@@ -130,6 +130,11 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         "--enable-shared=no".to_string(),
     ];
 
+    // Windows: MSYS2/MinGW build needs explicit host triple
+    if target_os == "windows" {
+        configure_args.push("--host=x86_64-w64-mingw32".to_string());
+    }
+
     // Android cross-compilation
     if target_os == "android" {
         let ndk_home = env::var("NDK_HOME")
