@@ -345,6 +345,7 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
             println!("cargo:rustc-link-lib=asound");
             println!("cargo:rustc-link-lib=ssl");
             println!("cargo:rustc-link-lib=crypto");
+            println!("cargo:rustc-link-lib=opus");
             println!("cargo:rustc-link-lib=uuid");
             println!("cargo:rustc-link-lib=m");
             println!("cargo:rustc-link-lib=rt");
