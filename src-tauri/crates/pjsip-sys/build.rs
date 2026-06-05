@@ -298,7 +298,6 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
         "pjmedia-audiodev",
         "pjmedia-videodev",
         "pjsdp",
-        "pjsdp",
         "pjnath",
         "pjlib-util",
         "pj",
@@ -309,6 +308,7 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
         "speex",
         "gsmcodec",
         "webrtc",
+        "yuv",
     ];
 
     for lib in &pjsip_libs {
@@ -334,6 +334,7 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
             }
             println!("cargo:rustc-link-lib=ssl");
             println!("cargo:rustc-link-lib=crypto");
+            println!("cargo:rustc-link-lib=c++");
             // Opus
             if let Some(opus_prefix) = find_opus_prefix(target_os) {
                 println!("cargo:rustc-link-search=native={}/lib", opus_prefix);
@@ -348,6 +349,7 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
             println!("cargo:rustc-link-lib=m");
             println!("cargo:rustc-link-lib=rt");
             println!("cargo:rustc-link-lib=pthread");
+            println!("cargo:rustc-link-lib=stdc++");
         }
         "windows" => {
             println!("cargo:rustc-link-lib=winmm");
