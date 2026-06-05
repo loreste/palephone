@@ -171,7 +171,7 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
             _ => panic!("Unsupported Android arch: {}", target_arch),
         };
 
-        let cc = format!("{}/bin/{}{}clang", toolchain, android_target, api_level);
+        let cc = format!("{}/bin/{}{}-clang", toolchain, android_target, api_level);
         configure_args.push(format!("--host={}", android_target));
         configure_args.push(format!("CC={}", cc));
         configure_args.push(format!("CXX={}++", cc));
