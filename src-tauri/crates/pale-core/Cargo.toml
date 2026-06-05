@@ -1,0 +1,16 @@
+[package]
+name = "pale-core"
+version = "0.1.0"
+edition = "2021"
+description = "Safe Rust wrapper over PJSIP for the Pale softphone"
+
+[dependencies]
+pjsip-sys = { path = "../pjsip-sys" }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["sync", "rt", "macros"] }
+log = "0.4"
+thiserror = "2"
+rusqlite = { version = "0.37", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+serde_json = "1"

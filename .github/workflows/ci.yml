@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - platform: macos-14
+            target: aarch64-apple-darwin
+          - platform: windows-2022
+            target: x86_64-pc-windows-msvc
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Linux dependencies
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libasound2-dev \
+            libpulse-dev \
+            libssl-dev \
+            libopus-dev \
+            autoconf \
+            automake
+
+      # macOS dependencies
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install openssl@3 opus autoconf automake
+
+      # Cache PJSIP build (very slow to compile)
+      - name: Cache PJSIP build
+        uses: actions/cache@v4
+        with:
+          path: |
+            src-tauri/target/debug/build/pjsip-sys-*/out/pjproject-*
+            src-tauri/target/release/build/pjsip-sys-*/out/pjproject-*
+          key: pjsip-${{ matrix.target }}-v2.14.1-${{ hashFiles('src-tauri/crates/pjsip-sys/build.rs') }}
+          restore-keys: |
+            pjsip-${{ matrix.target }}-v2.14.1-
+
+      # Cache Cargo registry and target
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: cargo-${{ matrix.target }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ matrix.target }}-
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

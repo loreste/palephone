@@ -1,0 +1,29 @@
+[package]
+name = "pale"
+version = "0.1.0"
+description = "Cross-platform SIP softphone"
+authors = ["loreste"]
+edition = "2021"
+
+[lib]
+name = "pale_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+pale-core = { path = "crates/pale-core" }
+pale-matrix = { path = "crates/pale-matrix" }
+pjsip-sys = { path = "crates/pjsip-sys" }
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread"] }
+tauri-plugin-notification = "2"
+log = "0.4"
+env_logger = "0.11"
+
+[workspace]
+members = ["crates/pale-core", "crates/pale-matrix", "crates/pjsip-sys"]

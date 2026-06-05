@@ -1,0 +1,85 @@
+name: Android Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-android:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 34
+          build-tools: 34.0.0
+          ndk-version: 27.0.12077973
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libasound2-dev \
+            libssl-dev \
+            autoconf \
+            automake
+
+      # Cache PJSIP Android build
+      - name: Cache PJSIP Android build
+        uses: actions/cache@v4
+        with:
+          path: |
+            src-tauri/target/aarch64-linux-android/release/build/pjsip-sys-*/out/pjproject-*
+          key: pjsip-android-arm64-v2.14.1-${{ hashFiles('src-tauri/crates/pjsip-sys/build.rs') }}
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Initialize Tauri Android
+        run: npm run tauri android init
+
+      - name: Build Android APK
+        run: npm run tauri android build
+        env:
+          NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+
+      # Upload APK as artifact
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: pale-android-apk
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+
+      # On tag push, attach to release
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          draft: true

@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <defs>
+    <linearGradient id="tg" x1="4" y1="4" x2="28" y2="28" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#818CF8"/>
+      <stop offset="100%" stop-color="#6366F1"/>
+    </linearGradient>
+  </defs>
+  <path
+    d="
+      M 6.5,19
+      C 6.5,19 5,15.5 5,12
+      C 5,8 7.5,5.5 10,5.5
+      L 13,5.5
+      C 13.8,5.5 14.5,6.2 14.5,7
+      L 14.5,10
+      C 14.5,10.8 13.8,11.5 13,11.5
+      L 11.5,11.5
+      C 11,11.5 10.5,12 10.5,12.5
+      C 10.5,14.5 12.5,17.5 16,20
+      C 19.5,17.5 21.5,14.5 21.5,12.5
+      C 21.5,12 21,11.5 20.5,11.5
+      L 19,11.5
+      C 18.2,11.5 17.5,10.8 17.5,10
+      L 17.5,7
+      C 17.5,6.2 18.2,5.5 19,5.5
+      L 22,5.5
+      C 24.5,5.5 27,8 27,12
+      C 27,15.5 25.5,19 25.5,19
+    "
+    fill="url(#tg)"
+  />
+  <!-- Status dot: red (unregistered/error) -->
+  <circle cx="25" cy="25" r="4.5" fill="#18181B" stroke="#18181B" stroke-width="1"/>
+  <circle cx="25" cy="25" r="3" fill="#EF4444"/>
+</svg>

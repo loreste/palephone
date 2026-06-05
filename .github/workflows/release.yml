@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            args: ""
+          - platform: macos-14
+            target: aarch64-apple-darwin
+            args: "--target aarch64-apple-darwin"
+          - platform: macos-14
+            target: x86_64-apple-darwin
+            args: "--target x86_64-apple-darwin"
+          - platform: windows-2022
+            target: x86_64-pc-windows-msvc
+            args: ""
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Linux dependencies
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libasound2-dev \
+            libpulse-dev \
+            libssl-dev \
+            libopus-dev \
+            autoconf \
+            automake
+
+      # macOS dependencies
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install openssl@3 opus autoconf automake
+
+      # Cache PJSIP build
+      - name: Cache PJSIP build
+        uses: actions/cache@v4
+        with:
+          path: |
+            src-tauri/target/release/build/pjsip-sys-*/out/pjproject-*
+          key: pjsip-release-${{ matrix.target }}-v2.14.1-${{ hashFiles('src-tauri/crates/pjsip-sys/build.rs') }}
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # Build and create release
+      - name: Build Tauri app and create release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS signing (uncomment when certificates are configured)
+          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Pale ${{ github.ref_name }}"
+          releaseBody: |
+            Cross-platform SIP softphone release.
+
+            ## Install
+
+            | Platform | File |
+            |----------|------|
+            | **macOS (Apple Silicon)** | `.dmg` |
+            | **macOS (Intel)** | `.dmg` |
+            | **Windows** | `.msi` or `.exe` |
+            | **Linux (Debian/Ubuntu)** | `.deb` |
+            | **Linux (AppImage)** | `.AppImage` |
+            | **Android** | `.apk` |
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

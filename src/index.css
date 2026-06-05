@@ -1,0 +1,207 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+
+/* ─── Dark Theme (default) ─── */
+:root,
+.dark {
+  --color-bg-base: #09090b;
+  --color-bg-surface: #18181b;
+  --color-bg-elevated: #27272a;
+  --color-bg-overlay: #3f3f46;
+
+  --color-border-subtle: #27272a;
+  --color-border-default: #3f3f46;
+  --color-border-focus: #6366f1;
+
+  --color-text-primary: #fafafa;
+  --color-text-secondary: #a1a1aa;
+  --color-text-tertiary: #71717a;
+  --color-text-inverse: #09090b;
+
+  --color-accent: #6366f1;
+  --color-accent-hover: #818cf8;
+  --color-accent-muted: rgba(99, 102, 241, 0.12);
+
+  --color-success: #22c55e;
+  --color-success-muted: rgba(34, 197, 94, 0.12);
+
+  --color-destructive: #ef4444;
+  --color-destructive-hover: #f87171;
+
+  --color-warning: #f59e0b;
+  --color-warning-muted: rgba(245, 158, 11, 0.12);
+
+  --color-info: #3b82f6;
+
+  /* Glass tokens */
+  --glass-bg: rgba(24, 24, 27, 0.72);
+  --glass-bg-light: rgba(255, 255, 255, 0.08);
+  --glass-border: rgba(255, 255, 255, 0.06);
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  --shadow-glow-accent: 0 0 20px rgba(99, 102, 241, 0.3);
+  --shadow-glow-success: 0 0 16px rgba(34, 197, 94, 0.25);
+  --shadow-glow-destructive: 0 0 16px rgba(239, 68, 68, 0.3);
+}
+
+/* ─── Light Theme ─── */
+.light {
+  --color-bg-base: #ffffff;
+  --color-bg-surface: #f4f4f5;
+  --color-bg-elevated: #e4e4e7;
+  --color-bg-overlay: #d4d4d8;
+
+  --color-border-subtle: #e4e4e7;
+  --color-border-default: #d4d4d8;
+  --color-border-focus: #6366f1;
+
+  --color-text-primary: #09090b;
+  --color-text-secondary: #52525b;
+  --color-text-tertiary: #a1a1aa;
+  --color-text-inverse: #fafafa;
+
+  --glass-bg: rgba(255, 255, 255, 0.72);
+  --glass-bg-light: rgba(0, 0, 0, 0.04);
+  --glass-border: rgba(0, 0, 0, 0.06);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.15), 0 0 0 1px rgba(0, 0, 0, 0.04);
+}
+
+/* ─── Tailwind v4 Theme ─── */
+@theme {
+  --color-base: var(--color-bg-base);
+  --color-surface: var(--color-bg-surface);
+  --color-elevated: var(--color-bg-elevated);
+  --color-overlay: var(--color-bg-overlay);
+
+  --color-border-subtle: var(--color-border-subtle);
+  --color-border-default: var(--color-border-default);
+  --color-border-focus: var(--color-border-focus);
+
+  --color-primary: var(--color-text-primary);
+  --color-secondary: var(--color-text-secondary);
+  --color-tertiary: var(--color-text-tertiary);
+  --color-inverse: var(--color-text-inverse);
+
+  --color-accent: var(--color-accent);
+  --color-accent-hover: var(--color-accent-hover);
+  --color-accent-muted: var(--color-accent-muted);
+
+  --color-success: var(--color-success);
+  --color-success-muted: var(--color-success-muted);
+
+  --color-destructive: var(--color-destructive);
+  --color-destructive-hover: var(--color-destructive-hover);
+
+  --color-warning: var(--color-warning);
+  --color-warning-muted: var(--color-warning-muted);
+
+  --color-info: var(--color-info);
+
+  --font-sans: "Inter Variable", "Inter", -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  --animate-ring-pulse: ring-pulse 1.5s ease-out infinite;
+  --animate-status-pulse: status-pulse 1.5s ease-in-out infinite;
+}
+
+/* ─── Mobile Safe Areas ─── */
+@supports (padding-top: env(safe-area-inset-top)) {
+  .safe-area-top {
+    padding-top: env(safe-area-inset-top);
+  }
+  .safe-area-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* ─── Base Styles ─── */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background-color: var(--color-bg-base);
+  color: var(--color-text-primary);
+}
+
+/* Prevent text selection on UI chrome */
+.select-none {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Tabular numbers for timers and dialpad */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── Animations ─── */
+@keyframes ring-pulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.6;
+  }
+  100% {
+    transform: scale(1.8);
+    opacity: 0;
+  }
+}
+
+@keyframes status-pulse {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-default);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-tertiary);
+}
+
+/* ─── Reduced motion ─── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

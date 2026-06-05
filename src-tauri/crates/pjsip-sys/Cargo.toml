@@ -1,0 +1,10 @@
+[package]
+name = "pjsip-sys"
+version = "0.1.0"
+edition = "2021"
+description = "Raw FFI bindings to PJSIP (pjsua API)"
+links = "pjsip"
+
+[build-dependencies]
+bindgen = "0.72"
+cc = "1.2"
