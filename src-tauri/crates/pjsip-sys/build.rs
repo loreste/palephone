@@ -200,14 +200,22 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
             sdk_path, min_ios, if target_arch == "aarch64" { "arm64" } else { "x86_64" }));
     }
 
-    if let Some(ref ssl_prefix) = openssl_prefix {
-        configure_args.push(format!("--with-ssl={}", ssl_prefix));
+    if target_os == "windows" {
+        // Use MSYS2 MinGW OpenSSL and Opus
+        let msys2 = env::var("MSYS2_PATH").unwrap_or_else(|_| "C:\\msys64".to_string());
+        // Convert Windows path to MSYS2 path for configure
+        let msys2_unix = msys2.replace('\\', "/").replace("C:", "/c");
+        configure_args.push(format!("--with-ssl={}/mingw64", msys2_unix));
+        configure_args.push(format!("--with-opus={}/mingw64", msys2_unix));
+    } else {
+        if let Some(ref ssl_prefix) = openssl_prefix {
+            configure_args.push(format!("--with-ssl={}", ssl_prefix));
+        }
+        if let Some(opus_prefix) = find_opus_prefix(target_os) {
+            configure_args.push(format!("--with-opus={}", opus_prefix));
+        }
     }
 
-    // Try to find opus
-    if let Some(opus_prefix) = find_opus_prefix(target_os) {
-        configure_args.push(format!("--with-opus={}", opus_prefix));
-    }
 
     // Set CFLAGS
     let cflags = format!(
@@ -219,8 +227,19 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         }
     );
 
-    // Run aconfigure (PJSIP's configure script)
-    let status = Command::new("sh")
+    // Determine shell and make commands
+    // On Windows, use MSYS2 bash/make (pre-installed on GitHub Actions runners)
+    let (sh_cmd, make_cmd) = if target_os == "windows" {
+        let msys2 = env::var("MSYS2_PATH").unwrap_or_else(|_| "C:\\msys64".to_string());
+        let sh = format!("{}/usr/bin/bash.exe", msys2);
+        let mk = format!("{}/usr/bin/make.exe", msys2);
+        (sh, mk)
+    } else {
+        ("sh".to_string(), "make".to_string())
+    };
+
+    // Run configure
+    let status = Command::new(&sh_cmd)
         .arg("-c")
         .arg(&configure_args.join(" "))
         .env("CFLAGS", &cflags)
@@ -229,13 +248,12 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         .expect("Failed to run PJSIP configure");
     assert!(status.success(), "PJSIP configure failed");
 
-    // Determine number of parallel jobs
     let num_jobs = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
 
     // Run make dep
-    let status = Command::new("make")
+    let status = Command::new(&make_cmd)
         .args(["dep", &format!("-j{}", num_jobs)])
         .current_dir(pj_src_dir)
         .status()
@@ -243,7 +261,7 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
     assert!(status.success(), "PJSIP make dep failed");
 
     // Run make
-    let status = Command::new("make")
+    let status = Command::new(&make_cmd)
         .arg(&format!("-j{}", num_jobs))
         .current_dir(pj_src_dir)
         .status()
@@ -364,6 +382,15 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
             println!("cargo:rustc-link-lib=advapi32");
             println!("cargo:rustc-link-lib=iphlpapi");
             println!("cargo:rustc-link-lib=mswsock");
+            println!("cargo:rustc-link-lib=gdi32");
+            println!("cargo:rustc-link-lib=user32");
+            println!("cargo:rustc-link-lib=stdc++");
+            // OpenSSL from MSYS2
+            let msys2 = env::var("MSYS2_PATH").unwrap_or_else(|_| "C:\\msys64".to_string());
+            println!("cargo:rustc-link-search=native={}/mingw64/lib", msys2);
+            println!("cargo:rustc-link-lib=ssl");
+            println!("cargo:rustc-link-lib=crypto");
+            println!("cargo:rustc-link-lib=opus");
         }
         "android" => {
             println!("cargo:rustc-link-lib=OpenSLES");

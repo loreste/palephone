@@ -65,6 +65,20 @@ jobs:
         run: |
           brew install openssl@3 opus autoconf automake
 
+      # Windows dependencies
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        run: |
+          C:\msys64\usr\bin\pacman.exe -S --noconfirm autoconf automake make mingw-w64-x86_64-openssl mingw-w64-x86_64-opus
+        shell: cmd
+
+      - name: Set Windows MSYS2 env
+        if: runner.os == 'Windows'
+        run: |
+          echo "MSYS2_PATH=C:\msys64" >> $env:GITHUB_ENV
+          echo "C:\msys64\usr\bin" >> $env:GITHUB_PATH
+          echo "C:\msys64\mingw64\bin" >> $env:GITHUB_PATH
+
       # Cache PJSIP build
       - name: Cache PJSIP build
         uses: actions/cache@v4
