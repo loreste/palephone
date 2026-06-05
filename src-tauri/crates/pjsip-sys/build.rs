@@ -102,6 +102,11 @@ fn write_config_site(pj_src_dir: &Path, target_os: &str) {
             config.push_str("#define PJMEDIA_VIDEO_DEV_HAS_ANDROID 1\n");
             config.push_str("#define PJ_ANDROID 1\n");
         }
+        "ios" => {
+            config.push_str("#define PJMEDIA_AUDIO_DEV_HAS_COREAUDIO 1\n");
+            config.push_str("#define PJMEDIA_VIDEO_DEV_HAS_IOS 1\n");
+            config.push_str("#define PJMEDIA_VIDEO_DEV_HAS_DARWIN 1\n");
+        }
         _ => {}
     }
 
@@ -172,6 +177,27 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         configure_args.push(format!("CXX={}++", cc));
         configure_args.push(format!("AR={}/bin/llvm-ar", toolchain));
         configure_args.push(format!("RANLIB={}/bin/llvm-ranlib", toolchain));
+    }
+
+    // iOS cross-compilation
+    if target_os == "ios" {
+        let ios_target = match target_arch {
+            "aarch64" => "arm64-apple-ios",
+            "x86_64" => "x86_64-apple-ios-simulator",
+            _ => panic!("Unsupported iOS arch: {}", target_arch),
+        };
+
+        let sdk = if target_arch == "x86_64" { "iphonesimulator" } else { "iphoneos" };
+        let sdk_path_output = Command::new("xcrun")
+            .args(["--sdk", sdk, "--show-sdk-path"])
+            .output()
+            .expect("Failed to find iOS SDK path");
+        let sdk_path = String::from_utf8_lossy(&sdk_path_output.stdout).trim().to_string();
+
+        let min_ios = "15.0";
+        configure_args.push(format!("--host={}", ios_target));
+        configure_args.push(format!("CFLAGS=-isysroot {} -miphoneos-version-min={} -arch {} -fembed-bitcode",
+            sdk_path, min_ios, if target_arch == "aarch64" { "arm64" } else { "x86_64" }));
     }
 
     if let Some(ref ssl_prefix) = openssl_prefix {
@@ -336,6 +362,18 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
             println!("cargo:rustc-link-lib=log");
             println!("cargo:rustc-link-lib=android");
             println!("cargo:rustc-link-lib=m");
+        }
+        "ios" => {
+            println!("cargo:rustc-link-lib=framework=AudioToolbox");
+            println!("cargo:rustc-link-lib=framework=AudioUnit");
+            println!("cargo:rustc-link-lib=framework=CoreAudio");
+            println!("cargo:rustc-link-lib=framework=CoreFoundation");
+            println!("cargo:rustc-link-lib=framework=CoreMedia");
+            println!("cargo:rustc-link-lib=framework=CoreVideo");
+            println!("cargo:rustc-link-lib=framework=AVFoundation");
+            println!("cargo:rustc-link-lib=framework=Foundation");
+            println!("cargo:rustc-link-lib=framework=Security");
+            println!("cargo:rustc-link-lib=framework=UIKit");
         }
         _ => {}
     }
