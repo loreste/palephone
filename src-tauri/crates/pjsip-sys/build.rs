@@ -335,6 +335,11 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
             println!("cargo:rustc-link-lib=ssl");
             println!("cargo:rustc-link-lib=crypto");
             println!("cargo:rustc-link-lib=c++");
+            println!("cargo:rustc-link-lib=framework=AVFoundation");
+            println!("cargo:rustc-link-lib=framework=CoreMedia");
+            println!("cargo:rustc-link-lib=framework=CoreVideo");
+            println!("cargo:rustc-link-lib=framework=VideoToolbox");
+            println!("cargo:rustc-link-lib=objc");
             // Opus
             if let Some(opus_prefix) = find_opus_prefix(target_os) {
                 println!("cargo:rustc-link-search=native={}/lib", opus_prefix);
