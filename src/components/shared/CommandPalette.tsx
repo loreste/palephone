@@ -1,8 +1,15 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Phone, Settings, Volume2, User, Clock, Search } from "lucide-react";
+import {
+  Phone, Settings, Volume2, Clock, Search,
+  MessageSquare, Users, FolderLock, ShieldCheck, Server,
+} from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useUiStore } from "@/store/uiStore";
+import { useServerStore } from "@/store/serverStore";
+import { usePresenceStore } from "@/store/presenceStore";
+import { makeCall, paleServerGetUsers, type ServerUser } from "@/lib/tauri";
+import { toast } from "@/components/ui/Toast";
 
 interface CommandItem {
   id: string;
@@ -20,84 +27,106 @@ interface CommandPaletteProps {
 export function CommandPalette({ open, onClose }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [contacts, setContacts] = useState<ServerUser[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const setActiveTab = useUiStore((s) => s.setActiveTab);
+  const { baseUrl, token, connected } = useServerStore();
+  const presenceMap = usePresenceStore((s) => s.presenceMap);
 
-  const commands: CommandItem[] = useMemo(
-    () => [
-      {
-        id: "call-alice",
-        label: "Call Alice Smith",
-        icon: Phone,
-        category: "Contacts",
-        action: () => {
-          console.log("Call Alice");
-          onClose();
-        },
-      },
-      {
-        id: "call-bob",
-        label: "Call Bob Chen",
-        icon: Phone,
-        category: "Contacts",
-        action: () => {
-          console.log("Call Bob");
-          onClose();
-        },
-      },
+  // Load contacts from server when opened
+  useEffect(() => {
+    if (open && connected && baseUrl && token) {
+      paleServerGetUsers(baseUrl, token).then(setContacts).catch(() => {});
+    }
+  }, [open, connected, baseUrl, token]);
+
+  const commands: CommandItem[] = useMemo(() => {
+    const nav: CommandItem[] = [
       {
         id: "open-dialpad",
         label: "Open Dialpad",
         icon: Phone,
         category: "Navigation",
-        action: () => {
-          setActiveTab("dialpad");
-          onClose();
-        },
+        action: () => { setActiveTab("dialpad"); onClose(); },
       },
       {
-        id: "open-settings",
-        label: "Open Settings",
-        icon: Settings,
+        id: "open-chat",
+        label: "Open Chat",
+        icon: MessageSquare,
         category: "Navigation",
-        action: () => {
-          setActiveTab("settings");
-          onClose();
-        },
+        action: () => { setActiveTab("chat"); onClose(); },
       },
       {
-        id: "open-audio",
-        label: "Audio Settings",
-        icon: Volume2,
+        id: "open-people",
+        label: "Open People",
+        icon: Users,
         category: "Navigation",
-        action: () => {
-          setActiveTab("settings");
-          onClose();
-        },
+        action: () => { setActiveTab("people"); onClose(); },
       },
       {
         id: "open-files",
         label: "Open Files",
-        icon: User,
+        icon: FolderLock,
         category: "Navigation",
-        action: () => {
-          setActiveTab("files");
-          onClose();
-        },
+        action: () => { setActiveTab("files"); onClose(); },
       },
       {
         id: "open-recent",
         label: "Recent Calls",
         icon: Clock,
         category: "Navigation",
+        action: () => { setActiveTab("recent"); onClose(); },
+      },
+      {
+        id: "open-admin",
+        label: "Admin Panel",
+        icon: ShieldCheck,
+        category: "Navigation",
+        action: () => { setActiveTab("admin"); onClose(); },
+      },
+      {
+        id: "open-settings",
+        label: "Open Settings",
+        icon: Settings,
+        category: "Navigation",
+        action: () => { setActiveTab("settings"); onClose(); },
+      },
+      {
+        id: "open-audio",
+        label: "Audio Settings",
+        icon: Volume2,
+        category: "Navigation",
+        action: () => { setActiveTab("settings"); onClose(); },
+      },
+      {
+        id: "open-server",
+        label: "Server Settings",
+        icon: Server,
+        category: "Navigation",
+        action: () => { setActiveTab("settings"); onClose(); },
+      },
+    ];
+
+    // Add contacts as callable commands
+    const contactCmds: CommandItem[] = contacts.map((user) => {
+      const presence = presenceMap[user.sip_uri];
+      const statusLabel = presence ? ` (${presence.status})` : "";
+      return {
+        id: `call-${user.id}`,
+        label: `Call ${user.display_name}${statusLabel}`,
+        icon: Phone,
+        category: "Contacts",
         action: () => {
-          setActiveTab("recent");
+          makeCall(user.sip_uri).catch((err) =>
+            toast({ type: "error", title: "Call failed", description: String(err) })
+          );
           onClose();
         },
-      },
-    ],
-    [onClose, setActiveTab]
-  );
+      };
+    });
+
+    return [...contactCmds, ...nav];
+  }, [onClose, setActiveTab, contacts, presenceMap]);
 
   const filtered = useMemo(() => {
     if (!query.trim()) return commands;
@@ -215,10 +244,10 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
             {/* Footer hint */}
             <div className="flex items-center gap-3 px-3 py-2 border-t border-border-subtle">
               <span className="text-[10px] text-tertiary">
-                <kbd className="px-1 py-0.5 rounded bg-elevated text-secondary font-mono">\u2191\u2193</kbd> navigate
+                <kbd className="px-1 py-0.5 rounded bg-elevated text-secondary font-mono">{"\u2191\u2193"}</kbd> navigate
               </span>
               <span className="text-[10px] text-tertiary">
-                <kbd className="px-1 py-0.5 rounded bg-elevated text-secondary font-mono">\u23CE</kbd> select
+                <kbd className="px-1 py-0.5 rounded bg-elevated text-secondary font-mono">{"\u23CE"}</kbd> select
               </span>
               <span className="text-[10px] text-tertiary">
                 <kbd className="px-1 py-0.5 rounded bg-elevated text-secondary font-mono">esc</kbd> close

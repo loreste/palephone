@@ -1,7 +1,11 @@
-import { Volume2, PhoneIncoming } from "lucide-react";
+import { useState, useRef, useEffect } from "react";
+import { Volume2, PhoneIncoming, Server } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useAccountStore } from "@/store/accountStore";
 import { useCallStore } from "@/store/callStore";
+import { useServerStore } from "@/store/serverStore";
+import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
+import { paleServerSetPresence } from "@/lib/tauri";
 import type { RegState } from "@/types";
 
 const regConfig: Record<RegState, { color: string; label: string; animate: boolean }> = {
@@ -11,9 +15,18 @@ const regConfig: Record<RegState, { color: string; label: string; animate: boole
   none: { color: "bg-tertiary", label: "No Account", animate: false },
 };
 
+const presenceOptions: { status: PresenceStatus; label: string; color: string }[] = [
+  { status: "online", label: "Online", color: "bg-green-500" },
+  { status: "busy", label: "Busy", color: "bg-red-500" },
+  { status: "away", label: "Away", color: "bg-yellow-500" },
+  { status: "dnd", label: "Do Not Disturb", color: "bg-red-600" },
+  { status: "offline", label: "Appear Offline", color: "bg-gray-400" },
+];
+
 export function StatusBar() {
   const { account, regState } = useAccountStore();
   const { setIncomingCall } = useCallStore();
+  const { baseUrl, token, connected: serverConnected } = useServerStore();
   const config = regConfig[regState];
 
   const simulateIncoming = () => {
@@ -60,6 +73,13 @@ export function StatusBar() {
         <span className="text-xs text-secondary truncate">
           {account?.sipUri ?? config.label}
         </span>
+
+        {/* Server + presence indicator */}
+        <PresenceIndicator
+          serverConnected={serverConnected}
+          baseUrl={baseUrl}
+          token={token}
+        />
       </div>
 
       <div className="flex items-center gap-1">
@@ -80,6 +100,81 @@ export function StatusBar() {
           <Volume2 size={14} />
         </button>
       </div>
+    </div>
+  );
+}
+
+function PresenceIndicator({
+  serverConnected,
+  baseUrl,
+  token,
+}: {
+  serverConnected: boolean;
+  baseUrl: string | null;
+  token: string | null;
+}) {
+  const [open, setOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const setPresence = usePresenceStore((s) => s.setPresence);
+
+  // Determine current presence from own entry
+  const presenceMap = usePresenceStore((s) => s.presenceMap);
+  const account = useAccountStore((s) => s.account);
+  const ownUri = account?.sipUri ? `sip:${account.sipUri}` : null;
+  const ownPresence = ownUri ? presenceMap[ownUri] : undefined;
+  const currentStatus = ownPresence?.status ?? (serverConnected ? "online" : "offline");
+  const currentColor = presenceOptions.find((p) => p.status === currentStatus)?.color ?? "bg-gray-400";
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    const handleClick = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [open]);
+
+  const handleSelect = async (status: PresenceStatus) => {
+    setOpen(false);
+    if (!baseUrl || !token) return;
+    try {
+      const result = await paleServerSetPresence(baseUrl, token, status);
+      setPresence(result.sip_uri, result);
+    } catch { /* ignore */ }
+  };
+
+  return (
+    <div className="relative ml-2 shrink-0" ref={dropdownRef}>
+      <button
+        onClick={() => serverConnected && setOpen(!open)}
+        className="flex items-center gap-1 text-xs text-tertiary hover:text-secondary transition-colors"
+        title={serverConnected ? `Status: ${currentStatus}` : "Server disconnected"}
+      >
+        <Server size={11} />
+        <span className={cn("w-2 h-2 rounded-full", serverConnected ? currentColor : "bg-tertiary")} />
+      </button>
+
+      {open && (
+        <div className="absolute top-full left-0 mt-1 w-40 bg-surface border border-border-subtle rounded-md shadow-lg z-50 py-1">
+          {presenceOptions.map((opt) => (
+            <button
+              key={opt.status}
+              onClick={() => handleSelect(opt.status)}
+              className={cn(
+                "w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left",
+                "hover:bg-elevated transition-colors",
+                currentStatus === opt.status && "text-accent font-medium"
+              )}
+            >
+              <span className={cn("w-2 h-2 rounded-full shrink-0", opt.color)} />
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

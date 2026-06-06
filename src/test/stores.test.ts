@@ -3,6 +3,9 @@ import { useCallStore } from "@/store/callStore";
 import { useAccountStore } from "@/store/accountStore";
 import { useUiStore } from "@/store/uiStore";
 import { useChatStore } from "@/store/chatStore";
+import { usePresenceStore } from "@/store/presenceStore";
+import { useServerStore } from "@/store/serverStore";
+import { useFileStore } from "@/store/fileStore";
 import type { CallSession } from "@/types";
 
 describe("callStore", () => {
@@ -171,5 +174,93 @@ describe("chatStore", () => {
     // Adding same message again should not duplicate
     store.addMessage(msg);
     expect(useChatStore.getState().messages["!room1:example.com"]).toHaveLength(1);
+  });
+});
+
+describe("presenceStore", () => {
+
+  beforeEach(() => {
+    usePresenceStore.getState().clearPresence();
+  });
+
+  it("sets and retrieves presence", () => {
+    const store = usePresenceStore.getState();
+    store.setPresence("sip:alice@example.com", {
+      sip_uri: "sip:alice@example.com",
+      status: "online",
+      note: null,
+      updated_at: "2026-06-05T12:00:00Z",
+    });
+    expect(usePresenceStore.getState().presenceMap["sip:alice@example.com"]?.status).toBe("online");
+  });
+
+  it("setBulkPresence replaces all", () => {
+    const store = usePresenceStore.getState();
+    store.setPresence("sip:old@example.com", {
+      sip_uri: "sip:old@example.com",
+      status: "online",
+      note: null,
+      updated_at: "2026-06-05T12:00:00Z",
+    });
+    store.setBulkPresence([
+      { sip_uri: "sip:new@example.com", status: "busy", note: null, updated_at: "2026-06-05T12:00:00Z" },
+    ]);
+    expect(usePresenceStore.getState().presenceMap["sip:old@example.com"]).toBeUndefined();
+    expect(usePresenceStore.getState().presenceMap["sip:new@example.com"]?.status).toBe("busy");
+  });
+
+  it("clearPresence empties map", () => {
+    const store = usePresenceStore.getState();
+    store.setPresence("sip:alice@example.com", {
+      sip_uri: "sip:alice@example.com",
+      status: "online",
+      note: null,
+      updated_at: "2026-06-05T12:00:00Z",
+    });
+    store.clearPresence();
+    expect(Object.keys(usePresenceStore.getState().presenceMap)).toHaveLength(0);
+  });
+});
+
+describe("serverStore", () => {
+
+  it("setConnection sets all fields", () => {
+    const store = useServerStore.getState();
+    store.setConnection("http://localhost:8080", "test-token", "2026-06-06T00:00:00Z");
+    const state = useServerStore.getState();
+    expect(state.baseUrl).toBe("http://localhost:8080");
+    expect(state.token).toBe("test-token");
+    expect(state.connected).toBe(true);
+    expect(state.tokenExpiresAt).toBe("2026-06-06T00:00:00Z");
+  });
+
+  it("disconnect clears all fields", () => {
+    const store = useServerStore.getState();
+    store.setConnection("http://localhost:8080", "test-token");
+    store.disconnect();
+    const state = useServerStore.getState();
+    expect(state.baseUrl).toBeNull();
+    expect(state.token).toBeNull();
+    expect(state.connected).toBe(false);
+  });
+});
+
+describe("fileStore server files", () => {
+
+  beforeEach(() => {
+    useFileStore.getState().setServerFiles([]);
+  });
+
+  it("manages server files", () => {
+    const store = useFileStore.getState();
+    store.setServerFiles([
+      { id: "f1", owner: "admin", filename: "test.pdf", content_type: "application/pdf", size: 1024, sha256: "abc", created_at: "2026-06-05T12:00:00Z" },
+      { id: "f2", owner: "admin", filename: "doc.txt", content_type: "text/plain", size: 256, sha256: "def", created_at: "2026-06-05T12:00:00Z" },
+    ]);
+    expect(useFileStore.getState().serverFiles).toHaveLength(2);
+
+    store.removeServerFile("f1");
+    expect(useFileStore.getState().serverFiles).toHaveLength(1);
+    expect(useFileStore.getState().serverFiles[0].id).toBe("f2");
   });
 });

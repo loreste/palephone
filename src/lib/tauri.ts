@@ -115,6 +115,11 @@ export interface AppConfig {
     username: string;
     user_id: string | null;
   };
+  server: {
+    url: string;
+    username: string;
+    auto_connect: boolean;
+  };
   ui: {
     theme: string;
     window_width: number;
@@ -185,6 +190,10 @@ export function matrixSendMessage(roomId: string, body: string): Promise<string>
   return invoke("matrix_send_message", { roomId, body });
 }
 
+export function matrixSetTyping(roomId: string, typing: boolean): Promise<void> {
+  return invoke("matrix_set_typing", { roomId, typing });
+}
+
 export function matrixSendFile(roomId: string, filePath: string): Promise<string> {
   return invoke("matrix_send_file", { roomId, filePath });
 }
@@ -198,16 +207,20 @@ export function matrixIsLoggedIn(): Promise<boolean> {
 }
 
 // Matrix event listeners
-export function onMatrixAuthState(handler: (event: any) => void): Promise<UnlistenFn> {
+export function onMatrixAuthState(handler: (event: unknown) => void): Promise<UnlistenFn> {
   return listen("matrix://auth-state", (e) => handler(e.payload));
 }
 
-export function onMatrixRooms(handler: (event: any) => void): Promise<UnlistenFn> {
+export function onMatrixRooms(handler: (event: unknown) => void): Promise<UnlistenFn> {
   return listen("matrix://rooms", (e) => handler(e.payload));
 }
 
-export function onMatrixMessage(handler: (event: any) => void): Promise<UnlistenFn> {
+export function onMatrixMessage(handler: (event: unknown) => void): Promise<UnlistenFn> {
   return listen("matrix://message", (e) => handler(e.payload));
+}
+
+export function onMatrixTyping(handler: (event: unknown) => void): Promise<UnlistenFn> {
+  return listen("matrix://typing", (e) => handler(e.payload));
 }
 
 // ─── Event Types (from pale-core PaleEvent) ───
@@ -287,4 +300,155 @@ export function onPaleError(
   handler: (event: PaleErrorEvent) => void
 ): Promise<UnlistenFn> {
   return listen<PaleErrorEvent>("pale://error", (e) => handler(e.payload));
+}
+
+// ─── Pale Server API (HTTP fetch, not Tauri invoke) ───
+
+export type PresenceStatus = "online" | "offline" | "busy" | "away" | "dnd";
+
+export interface ServerPresence {
+  sip_uri: string;
+  status: PresenceStatus;
+  note: string | null;
+  updated_at: string;
+}
+
+async function serverFetch<T>(
+  baseUrl: string,
+  token: string,
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
+  const response = await fetch(`${baseUrl.replace(/\/+$/, "")}${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+      ...(init?.headers || {}),
+    },
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(payload.error || response.statusText);
+  }
+  return response.json() as Promise<T>;
+}
+
+export function paleServerGetPresence(
+  baseUrl: string,
+  token: string,
+): Promise<ServerPresence[]> {
+  return serverFetch(baseUrl, token, "/v1/presence");
+}
+
+export function paleServerSetPresence(
+  baseUrl: string,
+  token: string,
+  status: PresenceStatus,
+  note?: string | null,
+): Promise<ServerPresence> {
+  return serverFetch(baseUrl, token, "/v1/presence", {
+    method: "PUT",
+    body: JSON.stringify({ status, note: note ?? null }),
+  });
+}
+
+export interface ServerUser {
+  id: string;
+  display_name: string;
+  sip_uri: string;
+  matrix_user_id: string | null;
+  created_at: string;
+}
+
+export function paleServerGetUsers(
+  baseUrl: string,
+  token: string,
+): Promise<ServerUser[]> {
+  return serverFetch(baseUrl, token, "/v1/users");
+}
+
+// ─── Call History Sync ───
+
+export interface ServerCallHistoryEntry {
+  id: string;
+  user_sip_uri: string;
+  direction: string;
+  remote_uri: string;
+  remote_name: string;
+  start_time: string;
+  duration_secs: number;
+  answered: boolean;
+  synced_at: string;
+}
+
+export function paleServerGetCallHistory(
+  baseUrl: string,
+  token: string,
+): Promise<ServerCallHistoryEntry[]> {
+  return serverFetch(baseUrl, token, "/v1/call-history");
+}
+
+export function paleServerSyncCallHistory(
+  baseUrl: string,
+  token: string,
+  entries: Omit<ServerCallHistoryEntry, "id" | "user_sip_uri" | "synced_at">[],
+): Promise<{ merged: number }> {
+  return serverFetch(baseUrl, token, "/v1/call-history", {
+    method: "POST",
+    body: JSON.stringify({ entries }),
+  });
+}
+
+// ─── Server Files ───
+
+export interface PaleServerFile {
+  id: string;
+  owner: string;
+  filename: string;
+  content_type: string;
+  size: number;
+  sha256: string;
+  created_at: string;
+}
+
+export function paleServerGetFiles(
+  baseUrl: string,
+  token: string,
+): Promise<PaleServerFile[]> {
+  return serverFetch(baseUrl, token, "/v1/files");
+}
+
+export async function paleServerUploadFile(
+  baseUrl: string,
+  token: string,
+  file: File,
+): Promise<PaleServerFile> {
+  const buffer = await file.arrayBuffer();
+  const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/files`, {
+    method: "POST",
+    headers: {
+      "Content-Type": file.type || "application/octet-stream",
+      Authorization: `Bearer ${token}`,
+      "X-Pale-Filename": file.name,
+    },
+    body: buffer,
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(payload.error || response.statusText);
+  }
+  return response.json();
+}
+
+export function paleServerDeleteFile(
+  baseUrl: string,
+  token: string,
+  id: string,
+): Promise<PaleServerFile> {
+  return serverFetch(baseUrl, token, `/v1/files/${id}`, { method: "DELETE" });
+}
+
+export function paleServerFileDownloadUrl(baseUrl: string, _token: string, id: string): string {
+  return `${baseUrl.replace(/\/+$/, "")}/v1/files/${id}`;
 }

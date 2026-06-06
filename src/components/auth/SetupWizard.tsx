@@ -1,10 +1,12 @@
 import { useState } from "react";
-import { Phone, MessageSquare, Lock, ArrowRight, Check } from "lucide-react";
+import { Phone, MessageSquare, Lock, ArrowRight, Check, Server } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { registerAccount, matrixLogin, storeSipPassword, getConfig, saveSettings } from "@/lib/tauri";
+import { adminLogin } from "@/lib/adminApi";
+import { useServerStore } from "@/store/serverStore";
 import { toast } from "@/components/ui/Toast";
 
-type WizardStep = "welcome" | "sip" | "matrix" | "done";
+type WizardStep = "welcome" | "sip" | "matrix" | "server" | "done";
 
 export function SetupWizard({ onComplete }: { onComplete: () => void }) {
   const [step, setStep] = useState<WizardStep>("welcome");
@@ -20,6 +22,12 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
       )}
       {step === "matrix" && (
         <MatrixSetupStep
+          onNext={() => setStep("server")}
+          onSkip={() => setStep("server")}
+        />
+      )}
+      {step === "server" && (
+        <ServerSetupStep
           onNext={() => setStep("done")}
           onSkip={() => setStep("done")}
         />
@@ -162,6 +170,60 @@ function MatrixSetupStep({ onNext, onSkip }: { onNext: () => void; onSkip: () =>
       <div className="flex gap-2">
         <Button variant="ghost" className="flex-1" onClick={onSkip}>Skip</Button>
         <Button className="flex-1 gap-1" onClick={handleLogin} disabled={loading || !homeserver || !username}>
+          {loading ? "Connecting..." : "Next"} <ArrowRight size={14} />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function ServerSetupStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => void }) {
+  const [url, setUrl] = useState("http://127.0.0.1:8080");
+  const [username, setUsername] = useState("admin");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const setServerConnection = useServerStore((s) => s.setConnection);
+
+  const handleConnect = async () => {
+    setLoading(true);
+    try {
+      const session = await adminLogin(url, username, password);
+      sessionStorage.setItem("pale.admin.token", session.token);
+      setServerConnection(url, session.token, session.expires_at);
+
+      const config = await getConfig().catch(() => null);
+      if (config) {
+        config.server = { url, username, auto_connect: true };
+        await saveSettings(config).catch(() => {});
+      }
+
+      toast({ type: "success", title: "Connected to server" });
+      onNext();
+    } catch (err) {
+      toast({ type: "error", title: "Connection failed", description: String(err) });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="w-full max-w-[300px]">
+      <StepHeader
+        icon={Server}
+        title="Pale Server"
+        description="Connect to your organization's Pale server for presence, conferencing, and admin features"
+        step={3}
+      />
+
+      <div className="space-y-3 mb-6">
+        <Input label="Server URL" value={url} onChange={setUrl} placeholder="http://pale.yourcompany.com" />
+        <Input label="Username" value={username} onChange={setUsername} placeholder="admin" />
+        <Input label="Password" value={password} onChange={setPassword} placeholder="password" type="password" />
+      </div>
+
+      <div className="flex gap-2">
+        <Button variant="ghost" className="flex-1" onClick={onSkip}>Skip</Button>
+        <Button className="flex-1 gap-1" onClick={handleConnect} disabled={loading || !url || !password}>
           {loading ? "Connecting..." : "Next"} <ArrowRight size={14} />
         </Button>
       </div>

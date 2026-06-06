@@ -1,0 +1,71 @@
+# ─── Pale Server ───
+# Multi-stage build for the standalone backend server.
+#
+# Required env vars at runtime:
+#   PALE_SERVER_TOKEN      (min 24 chars) — HTTP bearer token
+#   PALE_ADMIN_PASSWORD    (min 24 chars) — admin login password
+#   PALE_STORAGE_KEY       (min 24 chars) — encryption key for SQLite
+#
+# Optional env vars:
+#   PALE_HTTP_ADDR         (default 0.0.0.0:8080)
+#   PALE_SIP_ADDR          (default 0.0.0.0:5060)
+#   PALE_DATA_DIR          (default /data)
+#   PALE_ADMIN_USERNAME    (default admin)
+#   PALE_SIP_BACKEND       (pjsip | udp-parser, default pjsip)
+#   PALE_HTTP_TLS_CERT / PALE_HTTP_TLS_KEY
+#   PALE_SIP_TLS_CERT / PALE_SIP_TLS_KEY
+#   PALE_STUN_SERVERS      (comma-separated)
+#   PALE_TURN_SERVER / PALE_TURN_USERNAME / PALE_TURN_PASSWORD
+#
+# Build:
+#   docker build -f Dockerfile.pale-server -t pale-server .
+#
+# Run:
+#   docker run -p 8080:8080 -p 5060:5060/udp \
+#     -e PALE_SERVER_TOKEN=your-token-at-least-24-chars \
+#     -e PALE_ADMIN_PASSWORD=your-password-at-least-24 \
+#     -e PALE_STORAGE_KEY=your-storage-key-24-chars \
+#     -v pale-data:/data \
+#     pale-server
+
+FROM rust:1.82-bookworm AS builder
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    pkg-config \
+    python3 \
+    nasm \
+    libssl-dev \
+    libasound2-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY src-tauri/crates /build/crates
+
+WORKDIR /build/crates/pale-server
+RUN cargo build --release --bin pale-server
+
+# ─── Runtime ───
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/crates/pale-server/target/release/pale-server /usr/local/bin/pale-server
+
+ENV PALE_HTTP_ADDR=0.0.0.0:8080
+ENV PALE_SIP_ADDR=0.0.0.0:5060
+ENV PALE_DATA_DIR=/data
+
+VOLUME /data
+
+EXPOSE 8080
+EXPOSE 5060/udp
+EXPOSE 5061
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD curl -sf http://localhost:8080/health || exit 1
+
+ENTRYPOINT ["pale-server"]

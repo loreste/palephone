@@ -25,20 +25,34 @@ export interface SharedFile {
   url: string;
 }
 
+export interface ServerFile {
+  id: string;
+  owner: string;
+  filename: string;
+  content_type: string;
+  size: number;
+  sha256: string;
+  created_at: string;
+}
+
 interface FileStoreState {
   transfers: FileTransfer[];
   sharedFiles: SharedFile[];
+  serverFiles: ServerFile[];
 
   addTransfer: (transfer: FileTransfer) => void;
   updateTransfer: (id: string, update: Partial<FileTransfer>) => void;
   removeTransfer: (id: string) => void;
   addSharedFile: (file: SharedFile) => void;
   setSharedFiles: (files: SharedFile[]) => void;
+  setServerFiles: (files: ServerFile[]) => void;
+  removeServerFile: (id: string) => void;
 }
 
 export const useFileStore = create<FileStoreState>((set) => ({
   transfers: [],
   sharedFiles: [],
+  serverFiles: [],
 
   addTransfer: (transfer) =>
     set((state) => ({ transfers: [...state.transfers, transfer] })),
@@ -61,4 +75,11 @@ export const useFileStore = create<FileStoreState>((set) => ({
     })),
 
   setSharedFiles: (files) => set({ sharedFiles: files }),
+
+  setServerFiles: (files) => set({ serverFiles: files }),
+
+  removeServerFile: (id) =>
+    set((state) => ({
+      serverFiles: state.serverFiles.filter((f) => f.id !== id),
+    })),
 }));

@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { cn } from "@/lib/cn";
 import { Toggle } from "@/components/ui/Toggle";
 import { toast } from "@/components/ui/Toast";
+import { getConfig, saveSettings } from "@/lib/tauri";
 
 interface NetworkConfig {
   stunServer: string;
@@ -28,9 +29,41 @@ const defaultConfig: NetworkConfig = {
 export function NetworkSettings() {
   const [config, setConfig] = useState<NetworkConfig>(defaultConfig);
 
-  const handleSave = () => {
-    // TODO: Persist via Tauri app data
-    toast({ type: "success", title: "Network settings saved" });
+  // Load persisted network settings
+  useEffect(() => {
+    getConfig()
+      .then((appConfig) => {
+        setConfig({
+          stunServer: appConfig.network.stun_server || defaultConfig.stunServer,
+          turnServer: appConfig.network.turn_server || defaultConfig.turnServer,
+          turnUsername: appConfig.network.turn_username || defaultConfig.turnUsername,
+          turnPassword: "",
+          enableIce: appConfig.network.enable_ice,
+          sipPort: appConfig.network.sip_port || defaultConfig.sipPort,
+          rtpPortMin: appConfig.network.rtp_port_min || defaultConfig.rtpPortMin,
+          rtpPortMax: appConfig.network.rtp_port_max || defaultConfig.rtpPortMax,
+        });
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleSave = async () => {
+    try {
+      const appConfig = await getConfig();
+      appConfig.network = {
+        stun_server: config.stunServer,
+        turn_server: config.turnServer,
+        turn_username: config.turnUsername,
+        enable_ice: config.enableIce,
+        sip_port: config.sipPort,
+        rtp_port_min: config.rtpPortMin,
+        rtp_port_max: config.rtpPortMax,
+      };
+      await saveSettings(appConfig);
+      toast({ type: "success", title: "Network settings saved" });
+    } catch (err) {
+      toast({ type: "error", title: "Failed to save", description: String(err) });
+    }
   };
 
   return (

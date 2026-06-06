@@ -5,9 +5,11 @@ import {
   onCallState,
   onPaleError,
   addCallRecord,
+  paleServerSyncCallHistory,
 } from "@/lib/tauri";
 import { useAccountStore } from "@/store/accountStore";
 import { useCallStore } from "@/store/callStore";
+import { useServerStore } from "@/store/serverStore";
 import { toast } from "@/components/ui/Toast";
 import type { RegState, CallState } from "@/types";
 
@@ -96,15 +98,20 @@ export function useSipEvents() {
             const durationSecs = existing.connectTime
               ? Math.floor((Date.now() - existing.connectTime) / 1000)
               : 0;
-            addCallRecord({
-              id: 0,
+            const record = {
               direction: existing.direction,
               remote_uri: existing.remoteUri,
               remote_name: existing.remoteName,
               start_time: new Date(existing.startTime ?? Date.now()).toISOString(),
               duration_secs: durationSecs,
               answered: existing.connectTime !== null,
-            }).catch(() => {});
+            };
+            addCallRecord({ id: 0, ...record }).catch(() => {});
+            // Sync to pale-server if connected
+            const { baseUrl, token } = useServerStore.getState();
+            if (baseUrl && token) {
+              paleServerSyncCallHistory(baseUrl, token, [record]).catch(() => {});
+            }
             setTimeout(() => removeSession(event.call_id), 500);
           }
         }

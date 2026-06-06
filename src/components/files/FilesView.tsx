@@ -1,25 +1,45 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import {
   FileText, Image, Film, Music, Package,
-  Upload, Download, Search,
+  Upload, Download, Search, Server, Trash2,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
-import { useFileStore, type SharedFile, type FileTransfer } from "@/store/fileStore";
+import { useFileStore, type SharedFile, type FileTransfer, type ServerFile } from "@/store/fileStore";
 import { useChatStore } from "@/store/chatStore";
 import { useMatrixStore } from "@/store/matrixStore";
-import { matrixSendFile } from "@/lib/tauri";
+import { useServerStore } from "@/store/serverStore";
+import {
+  matrixSendFile,
+  paleServerGetFiles,
+  paleServerUploadFile,
+  paleServerDeleteFile,
+} from "@/lib/tauri";
 import { toast } from "@/components/ui/Toast";
 import { MatrixLoginView } from "@/components/auth/MatrixLoginView";
 
+type FileSource = "chat" | "server";
+
 export function FilesView() {
   const authState = useMatrixStore((s) => s.authState);
-  const { sharedFiles, transfers } = useFileStore();
+  const { sharedFiles, transfers, serverFiles, setServerFiles, removeServerFile } = useFileStore();
   const rooms = useChatStore((s) => s.rooms);
+  const { baseUrl, token, connected: serverConnected } = useServerStore();
   const [searchQuery, setSearchQuery] = useState("");
   const [dragOver, setDragOver] = useState(false);
+  const [source, setSource] = useState<FileSource>(serverConnected ? "server" : "chat");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const serverFileInputRef = useRef<HTMLInputElement>(null);
 
-  if (authState !== "logged_in") {
+  // Load server files
+  useEffect(() => {
+    if (serverConnected && baseUrl && token) {
+      paleServerGetFiles(baseUrl, token)
+        .then(setServerFiles)
+        .catch(() => {});
+    }
+  }, [serverConnected, baseUrl, token, setServerFiles]);
+
+  if (authState !== "logged_in" && !serverConnected) {
     return <MatrixLoginView />;
   }
 
@@ -71,7 +91,13 @@ export function FilesView() {
       <div className="flex items-center justify-between px-4 pt-4 pb-2">
         <h1 className="text-lg font-semibold text-primary">Files</h1>
         <button
-          onClick={() => fileInputRef.current?.click()}
+          onClick={() => {
+            if (source === "server") {
+              serverFileInputRef.current?.click();
+            } else {
+              fileInputRef.current?.click();
+            }
+          }}
           className="p-1.5 rounded-md text-tertiary hover:text-accent hover:bg-elevated transition-colors"
           aria-label="Upload file"
         >
@@ -82,7 +108,6 @@ export function FilesView() {
           type="file"
           className="hidden"
           onChange={(e) => {
-            // Handle file upload from picker
             const file = e.target.files?.[0];
             if (file && rooms.length > 0) {
               matrixSendFile(rooms[0].room_id, (file as any).path ?? file.name)
@@ -91,7 +116,49 @@ export function FilesView() {
             }
           }}
         />
+        <input
+          ref={serverFileInputRef}
+          type="file"
+          className="hidden"
+          onChange={async (e) => {
+            const file = e.target.files?.[0];
+            if (file && baseUrl && token) {
+              try {
+                const uploaded = await paleServerUploadFile(baseUrl, token, file);
+                setServerFiles([...serverFiles, uploaded]);
+                toast({ type: "success", title: "File uploaded" });
+              } catch (err) {
+                toast({ type: "error", title: "Upload failed", description: String(err) });
+              }
+            }
+          }}
+        />
       </div>
+
+      {/* Source tabs */}
+      {serverConnected && (
+        <div className="flex gap-1 px-4 pb-2">
+          <button
+            onClick={() => setSource("chat")}
+            className={cn(
+              "flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition-colors",
+              source === "chat" ? "bg-accent-muted text-accent" : "text-tertiary hover:text-secondary hover:bg-elevated"
+            )}
+          >
+            Chat Files
+          </button>
+          <button
+            onClick={() => setSource("server")}
+            className={cn(
+              "flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition-colors",
+              source === "server" ? "bg-accent-muted text-accent" : "text-tertiary hover:text-secondary hover:bg-elevated"
+            )}
+          >
+            <Server size={12} />
+            Server Files
+          </button>
+        </div>
+      )}
 
       {/* Search */}
       <div className="px-4 pb-3">
@@ -137,16 +204,35 @@ export function FilesView() {
 
       {/* File list */}
       <div className="flex-1 overflow-y-auto px-2">
-        {filteredFiles.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-32 gap-2">
-            <Package size={32} className="text-tertiary" />
-            <p className="text-sm text-tertiary">No files shared yet</p>
-            <p className="text-xs text-tertiary">Drag and drop files or use the upload button</p>
-          </div>
+        {source === "chat" ? (
+          filteredFiles.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-32 gap-2">
+              <Package size={32} className="text-tertiary" />
+              <p className="text-sm text-tertiary">No files shared yet</p>
+              <p className="text-xs text-tertiary">Drag and drop files or use the upload button</p>
+            </div>
+          ) : (
+            filteredFiles.map((file) => (
+              <FileItem key={file.eventId} file={file} />
+            ))
+          )
         ) : (
-          filteredFiles.map((file) => (
-            <FileItem key={file.eventId} file={file} />
-          ))
+          <ServerFileList
+            files={serverFiles}
+            searchQuery={searchQuery}
+            baseUrl={baseUrl}
+            token={token}
+            onDelete={async (id) => {
+              if (!baseUrl || !token) return;
+              try {
+                await paleServerDeleteFile(baseUrl, token, id);
+                removeServerFile(id);
+                toast({ type: "success", title: "File deleted" });
+              } catch (err) {
+                toast({ type: "error", title: "Delete failed", description: String(err) });
+              }
+            }}
+          />
         )}
       </div>
     </div>
@@ -213,6 +299,89 @@ function TransferItem({ transfer }: { transfer: FileTransfer }) {
       </div>
       <span className="text-[10px] text-tertiary shrink-0">{progress}%</span>
     </div>
+  );
+}
+
+function ServerFileList({
+  files,
+  searchQuery,
+  baseUrl,
+  token,
+  onDelete,
+}: {
+  files: ServerFile[];
+  searchQuery: string;
+  baseUrl: string | null;
+  token: string | null;
+  onDelete: (id: string) => void;
+}) {
+  const filtered = searchQuery
+    ? files.filter((f) => f.filename.toLowerCase().includes(searchQuery.toLowerCase()))
+    : files;
+
+  if (filtered.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-32 gap-2">
+        <Server size={32} className="text-tertiary" />
+        <p className="text-sm text-tertiary">No server files</p>
+        <p className="text-xs text-tertiary">Upload files to the Pale server</p>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {filtered.map((file) => {
+        const Icon = getFileIcon(file.content_type);
+        const time = new Date(file.created_at).toLocaleDateString([], {
+          month: "short",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+        });
+
+        return (
+          <div
+            key={file.id}
+            className={cn(
+              "group flex items-center gap-3 px-3 py-2.5 rounded-lg",
+              "hover:bg-elevated transition-colors"
+            )}
+          >
+            <div className="w-9 h-9 rounded-lg bg-accent/10 flex items-center justify-center shrink-0">
+              <Icon size={18} className="text-accent" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-primary truncate">{file.filename}</p>
+              <p className="text-[10px] text-tertiary">
+                {file.owner} &middot; {time}
+              </p>
+            </div>
+            <div className="flex items-center gap-1 shrink-0">
+              <span className="text-[10px] text-tertiary">{formatBytes(file.size)}</span>
+              {baseUrl && token && (
+                <a
+                  href={`${baseUrl.replace(/\/+$/, "")}/v1/files/${file.id}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="p-1 rounded-md text-tertiary hover:text-accent opacity-0 group-hover:opacity-100 transition-opacity"
+                  title="Download"
+                >
+                  <Download size={14} />
+                </a>
+              )}
+              <button
+                onClick={() => onDelete(file.id)}
+                className="p-1 rounded-md text-tertiary hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
+                title="Delete"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </>
   );
 }
 

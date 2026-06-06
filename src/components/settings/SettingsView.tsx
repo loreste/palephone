@@ -1,19 +1,22 @@
 import { useState } from "react";
-import { User, Volume2, Globe, Info } from "lucide-react";
+import { User, Volume2, Globe, Info, Server } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useAccountStore } from "@/store/accountStore";
+import { useServerStore } from "@/store/serverStore";
 import { AudioSettings } from "./AudioSettings";
 import { NetworkSettings } from "./NetworkSettings";
 import { registerAccount, storeSipPassword, getConfig, saveSettings } from "@/lib/tauri";
+import { adminLogin, adminLogout, adminBaseUrl } from "@/lib/adminApi";
 import { toast } from "@/components/ui/Toast";
 import type { SipAccount } from "@/types";
 
-type SettingsTab = "account" | "audio" | "network" | "about";
+type SettingsTab = "account" | "audio" | "network" | "server" | "about";
 
 const settingsTabs: { id: SettingsTab; label: string; icon: typeof User }[] = [
   { id: "account", label: "Account", icon: User },
   { id: "audio", label: "Audio", icon: Volume2 },
   { id: "network", label: "Network", icon: Globe },
+  { id: "server", label: "Server", icon: Server },
   { id: "about", label: "About", icon: Info },
 ];
 
@@ -52,6 +55,7 @@ export function SettingsView() {
         {activeTab === "account" && <AccountSettingsPanel />}
         {activeTab === "audio" && <AudioSettings />}
         {activeTab === "network" && <NetworkSettings />}
+        {activeTab === "server" && <ServerSettingsPanel />}
         {activeTab === "about" && <AboutPanel />}
       </div>
     </div>
@@ -185,6 +189,145 @@ function AccountSettingsPanel() {
         >
           Save
         </button>
+      </div>
+    </div>
+  );
+}
+
+function ServerSettingsPanel() {
+  const { baseUrl, connected, setConnection, disconnect } = useServerStore();
+  const [url, setUrl] = useState(baseUrl ?? adminBaseUrl());
+  const [username, setUsername] = useState("admin");
+  const [password, setPassword] = useState("");
+  const [testing, setTesting] = useState(false);
+
+  const handleConnect = async () => {
+    if (!url || !password) return;
+    setTesting(true);
+    try {
+      const session = await adminLogin(url, username, password);
+      sessionStorage.setItem("pale.admin.token", session.token);
+      setConnection(url, session.token, session.expires_at);
+      setPassword("");
+
+      // Persist server URL in app config
+      const config = await getConfig().catch(() => null);
+      if (config) {
+        config.server = { url, username, auto_connect: true };
+        await saveSettings(config).catch(() => {});
+      }
+
+      toast({ type: "success", title: "Connected to server" });
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Connection failed" });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const handleDisconnect = () => {
+    const token = sessionStorage.getItem("pale.admin.token");
+    if (token && baseUrl) {
+      adminLogout(baseUrl, token).catch(() => {});
+    }
+    sessionStorage.removeItem("pale.admin.token");
+    disconnect();
+    toast({ type: "info", title: "Disconnected from server" });
+  };
+
+  const handleTest = async () => {
+    setTesting(true);
+    try {
+      const response = await fetch(`${url.replace(/\/+$/, "")}/health`);
+      const data = await response.json();
+      if (data.ok) {
+        toast({ type: "success", title: "Server is reachable" });
+      } else {
+        toast({ type: "error", title: "Unexpected response" });
+      }
+    } catch {
+      toast({ type: "error", title: "Server unreachable" });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <SectionHeader title="Pale Server" />
+
+      <div className="flex items-center gap-2 text-sm">
+        <span
+          className={cn(
+            "w-2 h-2 rounded-full",
+            connected ? "bg-success" : "bg-tertiary"
+          )}
+        />
+        <span className="text-secondary">
+          {connected ? "Connected" : "Not connected"}
+        </span>
+      </div>
+
+      <FormField
+        label="Server URL"
+        value={url}
+        onChange={setUrl}
+        placeholder="http://127.0.0.1:8080"
+      />
+
+      {!connected && (
+        <>
+          <FormField
+            label="Username"
+            value={username}
+            onChange={setUsername}
+            placeholder="admin"
+          />
+          <FormField
+            label="Password"
+            value={password}
+            onChange={setPassword}
+            placeholder="password"
+            type="password"
+          />
+        </>
+      )}
+
+      <div className="flex gap-2 pt-2">
+        <button
+          onClick={handleTest}
+          disabled={testing}
+          className={cn(
+            "flex-1 px-4 py-2 rounded-md text-sm font-medium",
+            "bg-elevated text-secondary hover:bg-overlay transition-colors",
+            "disabled:opacity-60"
+          )}
+        >
+          {testing ? "Testing..." : "Test Connection"}
+        </button>
+        {connected ? (
+          <button
+            onClick={handleDisconnect}
+            className={cn(
+              "flex-1 px-4 py-2 rounded-md text-sm font-medium",
+              "bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors"
+            )}
+          >
+            Disconnect
+          </button>
+        ) : (
+          <button
+            onClick={handleConnect}
+            disabled={testing || !password}
+            className={cn(
+              "flex-1 px-4 py-2 rounded-md text-sm font-medium",
+              "bg-accent text-inverse hover:bg-accent-hover transition-colors",
+              "disabled:opacity-60"
+            )}
+          >
+            Connect
+          </button>
+        )}
       </div>
     </div>
   );

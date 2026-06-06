@@ -1,4 +1,4 @@
-import { Phone, MessageSquare, FolderLock, Clock, Settings } from "lucide-react";
+import { Phone, MessageSquare, Users, FolderLock, Clock, ShieldCheck, Settings } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useUiStore } from "@/store/uiStore";
 import { useChatStore } from "@/store/chatStore";
@@ -7,8 +7,10 @@ import type { Tab } from "@/types";
 const tabs: { id: Tab; label: string; icon: typeof Phone }[] = [
   { id: "dialpad", label: "Calls", icon: Phone },
   { id: "chat", label: "Chat", icon: MessageSquare },
+  { id: "people", label: "People", icon: Users },
   { id: "files", label: "Files", icon: FolderLock },
   { id: "recent", label: "Recent", icon: Clock },
+  { id: "admin", label: "Admin", icon: ShieldCheck },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 

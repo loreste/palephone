@@ -18,6 +18,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub matrix: MatrixPersist,
     #[serde(default)]
+    pub server: ServerPersist,
+    #[serde(default)]
     pub ui: UiPersist,
 }
 
@@ -28,6 +30,7 @@ impl Default for AppConfig {
             audio: AudioPersist::default(),
             network: NetworkPersist::default(),
             matrix: MatrixPersist::default(),
+            server: ServerPersist::default(),
             ui: UiPersist::default(),
         }
     }
@@ -128,6 +131,24 @@ impl Default for UiPersist {
             theme: "dark".into(),
             window_width: 380,
             window_height: 640,
+        }
+    }
+}
+
+/// Pale server connection configuration (password stored in OS keychain)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerPersist {
+    pub url: String,
+    pub username: String,
+    pub auto_connect: bool,
+}
+
+impl Default for ServerPersist {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            username: "admin".into(),
+            auto_connect: false,
         }
     }
 }

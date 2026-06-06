@@ -1,0 +1,25 @@
+[package]
+name = "pale-server"
+version = "0.1.0"
+edition = "2021"
+description = "Backend infrastructure server for Pale SIP, files, and conferences"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = ">=1.44.2, <2", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["serde", "v4"] }
+sha2 = "0.10"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+chrono = { version = ">=0.4.20, <0.5", features = ["serde"] }
+md-5 = "0.10"
+pjsip-sys = { path = "../pjsip-sys" }
+rsip = "0.4"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+rusqlite = { version = "0.37", features = ["bundled", "chrono", "uuid"] }

@@ -5,25 +5,58 @@ import {
   getCallHistory,
   deleteCallRecord,
   clearCallHistory,
+  paleServerGetCallHistory,
   type CallRecord,
 } from "@/lib/tauri";
+import { useServerStore } from "@/store/serverStore";
 import { toast } from "@/components/ui/Toast";
 
 export function RecentCallsList() {
   const [records, setRecords] = useState<CallRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const { baseUrl, token, connected } = useServerStore();
 
   const loadHistory = useCallback(async () => {
     try {
-      const data = await getCallHistory();
-      setRecords(data);
+      const localData = await getCallHistory().catch(() => [] as CallRecord[]);
+
+      // Merge with server call history if connected
+      if (connected && baseUrl && token) {
+        const serverData = await paleServerGetCallHistory(baseUrl, token).catch(() => []);
+        const serverRecords: CallRecord[] = serverData.map((entry) => ({
+          id: -1, // Server entries don't have local IDs
+          direction: entry.direction,
+          remote_uri: entry.remote_uri,
+          remote_name: entry.remote_name,
+          start_time: entry.start_time,
+          duration_secs: entry.duration_secs,
+          answered: entry.answered,
+        }));
+
+        // Merge: deduplicate by start_time + remote_uri + direction
+        const merged = [...localData];
+        for (const sr of serverRecords) {
+          const exists = merged.some(
+            (lr) =>
+              lr.start_time === sr.start_time &&
+              lr.remote_uri === sr.remote_uri &&
+              lr.direction === sr.direction
+          );
+          if (!exists) merged.push(sr);
+        }
+
+        // Sort by start_time descending
+        merged.sort((a, b) => new Date(b.start_time).getTime() - new Date(a.start_time).getTime());
+        setRecords(merged);
+      } else {
+        setRecords(localData);
+      }
     } catch {
-      // IPC may fail if backend isn't ready — use empty list
       setRecords([]);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [connected, baseUrl, token]);
 
   useEffect(() => {
     loadHistory();

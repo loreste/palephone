@@ -17,7 +17,14 @@ export interface ChatMessage {
   sender: string;
   sender_name: string | null;
   body: string;
-  msg_type: "text" | "image" | "file" | "audio" | "video" | "emote" | "notice";
+  msg_type:
+    | "text"
+    | "emote"
+    | "notice"
+    | { image: { url: string; thumbnail_url: string | null; width: number | null; height: number | null } }
+    | { file: { url: string; filename: string; size: number | null; mimetype: string | null } }
+    | { audio: { url: string; duration_ms: number | null } }
+    | { video: { url: string; duration_ms: number | null; width: number | null; height: number | null } };
   timestamp: number;
   is_encrypted: boolean;
   is_own: boolean;
@@ -27,17 +34,20 @@ interface ChatStoreState {
   rooms: RoomSummary[];
   activeRoomId: string | null;
   messages: Record<string, ChatMessage[]>; // room_id -> messages
+  typingByRoom: Record<string, string[]>;
 
   setRooms: (rooms: RoomSummary[]) => void;
   setActiveRoomId: (id: string | null) => void;
   addMessage: (msg: ChatMessage) => void;
   setMessages: (roomId: string, msgs: ChatMessage[]) => void;
+  setTypingUsers: (roomId: string, userIds: string[]) => void;
 }
 
 export const useChatStore = create<ChatStoreState>((set) => ({
   rooms: [],
   activeRoomId: null,
   messages: {},
+  typingByRoom: {},
 
   setRooms: (rooms) => set({ rooms }),
   setActiveRoomId: (id) => set({ activeRoomId: id }),
@@ -64,5 +74,10 @@ export const useChatStore = create<ChatStoreState>((set) => ({
   setMessages: (roomId, msgs) =>
     set((state) => ({
       messages: { ...state.messages, [roomId]: msgs },
+    })),
+
+  setTypingUsers: (roomId, userIds) =>
+    set((state) => ({
+      typingByRoom: { ...state.typingByRoom, [roomId]: userIds },
     })),
 }));

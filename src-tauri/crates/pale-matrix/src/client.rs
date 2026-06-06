@@ -1,13 +1,18 @@
 use std::path::Path;
+use std::time::Duration;
 
 use matrix_sdk::{
     config::SyncSettings,
     ruma::{
+        api::client::typing::create_typing_event::v3::{
+            Request as TypingRequest, Typing, TypingInfo,
+        },
         api::client::room::create_room::v3::Request as CreateRoomRequest,
         events::room::message::{
             MessageType as RumaMessageType, OriginalSyncRoomMessageEvent,
             RoomMessageEventContent,
         },
+        events::typing::SyncTypingEvent,
         OwnedUserId, RoomId,
     },
     Client, Room,
@@ -111,6 +116,28 @@ impl MatrixClient {
             },
         );
 
+        let tx_typing = tx.clone();
+        let own_user_id = client.user_id().map(|id| id.to_owned());
+        client.add_event_handler(
+            move |event: SyncTypingEvent, room: Room| {
+                let tx = tx_typing.clone();
+                let own_user_id = own_user_id.clone();
+                async move {
+                    let user_ids = event
+                        .content
+                        .user_ids
+                        .into_iter()
+                        .filter(|id| own_user_id.as_ref() != Some(id))
+                        .map(|id| id.to_string())
+                        .collect();
+                    let _ = tx.send(MatrixEvent::Typing {
+                        room_id: room.room_id().to_string(),
+                        user_ids,
+                    });
+                }
+            },
+        );
+
         let settings = SyncSettings::default();
 
         // Spawn sync loop on a dedicated thread (matrix-sdk crypto store isn't Send)
@@ -154,6 +181,25 @@ impl MatrixClient {
         Ok(response.response.event_id.to_string())
     }
 
+    pub async fn set_typing(&self, room_id: &str, typing: bool) -> Result<(), String> {
+        let client = self.client.as_ref().ok_or("Not logged in")?;
+        let user_id = client.user_id().ok_or("Not logged in")?.to_owned();
+        let room_id = RoomId::parse(room_id)
+            .map_err(|e| format!("Invalid room ID: {}", e))?
+            .to_owned();
+        let state = if typing {
+            Typing::Yes(TypingInfo::new(Duration::from_secs(5)))
+        } else {
+            Typing::No
+        };
+        let request = TypingRequest::new(user_id, room_id, state);
+        client
+            .send(request)
+            .await
+            .map_err(|e| format!("Failed to send typing state: {}", e))?;
+        Ok(())
+    }
+
     pub async fn create_dm(&self, user_id: &str) -> Result<String, String> {
         let client = self.client.as_ref().ok_or("Not logged in")?;
         let user = OwnedUserId::try_from(user_id).map_err(|e| format!("Invalid user ID: {}", e))?;
@@ -190,16 +236,19 @@ impl MatrixClient {
             .first()
             .unwrap_or(mime::APPLICATION_OCTET_STREAM);
 
+        let file_size = file_data.len() as u64;
+
         // Upload the file to the Matrix content repository
-        let _upload = client
+        let upload = client
             .media()
             .upload(&content_type, file_data, None)
             .await
             .map_err(|e| format!("Failed to upload file: {}", e))?;
 
-        // Send a file message referencing the upload
-        let body_text = format!("Sent file: {}", filename);
-        let content = RoomMessageEventContent::text_plain(&body_text);
+        // Send a file message referencing the uploaded MXC URI
+        use matrix_sdk::ruma::events::room::message::FileMessageEventContent;
+        let file_content = FileMessageEventContent::plain(filename.clone(), upload.content_uri);
+        let content = RoomMessageEventContent::new(RumaMessageType::File(file_content));
         let response = room
             .send(content)
             .await

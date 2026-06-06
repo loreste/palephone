@@ -1,10 +1,11 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use pale_core::{
-    load_config, save_config, AppConfig,
-    CallHistoryDb, CallRecord, EngineCommand, PaleEvent, PjsipEngine,
-    SipAccountConfig, Transport,
+    load_config, save_config, AccountPersist, AppConfig, CallHistoryDb, CallRecord, EngineCommand,
+    PaleEvent, PjsipEngine, SipAccountConfig, Transport,
 };
 use pale_matrix::{MatrixClient, MatrixEvent, RoomSummary};
 use serde::Deserialize;
@@ -16,7 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 struct EngineState(Arc<PjsipEngine>);
 
 /// Shared call history database
-struct HistoryState(Mutex<CallHistoryDb>);
+struct HistoryState(Arc<Mutex<CallHistoryDb>>);
 
 /// Shared Matrix client
 struct MatrixState(Arc<tokio::sync::Mutex<MatrixClient>>);
@@ -26,6 +27,22 @@ struct ConfigState {
     config: Mutex<AppConfig>,
     path: PathBuf,
 }
+
+/// Runtime metadata that is learned from PJSIP callbacks.
+struct SipRuntimeState {
+    default_account_id: Mutex<Option<i32>>,
+}
+
+#[derive(Debug, Clone)]
+struct TrackedCall {
+    direction: String,
+    remote_uri: String,
+    remote_name: String,
+    start_time: String,
+    connected_at_ms: Option<u128>,
+}
+
+type CallTracker = Arc<Mutex<HashMap<i32, TrackedCall>>>;
 
 // ─── Tauri Commands ───
 
@@ -40,35 +57,66 @@ struct AccountConfig {
 }
 
 #[tauri::command]
-fn register_account(state: State<EngineState>, config: AccountConfig) -> Result<(), String> {
+fn register_account(
+    engine: State<EngineState>,
+    config_state: State<ConfigState>,
+    config: AccountConfig,
+) -> Result<(), String> {
+    validate_no_nul("display_name", &config.display_name)?;
+    validate_no_nul("sip_uri", &config.sip_uri)?;
+    validate_no_nul("registrar_uri", &config.registrar_uri)?;
+    validate_no_nul("auth_username", &config.auth_username)?;
+    validate_no_nul("auth_password", &config.auth_password)?;
+
     let transport = match config.transport.as_str() {
         "tls" => Transport::Tls,
         "tcp" => Transport::Tcp,
         _ => Transport::Udp,
     };
 
-    state
+    let account = SipAccountConfig {
+        display_name: config.display_name,
+        sip_uri: config.sip_uri,
+        registrar_uri: config.registrar_uri,
+        auth_username: config.auth_username,
+        auth_password: config.auth_password,
+        transport,
+        reg_expiry: 3600,
+    };
+
+    engine
         .0
-        .send_command(EngineCommand::AddAccount(SipAccountConfig {
-            display_name: config.display_name,
-            sip_uri: config.sip_uri,
-            registrar_uri: config.registrar_uri,
-            auth_username: config.auth_username,
-            auth_password: config.auth_password,
-            transport,
-            reg_expiry: 3600,
-        }))
-        .map_err(|e| e.to_string())
+        .send_command(EngineCommand::AddAccount(account.clone()))
+        .map_err(|e| e.to_string())?;
+
+    let mut current = config_state.config.lock().map_err(|e| e.to_string())?;
+    current.account = Some(AccountPersist {
+        display_name: account.display_name,
+        sip_uri: account.sip_uri,
+        registrar_uri: account.registrar_uri,
+        auth_username: account.auth_username,
+        transport: account.transport,
+        reg_expiry: account.reg_expiry,
+    });
+    save_config(&config_state.path, &current).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn make_call(state: State<EngineState>, uri: String) -> Result<(), String> {
+fn make_call(
+    state: State<EngineState>,
+    runtime: State<SipRuntimeState>,
+    uri: String,
+) -> Result<(), String> {
+    validate_no_nul("uri", &uri)?;
+    let account_id = runtime
+        .default_account_id
+        .lock()
+        .map_err(|e| e.to_string())?
+        .unwrap_or(0);
+
     state
         .0
-        .send_command(EngineCommand::MakeCall {
-            account_id: 0,
-            uri,
-        })
+        .send_command(EngineCommand::MakeCall { account_id, uri })
         .map_err(|e| e.to_string())
 }
 
@@ -76,10 +124,7 @@ fn make_call(state: State<EngineState>, uri: String) -> Result<(), String> {
 fn answer_call(state: State<EngineState>, call_id: i32) -> Result<(), String> {
     state
         .0
-        .send_command(EngineCommand::AnswerCall {
-            call_id,
-            code: 200,
-        })
+        .send_command(EngineCommand::AnswerCall { call_id, code: 200 })
         .map_err(|e| e.to_string())
 }
 
@@ -117,6 +162,7 @@ fn set_mute(state: State<EngineState>, call_id: i32, muted: bool) -> Result<(), 
 
 #[tauri::command]
 fn send_dtmf(state: State<EngineState>, call_id: i32, digits: String) -> Result<(), String> {
+    validate_no_nul("digits", &digits)?;
     state
         .0
         .send_command(EngineCommand::SendDtmf { call_id, digits })
@@ -124,11 +170,8 @@ fn send_dtmf(state: State<EngineState>, call_id: i32, digits: String) -> Result<
 }
 
 #[tauri::command]
-fn blind_transfer(
-    state: State<EngineState>,
-    call_id: i32,
-    target: String,
-) -> Result<(), String> {
+fn blind_transfer(state: State<EngineState>, call_id: i32, target: String) -> Result<(), String> {
+    validate_no_nul("target", &target)?;
     state
         .0
         .send_command(EngineCommand::BlindTransfer { call_id, target })
@@ -205,6 +248,16 @@ async fn matrix_send_message(
 }
 
 #[tauri::command]
+async fn matrix_set_typing(
+    state: State<'_, MatrixState>,
+    room_id: String,
+    typing: bool,
+) -> Result<(), String> {
+    let client = state.0.lock().await;
+    client.set_typing(&room_id, typing).await
+}
+
+#[tauri::command]
 async fn matrix_send_file(
     state: State<'_, MatrixState>,
     room_id: String,
@@ -232,13 +285,21 @@ async fn matrix_is_logged_in(state: State<'_, MatrixState>) -> Result<bool, Stri
 // ─── Video Commands ───
 
 #[tauri::command]
-fn make_video_call(state: State<EngineState>, uri: String) -> Result<(), String> {
+fn make_video_call(
+    state: State<EngineState>,
+    runtime: State<SipRuntimeState>,
+    uri: String,
+) -> Result<(), String> {
+    validate_no_nul("uri", &uri)?;
+    let account_id = runtime
+        .default_account_id
+        .lock()
+        .map_err(|e| e.to_string())?
+        .unwrap_or(0);
+
     state
         .0
-        .send_command(EngineCommand::MakeVideoCall {
-            account_id: 0,
-            uri,
-        })
+        .send_command(EngineCommand::MakeVideoCall { account_id, uri })
         .map_err(|e| e.to_string())
 }
 
@@ -328,6 +389,121 @@ fn clear_call_history(state: State<HistoryState>) -> Result<(), String> {
 
 // ─── Event Bridge ───
 
+fn validate_no_nul(field: &str, value: &str) -> Result<(), String> {
+    if value.contains('\0') {
+        Err(format!("{} contains an invalid NUL byte", field))
+    } else {
+        Ok(())
+    }
+}
+
+fn current_epoch_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+fn current_iso_time() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+fn track_call_event(
+    event: &PaleEvent,
+    history: &Arc<Mutex<CallHistoryDb>>,
+    tracker: &CallTracker,
+    runtime: &SipRuntimeState,
+) {
+    match event {
+        PaleEvent::RegistrationState { account_id, .. } => {
+            if let Ok(mut default_account_id) = runtime.default_account_id.lock() {
+                *default_account_id = Some(*account_id);
+            }
+        }
+        PaleEvent::IncomingCall {
+            call_id,
+            caller_name,
+            caller_uri,
+            ..
+        } => {
+            if let Ok(mut calls) = tracker.lock() {
+                calls.entry(*call_id).or_insert_with(|| TrackedCall {
+                    direction: "inbound".to_string(),
+                    remote_uri: caller_uri.clone(),
+                    remote_name: caller_name.clone(),
+                    start_time: current_iso_time(),
+                    connected_at_ms: None,
+                });
+            }
+        }
+        PaleEvent::CallState {
+            call_id,
+            state,
+            direction,
+            remote_uri,
+            remote_name,
+        } => {
+            let now = current_epoch_ms();
+            let direction = match direction {
+                pale_core::CallDirection::Inbound => "inbound",
+                pale_core::CallDirection::Outbound => "outbound",
+            };
+
+            let mut completed = None;
+            if let Ok(mut calls) = tracker.lock() {
+                let tracked = calls.entry(*call_id).or_insert_with(|| TrackedCall {
+                    direction: direction.to_string(),
+                    remote_uri: remote_uri.clone(),
+                    remote_name: remote_name.clone(),
+                    start_time: current_iso_time(),
+                    connected_at_ms: None,
+                });
+
+                if tracked.remote_uri.is_empty() && !remote_uri.is_empty() {
+                    tracked.remote_uri = remote_uri.clone();
+                }
+                if tracked.remote_name.is_empty() && !remote_name.is_empty() {
+                    tracked.remote_name = remote_name.clone();
+                }
+
+                match state {
+                    pale_core::CallState::Connected => {
+                        if tracked.connected_at_ms.is_none() {
+                            tracked.connected_at_ms = Some(now);
+                        }
+                    }
+                    pale_core::CallState::Terminated => {
+                        completed = calls.remove(call_id);
+                    }
+                    _ => {}
+                }
+            }
+
+            if let Some(tracked) = completed {
+                let duration_secs = tracked
+                    .connected_at_ms
+                    .map(|connected| now.saturating_sub(connected) / 1000)
+                    .unwrap_or(0) as i64;
+                let record = CallRecord {
+                    id: 0,
+                    direction: tracked.direction,
+                    remote_uri: tracked.remote_uri,
+                    remote_name: tracked.remote_name,
+                    start_time: tracked.start_time,
+                    duration_secs,
+                    answered: tracked.connected_at_ms.is_some(),
+                };
+                if let Ok(db) = history.lock() {
+                    if let Err(e) = db.insert(&record) {
+                        log::warn!("Failed to persist call history from backend event: {}", e);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Forward MatrixEvents to the Tauri frontend
 fn start_matrix_event_bridge(app: AppHandle, matrix: Arc<tokio::sync::Mutex<MatrixClient>>) {
     std::thread::spawn(move || {
@@ -363,7 +539,13 @@ fn start_matrix_event_bridge(app: AppHandle, matrix: Arc<tokio::sync::Mutex<Matr
 }
 
 /// Forward PaleEvents from the Rust engine to the Tauri frontend
-fn start_event_bridge(app: AppHandle, engine: Arc<PjsipEngine>) {
+fn start_event_bridge(
+    app: AppHandle,
+    engine: Arc<PjsipEngine>,
+    history: Arc<Mutex<CallHistoryDb>>,
+    tracker: CallTracker,
+    runtime: Arc<SipRuntimeState>,
+) {
     let mut rx = engine.subscribe();
 
     // Spawn on a separate thread since we don't have a tokio runtime in the main app
@@ -377,6 +559,8 @@ fn start_event_bridge(app: AppHandle, engine: Arc<PjsipEngine>) {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
+                        track_call_event(&event, &history, &tracker, &runtime);
+
                         let event_name = match &event {
                             PaleEvent::RegistrationState { .. } => "sip://reg-state",
                             PaleEvent::IncomingCall { .. } => "sip://incoming-call",
@@ -388,7 +572,12 @@ fn start_event_bridge(app: AppHandle, engine: Arc<PjsipEngine>) {
 
                         // Send native OS notification for incoming calls
                         // (critical for Android background + desktop tray)
-                        if let PaleEvent::IncomingCall { ref caller_name, ref caller_uri, .. } = event {
+                        if let PaleEvent::IncomingCall {
+                            ref caller_name,
+                            ref caller_uri,
+                            ..
+                        } = event
+                        {
                             let title = "Incoming Call";
                             let body = if caller_name.is_empty() {
                                 caller_uri.clone()
@@ -396,11 +585,7 @@ fn start_event_bridge(app: AppHandle, engine: Arc<PjsipEngine>) {
                                 caller_name.clone()
                             };
                             use tauri_plugin_notification::NotificationExt;
-                            let _ = app.notification()
-                                .builder()
-                                .title(title)
-                                .body(&body)
-                                .show();
+                            let _ = app.notification().builder().title(title).body(&body).show();
                         }
 
                         let _ = app.emit(event_name, &event);
@@ -469,20 +654,22 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     // Initialize PJSIP engine
-    let engine = Arc::new(
-        PjsipEngine::new().expect("Failed to initialize PJSIP engine"),
-    );
+    let engine = Arc::new(PjsipEngine::new().expect("Failed to initialize PJSIP engine"));
 
     let engine_for_bridge = engine.clone();
+    let runtime = Arc::new(SipRuntimeState {
+        default_account_id: Mutex::new(None),
+    });
+    let runtime_for_bridge = runtime.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .manage(EngineState(engine))
+        .manage(runtime)
         .invoke_handler(tauri::generate_handler![
             // SIP commands
             register_account,
@@ -515,6 +702,7 @@ pub fn run() {
             matrix_logout,
             matrix_get_rooms,
             matrix_send_message,
+            matrix_set_typing,
             matrix_send_file,
             matrix_create_dm,
             matrix_is_logged_in,
@@ -537,15 +725,15 @@ pub fn run() {
 
             // Initialize call history database
             let db_path = app_data.join("call_history.db");
-            let history_db = CallHistoryDb::open(&db_path)
-                .expect("Failed to open call history database");
-            app.manage(HistoryState(Mutex::new(history_db)));
+            let history_db = Arc::new(Mutex::new(
+                CallHistoryDb::open(&db_path).expect("Failed to open call history database"),
+            ));
+            app.manage(HistoryState(history_db.clone()));
             log::info!("Call history DB opened at {:?}", db_path);
+            let call_tracker = Arc::new(Mutex::new(HashMap::new()));
 
             // Initialize Matrix client
-            let matrix_client = Arc::new(tokio::sync::Mutex::new(
-                MatrixClient::new(&app_data),
-            ));
+            let matrix_client = Arc::new(tokio::sync::Mutex::new(MatrixClient::new(&app_data)));
             app.manage(MatrixState(matrix_client.clone()));
             log::info!("Matrix client initialized");
 
@@ -566,7 +754,13 @@ pub fn run() {
                 });
             }
 
-            start_event_bridge(app.handle().clone(), engine_for_bridge);
+            start_event_bridge(
+                app.handle().clone(),
+                engine_for_bridge,
+                history_db,
+                call_tracker,
+                runtime_for_bridge,
+            );
             Ok(())
         })
         .run(tauri::generate_context!())
