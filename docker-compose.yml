@@ -1,20 +1,42 @@
-# Pale Server — Docker Compose
+# Pale Server — Docker Compose with PostgreSQL
 #
 # Quick start:
-#   docker compose up -d
-#
-# Generate strong secrets:
 #   export PALE_SERVER_TOKEN=$(openssl rand -base64 32)
 #   export PALE_ADMIN_PASSWORD=$(openssl rand -base64 32)
 #   export PALE_STORAGE_KEY=$(openssl rand -base64 32)
+#   docker compose up -d
+#
+# PostgreSQL is the primary data store. SQLite is kept as a local
+# cache/fallback for the encrypted SIP account credentials.
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pale-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: pale
+      POSTGRES_USER: pale
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-pale-dev-password}"
+    volumes:
+      - pale-pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pale"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   pale-server:
     build:
       context: .
       dockerfile: Dockerfile.pale-server
     container_name: pale-server
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8080:8080"       # HTTP API
       - "5060:5060/udp"   # SIP UDP
@@ -23,6 +45,8 @@ services:
       PALE_HTTP_ADDR: "0.0.0.0:8080"
       PALE_SIP_ADDR: "0.0.0.0:5060"
       PALE_DATA_DIR: "/data"
+      PALE_DATABASE_URL: "host=postgres user=pale password=${POSTGRES_PASSWORD:-pale-dev-password} dbname=pale"
+      PALE_PG_MAX_CONNECTIONS: "20"
       PALE_SERVER_TOKEN: "${PALE_SERVER_TOKEN:?Set PALE_SERVER_TOKEN (min 24 chars)}"
       PALE_ADMIN_PASSWORD: "${PALE_ADMIN_PASSWORD:?Set PALE_ADMIN_PASSWORD (min 24 chars)}"
       PALE_STORAGE_KEY: "${PALE_STORAGE_KEY:?Set PALE_STORAGE_KEY (min 24 chars)}"
@@ -41,8 +65,10 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
 
 volumes:
+  pale-pgdata:
+    driver: local
   pale-data:
     driver: local

@@ -9,11 +9,11 @@ use pale_server::{
 };
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let config = config_from_env();
-    let state = Arc::new(AppState::persistent(
+    let mut app_state = AppState::persistent(
         config.data_dir.clone(),
         config.http_token.clone(),
         config.admin_username.clone(),
@@ -21,7 +21,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.storage_key.clone(),
         config.max_upload_bytes,
         config.media.clone(),
-    )?);
+    )?;
+
+    // Connect to PostgreSQL if PALE_DATABASE_URL is set
+    if let Some(database_url) = optional_env("PALE_DATABASE_URL") {
+        let max_pg_connections: usize = std::env::var("PALE_PG_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
+
+        match pale_server::PgStore::connect(&database_url, max_pg_connections).await {
+            Ok(pg) => {
+                if let Err(e) = pg.run_migrations().await {
+                    log::error!("PostgreSQL migration failed: {}", e);
+                    return Err(e);
+                }
+                app_state.set_pg_store(pg);
+                app_state.load_from_postgres().await;
+                log::info!("PostgreSQL connected and migrations applied");
+            }
+            Err(e) => {
+                log::error!("Failed to connect to PostgreSQL: {}", e);
+                return Err(e);
+            }
+        }
+    } else {
+        log::info!("No PALE_DATABASE_URL set — using SQLite-only persistence");
+    }
+
+    let state = Arc::new(app_state);
     tokio::fs::create_dir_all(state.files_dir()).await?;
 
     let sip_backend = sip_backend_from_env();
@@ -171,7 +199,7 @@ fn required_secret(name: &str) -> String {
         .unwrap_or_else(|| panic!("{} must be set to at least 24 characters", name))
 }
 
-fn tls_config_from_env(sip_port: u16) -> Result<Option<TlsConfig>, Box<dyn std::error::Error>> {
+fn tls_config_from_env(sip_port: u16) -> Result<Option<TlsConfig>, Box<dyn std::error::Error + Send + Sync>> {
     if !env_bool("PALE_SIP_TLS", true) {
         return Ok(None);
     }
@@ -196,7 +224,7 @@ fn tls_config_from_env(sip_port: u16) -> Result<Option<TlsConfig>, Box<dyn std::
     }))
 }
 
-fn required_env(name: &str) -> Result<String, Box<dyn std::error::Error>> {
+fn required_env(name: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     std::env::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())

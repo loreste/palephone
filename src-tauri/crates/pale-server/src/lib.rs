@@ -12,10 +12,12 @@ use sha2::{Digest as ShaDigest, Sha256};
 use uuid::Uuid;
 
 pub mod http;
+pub mod pg_store;
 pub mod pjsip_runtime;
 pub mod sip;
 mod storage;
 
+pub use pg_store::PgStore;
 use storage::{Store, StoredObject};
 
 const MAX_SIP_MESSAGES: usize = 10_000;
@@ -197,6 +199,7 @@ pub struct AppState {
     presence: ShardedMap<String, UserPresence>,
     call_history: ShardedMap<Uuid, CallHistoryEntry>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
+    pg: Option<PgStore>,
 }
 
 impl fmt::Debug for ServerConfig {
@@ -297,7 +300,50 @@ impl AppState {
             presence: ShardedMap::new(),
             call_history: ShardedMap::new(),
             sse_tx: tokio::sync::broadcast::channel(256).0,
+            pg: None,
         }
+    }
+
+    pub fn set_pg_store(&mut self, pg: PgStore) {
+        self.pg = Some(pg);
+    }
+
+    pub async fn load_from_postgres(&self) {
+        let Some(pg) = &self.pg else { return };
+
+        match pg.load_users().await {
+            Ok(users) => {
+                for user in users {
+                    self.users.insert(user.id, user);
+                }
+            }
+            Err(e) => log::warn!("Failed to load users from Postgres: {}", e),
+        }
+        match pg.load_sip_accounts().await {
+            Ok(accounts) => {
+                for account in accounts {
+                    self.sip_accounts.insert(account.aor(), account);
+                }
+            }
+            Err(e) => log::warn!("Failed to load SIP accounts from Postgres: {}", e),
+        }
+        match pg.load_registrations().await {
+            Ok(regs) => {
+                for reg in regs {
+                    self.registrations.insert(reg.aor.clone(), reg);
+                }
+            }
+            Err(e) => log::warn!("Failed to load registrations from Postgres: {}", e),
+        }
+        match pg.load_routing_rules().await {
+            Ok(rules) => {
+                for rule in rules {
+                    self.routing_rules.insert(rule.id, rule);
+                }
+            }
+            Err(e) => log::warn!("Failed to load routing rules from Postgres: {}", e),
+        }
+        log::info!("Loaded data from PostgreSQL into memory cache");
     }
 
     pub fn http_token(&self) -> &str {
@@ -459,6 +505,8 @@ impl AppState {
             events.drain(..overflow);
         }
         self.persist(&event);
+        let e = event.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.insert_audit_event(&e).await }));
         event
     }
 
@@ -576,6 +624,8 @@ impl AppState {
         self.users.insert(user.id, user.clone());
         self.users.trim_to_len(MAX_USERS);
         self.persist(&user);
+        let u = user.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.insert_user(&u).await }));
         user
     }
 
@@ -587,6 +637,7 @@ impl AppState {
         let user = self.users.remove(&id);
         if user.is_some() {
             self.delete_persisted(User::collection(), id.to_string());
+            self.pg_spawn(move |pg| Box::pin(async move { pg.delete_user(id).await }));
         }
         user
     }
@@ -604,6 +655,8 @@ impl AppState {
         self.sip_accounts.insert(key, account.clone());
         self.sip_accounts.trim_to_len(MAX_SIP_ACCOUNTS);
         self.persist_sip_account(&account);
+        let a = account.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.upsert_sip_account(&a).await }));
         account
     }
 
@@ -667,6 +720,8 @@ impl AppState {
         if self.should_persist_runtime_events() {
             self.persist(&registration);
         }
+        let reg = registration.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.upsert_registration(&reg).await }));
         self.update_presence(&aor, PresenceStatus::Online, None);
     }
 
@@ -770,6 +825,8 @@ impl AppState {
         if self.should_persist_runtime_events() {
             self.persist(&message);
         }
+        let m = message.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.insert_message(&m).await }));
         self.broadcast_sse(SseEvent {
             event_type: "message".to_string(),
             payload: serde_json::to_value(&message).unwrap_or_default(),
@@ -1040,6 +1097,8 @@ impl AppState {
         self.routing_rules.insert(rule.id, rule.clone());
         self.routing_rules.trim_to_len(MAX_ROUTING_RULES);
         self.persist(&rule);
+        let r = rule.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.upsert_routing_rule(&r).await }));
         rule
     }
 
@@ -1107,6 +1166,8 @@ impl AppState {
         self.presence
             .insert(sip_uri.to_string(), presence.clone());
         self.presence.trim_to_len(MAX_PRESENCE);
+        let p = presence.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.upsert_presence(&p).await }));
         self.broadcast_sse(SseEvent {
             event_type: "presence".to_string(),
             payload: serde_json::to_value(&presence).unwrap_or_default(),
@@ -1130,6 +1191,22 @@ impl AppState {
 
     pub fn broadcast_sse(&self, event: SseEvent) {
         let _ = self.sse_tx.send(event);
+    }
+
+    /// Spawn a background Postgres write. Errors are logged, never block the caller.
+    fn pg_spawn<F>(&self, f: F)
+    where
+        F: FnOnce(PgStore) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), pg_store::PgError>> + Send>>
+            + Send
+            + 'static,
+    {
+        if let Some(pg) = self.pg.clone() {
+            tokio::spawn(async move {
+                if let Err(e) = f(pg).await {
+                    log::error!("Postgres write failed: {}", e);
+                }
+            });
+        }
     }
 
     // ─── Call History ───
