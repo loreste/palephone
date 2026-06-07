@@ -193,4 +193,4 @@ git push --tags
 
 ## License
 
-GPL-2.0 — same as PJSIP. See [LICENSE](LICENSE).
+This project is licensed under the GNU General Public License v2.0. See [LICENSE](LICENSE) for details.
