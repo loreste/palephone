@@ -352,6 +352,10 @@ impl AppState {
         })
     }
 
+    pub fn pg_store(&self) -> Option<&PgStore> {
+        self.pg.as_ref()
+    }
+
     pub fn set_pg_store(&mut self, pg: PgStore) {
         self.pg = Some(pg);
     }
@@ -1689,7 +1693,7 @@ pub struct CallHistoryEntry {
     pub direction: String,
     pub remote_uri: String,
     pub remote_name: String,
-    pub start_time: String,
+    pub start_time: DateTime<Utc>,
     pub duration_secs: i64,
     pub answered: bool,
     pub synced_at: DateTime<Utc>,
@@ -1705,7 +1709,7 @@ pub struct CallHistoryInput {
     pub direction: String,
     pub remote_uri: String,
     pub remote_name: String,
-    pub start_time: String,
+    pub start_time: DateTime<Utc>,
     pub duration_secs: i64,
     pub answered: bool,
 }

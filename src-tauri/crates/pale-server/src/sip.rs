@@ -1721,7 +1721,7 @@ Authorization: {}\r\n\r\n", conf_uri, conf_uri, auth);
                 direction: "outbound".to_string(),
                 remote_uri: "sip:bob@example.com".to_string(),
                 remote_name: "Bob".to_string(),
-                start_time: "2026-06-05T12:00:00Z".to_string(),
+                start_time: "2026-06-05T12:00:00Z".parse::<chrono::DateTime<chrono::Utc>>().unwrap(),
                 duration_secs: 120,
                 answered: true,
             },

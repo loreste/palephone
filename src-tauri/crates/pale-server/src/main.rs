@@ -117,6 +117,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     });
 
+    // Spawn periodic database cleanup (every 24 hours, also runs on startup)
+    let cleanup_state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            // Run cleanup if PgStore is available
+            if let Some(pg) = &cleanup_state.pg_store() {
+                match pg.cleanup_expired().await {
+                    Ok(()) => log::info!("Database cleanup completed"),
+                    Err(e) => log::warn!("Database cleanup failed: {}", e),
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(86400)).await;
+        }
+    });
+
     // Build app router with /metrics endpoint
     let metrics_router = axum::Router::new()
         .route("/metrics", axum::routing::get(metrics::metrics_handler))

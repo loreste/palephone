@@ -163,7 +163,10 @@ impl PgStore {
     pub async fn upsert_dialog(&self, dialog: &SipDialog) -> Result<(), PgError> {
         let client = self.pool.get().await?;
         let media_json = serde_json::to_value(&dialog.media_types).unwrap_or_default();
-        let status_str = format!("{:?}", dialog.status).to_lowercase();
+        let status_str = serde_json::to_value(&dialog.status)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "routing".to_string());
 
         client.execute(
             "INSERT INTO sip_dialogs (call_id, from_uri, to_uri, target_contact, status, media_types, created_at, updated_at)
