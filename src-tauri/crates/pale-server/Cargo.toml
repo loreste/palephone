@@ -1,6 +1,7 @@
 [package]
 name = "pale-server"
 version = "0.1.0"
+license = "GPL-2.0-only"
 edition = "2021"
 description = "Backend infrastructure server for Pale SIP, files, and conferences"
 

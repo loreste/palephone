@@ -3,6 +3,7 @@ name = "pale"
 version = "0.1.0"
 description = "Cross-platform SIP softphone"
 authors = ["loreste"]
+license = "GPL-2.0-only"
 edition = "2021"
 
 [lib]
