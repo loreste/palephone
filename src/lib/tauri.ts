@@ -120,6 +120,14 @@ export interface AppConfig {
     username: string;
     auto_connect: boolean;
   };
+  notifications: {
+    enabled: boolean;
+    sound_enabled: boolean;
+    dnd_enabled: boolean;
+    dnd_start: string;
+    dnd_end: string;
+    muted_rooms: string[];
+  };
   ui: {
     theme: string;
     window_width: number;

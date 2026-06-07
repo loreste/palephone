@@ -1,8 +1,7 @@
 import { useState, useRef, useEffect } from "react";
-import { Volume2, PhoneIncoming, Server } from "lucide-react";
+import { Volume2, Server, Search } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useAccountStore } from "@/store/accountStore";
-import { useCallStore } from "@/store/callStore";
 import { useServerStore } from "@/store/serverStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
 import { paleServerSetPresence } from "@/lib/tauri";
@@ -25,23 +24,8 @@ const presenceOptions: { status: PresenceStatus; label: string; color: string }[
 
 export function StatusBar() {
   const { account, regState } = useAccountStore();
-  const { setIncomingCall } = useCallStore();
   const { baseUrl, token, connected: serverConnected } = useServerStore();
   const config = regConfig[regState];
-
-  const simulateIncoming = () => {
-    setIncomingCall({
-      id: Date.now(),
-      direction: "inbound",
-      state: "ringing",
-      remoteUri: "sip:bob@example.com",
-      remoteName: "Bob Chen",
-      startTime: Date.now(),
-      connectTime: null,
-      isMuted: false,
-      isHeld: false,
-    });
-  };
 
   return (
     <div
@@ -83,14 +67,13 @@ export function StatusBar() {
       </div>
 
       <div className="flex items-center gap-1">
-        {/* Dev: simulate incoming call */}
         <button
-          onClick={simulateIncoming}
-          className="p-1 rounded-sm hover:bg-elevated text-tertiary hover:text-info transition-colors"
-          aria-label="Simulate incoming call"
-          title="Dev: Simulate incoming call"
+          onClick={() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "f", metaKey: true }))}
+          className="p-1 rounded-sm hover:bg-elevated text-tertiary hover:text-secondary transition-colors"
+          aria-label="Search messages"
+          title="Search (Cmd+F)"
         >
-          <PhoneIncoming size={13} />
+          <Search size={13} />
         </button>
 
         <button

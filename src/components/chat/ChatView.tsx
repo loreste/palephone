@@ -14,12 +14,40 @@ import { MatrixLoginView } from "@/components/auth/MatrixLoginView";
 export function ChatView() {
   const authState = useMatrixStore((s) => s.authState);
   const { rooms, activeRoomId, setActiveRoomId, messages, typingByRoom } = useChatStore();
+  const { baseUrl, token, connected } = useServerStore();
+  const [serverRooms, setServerRooms] = useState<RoomSummary[]>([]);
 
-  if (authState !== "logged_in") {
+  // Load server rooms
+  useEffect(() => {
+    if (!connected || !baseUrl || !token) return;
+    import("@/lib/tauri").then(({ paleServerGetRooms }) => {
+      paleServerGetRooms(baseUrl, token)
+        .then((rooms) => {
+          setServerRooms(
+            rooms.map((r) => ({
+              room_id: r.id,
+              name: r.name,
+              is_direct: r.is_direct,
+              is_encrypted: false,
+              last_message: null,
+              last_message_sender: null,
+              last_message_ts: null,
+              unread_count: 0,
+            }))
+          );
+        })
+        .catch(() => {});
+    });
+  }, [connected, baseUrl, token]);
+
+  // Merge Matrix rooms with server rooms
+  const allRooms = [...rooms, ...serverRooms.filter((sr) => !rooms.some((r) => r.room_id === sr.room_id))];
+
+  if (authState !== "logged_in" && !connected) {
     return <MatrixLoginView />;
   }
 
-  const activeRoom = rooms.find((r) => r.room_id === activeRoomId);
+  const activeRoom = allRooms.find((r) => r.room_id === activeRoomId);
   const roomMessages = activeRoomId ? (messages[activeRoomId] ?? []) : [];
   const typingUsers = activeRoomId ? (typingByRoom[activeRoomId] ?? []) : [];
 
@@ -34,7 +62,7 @@ export function ChatView() {
         />
       ) : (
         <ConversationList
-          rooms={rooms}
+          rooms={allRooms}
           onSelect={(id) => setActiveRoomId(id)}
         />
       )}
@@ -51,6 +79,8 @@ function ConversationList({
 }) {
   const [showNewChat, setShowNewChat] = useState(false);
 
+  const { baseUrl, token, connected } = useServerStore();
+
   const handleNewDm = async (userId: string) => {
     try {
       const roomId = await matrixCreateDm(userId);
@@ -58,6 +88,21 @@ function ConversationList({
       onSelect(roomId);
     } catch (err) {
       toast({ type: "error", title: "Could not create chat", description: String(err) });
+    }
+  };
+
+  const handleCreateRoom = async (name: string, members: string[]) => {
+    if (!connected || !baseUrl || !token) {
+      toast({ type: "error", title: "Not connected to server" });
+      return;
+    }
+    try {
+      const { paleServerCreateRoom } = await import("@/lib/tauri");
+      const room = await paleServerCreateRoom(baseUrl, token, name, "", members);
+      setShowNewChat(false);
+      onSelect(room.id);
+    } catch (err) {
+      toast({ type: "error", title: "Could not create room", description: String(err) });
     }
   };
 
@@ -74,7 +119,7 @@ function ConversationList({
         </button>
       </div>
 
-      {showNewChat && <NewChatInput onSubmit={handleNewDm} />}
+      {showNewChat && <NewChatInput onSubmit={handleNewDm} onCreateRoom={handleCreateRoom} />}
 
       <div className="flex-1 overflow-y-auto px-2">
         {rooms.length === 0 && !showNewChat ? (
@@ -318,42 +363,120 @@ function ChatRoom({
   );
 }
 
-function NewChatInput({ onSubmit }: { onSubmit: (userId: string) => void }) {
+function NewChatInput({
+  onSubmit,
+  onCreateRoom,
+}: {
+  onSubmit: (userId: string) => void;
+  onCreateRoom: (name: string, members: string[]) => void;
+}) {
+  const [mode, setMode] = useState<"dm" | "room">("dm");
   const [userId, setUserId] = useState("");
+  const [roomName, setRoomName] = useState("");
+  const [roomMembers, setRoomMembers] = useState("");
 
   return (
-    <div className="px-4 pb-3">
-      <div className="flex gap-2">
-        <input
-          type="text"
-          value={userId}
-          onChange={(e) => setUserId(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && userId.trim()) onSubmit(userId.trim());
-          }}
-          placeholder="@user:homeserver.com"
-          className={cn(
-            "flex-1 bg-surface border border-border-subtle rounded-lg",
-            "px-3 py-2 text-sm text-primary",
-            "placeholder:text-tertiary",
-            "focus:outline-none focus:border-border-focus"
-          )}
-          autoFocus
-        />
+    <div className="px-4 pb-3 space-y-2">
+      <div className="flex gap-1">
         <button
-          onClick={() => userId.trim() && onSubmit(userId.trim())}
-          disabled={!userId.trim()}
+          onClick={() => setMode("dm")}
           className={cn(
-            "px-3 py-2 rounded-lg text-sm font-medium transition-colors",
-            userId.trim()
-              ? "bg-accent text-white hover:bg-accent-hover"
-              : "bg-elevated text-tertiary cursor-not-allowed"
+            "px-2 py-1 text-xs rounded-md",
+            mode === "dm" ? "bg-accent-muted text-accent" : "text-tertiary hover:text-secondary"
           )}
         >
-          Start
+          Direct Message
+        </button>
+        <button
+          onClick={() => setMode("room")}
+          className={cn(
+            "px-2 py-1 text-xs rounded-md",
+            mode === "room" ? "bg-accent-muted text-accent" : "text-tertiary hover:text-secondary"
+          )}
+        >
+          Group Room
         </button>
       </div>
-      <p className="text-[10px] text-tertiary mt-1">Enter a Matrix user ID to start a conversation</p>
+
+      {mode === "dm" ? (
+        <>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={userId}
+              onChange={(e) => setUserId(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && userId.trim()) onSubmit(userId.trim());
+              }}
+              placeholder="@user:homeserver.com"
+              className={cn(
+                "flex-1 bg-surface border border-border-subtle rounded-lg",
+                "px-3 py-2 text-sm text-primary",
+                "placeholder:text-tertiary",
+                "focus:outline-none focus:border-border-focus"
+              )}
+              autoFocus
+            />
+            <button
+              onClick={() => userId.trim() && onSubmit(userId.trim())}
+              disabled={!userId.trim()}
+              className={cn(
+                "px-3 py-2 rounded-lg text-sm font-medium transition-colors",
+                userId.trim()
+                  ? "bg-accent text-white hover:bg-accent-hover"
+                  : "bg-elevated text-tertiary cursor-not-allowed"
+              )}
+            >
+              Start
+            </button>
+          </div>
+          <p className="text-[10px] text-tertiary">Enter a Matrix user ID to start a DM</p>
+        </>
+      ) : (
+        <>
+          <input
+            type="text"
+            value={roomName}
+            onChange={(e) => setRoomName(e.target.value)}
+            placeholder="Room name"
+            className={cn(
+              "w-full bg-surface border border-border-subtle rounded-lg",
+              "px-3 py-2 text-sm text-primary placeholder:text-tertiary",
+              "focus:outline-none focus:border-border-focus"
+            )}
+            autoFocus
+          />
+          <input
+            type="text"
+            value={roomMembers}
+            onChange={(e) => setRoomMembers(e.target.value)}
+            placeholder="Members (comma-separated SIP URIs)"
+            className={cn(
+              "w-full bg-surface border border-border-subtle rounded-lg",
+              "px-3 py-2 text-sm text-primary placeholder:text-tertiary",
+              "focus:outline-none focus:border-border-focus"
+            )}
+          />
+          <button
+            onClick={() => {
+              if (roomName.trim()) {
+                const members = roomMembers.split(",").map((m) => m.trim()).filter(Boolean);
+                onCreateRoom(roomName.trim(), members);
+              }
+            }}
+            disabled={!roomName.trim()}
+            className={cn(
+              "w-full px-3 py-2 rounded-lg text-sm font-medium transition-colors",
+              roomName.trim()
+                ? "bg-accent text-white hover:bg-accent-hover"
+                : "bg-elevated text-tertiary cursor-not-allowed"
+            )}
+          >
+            Create Room
+          </button>
+          <p className="text-[10px] text-tertiary">Create a group chat on the Pale server</p>
+        </>
+      )}
     </div>
   );
 }

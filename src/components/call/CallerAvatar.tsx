@@ -1,11 +1,13 @@
+import { useState } from "react";
 import { cn } from "@/lib/cn";
+import { useServerStore } from "@/store/serverStore";
 
 const gradientPairs = [
-  ["#6366F1", "#8B5CF6"], // indigo → violet
-  ["#EC4899", "#F43F5E"], // pink → rose
-  ["#14B8A6", "#06B6D4"], // teal → cyan
-  ["#F59E0B", "#EF4444"], // amber → red
-  ["#22C55E", "#14B8A6"], // green → teal
+  ["#6366F1", "#8B5CF6"], // indigo - violet
+  ["#EC4899", "#F43F5E"], // pink - rose
+  ["#14B8A6", "#06B6D4"], // teal - cyan
+  ["#F59E0B", "#EF4444"], // amber - red
+  ["#22C55E", "#14B8A6"], // green - teal
 ];
 
 function hashName(name: string): number {
@@ -27,6 +29,7 @@ function getInitials(name: string): string {
 interface CallerAvatarProps {
   name: string;
   size?: "sm" | "md" | "lg";
+  avatarUrl?: string | null;
   className?: string;
 }
 
@@ -36,24 +39,46 @@ const sizeMap = {
   lg: "w-24 h-24 text-3xl",
 };
 
-export function CallerAvatar({ name, size = "lg", className }: CallerAvatarProps) {
+export function CallerAvatar({ name, size = "lg", avatarUrl, className }: CallerAvatarProps) {
   const hash = hashName(name);
   const pair = gradientPairs[hash % gradientPairs.length];
   const initials = getInitials(name);
+  const [imgError, setImgError] = useState(false);
+  const { baseUrl } = useServerStore();
+
+  // Build full avatar URL if it's a relative server path
+  const fullAvatarUrl = avatarUrl
+    ? avatarUrl.startsWith("http")
+      ? avatarUrl
+      : baseUrl
+        ? `${baseUrl.replace(/\/+$/, "")}${avatarUrl}`
+        : null
+    : null;
+
+  const showImage = fullAvatarUrl && !imgError;
 
   return (
     <div
       className={cn(
-        "rounded-full flex items-center justify-center font-semibold text-white shrink-0",
+        "rounded-full flex items-center justify-center font-semibold text-white shrink-0 overflow-hidden",
         sizeMap[size],
         className
       )}
-      style={{
+      style={showImage ? undefined : {
         background: `linear-gradient(135deg, ${pair[0]}, ${pair[1]})`,
       }}
       aria-hidden
     >
-      {initials}
+      {showImage ? (
+        <img
+          src={fullAvatarUrl}
+          alt={name}
+          className="w-full h-full object-cover"
+          onError={() => setImgError(true)}
+        />
+      ) : (
+        initials
+      )}
     </div>
   );
 }

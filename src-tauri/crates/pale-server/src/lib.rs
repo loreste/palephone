@@ -203,10 +203,13 @@ pub struct AppState {
     call_history: ShardedMap<Uuid, CallHistoryEntry>,
     rooms: ShardedMap<Uuid, Room>,
     room_messages: RwLock<Vec<RoomMessage>>,
+    voicemails: ShardedMap<Uuid, Voicemail>,
+    recordings: ShardedMap<Uuid, CallRecording>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
     rate_limits: ShardedMap<String, RateLimitBucket>,
     rate_limit_rps: u32,
     pg: Option<PgStore>,
+    pg_failure_count: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl fmt::Debug for ServerConfig {
@@ -308,10 +311,13 @@ impl AppState {
             call_history: ShardedMap::new(),
             rooms: ShardedMap::new(),
             room_messages: RwLock::new(Vec::new()),
+            voicemails: ShardedMap::new(),
+            recordings: ShardedMap::new(),
             sse_tx: tokio::sync::broadcast::channel(256).0,
             rate_limits: ShardedMap::new(),
             rate_limit_rps: 100,
             pg: None,
+            pg_failure_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -1235,6 +1241,58 @@ impl AppState {
         let _ = self.sse_tx.send(event);
     }
 
+    // ─── Voicemail ───
+
+    pub fn store_voicemail(&self, vm: Voicemail) {
+        self.voicemails.insert(vm.id, vm.clone());
+        self.broadcast_sse(SseEvent {
+            event_type: "voicemail".to_string(),
+            payload: serde_json::to_value(&vm).unwrap_or_default(),
+        });
+    }
+
+    pub fn voicemails_for_user(&self, callee_uri: &str) -> Vec<Voicemail> {
+        self.voicemails
+            .values()
+            .into_iter()
+            .filter(|v| v.callee_uri == callee_uri)
+            .collect()
+    }
+
+    pub fn mark_voicemail_listened(&self, id: Uuid) -> Option<Voicemail> {
+        self.voicemails.with_write(&id, |vms| {
+            let vm = vms.get_mut(&id)?;
+            vm.listened = true;
+            Some(vm.clone())
+        })
+    }
+
+    pub fn delete_voicemail(&self, id: Uuid) -> Option<Voicemail> {
+        self.voicemails.remove(&id)
+    }
+
+    // ─── Call Recordings ───
+
+    pub fn store_recording(&self, recording: CallRecording) {
+        self.recordings.insert(recording.id, recording.clone());
+        self.broadcast_sse(SseEvent {
+            event_type: "recording".to_string(),
+            payload: serde_json::to_value(&recording).unwrap_or_default(),
+        });
+    }
+
+    pub fn recordings_for_user(&self, sip_uri: &str) -> Vec<CallRecording> {
+        self.recordings
+            .values()
+            .into_iter()
+            .filter(|r| r.caller_uri == sip_uri || r.callee_uri == sip_uri)
+            .collect()
+    }
+
+    pub fn delete_recording(&self, id: Uuid) -> Option<CallRecording> {
+        self.recordings.remove(&id)
+    }
+
     // ─── Group Chat Rooms ───
 
     pub fn create_room(&self, creator: &str, input: CreateRoomRequest) -> Room {
@@ -1328,7 +1386,19 @@ impl AppState {
             .collect()
     }
 
-    /// Spawn a background Postgres write. Errors are logged, never block the caller.
+    /// Returns true if Postgres is connected and healthy.
+    pub fn pg_healthy(&self) -> bool {
+        if self.pg.is_none() {
+            return true; // No PG configured = not degraded
+        }
+        let failures = self
+            .pg_failure_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+        failures < 10 // Circuit breaker: open after 10 consecutive failures
+    }
+
+    /// Spawn a background Postgres write with circuit breaker.
+    /// After 10 consecutive failures, stops attempting writes until a success resets the counter.
     fn pg_spawn<F>(&self, f: F)
     where
         F: FnOnce(PgStore) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), pg_store::PgError>> + Send>>
@@ -1336,9 +1406,25 @@ impl AppState {
             + 'static,
     {
         if let Some(pg) = self.pg.clone() {
+            let failures = self.pg_failure_count.load(std::sync::atomic::Ordering::Relaxed);
+            if failures >= 10 {
+                // Circuit open — skip writes, log periodically
+                if failures % 100 == 10 {
+                    log::warn!("Postgres circuit breaker open ({} consecutive failures), skipping writes", failures);
+                }
+                self.pg_failure_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+            let counter = self.pg_failure_count.clone();
             tokio::spawn(async move {
-                if let Err(e) = f(pg).await {
-                    log::error!("Postgres write failed: {}", e);
+                match f(pg).await {
+                    Ok(()) => {
+                        counter.store(0, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        log::error!("Postgres write failed: {}", e);
+                    }
                 }
             });
         }
@@ -1622,6 +1708,32 @@ pub struct CallHistoryInput {
     pub start_time: String,
     pub duration_secs: i64,
     pub answered: bool,
+}
+
+// ─── Voicemail & Call Recordings ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Voicemail {
+    pub id: Uuid,
+    pub callee_uri: String,
+    pub caller_uri: String,
+    pub caller_name: String,
+    pub duration_secs: i32,
+    pub file_id: Option<Uuid>,
+    pub listened: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallRecording {
+    pub id: Uuid,
+    pub call_id: Option<String>,
+    pub caller_uri: String,
+    pub callee_uri: String,
+    pub duration_secs: i32,
+    pub file_id: Option<Uuid>,
+    pub recorded_by: String,
+    pub created_at: DateTime<Utc>,
 }
 
 // ─── Group Chat Rooms ───

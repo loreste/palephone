@@ -7,7 +7,7 @@ pub mod events;
 pub mod types;
 
 pub use call_history::{CallHistoryDb, CallRecord};
-pub use config::{load_config, save_config, AccountPersist, AppConfig, AudioPersist, MatrixPersist, NetworkPersist, ServerPersist, UiPersist};
+pub use config::{load_config, save_config, AccountPersist, AppConfig, AudioPersist, MatrixPersist, NetworkPersist, NotificationPersist, ServerPersist, UiPersist};
 pub use credential_store::{delete_password, get_password, store_password};
 pub use engine::{EngineCommand, PjsipEngine};
 pub use error::{PaleError, PaleResult};

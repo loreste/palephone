@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { User, Volume2, Globe, Info, Server } from "lucide-react";
+import { useState, useEffect } from "react";
+import { User, Volume2, Globe, Info, Server, Bell } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useAccountStore } from "@/store/accountStore";
 import { useServerStore } from "@/store/serverStore";
@@ -10,13 +10,14 @@ import { adminLogin, adminLogout, adminBaseUrl } from "@/lib/adminApi";
 import { toast } from "@/components/ui/Toast";
 import type { SipAccount } from "@/types";
 
-type SettingsTab = "account" | "audio" | "network" | "server" | "about";
+type SettingsTab = "account" | "audio" | "network" | "server" | "notifications" | "about";
 
 const settingsTabs: { id: SettingsTab; label: string; icon: typeof User }[] = [
   { id: "account", label: "Account", icon: User },
   { id: "audio", label: "Audio", icon: Volume2 },
   { id: "network", label: "Network", icon: Globe },
   { id: "server", label: "Server", icon: Server },
+  { id: "notifications", label: "Notifications", icon: Bell },
   { id: "about", label: "About", icon: Info },
 ];
 
@@ -56,6 +57,7 @@ export function SettingsView() {
         {activeTab === "audio" && <AudioSettings />}
         {activeTab === "network" && <NetworkSettings />}
         {activeTab === "server" && <ServerSettingsPanel />}
+        {activeTab === "notifications" && <NotificationSettingsPanel />}
         {activeTab === "about" && <AboutPanel />}
       </div>
     </div>
@@ -328,6 +330,117 @@ function ServerSettingsPanel() {
             Connect
           </button>
         )}
+      </div>
+    </div>
+  );
+}
+
+function NotificationSettingsPanel() {
+  const [config, setConfig] = useState({
+    enabled: true,
+    sound_enabled: true,
+    dnd_enabled: false,
+    dnd_start: "22:00",
+    dnd_end: "07:00",
+  });
+
+  useEffect(() => {
+    getConfig()
+      .then((appConfig) => {
+        if (appConfig.notifications) {
+          setConfig({
+            enabled: appConfig.notifications.enabled,
+            sound_enabled: appConfig.notifications.sound_enabled,
+            dnd_enabled: appConfig.notifications.dnd_enabled,
+            dnd_start: appConfig.notifications.dnd_start,
+            dnd_end: appConfig.notifications.dnd_end,
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleSave = async () => {
+    try {
+      const appConfig = await getConfig();
+      appConfig.notifications = {
+        ...appConfig.notifications,
+        enabled: config.enabled,
+        sound_enabled: config.sound_enabled,
+        dnd_enabled: config.dnd_enabled,
+        dnd_start: config.dnd_start,
+        dnd_end: config.dnd_end,
+      };
+      await saveSettings(appConfig);
+      toast({ type: "success", title: "Notification settings saved" });
+    } catch (err) {
+      toast({ type: "error", title: "Failed to save", description: String(err) });
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <SectionHeader title="Notifications" />
+
+      <div className="flex items-center justify-between py-1">
+        <span className="text-sm text-primary">Enable notifications</span>
+        <input
+          type="checkbox"
+          checked={config.enabled}
+          onChange={(e) => setConfig({ ...config, enabled: e.target.checked })}
+          className="w-4 h-4 accent-accent"
+        />
+      </div>
+
+      <div className="flex items-center justify-between py-1">
+        <span className="text-sm text-primary">Notification sounds</span>
+        <input
+          type="checkbox"
+          checked={config.sound_enabled}
+          onChange={(e) => setConfig({ ...config, sound_enabled: e.target.checked })}
+          className="w-4 h-4 accent-accent"
+        />
+      </div>
+
+      <SectionHeader title="Do Not Disturb" />
+
+      <div className="flex items-center justify-between py-1">
+        <span className="text-sm text-primary">Enable DND schedule</span>
+        <input
+          type="checkbox"
+          checked={config.dnd_enabled}
+          onChange={(e) => setConfig({ ...config, dnd_enabled: e.target.checked })}
+          className="w-4 h-4 accent-accent"
+        />
+      </div>
+
+      {config.dnd_enabled && (
+        <div className="grid grid-cols-2 gap-3">
+          <FormField
+            label="Start time"
+            value={config.dnd_start}
+            onChange={(v) => setConfig({ ...config, dnd_start: v })}
+            placeholder="22:00"
+          />
+          <FormField
+            label="End time"
+            value={config.dnd_end}
+            onChange={(v) => setConfig({ ...config, dnd_end: v })}
+            placeholder="07:00"
+          />
+        </div>
+      )}
+
+      <div className="flex gap-2 pt-2">
+        <button
+          onClick={handleSave}
+          className={cn(
+            "flex-1 px-4 py-2 rounded-md text-sm font-medium",
+            "bg-accent text-inverse hover:bg-accent-hover transition-colors"
+          )}
+        >
+          Save
+        </button>
       </div>
     </div>
   );

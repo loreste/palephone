@@ -67,6 +67,11 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/search/messages", get(search_messages))
         .route("/v1/messages/{id}/read", put(mark_message_read))
         .route("/v1/users/{id}/avatar", put(upload_avatar))
+        .route("/v1/voicemail", get(list_voicemails))
+        .route("/v1/voicemail/{id}/listen", put(mark_voicemail_listened))
+        .route("/v1/voicemail/{id}", delete(delete_voicemail))
+        .route("/v1/recordings", get(list_recordings))
+        .route("/v1/recordings/{id}", delete(delete_recording))
         .route("/v1/events", get(sse_stream))
         .layer(from_fn(crate::metrics::request_metrics))
         .layer(from_fn(cors))
@@ -137,8 +142,13 @@ fn env_bool(name: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-async fn health() -> Json<serde_json::Value> {
-    Json(json!({ "ok": true, "service": "pale-server" }))
+async fn health(State(state): State<SharedState>) -> Json<serde_json::Value> {
+    let pg_healthy = state.pg_healthy();
+    Json(json!({
+        "ok": pg_healthy,
+        "service": "pale-server",
+        "status": if pg_healthy { "healthy" } else { "degraded" },
+    }))
 }
 
 async fn admin_login(
@@ -847,6 +857,57 @@ async fn upload_avatar(
         "file_id": file_id,
         "url": format!("/v1/files/{}", file_id),
     })))
+}
+
+// ─── Voicemail ───
+
+async fn list_voicemails(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::Voicemail>>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    Ok(Json(state.voicemails_for_user(&principal)))
+}
+
+async fn mark_voicemail_listened(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::Voicemail>, ApiError> {
+    require_bearer(&headers, &state)?;
+    state.mark_voicemail_listened(id).map(Json).ok_or(ApiError::NotFound)
+}
+
+async fn delete_voicemail(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    state.delete_voicemail(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "voicemail.deleted", Some(id.to_string()));
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ─── Call Recordings ───
+
+async fn list_recordings(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::CallRecording>>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    Ok(Json(state.recordings_for_user(&principal)))
+}
+
+async fn delete_recording(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    state.delete_recording(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "recording.deleted", Some(id.to_string()));
+    Ok(Json(json!({ "ok": true })))
 }
 
 // ─── Server-Sent Events ───

@@ -15,6 +15,7 @@ import { AdminView } from "@/components/admin/AdminView";
 import { ActiveCallView } from "@/components/call/ActiveCallView";
 import { IncomingCallOverlay } from "@/components/call/IncomingCallOverlay";
 import { CommandPalette } from "@/components/shared/CommandPalette";
+import { SearchOverlay } from "@/components/shared/SearchOverlay";
 import { SetupWizard } from "@/components/auth/SetupWizard";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
@@ -38,14 +39,17 @@ export function AppShell() {
   const hasActiveCall = activeCallId !== null;
 
   const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [showWizard, setShowWizard] = useState(false);
   const [wizardChecked, setWizardChecked] = useState(false);
   const mobile = isMobile();
 
   const openCommandPalette = useCallback(() => setCmdPaletteOpen(true), []);
   const closeCommandPalette = useCallback(() => setCmdPaletteOpen(false), []);
+  const openSearch = useCallback(() => setSearchOpen(true), []);
+  const closeSearch = useCallback(() => setSearchOpen(false), []);
 
-  useKeyboardShortcuts({ onOpenCommandPalette: openCommandPalette });
+  useKeyboardShortcuts({ onOpenCommandPalette: openCommandPalette, onOpenSearch: openSearch });
 
   // Connect to pale-server SSE for real-time presence & message events
   const serverBaseUrl = useServerStore((s) => s.baseUrl);
@@ -107,6 +111,7 @@ export function AppShell() {
       {/* Overlays */}
       <IncomingCallOverlay />
       <CommandPalette open={cmdPaletteOpen} onClose={closeCommandPalette} />
+      <SearchOverlay open={searchOpen} onClose={closeSearch} />
       <ToastContainer />
     </div>
   );

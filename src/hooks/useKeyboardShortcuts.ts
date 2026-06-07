@@ -4,9 +4,10 @@ import { useCallStore } from "@/store/callStore";
 
 interface ShortcutHandlers {
   onOpenCommandPalette: () => void;
+  onOpenSearch?: () => void;
 }
 
-export function useKeyboardShortcuts({ onOpenCommandPalette }: ShortcutHandlers) {
+export function useKeyboardShortcuts({ onOpenCommandPalette, onOpenSearch }: ShortcutHandlers) {
   const setActiveTab = useUiStore((s) => s.setActiveTab);
   const { activeCallId, sessions, incomingCall, setMuted, setHeld, updateSessionState, removeSession, setIncomingCall, addSession, setActiveCallId } =
     useCallStore();
@@ -25,6 +26,13 @@ export function useKeyboardShortcuts({ onOpenCommandPalette }: ShortcutHandlers)
       if (meta && e.key === "k") {
         e.preventDefault();
         onOpenCommandPalette();
+        return;
+      }
+
+      // Cmd+F — Search
+      if (meta && e.key === "f") {
+        e.preventDefault();
+        onOpenSearch?.();
         return;
       }
 

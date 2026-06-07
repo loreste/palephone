@@ -20,6 +20,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub server: ServerPersist,
     #[serde(default)]
+    pub notifications: NotificationPersist,
+    #[serde(default)]
     pub ui: UiPersist,
 }
 
@@ -31,6 +33,7 @@ impl Default for AppConfig {
             network: NetworkPersist::default(),
             matrix: MatrixPersist::default(),
             server: ServerPersist::default(),
+            notifications: NotificationPersist::default(),
             ui: UiPersist::default(),
         }
     }
@@ -131,6 +134,30 @@ impl Default for UiPersist {
             theme: "dark".into(),
             window_width: 380,
             window_height: 640,
+        }
+    }
+}
+
+/// Notification preferences
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationPersist {
+    pub enabled: bool,
+    pub sound_enabled: bool,
+    pub dnd_enabled: bool,
+    pub dnd_start: String,    // HH:MM format, e.g. "22:00"
+    pub dnd_end: String,      // HH:MM format, e.g. "07:00"
+    pub muted_rooms: Vec<String>,
+}
+
+impl Default for NotificationPersist {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sound_enabled: true,
+            dnd_enabled: false,
+            dnd_start: "22:00".into(),
+            dnd_end: "07:00".into(),
+            muted_rooms: Vec::new(),
         }
     }
 }
