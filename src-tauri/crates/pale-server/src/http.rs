@@ -66,6 +66,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/rooms/{id}/members", post(add_room_member).delete(leave_room))
         .route("/v1/search/messages", get(search_messages))
         .route("/v1/messages/{id}/read", put(mark_message_read))
+        .route("/v1/messages/{id}", put(edit_message).delete(delete_message))
+        .route("/v1/messages/{id}/react", post(react_to_message))
         .route("/v1/users/{id}/avatar", put(upload_avatar))
         .route("/v1/voicemail", get(list_voicemails))
         .route("/v1/voicemail/{id}/listen", put(mark_voicemail_listened))
@@ -810,6 +812,76 @@ async fn mark_message_read(
             "message_id": id,
             "reader": principal,
             "read_at": Utc::now(),
+        }),
+    });
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ─── Message Edit & Delete ───
+
+#[derive(serde::Deserialize)]
+struct EditMessageRequest {
+    body: String,
+}
+
+async fn edit_message(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<EditMessageRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "message_edited".to_string(),
+        payload: json!({
+            "message_id": id,
+            "new_body": input.body,
+            "edited_by": principal,
+            "edited_at": Utc::now(),
+        }),
+    });
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn delete_message(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "message_deleted".to_string(),
+        payload: json!({
+            "message_id": id,
+            "deleted_by": principal,
+            "deleted_at": Utc::now(),
+        }),
+    });
+    state.record_audit_event(&principal, "message.deleted", Some(id.to_string()));
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ─── Reactions ───
+
+#[derive(serde::Deserialize)]
+struct ReactionRequest {
+    emoji: String,
+}
+
+async fn react_to_message(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<ReactionRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "reaction".to_string(),
+        payload: json!({
+            "message_id": id,
+            "emoji": input.emoji,
+            "user": principal,
+            "created_at": Utc::now(),
         }),
     });
     Ok(Json(json!({ "ok": true })))

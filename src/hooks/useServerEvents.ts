@@ -53,6 +53,44 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
         } catch { /* ignore */ }
       });
 
+      es.addEventListener("room_message", (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          addMessage({
+            event_id: msg.id,
+            room_id: msg.room_id,
+            sender: msg.sender_uri,
+            sender_name: null,
+            body: msg.body,
+            msg_type: "text" as const,
+            timestamp: Math.floor(new Date(msg.created_at).getTime() / 1000),
+            is_encrypted: false,
+            is_own: false,
+          });
+        } catch { /* ignore */ }
+      });
+
+      es.addEventListener("voicemail", () => {
+        // Voicemail received — could update a badge or store
+        import("@/lib/notifications").then(({ shouldNotify }) => {
+          shouldNotify().then((ok) => {
+            if (ok) {
+              import("@/components/ui/Toast").then(({ toast }) => {
+                toast({ type: "info", title: "New voicemail" });
+              });
+            }
+          });
+        });
+      });
+
+      es.addEventListener("recording", () => {
+        // Recording completed notification
+      });
+
+      es.addEventListener("read_receipt", () => {
+        // Read receipt received — could update message badges
+      });
+
       es.onerror = () => {
         es.close();
         sourceRef.current = null;

@@ -10,6 +10,7 @@ import {
 import { useAccountStore } from "@/store/accountStore";
 import { useCallStore } from "@/store/callStore";
 import { useServerStore } from "@/store/serverStore";
+import { shouldNotify } from "@/lib/notifications";
 import { toast } from "@/components/ui/Toast";
 import type { RegState, CallState } from "@/types";
 
@@ -60,7 +61,9 @@ export function useSipEvents() {
           isMuted: false,
           isHeld: false,
         });
-        toast({ type: "info", title: "Incoming call", description: event.caller_name || event.caller_uri });
+        shouldNotify().then((ok) => {
+          if (ok) toast({ type: "info", title: "Incoming call", description: event.caller_name || event.caller_uri });
+        });
       })
     );
 

@@ -1,6 +1,8 @@
 import { useEffect, useState, useCallback } from "react";
-import { PhoneOutgoing, PhoneIncoming, PhoneMissed, Trash2 } from "lucide-react";
+import { PhoneOutgoing, PhoneIncoming, PhoneMissed, Trash2, Phone, Voicemail, Mic } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { VoicemailView } from "./VoicemailView";
+import { RecordingsView } from "./RecordingsView";
 import {
   getCallHistory,
   deleteCallRecord,
@@ -11,7 +13,10 @@ import {
 import { useServerStore } from "@/store/serverStore";
 import { toast } from "@/components/ui/Toast";
 
+type RecentTab = "calls" | "voicemail" | "recordings";
+
 export function RecentCallsList() {
+  const [recentTab, setRecentTab] = useState<RecentTab>("calls");
   const [records, setRecords] = useState<CallRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const { baseUrl, token, connected } = useServerStore();
@@ -91,7 +96,7 @@ export function RecentCallsList() {
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between px-4 pt-4 pb-2">
         <h1 className="text-lg font-semibold text-primary">Recent</h1>
-        {records.length > 0 && (
+        {recentTab === "calls" && records.length > 0 && (
           <button
             onClick={handleClearAll}
             className="text-xs text-tertiary hover:text-destructive transition-colors"
@@ -101,7 +106,29 @@ export function RecentCallsList() {
         )}
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex gap-1 px-4 pb-2">
+        {([
+          { id: "calls" as RecentTab, label: "Calls", icon: Phone },
+          { id: "voicemail" as RecentTab, label: "Voicemail", icon: Voicemail },
+          { id: "recordings" as RecentTab, label: "Recordings", icon: Mic },
+        ]).map(({ id, label, icon: Icon }) => (
+          <button
+            key={id}
+            onClick={() => setRecentTab(id)}
+            className={cn(
+              "flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition-colors",
+              recentTab === id ? "bg-accent-muted text-accent" : "text-tertiary hover:text-secondary hover:bg-elevated"
+            )}
+          >
+            <Icon size={12} />
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {recentTab === "voicemail" && <div className="flex-1 overflow-y-auto"><VoicemailView /></div>}
+      {recentTab === "recordings" && <div className="flex-1 overflow-y-auto"><RecordingsView /></div>}
+      {recentTab === "calls" && <div className="flex-1 overflow-y-auto">
         {loading ? (
           <div className="flex items-center justify-center h-32">
             <p className="text-sm text-tertiary">Loading...</p>
@@ -126,7 +153,7 @@ export function RecentCallsList() {
             </div>
           ))
         )}
-      </div>
+      </div>}
     </div>
   );
 }

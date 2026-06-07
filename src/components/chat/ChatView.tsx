@@ -11,6 +11,8 @@ import { CallerAvatar } from "@/components/call/CallerAvatar";
 import { EncryptionBadge } from "@/components/encryption/EncryptionBadge";
 import { MatrixLoginView } from "@/components/auth/MatrixLoginView";
 
+const QUICK_REACTIONS = ["\u{1F44D}", "\u{2764}\u{FE0F}", "\u{1F602}", "\u{1F44F}", "\u{1F914}"];
+
 export function ChatView() {
   const authState = useMatrixStore((s) => s.authState);
   const { rooms, activeRoomId, setActiveRoomId, messages, typingByRoom } = useChatStore();
@@ -189,6 +191,32 @@ function ChatRoom({
   const typingSentRef = useRef(false);
   const { baseUrl, token, connected } = useServerStore();
   const addMessage = useChatStore((s) => s.addMessage);
+  const isServerRoom = !room.room_id.startsWith("!");
+
+  // Load server room messages on mount
+  useEffect(() => {
+    if (isServerRoom && connected && baseUrl && token) {
+      import("@/lib/tauri").then(({ paleServerGetRoomMessages }) => {
+        paleServerGetRoomMessages(baseUrl, token, room.room_id)
+          .then((msgs) => {
+            for (const msg of msgs) {
+              addMessage({
+                event_id: msg.id,
+                room_id: room.room_id,
+                sender: msg.sender_uri,
+                sender_name: null,
+                body: msg.body,
+                msg_type: "text",
+                timestamp: Math.floor(new Date(msg.created_at).getTime() / 1000),
+                is_encrypted: false,
+                is_own: false,
+              });
+            }
+          })
+          .catch(() => {});
+      });
+    }
+  }, [room.room_id, isServerRoom, connected, baseUrl, token, addMessage]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -267,7 +295,23 @@ function ChatRoom({
     setInput("");
     stopTyping();
     try {
-      await matrixSendMessage(room.room_id, body);
+      if (isServerRoom && connected && baseUrl && token) {
+        const { paleServerSendRoomMessage } = await import("@/lib/tauri");
+        const msg = await paleServerSendRoomMessage(baseUrl, token, room.room_id, body);
+        addMessage({
+          event_id: msg.id,
+          room_id: room.room_id,
+          sender: msg.sender_uri,
+          sender_name: null,
+          body: msg.body,
+          msg_type: "text",
+          timestamp: Math.floor(new Date(msg.created_at).getTime() / 1000),
+          is_encrypted: false,
+          is_own: true,
+        });
+      } else {
+        await matrixSendMessage(room.room_id, body);
+      }
     } catch (err) {
       toast({ type: "error", title: "Send failed", description: String(err) });
     }
@@ -513,14 +557,54 @@ function MessageBubble({ message }: { message: ChatMessage }) {
     minute: "2-digit",
   });
   const kind = msgTypeLabel(message.msg_type);
+  const { baseUrl, token, connected } = useServerStore();
+
+  const handleDelete = async () => {
+    if (!connected || !baseUrl || !token) return;
+    const { paleServerDeleteMessage } = await import("@/lib/tauri");
+    paleServerDeleteMessage(baseUrl, token, message.event_id).catch(() => {});
+  };
 
   return (
     <div
       className={cn(
-        "flex",
+        "flex group/msg",
         message.is_own ? "justify-end" : "justify-start"
       )}
     >
+      {/* Message actions — visible on hover */}
+      {message.is_own && connected && (
+        <div className="flex items-center gap-0.5 mr-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
+          <button
+            onClick={handleDelete}
+            className="p-0.5 rounded text-tertiary hover:text-destructive"
+            title="Delete message"
+          >
+            <X size={12} />
+          </button>
+        </div>
+      )}
+      {!message.is_own && connected && (
+        <div className="flex items-center gap-0.5 order-last ml-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
+          {QUICK_REACTIONS.map((emoji) => (
+            <button
+              key={emoji}
+              onClick={async () => {
+                if (!baseUrl || !token) return;
+                await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/messages/${message.event_id}/react`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                  body: JSON.stringify({ emoji }),
+                });
+              }}
+              className="p-0.5 rounded hover:bg-elevated text-xs"
+              title={emoji}
+            >
+              {emoji}
+            </button>
+          ))}
+        </div>
+      )}
       <div
         className={cn(
           "max-w-[80%] rounded-2xl px-3 py-2",
@@ -534,17 +618,40 @@ function MessageBubble({ message }: { message: ChatMessage }) {
             {message.sender_name ?? message.sender.split(":")[0]?.replace("@", "")}
           </p>
         )}
-        {kind === "image" && (
+        {kind === "image" && typeof message.msg_type === "object" && "image" in message.msg_type && (message.msg_type as { image: { url: string } }).image.url ? (
+          <img
+            src={(message.msg_type as { image: { url: string } }).image.url}
+            alt="Shared image"
+            className="rounded-lg max-w-full max-h-[300px] object-contain mb-1 cursor-pointer"
+            onClick={() => window.open((message.msg_type as { image: { url: string } }).image.url, "_blank")}
+          />
+        ) : kind === "image" ? (
           <div className="flex items-center gap-1 mb-1">
             <ImageIcon size={14} className="opacity-60" />
             <span className="text-xs opacity-60">Image</span>
           </div>
-        )}
+        ) : null}
         {kind === "file" && typeof message.msg_type === "object" && "file" in message.msg_type && (
-          <div className="flex items-center gap-1 mb-1">
+          <div className="flex items-center gap-1 mb-1 px-2 py-1.5 bg-black/5 rounded-lg">
             <FileIcon size={14} className="opacity-60" />
-            <span className="text-xs opacity-60">{message.msg_type.file.filename}</span>
+            <span className="text-xs opacity-60 flex-1 truncate">{message.msg_type.file.filename}</span>
+            {message.msg_type.file.url && (
+              <a
+                href={message.msg_type.file.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[10px] text-accent hover:underline shrink-0"
+              >
+                Download
+              </a>
+            )}
           </div>
+        )}
+        {kind === "audio" && typeof message.msg_type === "object" && "audio" in message.msg_type && message.msg_type.audio.url && (
+          <audio controls className="max-w-full mb-1" src={message.msg_type.audio.url} />
+        )}
+        {kind === "video" && typeof message.msg_type === "object" && "video" in message.msg_type && message.msg_type.video.url && (
+          <video controls className="rounded-lg max-w-full max-h-[300px] mb-1" src={message.msg_type.video.url} />
         )}
         <p className="text-sm whitespace-pre-wrap break-words">{message.body}</p>
         <p

@@ -180,6 +180,10 @@ export function toggleVideo(callId: number, enabled: boolean): Promise<void> {
   return invoke("toggle_video", { callId, enabled });
 }
 
+export function startScreenShare(callId: number, enabled: boolean): Promise<void> {
+  return invoke("start_screen_share", { callId, enabled });
+}
+
 // ─── Matrix Commands ───
 
 export function matrixLogin(homeserver: string, username: string, password: string): Promise<string> {
@@ -522,6 +526,30 @@ export function paleServerMarkRead(
 ): Promise<void> {
   return serverFetch(baseUrl, token, `/v1/messages/${messageId}/read`, {
     method: "PUT",
+  });
+}
+
+// ─── Message Edit & Delete ───
+
+export function paleServerEditMessage(
+  baseUrl: string,
+  token: string,
+  messageId: string,
+  body: string,
+): Promise<void> {
+  return serverFetch(baseUrl, token, `/v1/messages/${messageId}`, {
+    method: "PUT",
+    body: JSON.stringify({ body }),
+  });
+}
+
+export function paleServerDeleteMessage(
+  baseUrl: string,
+  token: string,
+  messageId: string,
+): Promise<void> {
+  return serverFetch(baseUrl, token, `/v1/messages/${messageId}`, {
+    method: "DELETE",
   });
 }
 

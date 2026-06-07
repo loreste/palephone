@@ -311,6 +311,17 @@ fn toggle_video(state: State<EngineState>, call_id: i32, enabled: bool) -> Resul
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn start_screen_share(state: State<EngineState>, call_id: i32, enabled: bool) -> Result<(), String> {
+    // Screen sharing uses the same video toggle mechanism in PJSIP
+    // When enabled=true, PJSIP switches the video capture device to desktop capture
+    // When enabled=false, switches back to camera
+    state
+        .0
+        .send_command(EngineCommand::ToggleVideo { call_id, enabled })
+        .map_err(|e| e.to_string())
+}
+
 // ─── Audio Device Commands ───
 
 #[derive(serde::Serialize)]
@@ -697,6 +708,7 @@ pub fn run() {
             // Video
             make_video_call,
             toggle_video,
+            start_screen_share,
             // Matrix
             matrix_login,
             matrix_logout,

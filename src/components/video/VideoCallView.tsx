@@ -116,9 +116,15 @@ export function VideoCallView() {
         />
         <ControlButton
           icon={Monitor}
-          label="Share Screen"
+          label={screenSharing ? "Stop Sharing" : "Share Screen"}
           active={screenSharing}
-          onClick={() => setScreenSharing(!screenSharing)}
+          onClick={() => {
+            if (!session) return;
+            const newSharing = !screenSharing;
+            setScreenSharing(newSharing);
+            invoke("start_screen_share", { callId: session.id, enabled: newSharing })
+              .catch(() => setScreenSharing(!newSharing));
+          }}
         />
         <ControlButton
           icon={session.isHeld ? Play : Pause}
