@@ -85,7 +85,7 @@ export function AppShell() {
 
   if (showWizard) {
     return (
-      <div className="flex flex-col h-screen w-screen overflow-hidden">
+      <div className="flex flex-col h-screen w-screen overflow-hidden safe-area-top safe-area-bottom">
         {!mobile && <TitleBar />}
         <main className="flex-1 overflow-y-auto">
           <SetupWizard onComplete={() => setShowWizard(false)} />
@@ -98,7 +98,7 @@ export function AppShell() {
   const View = views[activeTab];
 
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden">
+    <div className="flex flex-col h-screen w-screen overflow-hidden safe-area-top safe-area-bottom">
       {!mobile && <TitleBar />}
       <StatusBar />
 

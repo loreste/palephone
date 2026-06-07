@@ -1,20 +1,22 @@
 import { Phone, MessageSquare, Users, FolderLock, Clock, ShieldCheck, Settings } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/cn";
 import { useUiStore } from "@/store/uiStore";
 import { useChatStore } from "@/store/chatStore";
 import type { Tab } from "@/types";
 
-const tabs: { id: Tab; label: string; icon: typeof Phone }[] = [
-  { id: "dialpad", label: "Calls", icon: Phone },
-  { id: "chat", label: "Chat", icon: MessageSquare },
-  { id: "people", label: "People", icon: Users },
-  { id: "files", label: "Files", icon: FolderLock },
-  { id: "recent", label: "Recent", icon: Clock },
-  { id: "admin", label: "Admin", icon: ShieldCheck },
-  { id: "settings", label: "Settings", icon: Settings },
+const tabs: { id: Tab; labelKey: string; icon: typeof Phone }[] = [
+  { id: "dialpad", labelKey: "nav.calls", icon: Phone },
+  { id: "chat", labelKey: "nav.chat", icon: MessageSquare },
+  { id: "people", labelKey: "nav.people", icon: Users },
+  { id: "files", labelKey: "nav.files", icon: FolderLock },
+  { id: "recent", labelKey: "nav.recent", icon: Clock },
+  { id: "admin", labelKey: "nav.admin", icon: ShieldCheck },
+  { id: "settings", labelKey: "nav.settings", icon: Settings },
 ];
 
 export function BottomNav() {
+  const { t } = useTranslation();
   const { activeTab, setActiveTab } = useUiStore();
   const totalUnread = useChatStore((s) =>
     s.rooms.reduce((sum, r) => sum + r.unread_count, 0)
@@ -23,12 +25,13 @@ export function BottomNav() {
   return (
     <nav
       className={cn(
-        "flex items-stretch h-[48px]",
+        "flex items-stretch h-[56px] md:h-[48px]",
         "bg-surface border-t border-border-subtle",
         "shrink-0"
       )}
     >
-      {tabs.map(({ id, label, icon: Icon }) => {
+      {tabs.map(({ id, labelKey, icon: Icon }) => {
+        const label = t(labelKey);
         const isActive = activeTab === id;
         return (
           <button
