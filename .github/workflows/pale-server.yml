@@ -69,7 +69,21 @@ jobs:
             -f src-tauri/crates/pale-server/migrations/001_initial_schema.sql
           PGPASSWORD=pale_test_password psql -h localhost -U pale_test -d pale_test \
             -f src-tauri/crates/pale-server/migrations/002_rooms_search_receipts_avatars.sql
-          echo "Migrations applied successfully"
+          PGPASSWORD=pale_test_password psql -h localhost -U pale_test -d pale_test \
+            -f src-tauri/crates/pale-server/migrations/003_voicemail_recordings.sql
+          PGPASSWORD=pale_test_password psql -h localhost -U pale_test -d pale_test \
+            -f src-tauri/crates/pale-server/migrations/004_dba_fixes.sql
+          echo "All 4 migrations applied successfully"
+          # Verify idempotency — run all migrations again
+          PGPASSWORD=pale_test_password psql -h localhost -U pale_test -d pale_test \
+            -f src-tauri/crates/pale-server/migrations/001_initial_schema.sql
+          PGPASSWORD=pale_test_password psql -h localhost -U pale_test -d pale_test \
+            -f src-tauri/crates/pale-server/migrations/002_rooms_search_receipts_avatars.sql
+          PGPASSWORD=pale_test_password psql -h localhost -U pale_test -d pale_test \
+            -f src-tauri/crates/pale-server/migrations/003_voicemail_recordings.sql
+          PGPASSWORD=pale_test_password psql -h localhost -U pale_test -d pale_test \
+            -f src-tauri/crates/pale-server/migrations/004_dba_fixes.sql
+          echo "Idempotency verified — all migrations re-applied without errors"
 
   docker:
     name: Build Docker image
