@@ -49,6 +49,10 @@ pub enum EngineCommand {
         call_id: CallId,
         target: String,
     },
+    AttendedTransfer {
+        call_id: CallId,
+        target_call_id: CallId,
+    },
     MakeVideoCall {
         account_id: AccountId,
         uri: String,
@@ -260,6 +264,9 @@ impl PjsipEngine {
                         }
                         EngineCommand::BlindTransfer { call_id, target } => {
                             Self::handle_blind_transfer(call_id, &target);
+                        }
+                        EngineCommand::AttendedTransfer { call_id, target_call_id } => {
+                            Self::handle_attended_transfer(call_id, target_call_id);
                         }
                         EngineCommand::MakeVideoCall { account_id, uri } => {
                             Self::handle_make_video_call(account_id, &uri);
@@ -478,6 +485,29 @@ impl PjsipEngine {
                     message: format!(
                         "Transfer failed for call {}: status={}",
                         call_id, status
+                    ),
+                });
+            }
+        }
+    }
+
+    fn handle_attended_transfer(call_id: CallId, target_call_id: CallId) {
+        unsafe {
+            // pjsua_call_xfer_replaces sends a REFER with Replaces header
+            // This connects the two remote parties (call_id's remote ↔ target_call_id's remote)
+            // and disconnects the local endpoint from both calls
+            let options = 0_u32; // PJSUA_XFER_NO_REQUIRE_REPLACES = 0
+            let status = pjsip_sys::pjsua_call_xfer_replaces(
+                call_id,
+                target_call_id,
+                options,
+                std::ptr::null(),
+            );
+            if status != 0 {
+                emit_event(PaleEvent::Error {
+                    message: format!(
+                        "Attended transfer failed for calls {}->{}: status={}",
+                        call_id, target_call_id, status
                     ),
                 });
             }

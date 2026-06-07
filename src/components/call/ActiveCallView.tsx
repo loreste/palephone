@@ -19,6 +19,7 @@ export function ActiveCallView() {
 
   const [showDtmf, setShowDtmf] = useState(false);
   const [showTransfer, setShowTransfer] = useState(false);
+  const [consultationTarget, setConsultationTarget] = useState<string | null>(null);
 
   const handleToggleMute = useCallback(() => {
     if (!session) return;
@@ -55,8 +56,10 @@ export function ActiveCallView() {
       : session.state === "ringing"
         ? "Ringing..."
         : session.state === "on_hold"
-          ? "On Hold"
-          : "Connected";
+          ? consultationTarget ? "On Hold — Consulting..." : "On Hold"
+          : session.state === "transferring"
+            ? "Transferring..."
+            : "Connected";
 
   const stateBadgeVariant =
     session.state === "connected"
@@ -103,9 +106,14 @@ export function ActiveCallView() {
             setShowTransfer(false);
           }}
           onAttendedTransfer={(target) => {
-            // Attended transfer: hold current, call target
-            // Full implementation in Phase 6
-            if (session) ipc.blindTransfer(session.id, target).catch(() => {});
+            if (!session) return;
+            // Step 1: Hold the current call
+            setHeld(session.id, true);
+            updateSessionState(session.id, "on_hold");
+            ipc.holdCall(session.id).catch(() => {});
+            // Step 2: Initiate consultation call to target
+            setConsultationTarget(target);
+            ipc.makeCall(target).catch(() => {});
             setShowTransfer(false);
           }}
         />
@@ -126,6 +134,29 @@ export function ActiveCallView() {
         onClose={() => setShowDtmf(false)}
         onDigit={handleDtmf}
       />
+
+      {/* Attended transfer: Complete Transfer button when consultation call is active */}
+      {consultationTarget && sessions.length >= 2 && (
+        <button
+          onClick={() => {
+            // Find the consultation call (the one that's not the original held call)
+            const originalCall = sessions.find((s) => s.isHeld);
+            const consultCall = sessions.find((s) => s.id !== originalCall?.id && s.state === "connected");
+            if (originalCall && consultCall) {
+              ipc.attendedTransfer(originalCall.id, consultCall.id).catch(() => {});
+              setConsultationTarget(null);
+              // Both calls will be terminated by PJSIP after successful transfer
+            }
+          }}
+          className={cn(
+            "w-full max-w-[200px] h-[40px] rounded-full",
+            "bg-success text-white font-semibold text-sm",
+            "hover:bg-success/90 transition-colors mb-2"
+          )}
+        >
+          Complete Transfer
+        </button>
+      )}
 
       {/* Hangup button */}
       <motion.button

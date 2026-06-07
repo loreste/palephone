@@ -334,13 +334,33 @@ fn handle_refer(request: &SipRequest, state: &AppState) -> Option<String> {
         return Some(request.digest_challenge(&realm, state.issue_sip_nonce()));
     }
 
-    let refer_to = request
-        .header("refer-to")
+    let refer_to_raw = request.header("refer-to").map(|v| v.trim().to_string());
+    let refer_to = refer_to_raw
+        .as_deref()
         .and_then(extract_sip_uri)
-        .or_else(|| request.header("refer-to").map(|v| v.trim().to_string()));
+        .or_else(|| refer_to_raw.clone());
 
     let Some(target) = refer_to else {
         return Some(request.response(400, "Bad Request", &[]));
+    };
+
+    // Check for Replaces header in the Refer-To URI (attended transfer)
+    // Format: <sip:target?Replaces=call-id%3Bto-tag%3D...%3Bfrom-tag%3D...>
+    let is_attended = refer_to_raw
+        .as_deref()
+        .map(|v| v.contains("Replaces=") || v.contains("replaces="))
+        .unwrap_or(false);
+
+    let replaces_call_id = if is_attended {
+        refer_to_raw
+            .as_deref()
+            .and_then(|v| v.split("Replaces=").nth(1).or_else(|| v.split("replaces=").nth(1)))
+            .map(|v| v.split('%').next().unwrap_or(v))
+            .map(|v| v.split(';').next().unwrap_or(v))
+            .map(|v| v.split('>').next().unwrap_or(v))
+            .map(ToOwned::to_owned)
+    } else {
+        None
     };
 
     // End the original dialog
@@ -348,12 +368,18 @@ fn handle_refer(request: &SipRequest, state: &AppState) -> Option<String> {
         let _ = state.update_sip_dialog_status(call_id, SipDialogStatus::Ended);
     }
 
-    // Record audit
+    // For attended transfer, also end the consultation leg
+    if let Some(replaces_id) = &replaces_call_id {
+        let _ = state.update_sip_dialog_status(replaces_id, SipDialogStatus::Ended);
+    }
+
     let from_uri = request
         .header("from")
         .and_then(extract_sip_uri)
         .unwrap_or_default();
-    state.record_audit_event(&from_uri, "call.transferred", Some(target.clone()));
+
+    let transfer_type = if is_attended { "call.attended_transfer" } else { "call.blind_transfer" };
+    state.record_audit_event(&from_uri, transfer_type, Some(target.clone()));
 
     Some(request.response(
         202,

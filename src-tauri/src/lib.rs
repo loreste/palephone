@@ -178,6 +178,21 @@ fn blind_transfer(state: State<EngineState>, call_id: i32, target: String) -> Re
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn attended_transfer(
+    state: State<EngineState>,
+    call_id: i32,
+    target_call_id: i32,
+) -> Result<(), String> {
+    state
+        .0
+        .send_command(EngineCommand::AttendedTransfer {
+            call_id,
+            target_call_id,
+        })
+        .map_err(|e| e.to_string())
+}
+
 // ─── Config Commands ───
 
 #[tauri::command]
@@ -692,6 +707,7 @@ pub fn run() {
             set_mute,
             send_dtmf,
             blind_transfer,
+            attended_transfer,
             // Call history
             get_call_history,
             add_call_record,

@@ -54,6 +54,10 @@ export function blindTransfer(callId: number, target: string): Promise<void> {
   return invoke("blind_transfer", { callId, target });
 }
 
+export function attendedTransfer(callId: number, targetCallId: number): Promise<void> {
+  return invoke("attended_transfer", { callId, targetCallId });
+}
+
 // ─── Call History ───
 
 export interface CallRecord {
