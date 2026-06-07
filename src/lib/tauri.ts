@@ -400,6 +400,123 @@ export function paleServerSyncCallHistory(
   });
 }
 
+// ─── Message History ───
+
+export interface ServerSipMessage {
+  id: string;
+  call_id: string | null;
+  from_uri: string;
+  to_uri: string;
+  content_type: string;
+  body: string;
+  received_at: string;
+}
+
+export function paleServerGetMessages(
+  baseUrl: string,
+  token: string,
+  options?: { limit?: number; before?: string; roomId?: string },
+): Promise<ServerSipMessage[]> {
+  const params = new URLSearchParams();
+  if (options?.limit) params.set("limit", String(options.limit));
+  if (options?.before) params.set("before", options.before);
+  if (options?.roomId) params.set("room_id", options.roomId);
+  const qs = params.toString();
+  return serverFetch(baseUrl, token, `/v1/sip/messages${qs ? `?${qs}` : ""}`);
+}
+
+// ─── Group Chat Rooms ───
+
+export interface ServerRoom {
+  id: string;
+  name: string;
+  description: string;
+  is_direct: boolean;
+  created_by: string;
+  members: { user_sip_uri: string; role: string; joined_at: string }[];
+  created_at: string;
+}
+
+export interface ServerRoomMessage {
+  id: string;
+  room_id: string;
+  sender_uri: string;
+  body: string;
+  content_type: string;
+  created_at: string;
+}
+
+export function paleServerGetRooms(baseUrl: string, token: string): Promise<ServerRoom[]> {
+  return serverFetch(baseUrl, token, "/v1/rooms");
+}
+
+export function paleServerCreateRoom(
+  baseUrl: string,
+  token: string,
+  name: string,
+  description: string,
+  members: string[],
+): Promise<ServerRoom> {
+  return serverFetch(baseUrl, token, "/v1/rooms", {
+    method: "POST",
+    body: JSON.stringify({ name, description, members }),
+  });
+}
+
+export function paleServerGetRoomMessages(
+  baseUrl: string,
+  token: string,
+  roomId: string,
+): Promise<ServerRoomMessage[]> {
+  return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/messages`);
+}
+
+export function paleServerSendRoomMessage(
+  baseUrl: string,
+  token: string,
+  roomId: string,
+  body: string,
+): Promise<ServerRoomMessage> {
+  return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ body }),
+  });
+}
+
+// ─── Search ───
+
+export interface SearchResult {
+  id: string;
+  source: string;
+  from_uri: string;
+  body: string;
+  timestamp: string;
+  room_id: string | null;
+}
+
+export function paleServerSearchMessages(
+  baseUrl: string,
+  token: string,
+  query: string,
+  limit?: number,
+): Promise<SearchResult[]> {
+  const params = new URLSearchParams({ q: query });
+  if (limit) params.set("limit", String(limit));
+  return serverFetch(baseUrl, token, `/v1/search/messages?${params}`);
+}
+
+// ─── Read Receipts ───
+
+export function paleServerMarkRead(
+  baseUrl: string,
+  token: string,
+  messageId: string,
+): Promise<void> {
+  return serverFetch(baseUrl, token, `/v1/messages/${messageId}/read`, {
+    method: "PUT",
+  });
+}
+
 // ─── Server Files ───
 
 export interface PaleServerFile {

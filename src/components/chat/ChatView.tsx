@@ -1,10 +1,11 @@
-import { useState, useRef, useEffect } from "react";
-import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X } from "lucide-react";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useChatStore, type ChatMessage, type RoomSummary } from "@/store/chatStore";
 import { useMatrixStore } from "@/store/matrixStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
-import { matrixSendMessage, matrixSetTyping, matrixCreateDm } from "@/lib/tauri";
+import { useServerStore } from "@/store/serverStore";
+import { matrixSendMessage, matrixSetTyping, matrixCreateDm, paleServerGetMessages } from "@/lib/tauri";
 import { toast } from "@/components/ui/Toast";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
 import { EncryptionBadge } from "@/components/encryption/EncryptionBadge";
@@ -135,13 +136,55 @@ function ChatRoom({
   onBack: () => void;
 }) {
   const [input, setInput] = useState("");
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<number | null>(null);
   const typingSentRef = useRef(false);
+  const { baseUrl, token, connected } = useServerStore();
+  const addMessage = useChatStore((s) => s.addMessage);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
+
+  // Load older messages when scrolling to top
+  const handleScroll = useCallback(async () => {
+    const container = messagesContainerRef.current;
+    if (!container || !connected || !baseUrl || !token || loadingHistory || !hasMore) return;
+    if (container.scrollTop > 50) return; // Only trigger near top
+
+    setLoadingHistory(true);
+    const oldest = messages[0];
+    const before = oldest ? new Date(oldest.timestamp * 1000).toISOString() : undefined;
+
+    try {
+      const older = await paleServerGetMessages(baseUrl, token, {
+        limit: 50,
+        before,
+        roomId: room.room_id,
+      });
+      if (older.length === 0) {
+        setHasMore(false);
+      } else {
+        for (const msg of older) {
+          addMessage({
+            event_id: msg.id,
+            room_id: room.room_id,
+            sender: msg.from_uri,
+            sender_name: null,
+            body: msg.body,
+            msg_type: "text",
+            timestamp: Math.floor(new Date(msg.received_at).getTime() / 1000),
+            is_encrypted: false,
+            is_own: false,
+          });
+        }
+      }
+    } catch { /* ignore */ }
+    setLoadingHistory(false);
+  }, [connected, baseUrl, token, loadingHistory, hasMore, messages, room.room_id, addMessage]);
 
   useEffect(() => {
     return () => {
@@ -209,8 +252,18 @@ function ChatRoom({
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
-        {messages.length === 0 && (
+      <div
+        ref={messagesContainerRef}
+        className="flex-1 overflow-y-auto px-4 py-3 space-y-2"
+        onScroll={handleScroll}
+      >
+        {loadingHistory && (
+          <div className="flex items-center justify-center py-2">
+            <Loader2 size={16} className="animate-spin text-tertiary" />
+            <span className="text-xs text-tertiary ml-2">Loading history...</span>
+          </div>
+        )}
+        {messages.length === 0 && !loadingHistory && (
           <div className="flex items-center justify-center h-32">
             <p className="text-sm text-tertiary">No messages yet</p>
           </div>

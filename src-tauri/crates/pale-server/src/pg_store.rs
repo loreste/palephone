@@ -41,9 +41,17 @@ impl PgStore {
 
     pub async fn run_migrations(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let client = self.pool.get().await?;
-        let migration_sql = include_str!("../migrations/001_initial_schema.sql");
-        client.batch_execute(migration_sql).await?;
-        log::info!("PostgreSQL migrations applied");
+
+        let migrations = [
+            include_str!("../migrations/001_initial_schema.sql"),
+            include_str!("../migrations/002_rooms_search_receipts_avatars.sql"),
+        ];
+
+        for (i, sql) in migrations.iter().enumerate() {
+            client.batch_execute(sql).await?;
+            log::info!("PostgreSQL migration {} applied", i + 1);
+        }
+
         Ok(())
     }
 

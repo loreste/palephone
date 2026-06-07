@@ -15,6 +15,10 @@ sha2 = "0.10"
 thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
 chrono = { version = ">=0.4.20, <0.5", features = ["serde"] }
 md-5 = "0.10"
 pjsip-sys = { path = "../pjsip-sys" }

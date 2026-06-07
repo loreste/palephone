@@ -19,7 +19,8 @@ use uuid::Uuid;
 use crate::{
     safe_filename, sip_ha1, AppState, AuthError, CallStatus, CreateCallRequest,
     CreateConferenceRequest, CreateRoutingRuleRequest, CreateSipAccountRequest, CreateUserRequest,
-    FileRecord, JoinConferenceRequest, SetPresenceRequest, SyncCallHistoryRequest,
+    AddRoomMemberRequest, CreateRoomRequest, FileRecord, JoinConferenceRequest,
+    SendRoomMessageRequest, SetPresenceRequest, SyncCallHistoryRequest,
     UpdateCallStatusRequest, UpdateSipAccountStatusRequest,
 };
 
@@ -59,7 +60,15 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/presence", get(list_presence).put(set_presence))
         .route("/v1/presence/{sip_uri}", get(get_presence))
         .route("/v1/call-history", get(get_call_history).post(sync_call_history))
+        .route("/v1/rooms", get(list_rooms).post(create_room))
+        .route("/v1/rooms/{id}", get(get_room))
+        .route("/v1/rooms/{id}/messages", get(list_room_messages).post(send_room_message))
+        .route("/v1/rooms/{id}/members", post(add_room_member).delete(leave_room))
+        .route("/v1/search/messages", get(search_messages))
+        .route("/v1/messages/{id}/read", put(mark_message_read))
+        .route("/v1/users/{id}/avatar", put(upload_avatar))
         .route("/v1/events", get(sse_stream))
+        .layer(from_fn(crate::metrics::request_metrics))
         .layer(from_fn(cors))
         .layer(DefaultBodyLimit::max(max_upload_bytes))
         .with_state(state)
@@ -641,6 +650,205 @@ async fn sync_call_history(
     Ok(Json(json!({ "merged": merged })))
 }
 
+// ─── Group Chat Rooms ───
+
+async fn list_rooms(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::Room>>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    Ok(Json(state.list_rooms_for_user(&principal)))
+}
+
+async fn create_room(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateRoomRequest>,
+) -> Result<Json<crate::Room>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let room = state.create_room(&principal, input);
+    state.record_audit_event(&principal, "room.created", Some(room.id.to_string()));
+    Ok(Json(room))
+}
+
+async fn get_room(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::Room>, ApiError> {
+    require_bearer(&headers, &state)?;
+    state.room(id).map(Json).ok_or(ApiError::NotFound)
+}
+
+async fn list_room_messages(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::RoomMessage>>, ApiError> {
+    require_bearer(&headers, &state)?;
+    Ok(Json(state.room_messages(id)))
+}
+
+async fn send_room_message(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<SendRoomMessageRequest>,
+) -> Result<Json<crate::RoomMessage>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    if state.room(id).is_none() {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(state.send_room_message(id, &principal, &input.body)))
+}
+
+async fn add_room_member(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<AddRoomMemberRequest>,
+) -> Result<Json<crate::Room>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    state
+        .add_room_member(id, &input.user_sip_uri)
+        .map(Json)
+        .ok_or(ApiError::NotFound)
+}
+
+async fn leave_room(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::Room>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    state
+        .remove_room_member(id, &principal)
+        .map(Json)
+        .ok_or(ApiError::NotFound)
+}
+
+// ─── Search ───
+
+#[derive(serde::Deserialize)]
+struct SearchQuery {
+    q: String,
+    limit: Option<usize>,
+}
+
+async fn search_messages(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<SearchQuery>,
+) -> Result<Json<Vec<crate::SearchResult>>, ApiError> {
+    require_bearer(&headers, &state)?;
+    let term = query.q.to_lowercase();
+    let limit = query.limit.unwrap_or(50).min(200);
+
+    // Search SIP messages (in-memory for now; Postgres GIN index used when PG is primary)
+    let mut results: Vec<crate::SearchResult> = state
+        .sip_messages()
+        .into_iter()
+        .filter(|m| m.body.to_lowercase().contains(&term))
+        .take(limit)
+        .map(|m| crate::SearchResult {
+            id: m.id,
+            source: "sip".to_string(),
+            from_uri: m.from_uri,
+            body: m.body,
+            timestamp: m.received_at,
+            room_id: None,
+        })
+        .collect();
+
+    // Search room messages
+    let room_results: Vec<crate::SearchResult> = state
+        .room_messages
+        .read()
+        .expect("room messages lock poisoned")
+        .iter()
+        .filter(|m| m.body.to_lowercase().contains(&term))
+        .take(limit)
+        .map(|m| crate::SearchResult {
+            id: m.id,
+            source: "room".to_string(),
+            from_uri: m.sender_uri.clone(),
+            body: m.body.clone(),
+            timestamp: m.created_at,
+            room_id: Some(m.room_id),
+        })
+        .collect();
+
+    results.extend(room_results);
+    results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    results.truncate(limit);
+
+    Ok(Json(results))
+}
+
+// ─── Read Receipts ───
+
+async fn mark_message_read(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    // For now, broadcast the read event via SSE (full persistence via PG)
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "read_receipt".to_string(),
+        payload: json!({
+            "message_id": id,
+            "reader": principal,
+            "read_at": Utc::now(),
+        }),
+    });
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ─── Avatar Upload ───
+
+async fn upload_avatar(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(user_id): Path<Uuid>,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    if body.len() as u64 > state.max_upload_bytes() {
+        return Err(ApiError::PayloadTooLarge);
+    }
+
+    let content_type = header_string(&headers, header::CONTENT_TYPE.as_str())
+        .unwrap_or_else(|| "image/png".to_string());
+
+    // Store as a file
+    tokio::fs::create_dir_all(state.files_dir()).await?;
+    let file_id = Uuid::new_v4();
+    let path = state.file_path(file_id);
+    tokio::fs::write(&path, &body).await?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(&body);
+    let sha256 = to_hex(&hasher.finalize());
+
+    let record = FileRecord {
+        id: file_id,
+        owner: principal.clone(),
+        filename: format!("avatar-{}.png", user_id),
+        content_type,
+        size: body.len() as u64,
+        sha256,
+        created_at: Utc::now(),
+    };
+    state.put_file_record(record);
+    state.record_audit_event(&principal, "user.avatar_updated", Some(user_id.to_string()));
+
+    Ok(Json(json!({
+        "file_id": file_id,
+        "url": format!("/v1/files/{}", file_id),
+    })))
+}
+
 // ─── Server-Sent Events ───
 
 #[derive(serde::Deserialize)]
@@ -694,9 +902,16 @@ fn authenticated_principal(headers: &HeaderMap, state: &AppState) -> Result<Stri
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .unwrap_or("");
-    state
+    let principal = state
         .principal_for_bearer(provided)
-        .ok_or(ApiError::Unauthorized)
+        .ok_or(ApiError::Unauthorized)?;
+
+    // Rate limit per principal
+    if !state.check_rate_limit(&principal) {
+        return Err(ApiError::TooManyRequests);
+    }
+
+    Ok(principal)
 }
 
 fn request_source(headers: &HeaderMap) -> String {

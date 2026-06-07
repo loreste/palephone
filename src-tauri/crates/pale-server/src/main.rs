@@ -3,14 +3,29 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use pale_server::{
-    http,
+    http, metrics,
     pjsip_runtime::{PjsipRuntime, PjsipRuntimeConfig, TlsConfig},
     sip, AppState, MediaConfig, ServerConfig, TurnConfig, TurnTransport,
 };
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // Structured logging: JSON in production, pretty in dev
+    let json_logs = env_bool("PALE_LOG_JSON", false);
+    if json_logs {
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+            .init();
+    }
+
+    // Install Prometheus metrics recorder
+    let prom_handle = Arc::new(metrics::install_recorder());
 
     let config = config_from_env();
     let mut app_state = AppState::persistent(
@@ -49,6 +64,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         log::info!("No PALE_DATABASE_URL set — using SQLite-only persistence");
     }
 
+    // Rate limiting
+    let rate_limit_rps: u32 = std::env::var("PALE_RATE_LIMIT_RPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
+    app_state.set_rate_limit_rps(rate_limit_rps);
+
     let state = Arc::new(app_state);
     tokio::fs::create_dir_all(state.files_dir()).await?;
 
@@ -86,7 +108,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     };
 
-    let app = http::router(state);
+    // Spawn periodic gauge refresh (every 30s)
+    let gauge_state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            metrics::record_app_gauges(&gauge_state);
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+    });
+
+    // Build app router with /metrics endpoint
+    let metrics_router = axum::Router::new()
+        .route("/metrics", axum::routing::get(metrics::metrics_handler))
+        .with_state(prom_handle);
+    let app = http::router(state).merge(metrics_router);
+
     if let (Some(cert), Some(key)) = (&config.http_tls_cert, &config.http_tls_key) {
         let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key).await?;
         log::info!("Pale backend HTTPS API listening on {}", config.http_addr);

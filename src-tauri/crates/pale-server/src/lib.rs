@@ -12,6 +12,7 @@ use sha2::{Digest as ShaDigest, Sha256};
 use uuid::Uuid;
 
 pub mod http;
+pub mod metrics;
 pub mod pg_store;
 pub mod pjsip_runtime;
 pub mod sip;
@@ -37,6 +38,8 @@ const MAX_ROUTING_RULES: usize = 100_000;
 const MAX_AUDIT_EVENTS: usize = 50_000;
 const MAX_PRESENCE: usize = 100_000;
 const MAX_CALL_HISTORY: usize = 100_000;
+const MAX_ROOMS: usize = 50_000;
+const MAX_ROOM_MESSAGES: usize = 100_000;
 const SHARDED_MAP_SHARDS: usize = 32;
 const DEFAULT_MAX_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_LOGIN_FAILURES: u32 = 5;
@@ -198,7 +201,11 @@ pub struct AppState {
     audit_events: RwLock<Vec<AdminAuditEvent>>,
     presence: ShardedMap<String, UserPresence>,
     call_history: ShardedMap<Uuid, CallHistoryEntry>,
+    rooms: ShardedMap<Uuid, Room>,
+    room_messages: RwLock<Vec<RoomMessage>>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
+    rate_limits: ShardedMap<String, RateLimitBucket>,
+    rate_limit_rps: u32,
     pg: Option<PgStore>,
 }
 
@@ -299,9 +306,44 @@ impl AppState {
             audit_events: RwLock::new(Vec::new()),
             presence: ShardedMap::new(),
             call_history: ShardedMap::new(),
+            rooms: ShardedMap::new(),
+            room_messages: RwLock::new(Vec::new()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
+            rate_limits: ShardedMap::new(),
+            rate_limit_rps: 100,
             pg: None,
         }
+    }
+
+    pub fn set_rate_limit_rps(&mut self, rps: u32) {
+        self.rate_limit_rps = rps;
+    }
+
+    /// Token bucket rate limiter. Returns true if request is allowed.
+    pub fn check_rate_limit(&self, principal: &str) -> bool {
+        let now = Utc::now();
+        let max_tokens = self.rate_limit_rps as f64;
+        let key = principal.to_string();
+
+        self.rate_limits.with_write(&key, |buckets| {
+            let bucket = buckets.entry(key.clone()).or_insert_with(|| RateLimitBucket {
+                tokens: max_tokens,
+                last_refill: now,
+            });
+
+            // Refill tokens based on elapsed time
+            let elapsed = (now - bucket.last_refill).num_milliseconds().max(0) as f64 / 1000.0;
+            bucket.tokens = (bucket.tokens + elapsed * max_tokens).min(max_tokens);
+            bucket.last_refill = now;
+
+            // Try to consume a token
+            if bucket.tokens >= 1.0 {
+                bucket.tokens -= 1.0;
+                true
+            } else {
+                false
+            }
+        })
     }
 
     pub fn set_pg_store(&mut self, pg: PgStore) {
@@ -1193,6 +1235,99 @@ impl AppState {
         let _ = self.sse_tx.send(event);
     }
 
+    // ─── Group Chat Rooms ───
+
+    pub fn create_room(&self, creator: &str, input: CreateRoomRequest) -> Room {
+        let room = Room {
+            id: Uuid::new_v4(),
+            name: input.name,
+            description: input.description.unwrap_or_default(),
+            is_direct: false,
+            created_by: creator.to_string(),
+            members: std::iter::once(RoomMember {
+                user_sip_uri: creator.to_string(),
+                role: "admin".to_string(),
+                joined_at: Utc::now(),
+            })
+            .chain(input.members.into_iter().map(|uri| RoomMember {
+                user_sip_uri: uri,
+                role: "member".to_string(),
+                joined_at: Utc::now(),
+            }))
+            .collect(),
+            created_at: Utc::now(),
+        };
+        self.rooms.insert(room.id, room.clone());
+        self.rooms.trim_to_len(MAX_ROOMS);
+        room
+    }
+
+    pub fn list_rooms_for_user(&self, sip_uri: &str) -> Vec<Room> {
+        self.rooms
+            .values()
+            .into_iter()
+            .filter(|r| r.members.iter().any(|m| m.user_sip_uri == sip_uri))
+            .collect()
+    }
+
+    pub fn room(&self, id: Uuid) -> Option<Room> {
+        self.rooms.get(&id)
+    }
+
+    pub fn add_room_member(&self, room_id: Uuid, user_sip_uri: &str) -> Option<Room> {
+        self.rooms.with_write(&room_id, |rooms| {
+            let room = rooms.get_mut(&room_id)?;
+            if !room.members.iter().any(|m| m.user_sip_uri == user_sip_uri) {
+                room.members.push(RoomMember {
+                    user_sip_uri: user_sip_uri.to_string(),
+                    role: "member".to_string(),
+                    joined_at: Utc::now(),
+                });
+            }
+            Some(room.clone())
+        })
+    }
+
+    pub fn remove_room_member(&self, room_id: Uuid, user_sip_uri: &str) -> Option<Room> {
+        self.rooms.with_write(&room_id, |rooms| {
+            let room = rooms.get_mut(&room_id)?;
+            room.members.retain(|m| m.user_sip_uri != user_sip_uri);
+            Some(room.clone())
+        })
+    }
+
+    pub fn send_room_message(&self, room_id: Uuid, sender_uri: &str, body: &str) -> RoomMessage {
+        let msg = RoomMessage {
+            id: Uuid::new_v4(),
+            room_id,
+            sender_uri: sender_uri.to_string(),
+            body: body.to_string(),
+            content_type: "text/plain".to_string(),
+            created_at: Utc::now(),
+        };
+        let mut messages = self.room_messages.write().expect("room messages lock poisoned");
+        messages.push(msg.clone());
+        if messages.len() > MAX_ROOM_MESSAGES {
+            let overflow = messages.len() - MAX_ROOM_MESSAGES;
+            messages.drain(..overflow);
+        }
+        self.broadcast_sse(SseEvent {
+            event_type: "room_message".to_string(),
+            payload: serde_json::to_value(&msg).unwrap_or_default(),
+        });
+        msg
+    }
+
+    pub fn room_messages(&self, room_id: Uuid) -> Vec<RoomMessage> {
+        self.room_messages
+            .read()
+            .expect("room messages lock poisoned")
+            .iter()
+            .filter(|m| m.room_id == room_id)
+            .cloned()
+            .collect()
+    }
+
     /// Spawn a background Postgres write. Errors are logged, never block the caller.
     fn pg_spawn<F>(&self, f: F)
     where
@@ -1443,6 +1578,12 @@ pub struct UserPresence {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RateLimitBucket {
+    pub tokens: f64,
+    pub last_refill: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetPresenceRequest {
     pub status: PresenceStatus,
@@ -1481,6 +1622,74 @@ pub struct CallHistoryInput {
     pub start_time: String,
     pub duration_secs: i64,
     pub answered: bool,
+}
+
+// ─── Group Chat Rooms ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Room {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub is_direct: bool,
+    pub created_by: String,
+    pub members: Vec<RoomMember>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomMember {
+    pub user_sip_uri: String,
+    pub role: String,
+    pub joined_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateRoomRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub members: Vec<String>, // SIP URIs to invite
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomMessage {
+    pub id: Uuid,
+    pub room_id: Uuid,
+    pub sender_uri: String,
+    pub body: String,
+    pub content_type: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SendRoomMessageRequest {
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AddRoomMemberRequest {
+    pub user_sip_uri: String,
+}
+
+// ─── Read Receipts ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageRead {
+    pub message_id: Uuid,
+    pub reader_uri: String,
+    pub read_at: DateTime<Utc>,
+}
+
+// ─── Search ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchResult {
+    pub id: Uuid,
+    pub source: String, // "sip" or "room"
+    pub from_uri: String,
+    pub body: String,
+    pub timestamp: DateTime<Utc>,
+    pub room_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone)]
