@@ -112,17 +112,22 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
     };
   }, [baseUrl, token, setPresence, setBulkPresence, addMessage]);
 
-  // Token auto-refresh
+  // Token auto-refresh (with stale-token guard to prevent race conditions)
   useEffect(() => {
     if (!baseUrl || !token || !tokenExpiresAt) return;
 
     const expiresMs = new Date(tokenExpiresAt).getTime();
     const refreshAt = expiresMs - TOKEN_REFRESH_BUFFER_MS;
     const delayMs = Math.max(refreshAt - Date.now(), 0);
+    const currentToken = token; // Capture token at effect time
 
     refreshRef.current = window.setTimeout(async () => {
+      // Guard: only refresh if the token hasn't changed since this timer was set
+      const storeToken = useServerStore.getState().token;
+      if (storeToken !== currentToken) return; // Token already refreshed by another path
+
       try {
-        const session = await adminRefreshToken(baseUrl, token);
+        const session = await adminRefreshToken(baseUrl, currentToken);
         sessionStorage.setItem("pale.admin.token", session.token);
         updateToken(session.token, session.expires_at);
       } catch {

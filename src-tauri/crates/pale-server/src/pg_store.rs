@@ -25,7 +25,10 @@ impl PgStore {
         let pg_config = tokio_postgres::Config::from_str(database_url)?;
         let mut cfg = Config::new();
         cfg.dbname = pg_config.get_dbname().map(String::from);
-        cfg.host = pg_config.get_hosts().first().map(|h| format!("{:?}", h).trim_matches('"').to_string());
+        cfg.host = pg_config.get_hosts().first().map(|h| {
+            let debug = format!("{:?}", h);
+            debug.trim_matches('"').trim_start_matches("Tcp(\"").trim_end_matches("\")").to_string()
+        });
         cfg.port = pg_config.get_ports().first().copied();
         cfg.user = pg_config.get_user().map(String::from);
         cfg.password = pg_config.get_password().map(|p| String::from_utf8_lossy(p).to_string());

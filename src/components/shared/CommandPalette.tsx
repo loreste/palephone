@@ -33,11 +33,14 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
   const { baseUrl, token, connected } = useServerStore();
   const presenceMap = usePresenceStore((s) => s.presenceMap);
 
-  // Load contacts from server when opened
+  // Load contacts from server when opened (with cancellation to avoid race conditions)
   useEffect(() => {
-    if (open && connected && baseUrl && token) {
-      paleServerGetUsers(baseUrl, token).then(setContacts).catch(() => {});
-    }
+    if (!open || !connected || !baseUrl || !token) return;
+    let cancelled = false;
+    paleServerGetUsers(baseUrl, token)
+      .then((result) => { if (!cancelled) setContacts(result); })
+      .catch(() => {});
+    return () => { cancelled = true; };
   }, [open, connected, baseUrl, token]);
 
   const commands: CommandItem[] = useMemo(() => {

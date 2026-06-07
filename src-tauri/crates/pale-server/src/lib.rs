@@ -858,6 +858,10 @@ impl AppState {
         self.sip_dialogs.values()
     }
 
+    pub fn dialog_exists(&self, call_id: &str) -> bool {
+        self.sip_dialogs.get(&call_id.to_string()).is_some()
+    }
+
     pub fn store_sip_message(&self, input: StoreSipMessage) -> SipMessage {
         let message = SipMessage {
             id: Uuid::new_v4(),
@@ -1462,15 +1466,16 @@ impl AppState {
     }
 
     pub fn merge_call_history(&self, user_sip_uri: &str, entries: Vec<CallHistoryInput>) -> usize {
+        use std::collections::HashSet;
         let existing = self.call_history_for_user(user_sip_uri);
+        let existing_set: HashSet<(i64, &str, &str)> = existing
+            .iter()
+            .map(|e| (e.start_time.timestamp(), e.remote_uri.as_str(), e.direction.as_str()))
+            .collect();
         let mut merged = 0;
         for input in entries {
-            let duplicate = existing.iter().any(|e| {
-                e.start_time == input.start_time
-                    && e.remote_uri == input.remote_uri
-                    && e.direction == input.direction
-            });
-            if !duplicate {
+            let key = (input.start_time.timestamp(), input.remote_uri.as_str(), input.direction.as_str());
+            if !existing_set.contains(&key) {
                 self.store_call_history(user_sip_uri, input);
                 merged += 1;
             }

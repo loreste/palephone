@@ -193,14 +193,15 @@ function ChatRoom({
   const addMessage = useChatStore((s) => s.addMessage);
   const isServerRoom = !room.room_id.startsWith("!");
 
-  // Load server room messages on mount
+  // Load server room messages on mount (stable deps only — no addMessage to avoid re-render loop)
   useEffect(() => {
     if (isServerRoom && connected && baseUrl && token) {
       import("@/lib/tauri").then(({ paleServerGetRoomMessages }) => {
         paleServerGetRoomMessages(baseUrl, token, room.room_id)
           .then((msgs) => {
+            const add = useChatStore.getState().addMessage;
             for (const msg of msgs) {
-              addMessage({
+              add({
                 event_id: msg.id,
                 room_id: room.room_id,
                 sender: msg.sender_uri,
@@ -216,20 +217,24 @@ function ChatRoom({
           .catch(() => {});
       });
     }
-  }, [room.room_id, isServerRoom, connected, baseUrl, token, addMessage]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [room.room_id, isServerRoom, connected, baseUrl, token]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
 
-  // Load older messages when scrolling to top
+  // Load older messages when scrolling to top (avoid messages/addMessage in deps to prevent re-creation)
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+
   const handleScroll = useCallback(async () => {
     const container = messagesContainerRef.current;
     if (!container || !connected || !baseUrl || !token || loadingHistory || !hasMore) return;
-    if (container.scrollTop > 50) return; // Only trigger near top
+    if (container.scrollTop > 50) return;
 
     setLoadingHistory(true);
-    const oldest = messages[0];
+    const oldest = messagesRef.current[0];
     const before = oldest ? new Date(oldest.timestamp * 1000).toISOString() : undefined;
 
     try {
@@ -241,8 +246,9 @@ function ChatRoom({
       if (older.length === 0) {
         setHasMore(false);
       } else {
+        const add = useChatStore.getState().addMessage;
         for (const msg of older) {
-          addMessage({
+          add({
             event_id: msg.id,
             room_id: room.room_id,
             sender: msg.from_uri,
@@ -257,7 +263,8 @@ function ChatRoom({
       }
     } catch { /* ignore */ }
     setLoadingHistory(false);
-  }, [connected, baseUrl, token, loadingHistory, hasMore, messages, room.room_id, addMessage]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connected, baseUrl, token, loadingHistory, hasMore, room.room_id]);
 
   useEffect(() => {
     return () => {

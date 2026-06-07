@@ -12,8 +12,8 @@ let cachedConfig: {
 let lastLoad = 0;
 
 async function loadConfig() {
-  // Cache config for 30 seconds
-  if (cachedConfig && Date.now() - lastLoad < 30_000) return cachedConfig;
+  // Cache config for 5 seconds (short to avoid stale DND state after settings change)
+  if (cachedConfig && Date.now() - lastLoad < 5_000) return cachedConfig;
   try {
     const config = await getConfig();
     cachedConfig = config.notifications;

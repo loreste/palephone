@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   Activity,
   ClipboardList,
@@ -88,29 +88,15 @@ export function AdminView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authenticated]);
 
-  // Auto-refresh via SSE — debounce to avoid hammering the API
-  const refreshTimerRef = useRef<number | null>(null);
-  const debouncedRefresh = useCallback(() => {
-    if (refreshTimerRef.current) window.clearTimeout(refreshTimerRef.current);
-    refreshTimerRef.current = window.setTimeout(() => {
-      if (token) refresh();
-    }, 2000);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, baseUrl]);
-
+  // Auto-refresh via polling (uses global SSE connection from useServerEvents, no duplicate)
   useEffect(() => {
     if (!authenticated || !token) return;
-    const url = `${baseUrl.replace(/\/+$/, "")}/v1/events?token=${encodeURIComponent(token)}`;
-    const es = new EventSource(url);
-    es.addEventListener("presence", debouncedRefresh);
-    es.addEventListener("message", debouncedRefresh);
-    es.addEventListener("notification", debouncedRefresh);
-    es.onerror = () => { es.close(); };
-    return () => {
-      es.close();
-      if (refreshTimerRef.current) window.clearTimeout(refreshTimerRef.current);
-    };
-  }, [authenticated, baseUrl, token, debouncedRefresh]);
+    const interval = window.setInterval(() => {
+      refresh();
+    }, 30000); // Refresh every 30 seconds
+    return () => window.clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authenticated, token]);
 
   const onLogin = async (event: FormEvent) => {
     event.preventDefault();

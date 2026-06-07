@@ -162,8 +162,7 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
 
     // Re-INVITE detection: if dialog exists, this is a mid-call update (hold/video toggle)
     if let Some(call_id) = request.call_id() {
-        let existing = state.sip_dialogs().iter().any(|d| d.call_id == call_id);
-        if existing {
+        if state.dialog_exists(call_id) {
             let body = request.body_text();
             let hold_status = detect_hold_from_sdp(&body);
             let status = match hold_status {
@@ -401,10 +400,16 @@ fn handle_subscribe(
         .unwrap_or(3600)
         .clamp(0, 86_400);
 
-    let subscription_id = request
-        .call_id()
-        .unwrap_or("unknown")
-        .to_string();
+    let from_tag = request
+        .header("from")
+        .and_then(|h| h.split("tag=").nth(1))
+        .map(|t| t.split(';').next().unwrap_or(t))
+        .unwrap_or("notag");
+    let subscription_id = format!(
+        "{}:{}",
+        request.call_id().unwrap_or("unknown"),
+        from_tag
+    );
 
     if expires == 0 {
         let _ = state.remove_sip_subscription(&subscription_id);

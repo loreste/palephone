@@ -997,11 +997,14 @@ async fn sse_stream(
 {
     // EventSource can't set Authorization headers, so accept token from query param too
     if let Some(token) = &query.token {
-        state
+        let principal = state
             .principal_for_bearer(token)
             .ok_or(ApiError::Unauthorized)?;
+        if !state.check_rate_limit(&principal) {
+            return Err(ApiError::TooManyRequests);
+        }
     } else {
-        require_bearer(&headers, &state)?;
+        authenticated_principal(&headers, &state)?;
     }
     let rx = state.sse_subscribe();
     let stream = BroadcastStream::new(rx).filter_map(|result| match result {

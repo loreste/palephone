@@ -41,9 +41,10 @@ export function RecentCallsList() {
         // Merge: deduplicate by start_time + remote_uri + direction
         const merged = [...localData];
         for (const sr of serverRecords) {
+          const srTime = new Date(sr.start_time).getTime();
           const exists = merged.some(
             (lr) =>
-              lr.start_time === sr.start_time &&
+              new Date(lr.start_time).getTime() === srTime &&
               lr.remote_uri === sr.remote_uri &&
               lr.direction === sr.direction
           );
