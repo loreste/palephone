@@ -52,7 +52,8 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
 ];
 
 export function AdminView() {
-  const [baseUrl] = useState(adminBaseUrl());
+  const serverBaseUrl = useServerStore((s) => s.baseUrl);
+  const [baseUrl] = useState(serverBaseUrl || adminBaseUrl());
   const [token, setToken] = useState(() => sessionStorage.getItem("pale.admin.token") || "");
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
