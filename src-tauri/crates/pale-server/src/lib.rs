@@ -771,6 +771,14 @@ impl AppState {
         self.users.values()
     }
 
+    pub fn update_user_role(&self, id: Uuid, role: &str) -> Option<User> {
+        self.users.with_write(&id, |users| {
+            let user = users.get_mut(&id)?;
+            user.role = role.to_string();
+            Some(user.clone())
+        })
+    }
+
     pub fn delete_user(&self, id: Uuid) -> Option<User> {
         let user = self.users.remove(&id);
         if user.is_some() {

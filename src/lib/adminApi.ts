@@ -149,6 +149,8 @@ export interface CreateUserInput {
   display_name: string;
   sip_uri: string;
   matrix_user_id?: string | null;
+  password?: string;
+  role?: string;
 }
 
 export interface CreateSipAccountInput {

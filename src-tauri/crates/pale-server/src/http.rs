@@ -38,6 +38,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/admin/audit", get(list_audit_events))
         .route("/v1/users", get(list_users).post(create_user))
         .route("/v1/users/{id}", delete(delete_user))
+        .route("/v1/users/{id}/role", put(update_user_role))
         .route("/v1/sip/accounts", get(list_sip_accounts).post(create_sip_account))
         .route(
             "/v1/sip/accounts/{username}/{domain}",
@@ -279,6 +280,23 @@ async fn delete_user(
     let user = state.delete_user(id).ok_or(ApiError::NotFound)?;
     state.record_audit_event(&principal, "user.deleted", Some(id.to_string()));
     Ok(Json(user))
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateRoleRequest {
+    role: String,
+}
+
+async fn update_user_role(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<UpdateRoleRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    state.update_user_role(id, &input.role).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "user.role_updated", Some(format!("{}:{}", id, input.role)));
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn create_sip_account(

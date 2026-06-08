@@ -297,7 +297,8 @@ function UsersPanel({
 }) {
   const [displayName, setDisplayName] = useState("");
   const [sipUri, setSipUri] = useState("");
-  const [matrixUserId, setMatrixUserId] = useState("");
+  const [userPassword, setUserPassword] = useState("");
+  const [role, setRole] = useState("user");
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -305,11 +306,14 @@ function UsersPanel({
       await createAdminUser(baseUrl, token, {
         display_name: displayName,
         sip_uri: sipUri,
-        matrix_user_id: matrixUserId || null,
+        matrix_user_id: null,
+        password: userPassword || undefined,
+        role,
       });
       setDisplayName("");
       setSipUri("");
-      setMatrixUserId("");
+      setUserPassword("");
+      setRole("user");
       toast({ type: "success", title: "User created" });
       onChange();
     } catch (err) {
@@ -327,23 +331,53 @@ function UsersPanel({
     }
   };
 
+  const toggleRole = async (user: { id: string; sip_uri: string; display_name: string; matrix_user_id?: string | null }, currentRole: string) => {
+    const newRole = currentRole === "admin" ? "user" : "admin";
+    try {
+      const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/users/${user.id}/role`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ role: newRole }),
+      });
+      if (!res.ok) throw new Error("Failed");
+      toast({ type: "success", title: `${user.display_name} is now ${newRole}` });
+      onChange();
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Failed to update role" });
+    }
+  };
+
   return (
-    <PanelWithForm
-      title="Users"
-      icon={UserPlus}
-      onSubmit={submit}
-      fields={[
-        ["Display name", displayName, setDisplayName],
-        ["SIP URI", sipUri, setSipUri],
-        ["Matrix user ID", matrixUserId, setMatrixUserId],
-      ]}
-      action="Create user"
-    >
-      <div className="overflow-x-auto">
+    <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+      <div className="p-3 border-b border-border-subtle flex items-center gap-2">
+        <UserPlus size={17} className="text-accent" />
+        <h2 className="font-medium">Users</h2>
+      </div>
+      <form onSubmit={submit} className="p-3 grid md:grid-cols-5 gap-2 border-b border-border-subtle">
+        <Field label="Display name" value={displayName} onChange={setDisplayName} />
+        <Field label="SIP URI" value={sipUri} onChange={setSipUri} />
+        <Field label="Password" value={userPassword} onChange={setUserPassword} type="password" />
+        <label className="block">
+          <span className="block text-xs text-tertiary mb-1">Role</span>
+          <select
+            value={role}
+            onChange={(e) => setRole(e.target.value)}
+            className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+          >
+            <option value="user">User</option>
+            <option value="admin">Admin</option>
+          </select>
+        </label>
+        <button className="h-10 self-end rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium flex items-center justify-center gap-2">
+          <Plus size={16} />
+          Create user
+        </button>
+      </form>
+      <div className="p-3 overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="text-tertiary">
             <tr className="border-b border-border-subtle">
-              {["Name", "SIP URI", "Matrix", ""].map((header) => (
+              {["Name", "SIP URI", "Role", ""].map((header) => (
                 <th key={header} className="text-left py-2 px-2 font-medium">{header}</th>
               ))}
             </tr>
@@ -353,18 +387,33 @@ function UsersPanel({
               <tr key={user.id} className="border-b border-border-subtle">
                 <td className="py-2 px-2">{user.display_name}</td>
                 <td className="py-2 px-2 text-secondary">{user.sip_uri}</td>
-                <td className="py-2 px-2 text-secondary">{user.matrix_user_id || "-"}</td>
+                <td className="py-2 px-2">
+                  <span className={cn(
+                    "px-2 py-0.5 rounded-full text-xs font-medium",
+                    (user as any).role === "admin" ? "bg-accent/20 text-accent" : "bg-elevated text-secondary"
+                  )}>
+                    {(user as any).role || "user"}
+                  </span>
+                </td>
                 <td className="py-2 px-2 text-right">
-                  <IconButton label="Delete user" tone="danger" onClick={() => remove(user.id)}>
-                    <Trash2 size={16} />
-                  </IconButton>
+                  <div className="inline-flex items-center gap-1">
+                    <button
+                      onClick={() => toggleRole(user, (user as any).role || "user")}
+                      className="h-8 px-2 rounded-md hover:bg-elevated text-xs text-secondary hover:text-primary"
+                    >
+                      {(user as any).role === "admin" ? "Demote" : "Promote"}
+                    </button>
+                    <IconButton label="Delete user" tone="danger" onClick={() => remove(user.id)}>
+                      <Trash2 size={16} />
+                    </IconButton>
+                  </div>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-    </PanelWithForm>
+    </section>
   );
 }
 
