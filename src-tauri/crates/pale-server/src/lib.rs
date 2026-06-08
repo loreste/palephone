@@ -834,17 +834,27 @@ impl AppState {
             .insert(session.token.clone(), session.clone());
         self.admin_sessions.trim_to_len(MAX_ADMIN_SESSIONS);
 
-        // Get SIP credentials
+        // Get or create SIP credentials
         let sip_creds = split_sip_aor_simple(&user.sip_uri)
-            .and_then(|(username, domain)| {
-                self.sip_account(&username, &domain).map(|_| SipCredentials {
+            .map(|(username, domain)| {
+                // Auto-create SIP account if it doesn't exist
+                if self.sip_account(&username, &domain).is_none() {
+                    self.upsert_sip_account(CreateSipAccountRequest {
+                        username: username.clone(),
+                        domain: domain.clone(),
+                        password_ha1: sip_ha1(&username, &domain, password),
+                        display_name: Some(user.display_name.clone()),
+                    });
+                    log::info!("Auto-created SIP account for {} on login", user.sip_uri);
+                }
+                SipCredentials {
                     sip_uri: user.sip_uri.clone(),
                     registrar_uri: format!("sip:{}", self.sip_registrar),
                     username: username.clone(),
                     password: password.to_string(),
                     transport: "udp".to_string(),
                     domain,
-                })
+                }
             });
 
         // Set presence to online

@@ -33,7 +33,7 @@ services:
     network_mode: host
     volumes:
       - ./turnserver.conf:/etc/turnserver.conf:ro
-    command: ["-c", "/etc/turnserver.conf"]
+    command: ["-c", "/etc/turnserver.conf", "--static-auth-secret=${TURN_SECRET:-changeme-turn-secret}"]
     healthcheck:
       test: ["CMD", "turnadmin", "-l"]
       interval: 30s
