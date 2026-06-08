@@ -19,7 +19,8 @@ use uuid::Uuid;
 use crate::{
     safe_filename, sip_ha1, AppState, AuthError, CallStatus, CreateCallRequest,
     CreateConferenceRequest, CreateRoutingRuleRequest, CreateSipAccountRequest, CreateUserRequest,
-    AddRoomMemberRequest, CreateRoomRequest, FileRecord, JoinConferenceRequest,
+    AddRoomMemberRequest, CreateIvrRequest, CreateRingGroupRequest, CreateRoomRequest,
+    FileRecord, JoinConferenceRequest,
     SendRoomMessageRequest, SetPresenceRequest, SyncCallHistoryRequest,
     UpdateCallStatusRequest, UpdateSipAccountStatusRequest,
 };
@@ -72,6 +73,11 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/messages/{id}", put(edit_message).delete(delete_message))
         .route("/v1/messages/{id}/react", post(react_to_message))
         .route("/v1/users/{id}/avatar", put(upload_avatar))
+        .route("/v1/ring-groups", get(list_ring_groups).post(create_ring_group))
+        .route("/v1/ring-groups/{id}", get(get_ring_group).delete(delete_ring_group))
+        .route("/v1/ivrs", get(list_ivrs).post(create_ivr))
+        .route("/v1/ivrs/{id}", get(get_ivr).delete(delete_ivr))
+        .route("/v1/routes/resolve/{uri}", get(resolve_route))
         .route("/v1/voicemail", get(list_voicemails))
         .route("/v1/voicemail/{id}/listen", put(mark_voicemail_listened))
         .route("/v1/voicemail/{id}", delete(delete_voicemail))
@@ -987,6 +993,100 @@ async fn upload_avatar(
         "file_id": file_id,
         "url": format!("/v1/files/{}", file_id),
     })))
+}
+
+// ─── Ring Groups ───
+
+async fn list_ring_groups(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::RingGroup>>, ApiError> {
+    require_bearer(&headers, &state)?;
+    Ok(Json(state.list_ring_groups()))
+}
+
+async fn create_ring_group(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateRingGroupRequest>,
+) -> Result<Json<crate::RingGroup>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let group = state.create_ring_group(input).map_err(|e| ApiError::Conflict(e))?;
+    state.record_audit_event(&principal, "ring_group.created", Some(group.id.to_string()));
+    Ok(Json(group))
+}
+
+async fn get_ring_group(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::RingGroup>, ApiError> {
+    require_bearer(&headers, &state)?;
+    state.ring_group(id).map(Json).ok_or(ApiError::NotFound)
+}
+
+async fn delete_ring_group(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    state.delete_ring_group(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "ring_group.deleted", Some(id.to_string()));
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ─── IVR ───
+
+async fn list_ivrs(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::Ivr>>, ApiError> {
+    require_bearer(&headers, &state)?;
+    Ok(Json(state.list_ivrs()))
+}
+
+async fn create_ivr(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateIvrRequest>,
+) -> Result<Json<crate::Ivr>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let ivr = state.create_ivr(input).map_err(|e| ApiError::Conflict(e))?;
+    state.record_audit_event(&principal, "ivr.created", Some(ivr.id.to_string()));
+    Ok(Json(ivr))
+}
+
+async fn get_ivr(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::Ivr>, ApiError> {
+    require_bearer(&headers, &state)?;
+    state.ivr(id).map(Json).ok_or(ApiError::NotFound)
+}
+
+async fn delete_ivr(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    state.delete_ivr(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "ivr.deleted", Some(id.to_string()));
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ─── Route Resolution ───
+
+async fn resolve_route(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(uri): Path<String>,
+) -> Result<Json<crate::ResolvedRoute>, ApiError> {
+    require_bearer(&headers, &state)?;
+    let full_uri = if uri.starts_with("sip:") { uri } else { format!("sip:{}", uri) };
+    Ok(Json(state.resolve_inbound_route(&full_uri)))
 }
 
 // ─── Voicemail ───

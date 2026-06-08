@@ -205,6 +205,8 @@ pub struct AppState {
     room_messages: RwLock<Vec<RoomMessage>>,
     voicemails: ShardedMap<Uuid, Voicemail>,
     recordings: ShardedMap<Uuid, CallRecording>,
+    ring_groups: ShardedMap<Uuid, RingGroup>,
+    ivrs: ShardedMap<Uuid, Ivr>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
     rate_limits: ShardedMap<String, RateLimitBucket>,
     rate_limit_rps: u32,
@@ -313,6 +315,8 @@ impl AppState {
             room_messages: RwLock::new(Vec::new()),
             voicemails: ShardedMap::new(),
             recordings: ShardedMap::new(),
+            ring_groups: ShardedMap::new(),
+            ivrs: ShardedMap::new(),
             sse_tx: tokio::sync::broadcast::channel(256).0,
             rate_limits: ShardedMap::new(),
             rate_limit_rps: 100,
@@ -1343,6 +1347,144 @@ impl AppState {
         let _ = self.sse_tx.send(event);
     }
 
+    // ─── Ring Groups ───
+
+    pub fn create_ring_group(&self, input: CreateRingGroupRequest) -> Result<RingGroup, String> {
+        if self.ring_groups.values().iter().any(|g| g.extension == input.extension) {
+            return Err(format!("Ring group with extension {} already exists", input.extension));
+        }
+        let group = RingGroup {
+            id: Uuid::new_v4(),
+            name: input.name,
+            extension: input.extension,
+            strategy: input.strategy.unwrap_or(RingStrategy::Simultaneous),
+            ring_timeout: input.ring_timeout.unwrap_or(30),
+            members: input.members,
+            fallback_uri: input.fallback_uri,
+            enabled: true,
+            created_at: Utc::now(),
+        };
+        self.ring_groups.insert(group.id, group.clone());
+        Ok(group)
+    }
+
+    pub fn list_ring_groups(&self) -> Vec<RingGroup> {
+        self.ring_groups.values()
+    }
+
+    pub fn ring_group(&self, id: Uuid) -> Option<RingGroup> {
+        self.ring_groups.get(&id)
+    }
+
+    pub fn ring_group_by_extension(&self, extension: &str) -> Option<RingGroup> {
+        self.ring_groups.values().into_iter().find(|g| g.extension == extension && g.enabled)
+    }
+
+    pub fn delete_ring_group(&self, id: Uuid) -> Option<RingGroup> {
+        self.ring_groups.remove(&id)
+    }
+
+    // ─── IVR ───
+
+    pub fn create_ivr(&self, input: CreateIvrRequest) -> Result<Ivr, String> {
+        if self.ivrs.values().iter().any(|i| i.extension == input.extension) {
+            return Err(format!("IVR with extension {} already exists", input.extension));
+        }
+        let ivr = Ivr {
+            id: Uuid::new_v4(),
+            name: input.name,
+            extension: input.extension,
+            greeting_text: input.greeting_text.unwrap_or_else(|| "Welcome.".to_string()),
+            greeting_file_id: None,
+            timeout_secs: input.timeout_secs.unwrap_or(10),
+            max_retries: input.max_retries.unwrap_or(3),
+            invalid_destination: input.invalid_destination,
+            timeout_destination: input.timeout_destination,
+            options: input.options,
+            enabled: true,
+            created_at: Utc::now(),
+        };
+        self.ivrs.insert(ivr.id, ivr.clone());
+        Ok(ivr)
+    }
+
+    pub fn list_ivrs(&self) -> Vec<Ivr> {
+        self.ivrs.values()
+    }
+
+    pub fn ivr(&self, id: Uuid) -> Option<Ivr> {
+        self.ivrs.get(&id)
+    }
+
+    pub fn ivr_by_extension(&self, extension: &str) -> Option<Ivr> {
+        self.ivrs.values().into_iter().find(|i| i.extension == extension && i.enabled)
+    }
+
+    pub fn delete_ivr(&self, id: Uuid) -> Option<Ivr> {
+        self.ivrs.remove(&id)
+    }
+
+    // ─── Call Route Resolution ───
+
+    /// Resolve where an inbound call to a URI should be routed.
+    /// Checks in order: direct user registration, ring groups, IVRs, routing rules.
+    pub fn resolve_inbound_route(&self, destination_uri: &str) -> ResolvedRoute {
+        // 1. Check if it's a ring group extension
+        if let Some(group) = self.ring_group_by_extension(destination_uri) {
+            return ResolvedRoute {
+                destination_type: "ring_group".to_string(),
+                destination: group.extension.clone(),
+                ring_group: Some(group),
+                ivr: None,
+            };
+        }
+
+        // 2. Check if it's an IVR extension
+        if let Some(ivr) = self.ivr_by_extension(destination_uri) {
+            return ResolvedRoute {
+                destination_type: "ivr".to_string(),
+                destination: ivr.extension.clone(),
+                ring_group: None,
+                ivr: Some(ivr),
+            };
+        }
+
+        // 3. Check routing rules
+        if let Some(target) = self.resolve_routing_target("*", destination_uri) {
+            // Check if the routing target points to a ring group or IVR
+            if let Some(group) = self.ring_group_by_extension(&target) {
+                return ResolvedRoute {
+                    destination_type: "ring_group".to_string(),
+                    destination: target,
+                    ring_group: Some(group),
+                    ivr: None,
+                };
+            }
+            if let Some(ivr) = self.ivr_by_extension(&target) {
+                return ResolvedRoute {
+                    destination_type: "ivr".to_string(),
+                    destination: target,
+                    ring_group: None,
+                    ivr: Some(ivr),
+                };
+            }
+            return ResolvedRoute {
+                destination_type: "user".to_string(),
+                destination: target,
+                ring_group: None,
+                ivr: None,
+            };
+        }
+
+        // 4. Default: route to the user directly
+        ResolvedRoute {
+            destination_type: "user".to_string(),
+            destination: destination_uri.to_string(),
+            ring_group: None,
+            ivr: None,
+        }
+    }
+
     // ─── Voicemail ───
 
     pub fn store_voicemail(&self, vm: Voicemail) {
@@ -2139,6 +2281,87 @@ pub struct CreateRoutingRuleRequest {
     pub target: String,
     pub priority: i32,
     pub enabled: bool,
+}
+
+// ─── Ring Groups ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RingGroup {
+    pub id: Uuid,
+    pub name: String,
+    pub extension: String,
+    pub strategy: RingStrategy,
+    pub ring_timeout: i32,
+    pub members: Vec<String>, // SIP URIs
+    pub fallback_uri: Option<String>,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RingStrategy {
+    Simultaneous,
+    Sequential,
+    Random,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateRingGroupRequest {
+    pub name: String,
+    pub extension: String,
+    pub strategy: Option<RingStrategy>,
+    pub ring_timeout: Option<i32>,
+    pub members: Vec<String>,
+    pub fallback_uri: Option<String>,
+}
+
+// ─── IVR ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ivr {
+    pub id: Uuid,
+    pub name: String,
+    pub extension: String,
+    pub greeting_text: String,
+    pub greeting_file_id: Option<Uuid>,
+    pub timeout_secs: i32,
+    pub max_retries: i32,
+    pub invalid_destination: Option<String>,
+    pub timeout_destination: Option<String>,
+    pub options: Vec<IvrOption>,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IvrOption {
+    pub digit: String,
+    pub label: String,
+    pub destination: String,
+    pub destination_type: String, // user, ring_group, ivr, voicemail, external
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateIvrRequest {
+    pub name: String,
+    pub extension: String,
+    pub greeting_text: Option<String>,
+    pub timeout_secs: Option<i32>,
+    pub max_retries: Option<i32>,
+    pub invalid_destination: Option<String>,
+    pub timeout_destination: Option<String>,
+    pub options: Vec<IvrOption>,
+}
+
+// ─── Call Route Resolution ───
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolvedRoute {
+    pub destination_type: String, // user, ring_group, ivr
+    pub destination: String,     // SIP URI or ID
+    pub ring_group: Option<RingGroup>,
+    pub ivr: Option<Ivr>,
 }
 
 /// Parse "sip:user@domain" into (user, domain)

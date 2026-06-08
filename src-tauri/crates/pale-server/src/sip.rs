@@ -202,6 +202,53 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
         return Some(request.response(480, "Conference Not Active", &[]));
     }
 
+    // Ring group routing: if destination is a ring group, redirect to first available member
+    if let Some(group) = state.ring_group_by_extension(&requested_uri) {
+        state.upsert_sip_dialog(UpsertSipDialog {
+            call_id: request.call_id().unwrap_or_default().to_string(),
+            from_uri: from_aor.clone(),
+            to_uri: requested_uri.clone(),
+            target_contact: None,
+            status: SipDialogStatus::Ringing,
+            media_types: extract_media_types(&request.body_text()),
+        });
+        // Find first registered member
+        for member in &group.members {
+            if let Some(reg) = state.registration_for(member) {
+                return Some(request.response(
+                    302,
+                    "Moved Temporarily",
+                    &[("Contact", format!("<{}>", reg.contact))],
+                ));
+            }
+        }
+        // No member available — try fallback
+        if let Some(fallback) = &group.fallback_uri {
+            if let Some(reg) = state.registration_for(fallback) {
+                return Some(request.response(
+                    302,
+                    "Moved Temporarily",
+                    &[("Contact", format!("<{}>", reg.contact))],
+                ));
+            }
+        }
+        return Some(request.response(480, "No Group Members Available", &[]));
+    }
+
+    // IVR routing: if destination is an IVR, accept the call (IVR logic handled by PJSIP)
+    if let Some(ivr) = state.ivr_by_extension(&requested_uri) {
+        state.upsert_sip_dialog(UpsertSipDialog {
+            call_id: request.call_id().unwrap_or_default().to_string(),
+            from_uri: from_aor.clone(),
+            to_uri: requested_uri,
+            target_contact: None,
+            status: SipDialogStatus::Ringing,
+            media_types: extract_media_types(&request.body_text()),
+        });
+        // IVR answers the call — greeting playback handled by media
+        return Some(request.response(200, "OK", &[]));
+    }
+
     let routed_uri = state
         .resolve_routing_target(&from_aor, &requested_uri)
         .unwrap_or_else(|| requested_uri.clone());
