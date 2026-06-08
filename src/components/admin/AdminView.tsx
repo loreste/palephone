@@ -36,6 +36,12 @@ import {
 } from "@/lib/adminApi";
 import { toast } from "@/components/ui/Toast";
 import { useServerStore } from "@/store/serverStore";
+import { paleServerApi } from "@/lib/tauri";
+
+// Helper: all server calls go through Tauri invoke (not webview fetch)
+async function api<T = any>(baseUrl: string, token: string, path: string, opts?: { method?: string; body?: unknown }): Promise<T> {
+  return paleServerApi<T>(baseUrl, token, path, opts);
+}
 
 type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "conferences" | "files" | "directory" | "audit";
 
@@ -65,8 +71,9 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
 
 export function AdminView() {
   const serverBaseUrl = useServerStore((s) => s.baseUrl);
+  const serverToken = useServerStore((s) => s.token);
   const [baseUrl] = useState(serverBaseUrl || adminBaseUrl());
-  const [token, setToken] = useState(() => sessionStorage.getItem("pale.admin.token") || "");
+  const [token, setToken] = useState(() => serverToken || sessionStorage.getItem("pale.admin.token") || "");
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
   const [activeTab, setActiveTab] = useState<AdminTab>("overview");
@@ -75,6 +82,14 @@ export function AdminView() {
   const [error, setError] = useState<string | null>(null);
   const setServerConnection = useServerStore((s) => s.setConnection);
   const disconnectServer = useServerStore((s) => s.disconnect);
+
+  // Sync token from serverStore if it changes (e.g. after wizard login)
+  useEffect(() => {
+    if (serverToken && serverToken !== token) {
+      setToken(serverToken);
+      sessionStorage.setItem("pale.admin.token", serverToken);
+    }
+  }, [serverToken]);
 
   const authenticated = token.length > 0;
 
@@ -358,12 +373,10 @@ function UsersPanel({
   const toggleRole = async (user: { id: string; sip_uri: string; display_name: string; matrix_user_id?: string | null }, currentRole: string) => {
     const newRole = currentRole === "admin" ? "user" : "admin";
     try {
-      const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/users/${user.id}/role`, {
+      await api(baseUrl, token, `/v1/users/${user.id}/role`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ role: newRole }),
+        body: { role: newRole },
       });
-      if (!res.ok) throw new Error("Failed");
       toast({ type: "success", title: `${user.display_name} is now ${newRole}` });
       onChange();
     } catch (err) {
@@ -844,8 +857,8 @@ function RingGroupsPanel({ baseUrl, token }: { baseUrl: string; token: string })
 
   const load = async () => {
     try {
-      const res = await fetch(`${baseUrl}/v1/ring-groups`, { headers: { Authorization: `Bearer ${token}` } });
-      if (res.ok) setGroups(await res.json());
+      const data = await api<any[]>(baseUrl, token, "/v1/ring-groups");
+      setGroups(data);
     } catch { /* ignore */ }
   };
 
@@ -854,18 +867,16 @@ function RingGroupsPanel({ baseUrl, token }: { baseUrl: string; token: string })
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     try {
-      const res = await fetch(`${baseUrl}/v1/ring-groups`, {
+      await api(baseUrl, token, "/v1/ring-groups", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
+        body: {
           name,
           extension: extension.startsWith("sip:") ? extension : `sip:${extension}`,
           strategy,
           members: members.split(",").map((m) => m.trim()).filter(Boolean).map((m) => m.startsWith("sip:") ? m : `sip:${m}`),
           fallback_uri: fallback || null,
-        }),
+        },
       });
-      if (!res.ok) throw new Error((await res.json()).error);
       setName(""); setExtension(""); setMembers(""); setFallback("");
       toast({ type: "success", title: "Ring group created" });
       load();
@@ -876,7 +887,7 @@ function RingGroupsPanel({ baseUrl, token }: { baseUrl: string; token: string })
 
   const remove = async (id: string) => {
     try {
-      await fetch(`${baseUrl}/v1/ring-groups/${id}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+      await api(baseUrl, token, `/v1/ring-groups/${id}`, { method: "DELETE" });
       toast({ type: "success", title: "Ring group deleted" });
       load();
     } catch { toast({ type: "error", title: "Failed to delete" }); }
@@ -955,18 +966,9 @@ function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
   const uploadGreeting = async (file: File) => {
     setUploading(true);
     try {
-      const buffer = await file.arrayBuffer();
-      const res = await fetch(`${baseUrl}/v1/files`, {
-        method: "POST",
-        headers: {
-          "Content-Type": file.type || "audio/wav",
-          Authorization: `Bearer ${token}`,
-          "X-Pale-Filename": file.name,
-        },
-        body: buffer,
-      });
-      if (!res.ok) throw new Error("Upload failed");
-      const record = await res.json();
+      // File uploads need special handling — use paleServerUploadFile from tauri.ts
+      const { paleServerUploadFile } = await import("@/lib/tauri");
+      const record = await paleServerUploadFile(baseUrl, token, file);
       setGreetingFileId(record.id);
       toast({ type: "success", title: `Uploaded: ${file.name}` });
     } catch (err) {
@@ -977,8 +979,8 @@ function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
 
   const load = async () => {
     try {
-      const res = await fetch(`${baseUrl}/v1/ivrs`, { headers: { Authorization: `Bearer ${token}` } });
-      if (res.ok) setIvrs(await res.json());
+      const data = await api<any[]>(baseUrl, token, "/v1/ivrs");
+      setIvrs(data);
     } catch { /* ignore */ }
   };
 
@@ -999,10 +1001,9 @@ function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     try {
-      const res = await fetch(`${baseUrl}/v1/ivrs`, {
+      await api(baseUrl, token, "/v1/ivrs", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
+        body: {
           name,
           extension: extension.startsWith("sip:") ? extension : `sip:${extension}`,
           greeting_text: greetingMode === "text"
@@ -1015,9 +1016,8 @@ function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
             ...o,
             destination: o.destination.startsWith("sip:") ? o.destination : `sip:${o.destination}`,
           })),
-        }),
+        },
       });
-      if (!res.ok) throw new Error((await res.json()).error);
       setName(""); setExtension(""); setGreeting("");
       toast({ type: "success", title: "IVR created" });
       load();
@@ -1028,7 +1028,7 @@ function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
 
   const remove = async (id: string) => {
     try {
-      await fetch(`${baseUrl}/v1/ivrs/${id}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+      await api(baseUrl, token, `/v1/ivrs/${id}`, { method: "DELETE" });
       toast({ type: "success", title: "IVR deleted" });
       load();
     } catch { toast({ type: "error", title: "Failed to delete" }); }
@@ -1198,8 +1198,8 @@ function CrudPanel({ baseUrl, token, endpoint, title, icon: Icon, columns, rowFn
 
   const load = async () => {
     try {
-      const res = await fetch(`${baseUrl}/v1/${endpoint}`, { headers: { Authorization: `Bearer ${token}` } });
-      if (res.ok) setItems(await res.json());
+      const data = await api<any[]>(baseUrl, token, `/v1/${endpoint}`);
+      setItems(data);
     } catch { /* ignore */ }
   };
 
@@ -1210,12 +1210,10 @@ function CrudPanel({ baseUrl, token, endpoint, title, icon: Icon, columns, rowFn
     try {
       let body: any = { ...form, ...(extraJson || {}) };
       if (transformSubmit) body = transformSubmit(body);
-      const res = await fetch(`${baseUrl}/v1/${endpoint}`, {
+      await api(baseUrl, token, `/v1/${endpoint}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(body),
+        body,
       });
-      if (!res.ok) throw new Error((await res.json()).error);
       setForm({});
       toast({ type: "success", title: `${title} created` });
       load();
@@ -1227,7 +1225,7 @@ function CrudPanel({ baseUrl, token, endpoint, title, icon: Icon, columns, rowFn
   const remove = async (item: any) => {
     const key = item.id || item.extension;
     try {
-      await fetch(`${baseUrl}/v1/${endpoint}/${key}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+      await api(baseUrl, token, `/v1/${endpoint}/${key}`, { method: "DELETE" });
       toast({ type: "success", title: "Deleted" }); load();
     } catch { toast({ type: "error", title: "Failed to delete" }); }
   };
@@ -1277,8 +1275,8 @@ function QueuesPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
 
   const load = async () => {
     try {
-      const res = await fetch(`${baseUrl}/v1/queues`, { headers: { Authorization: `Bearer ${token}` } });
-      if (res.ok) setQueues(await res.json());
+      const data = await api<any[]>(baseUrl, token, "/v1/queues");
+      setQueues(data);
     } catch { /* ignore */ }
   };
 
@@ -1290,15 +1288,13 @@ function QueuesPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
       const agentList = agents.split(",").map((a) => a.trim()).filter(Boolean).map((a) => ({
         agent_uri: a.startsWith("sip:") ? a : `sip:${a}`,
       }));
-      const res = await fetch(`${baseUrl}/v1/queues`, {
+      await api(baseUrl, token, "/v1/queues", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
+        body: {
           name, extension: extension.startsWith("sip:") ? extension : `sip:${extension}`,
           strategy, agents: agentList, overflow_destination: overflow || null,
-        }),
+        },
       });
-      if (!res.ok) throw new Error((await res.json()).error);
       setName(""); setExtension(""); setAgents(""); setOverflow("");
       toast({ type: "success", title: "Queue created" }); load();
     } catch (err) {
@@ -1308,7 +1304,7 @@ function QueuesPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
 
   const remove = async (id: string) => {
     try {
-      await fetch(`${baseUrl}/v1/queues/${id}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+      await api(baseUrl, token, `/v1/queues/${id}`, { method: "DELETE" });
       toast({ type: "success", title: "Queue deleted" }); load();
     } catch { toast({ type: "error", title: "Failed" }); }
   };
@@ -1368,8 +1364,7 @@ function CdrsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
   const [cdrs, setCdrs] = useState<any[]>([]);
 
   useEffect(() => {
-    fetch(`${baseUrl}/v1/cdrs?limit=200`, { headers: { Authorization: `Bearer ${token}` } })
-      .then((r) => r.ok ? r.json() : [])
+    api<any[]>(baseUrl, token, '/v1/cdrs?limit=200')
       .then(setCdrs)
       .catch(() => {});
   }, [baseUrl, token]);
@@ -1431,8 +1426,8 @@ function AgentsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
 
   const load = async () => {
     try {
-      const res = await fetch(`${baseUrl}/v1/agents`, { headers: { Authorization: `Bearer ${token}` } });
-      if (res.ok) setAgents(await res.json());
+      const data = await api<any[]>(baseUrl, token, "/v1/agents");
+      setAgents(data);
     } catch { /* ignore */ }
   };
   useEffect(() => { load(); }, [baseUrl, token]);
@@ -1440,16 +1435,14 @@ function AgentsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     try {
-      const res = await fetch(`${baseUrl}/v1/agents`, {
+      await api(baseUrl, token, "/v1/agents", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
+        body: {
           user_sip_uri: sipUri.startsWith("sip:") ? sipUri : `sip:${sipUri}`,
           role, display_name: displayName,
           skills: skills ? skills.split(",").map((s) => s.trim()) : [],
-        }),
+        },
       });
-      if (!res.ok) throw new Error((await res.json()).error);
       setSipUri(""); setDisplayName(""); setSkills("");
       toast({ type: "success", title: "Agent profile created" }); load();
     } catch (err) { toast({ type: "error", title: err instanceof Error ? err.message : "Failed" }); }
@@ -1457,10 +1450,9 @@ function AgentsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
 
   const changeState = async (uri: string, state: string) => {
     try {
-      await fetch(`${baseUrl}/v1/agents/${encodeURIComponent(uri)}/state`, {
+      await api(baseUrl, token, `/v1/agents/${encodeURIComponent(uri)}/state`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ state }),
+        body: { state },
       });
       load();
     } catch { /* ignore */ }
@@ -1547,13 +1539,12 @@ function WallboardPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
 
   useEffect(() => {
     const load = () => {
-      fetch(`${baseUrl}/v1/wallboard`, { headers: { Authorization: `Bearer ${token}` } })
-        .then((r) => r.ok ? r.json() : null)
+      api(baseUrl, token, '/v1/wallboard')
         .then((d) => { if (d) setData(d); })
         .catch(() => {});
     };
     load();
-    const interval = setInterval(load, 5000); // Refresh every 5 seconds
+    const interval = setInterval(load, 5000);
     return () => clearInterval(interval);
   }, [baseUrl, token]);
 
@@ -1630,27 +1621,25 @@ function QaPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
   const [comments, setComments] = useState("");
 
   useEffect(() => {
-    fetch(`${baseUrl}/v1/qa/scorecards`, { headers: { Authorization: `Bearer ${token}` } })
-      .then((r) => r.ok ? r.json() : []).then(setScorecards).catch(() => {});
+    api<any[]>(baseUrl, token, '/v1/qa/scorecards')
+      .then(setScorecards).catch(() => {});
   }, [baseUrl, token]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     try {
-      const res = await fetch(`${baseUrl}/v1/qa/scorecards`, {
+      await api(baseUrl, token, "/v1/qa/scorecards", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
+        body: {
           call_id: callId, agent_uri: agentUri.startsWith("sip:") ? agentUri : `sip:${agentUri}`,
           scores: {}, total_score: parseFloat(totalScore) || 0, max_score: parseFloat(maxScore) || 100,
           comments,
-        }),
+        },
       });
-      if (!res.ok) throw new Error("Failed");
       setCallId(""); setAgentUri(""); setTotalScore(""); setComments("");
       toast({ type: "success", title: "Scorecard saved" });
-      const updated = await fetch(`${baseUrl}/v1/qa/scorecards`, { headers: { Authorization: `Bearer ${token}` } });
-      if (updated.ok) setScorecards(await updated.json());
+      const updated = await api<any[]>(baseUrl, token, "/v1/qa/scorecards");
+      setScorecards(updated);
     } catch (err) { toast({ type: "error", title: "Failed" }); }
   };
 
@@ -1728,20 +1717,17 @@ function DirectoryPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
   const [testResult, setTestResult] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch(`${baseUrl}/v1/ldap/config`, { headers: { Authorization: `Bearer ${token}` } })
-      .then((r) => r.ok ? r.json() : null)
+    api(baseUrl, token, '/v1/ldap/config')
       .then((data) => { if (data) setConfig(data); })
       .catch(() => {});
   }, [baseUrl, token]);
 
   const save = async () => {
     try {
-      const res = await fetch(`${baseUrl}/v1/ldap/config`, {
+      await api(baseUrl, token, "/v1/ldap/config", {
         method: "PUT",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(config),
+        body: config,
       });
-      if (!res.ok) throw new Error("Failed");
       toast({ type: "success", title: "Directory configuration saved" });
     } catch (err) {
       toast({ type: "error", title: "Failed to save" });
@@ -1752,12 +1738,10 @@ function DirectoryPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
     setTesting(true);
     setTestResult(null);
     try {
-      const res = await fetch(`${baseUrl}/v1/ldap/test`, {
+      const data = await api<{ ok: boolean; message?: string }>(baseUrl, token, "/v1/ldap/test", {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
       });
-      const data = await res.json();
-      setTestResult(data.ok ? "Connection successful" : data.message);
+      setTestResult(data.ok ? "Connection successful" : (data.message || "Failed"));
     } catch {
       setTestResult("Connection failed");
     }

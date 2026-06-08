@@ -35,6 +35,7 @@ export interface CallSession {
   connectTime: number | null;
   isMuted: boolean;
   isHeld: boolean;
+  isRecording: boolean;
 }
 
 export interface AudioDevice {

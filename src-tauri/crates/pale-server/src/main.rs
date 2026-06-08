@@ -70,7 +70,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(100);
     app_state.set_rate_limit_rps(rate_limit_rps);
-    app_state.set_sip_registrar(config.sip_addr.to_string());
+    // Use PALE_SIP_EXTERNAL_ADDR if set (public-facing SIP address for clients),
+    // otherwise derive from HTTP bind address, replacing 0.0.0.0 with 127.0.0.1
+    let sip_external = std::env::var("PALE_SIP_EXTERNAL_ADDR").unwrap_or_else(|_| {
+        let addr = config.sip_addr.to_string();
+        addr.replace("0.0.0.0", "127.0.0.1")
+    });
+    app_state.set_sip_registrar(sip_external);
 
     let state = Arc::new(app_state);
     tokio::fs::create_dir_all(state.files_dir()).await?;

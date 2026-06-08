@@ -23,6 +23,7 @@ describe("callStore", () => {
     connectTime: null,
     isMuted: false,
     isHeld: false,
+    isRecording: false,
   };
 
   it("adds and removes sessions", () => {

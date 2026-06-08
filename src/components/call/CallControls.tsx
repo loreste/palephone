@@ -1,23 +1,27 @@
-import { MicOff, Mic, Pause, Play, Grid3X3, PhoneForwarded } from "lucide-react";
+import { MicOff, Mic, Pause, Play, Grid3X3, PhoneForwarded, Circle } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { CallControlButton } from "./CallControlButton";
 
 interface CallControlsProps {
   isMuted: boolean;
   isHeld: boolean;
+  isRecording: boolean;
   onToggleMute: () => void;
   onToggleHold: () => void;
   onOpenKeypad: () => void;
   onTransfer: () => void;
+  onToggleRecord: () => void;
 }
 
 export function CallControls({
   isMuted,
   isHeld,
+  isRecording,
   onToggleMute,
   onToggleHold,
   onOpenKeypad,
   onTransfer,
+  onToggleRecord,
 }: CallControlsProps) {
   return (
     <div
@@ -45,6 +49,13 @@ export function CallControls({
         active={isHeld}
         activeColor="warning"
         onClick={onToggleHold}
+      />
+      <CallControlButton
+        icon={Circle}
+        label={isRecording ? "Stop Rec" : "Record"}
+        active={isRecording}
+        activeColor="destructive"
+        onClick={onToggleRecord}
       />
       <CallControlButton
         icon={Grid3X3}

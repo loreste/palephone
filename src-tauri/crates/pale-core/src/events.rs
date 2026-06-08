@@ -28,6 +28,11 @@ pub enum PaleEvent {
         input: f32,
         output: f32,
     },
+    RecordingState {
+        call_id: i32,
+        recording: bool,
+        file_path: String,
+    },
     AudioDevicesChanged,
     Error {
         message: String,

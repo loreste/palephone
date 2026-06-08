@@ -64,6 +64,7 @@ export function DialpadView() {
         connectTime: null,
         isMuted: false,
         isHeld: false,
+        isRecording: false,
       });
       setActiveCallId(callId);
 

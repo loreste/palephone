@@ -174,6 +174,29 @@ export function listAudioDevices(): Promise<AudioDeviceInfo[]> {
   return invoke("list_audio_devices");
 }
 
+// ─── Call Recording ───
+
+export function startRecording(callId: number): Promise<string> {
+  return invoke("start_recording", { callId });
+}
+
+export function stopRecording(callId: number): Promise<void> {
+  return invoke("stop_recording", { callId });
+}
+
+export interface RecordingStateEvent {
+  type: "recording_state";
+  call_id: number;
+  recording: boolean;
+  file_path: string;
+}
+
+export function onRecordingState(
+  handler: (event: RecordingStateEvent) => void
+): Promise<UnlistenFn> {
+  return listen<RecordingStateEvent>("sip://recording-state", (e) => handler(e.payload));
+}
+
 // ─── Video Commands ───
 
 export function makeVideoCall(uri: string): Promise<void> {
@@ -335,19 +358,18 @@ async function serverFetch<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
-  const response = await fetch(`${baseUrl.replace(/\/+$/, "")}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-      ...(init?.headers || {}),
+  const method = init?.method ?? "GET";
+  const body = init?.body ? JSON.parse(init.body as string) : undefined;
+
+  return invoke("pale_server_request", {
+    input: {
+      base_url: baseUrl,
+      method,
+      path,
+      token,
+      body: body ?? null,
     },
   });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(payload.error || response.statusText);
-  }
-  return response.json() as Promise<T>;
 }
 
 export function paleServerGetPresence(
@@ -554,6 +576,27 @@ export function paleServerDeleteMessage(
 ): Promise<void> {
   return serverFetch(baseUrl, token, `/v1/messages/${messageId}`, {
     method: "DELETE",
+  });
+}
+
+/**
+ * Generic server API call routed through Tauri (bypasses webview fetch restrictions).
+ * Use this instead of fetch() for all pale-server API calls.
+ */
+export async function paleServerApi<T = unknown>(
+  baseUrl: string,
+  token: string,
+  path: string,
+  options?: { method?: string; body?: unknown },
+): Promise<T> {
+  return invoke("pale_server_request", {
+    input: {
+      base_url: baseUrl,
+      method: options?.method ?? "GET",
+      path,
+      token,
+      body: options?.body ?? null,
+    },
   });
 }
 

@@ -193,6 +193,46 @@ fn attended_transfer(
         .map_err(|e| e.to_string())
 }
 
+// ─── Call Recording ───
+
+#[tauri::command]
+fn start_recording(
+    state: State<EngineState>,
+    app_handle: tauri::AppHandle,
+    call_id: i32,
+) -> Result<String, String> {
+    // Create recording file in app data dir
+    let recordings_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("recordings");
+    std::fs::create_dir_all(&recordings_dir).map_err(|e| e.to_string())?;
+
+    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let filename = format!("call_{}_{}.wav", call_id, timestamp);
+    let file_path = recordings_dir.join(&filename);
+    let file_path_str = file_path.to_string_lossy().to_string();
+
+    state
+        .0
+        .send_command(EngineCommand::StartRecording {
+            call_id,
+            file_path: file_path_str.clone(),
+        })
+        .map_err(|e| e.to_string())?;
+
+    Ok(file_path_str)
+}
+
+#[tauri::command]
+fn stop_recording(state: State<EngineState>, call_id: i32) -> Result<(), String> {
+    state
+        .0
+        .send_command(EngineCommand::StopRecording { call_id })
+        .map_err(|e| e.to_string())
+}
+
 // ─── Pale Server Login (HTTP from Rust to bypass webview fetch restrictions) ───
 
 #[derive(serde::Deserialize)]
@@ -229,6 +269,53 @@ async fn pale_server_login(input: PaleLoginRequest) -> Result<serde_json::Value,
         .json::<serde_json::Value>()
         .await
         .map_err(|e| format!("Invalid response: {}", e))
+}
+
+#[derive(serde::Deserialize)]
+struct PaleServerRequest {
+    base_url: String,
+    method: String,
+    path: String,
+    token: Option<String>,
+    body: Option<serde_json::Value>,
+}
+
+#[tauri::command]
+async fn pale_server_request(input: PaleServerRequest) -> Result<serde_json::Value, String> {
+    let url = format!("{}{}", input.base_url.trim_end_matches('/'), input.path);
+    let client = reqwest::Client::new();
+
+    let mut req = match input.method.to_uppercase().as_str() {
+        "POST" => client.post(&url),
+        "PUT" => client.put(&url),
+        "DELETE" => client.delete(&url),
+        _ => client.get(&url),
+    };
+
+    req = req.header("Content-Type", "application/json");
+
+    if let Some(token) = &input.token {
+        req = req.header("Authorization", format!("Bearer {}", token));
+    }
+
+    if let Some(body) = &input.body {
+        req = req.body(body.to_string());
+    }
+
+    let response = req.send().await.map_err(|e| format!("Network error: {}", e))?;
+    let status = response.status();
+
+    if status.as_u16() == 204 {
+        return Ok(serde_json::json!({"ok": true}));
+    }
+
+    let text = response.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        return Err(format!("{}: {}", status, text));
+    }
+
+    serde_json::from_str(&text).map_err(|_| text)
 }
 
 // ─── Config Commands ───
@@ -631,6 +718,7 @@ fn start_event_bridge(
                             PaleEvent::CallState { .. } => "sip://call-state",
                             PaleEvent::AudioLevel { .. } => "audio://level",
                             PaleEvent::AudioDevicesChanged => "audio://devices-changed",
+                            PaleEvent::RecordingState { .. } => "sip://recording-state",
                             PaleEvent::Error { .. } => "pale://error",
                         };
 
@@ -746,8 +834,12 @@ pub fn run() {
             send_dtmf,
             blind_transfer,
             attended_transfer,
-            // Server login
+            // Recording
+            start_recording,
+            stop_recording,
+            // Server API
             pale_server_login,
+            pale_server_request,
             // Call history
             get_call_history,
             add_call_record,

@@ -13,7 +13,7 @@ import { Badge } from "@/components/ui/Badge";
 import { CallLineIndicator } from "./CallLineIndicator";
 
 export function ActiveCallView() {
-  const { sessions, activeCallId, setMuted, setHeld, removeSession, updateSessionState } =
+  const { sessions, activeCallId, setMuted, setHeld, setRecording, removeSession, updateSessionState } =
     useCallStore();
   const session = sessions.find((s) => s.id === activeCallId);
 
@@ -36,8 +36,24 @@ export function ActiveCallView() {
     (newHeld ? ipc.holdCall(session.id) : ipc.unholdCall(session.id)).catch(() => {});
   }, [session, setHeld, updateSessionState]);
 
+  const handleToggleRecord = useCallback(() => {
+    if (!session) return;
+    if (session.isRecording) {
+      ipc.stopRecording(session.id).catch(() => {});
+      setRecording(session.id, false);
+    } else {
+      ipc.startRecording(session.id)
+        .then(() => setRecording(session.id, true))
+        .catch(() => {});
+    }
+  }, [session, setRecording]);
+
   const handleHangup = useCallback(() => {
     if (!session) return;
+    // Stop recording if active before hanging up
+    if (session.isRecording) {
+      ipc.stopRecording(session.id).catch(() => {});
+    }
     ipc.hangupCall(session.id).catch(() => {});
     updateSessionState(session.id, "terminated");
     setTimeout(() => removeSession(session.id), 300);
@@ -95,6 +111,12 @@ export function ActiveCallView() {
         <CallTimer connectTime={session.connectTime} />
 
         <Badge variant={stateBadgeVariant as any}>{stateLabel}</Badge>
+        {session.isRecording && (
+          <Badge variant="destructive">
+            <span className="inline-block w-2 h-2 rounded-full bg-white animate-pulse mr-1.5" />
+            Recording
+          </Badge>
+        )}
       </div>
 
       {/* Transfer panel or controls */}
@@ -121,8 +143,10 @@ export function ActiveCallView() {
         <CallControls
           isMuted={session.isMuted}
           isHeld={session.isHeld}
+          isRecording={session.isRecording}
           onToggleMute={handleToggleMute}
           onToggleHold={handleToggleHold}
+          onToggleRecord={handleToggleRecord}
           onOpenKeypad={() => setShowDtmf(!showDtmf)}
           onTransfer={() => setShowTransfer(true)}
         />

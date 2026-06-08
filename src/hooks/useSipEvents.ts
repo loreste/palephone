@@ -61,6 +61,7 @@ export function useSipEvents() {
           connectTime: null,
           isMuted: false,
           isHeld: false,
+          isRecording: false,
         });
         shouldNotify().then((ok) => {
           if (ok) toast({ type: "info", title: "Incoming call", description: event.caller_name || event.caller_uri });
@@ -86,6 +87,7 @@ export function useSipEvents() {
             connectTime: state === "connected" ? Date.now() : null,
             isMuted: false,
             isHeld: false,
+            isRecording: false,
           });
           setActiveCallId(event.call_id);
         } else if (existing) {

@@ -14,6 +14,10 @@ use crate::types::*;
 /// so we use a global sender.
 static EVENT_TX: OnceLock<broadcast::Sender<PaleEvent>> = OnceLock::new();
 
+/// Active recorders: call_id → (recorder_id, file_path)
+static ACTIVE_RECORDERS: std::sync::LazyLock<Mutex<std::collections::HashMap<CallId, (pjsip_sys::pjsua_recorder_id, String)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
 /// Send an event from PJSIP callbacks
 fn emit_event(event: PaleEvent) {
     if let Some(tx) = EVENT_TX.get() {
@@ -60,6 +64,13 @@ pub enum EngineCommand {
     ToggleVideo {
         call_id: CallId,
         enabled: bool,
+    },
+    StartRecording {
+        call_id: CallId,
+        file_path: String,
+    },
+    StopRecording {
+        call_id: CallId,
     },
     ListAudioDevices,
     Shutdown,
@@ -274,6 +285,12 @@ impl PjsipEngine {
                         EngineCommand::ToggleVideo { call_id, enabled } => {
                             Self::handle_toggle_video(call_id, enabled);
                         }
+                        EngineCommand::StartRecording { call_id, file_path } => {
+                            Self::handle_start_recording(call_id, &file_path);
+                        }
+                        EngineCommand::StopRecording { call_id } => {
+                            Self::handle_stop_recording(call_id);
+                        }
                         EngineCommand::ListAudioDevices => {
                             Self::handle_list_audio_devices();
                         }
@@ -301,14 +318,24 @@ impl PjsipEngine {
             let mut acc_cfg: pjsip_sys::pjsua_acc_config = std::mem::zeroed();
             pjsip_sys::pjsua_acc_config_default(&mut acc_cfg);
 
+            let sip_uri = if config.sip_uri.starts_with("sip:") || config.sip_uri.starts_with("sips:") {
+                config.sip_uri.clone()
+            } else {
+                format!("sip:{}", config.sip_uri)
+            };
             let id_str = CString::new(format!(
-                "\"{}\" <sip:{}>",
-                config.display_name, config.sip_uri
+                "\"{}\" <{}>",
+                config.display_name, sip_uri
             ))
             .unwrap();
             acc_cfg.id = pj_str_from_cstring(&id_str);
 
-            let reg_uri = CString::new(format!("sip:{}", config.registrar_uri)).unwrap();
+            let reg_uri_str = if config.registrar_uri.starts_with("sip:") || config.registrar_uri.starts_with("sips:") {
+                config.registrar_uri.clone()
+            } else {
+                format!("sip:{}", config.registrar_uri)
+            };
+            let reg_uri = CString::new(reg_uri_str).unwrap();
             acc_cfg.reg_uri = pj_str_from_cstring(&reg_uri);
 
             acc_cfg.cred_count = 1;
@@ -325,19 +352,21 @@ impl PjsipEngine {
 
             acc_cfg.reg_timeout = config.reg_expiry;
 
-            // Set transport based on config
+            // Set transport based on config — strip existing sip:/sips: prefix first
+            let bare_registrar = config.registrar_uri
+                .strip_prefix("sips:")
+                .or_else(|| config.registrar_uri.strip_prefix("sip:"))
+                .unwrap_or(&config.registrar_uri);
             match config.transport {
                 Transport::Tls => {
-                    // Use sips: URI for TLS registration
                     let reg_uri_tls =
-                        CString::new(format!("sips:{}", config.registrar_uri)).unwrap();
+                        CString::new(format!("sips:{}", bare_registrar)).unwrap();
                     acc_cfg.reg_uri = pj_str_from_cstring(&reg_uri_tls);
                 }
                 Transport::Tcp => {
-                    // Append ;transport=tcp to the registrar URI
                     let reg_uri_tcp = CString::new(format!(
                         "sip:{};transport=tcp",
-                        config.registrar_uri
+                        bare_registrar
                     ))
                     .unwrap();
                     acc_cfg.reg_uri = pj_str_from_cstring(&reg_uri_tcp);
@@ -561,6 +590,95 @@ impl PjsipEngine {
             if status != 0 {
                 log::warn!("Failed to toggle video for call {}: status={}", call_id, status);
             }
+        }
+    }
+
+    fn handle_start_recording(call_id: CallId, file_path: &str) {
+        unsafe {
+            // Check if call exists and is active
+            if pjsip_sys::pjsua_call_is_active(call_id) == 0 {
+                emit_event(PaleEvent::Error {
+                    message: format!("Cannot record: call {} is not active", call_id),
+                });
+                return;
+            }
+
+            // Stop any existing recording for this call
+            Self::handle_stop_recording(call_id);
+
+            // Create WAV recorder
+            let file_c = CString::new(file_path).unwrap();
+            let mut file_pj = pj_str_from_cstring(&file_c);
+            let mut recorder_id: pjsip_sys::pjsua_recorder_id = -1;
+
+            let status = pjsip_sys::pjsua_recorder_create(
+                &mut file_pj,
+                0,                    // enc_type: default (WAV)
+                std::ptr::null_mut(), // enc_param
+                -1,                   // max_size: unlimited
+                0,                    // options
+                &mut recorder_id,
+            );
+
+            if status != 0 {
+                emit_event(PaleEvent::Error {
+                    message: format!("Failed to create recorder for call {}: status={}", call_id, status),
+                });
+                return;
+            }
+
+            // Get the conference port for this call and the recorder
+            let call_conf_port = pjsip_sys::pjsua_call_get_conf_port(call_id);
+            let rec_conf_port = pjsip_sys::pjsua_recorder_get_conf_port(recorder_id);
+
+            if call_conf_port < 0 || rec_conf_port < 0 {
+                pjsip_sys::pjsua_recorder_destroy(recorder_id);
+                emit_event(PaleEvent::Error {
+                    message: format!("Failed to get conference ports for recording call {}", call_id),
+                });
+                return;
+            }
+
+            // Connect both directions to recorder:
+            // 1. Remote party's audio → recorder (what the remote says)
+            let status1 = pjsip_sys::pjsua_conf_connect(call_conf_port, rec_conf_port);
+            // 2. Local microphone → recorder (what we say) — port 0 is the sound device
+            let status2 = pjsip_sys::pjsua_conf_connect(0, rec_conf_port);
+
+            if status1 != 0 || status2 != 0 {
+                pjsip_sys::pjsua_recorder_destroy(recorder_id);
+                emit_event(PaleEvent::Error {
+                    message: format!("Failed to connect audio to recorder: status1={}, status2={}", status1, status2),
+                });
+                return;
+            }
+
+            // Store the recorder mapping
+            if let Ok(mut recorders) = ACTIVE_RECORDERS.lock() {
+                recorders.insert(call_id, (recorder_id, file_path.to_string()));
+            }
+
+            log::info!("Recording started for call {} → {}", call_id, file_path);
+            emit_event(PaleEvent::RecordingState {
+                call_id,
+                recording: true,
+                file_path: file_path.to_string(),
+            });
+        }
+    }
+
+    fn handle_stop_recording(call_id: CallId) {
+        let entry = ACTIVE_RECORDERS.lock().ok().and_then(|mut r| r.remove(&call_id));
+        if let Some((recorder_id, file_path)) = entry {
+            unsafe {
+                pjsip_sys::pjsua_recorder_destroy(recorder_id);
+            }
+            log::info!("Recording stopped for call {} — {}", call_id, file_path);
+            emit_event(PaleEvent::RecordingState {
+                call_id,
+                recording: false,
+                file_path,
+            });
         }
     }
 

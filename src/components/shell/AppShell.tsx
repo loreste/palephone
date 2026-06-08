@@ -98,12 +98,12 @@ export function AppShell() {
               return;
             }
           } catch {
-            // Auto-login failed, fall through to wizard check
+            // Auto-login failed, fall through to show wizard
           }
         }
 
-        // No saved credentials and not connected — show wizard
-        if (!config.account && !config.server?.auto_connect && !useServerStore.getState().connected) {
+        // Show wizard if not connected to server — need credentials
+        if (!useServerStore.getState().connected) {
           setShowWizard(true);
         }
 

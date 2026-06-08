@@ -11,6 +11,7 @@ interface CallStoreState {
   updateSessionState: (id: number, state: CallState) => void;
   setMuted: (id: number, muted: boolean) => void;
   setHeld: (id: number, held: boolean) => void;
+  setRecording: (id: number, recording: boolean) => void;
   setActiveCallId: (id: number | null) => void;
   setIncomingCall: (session: CallSession | null) => void;
   setConnectTime: (id: number, time: number) => void;
@@ -49,6 +50,13 @@ export const useCallStore = create<CallStoreState>((set) => ({
     set((state) => ({
       sessions: state.sessions.map((s) =>
         s.id === id ? { ...s, isHeld: held } : s
+      ),
+    })),
+
+  setRecording: (id, recording) =>
+    set((state) => ({
+      sessions: state.sessions.map((s) =>
+        s.id === id ? { ...s, isRecording: recording } : s
       ),
     })),
 
