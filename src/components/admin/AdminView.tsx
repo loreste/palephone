@@ -37,13 +37,15 @@ import {
 import { toast } from "@/components/ui/Toast";
 import { useServerStore } from "@/store/serverStore";
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "media" | "calls" | "conferences" | "files" | "audit";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "media" | "calls" | "conferences" | "files" | "audit";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
   { id: "users", label: "Users", icon: Users },
   { id: "sip", label: "SIP", icon: Server },
   { id: "routing", label: "Routing", icon: GitBranch },
+  { id: "ring_groups", label: "Ring Groups", icon: Users },
+  { id: "ivr", label: "IVR", icon: Router },
   { id: "media", label: "Media", icon: RadioTower },
   { id: "calls", label: "Calls", icon: Router },
   { id: "conferences", label: "Conferences", icon: Mic },
@@ -235,6 +237,8 @@ export function AdminView() {
         {activeTab === "users" && <UsersPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
         {activeTab === "sip" && <SipPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
         {activeTab === "routing" && <RoutingPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
+        {activeTab === "ring_groups" && <RingGroupsPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "ivr" && <IvrPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "media" && <MediaPanel snapshot={snapshot} />}
         {activeTab === "calls" && <CallsPanel snapshot={snapshot} />}
         {activeTab === "conferences" && <ConferencesPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
@@ -725,6 +729,278 @@ function AuditPanel({ snapshot }: { snapshot: AdminSnapshot | null }) {
         event.target ?? "-",
       ])}
     />
+  );
+}
+
+function RingGroupsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [groups, setGroups] = useState<any[]>([]);
+  const [name, setName] = useState("");
+  const [extension, setExtension] = useState("");
+  const [strategy, setStrategy] = useState("simultaneous");
+  const [members, setMembers] = useState("");
+  const [fallback, setFallback] = useState("");
+
+  const load = async () => {
+    try {
+      const res = await fetch(`${baseUrl}/v1/ring-groups`, { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) setGroups(await res.json());
+    } catch { /* ignore */ }
+  };
+
+  useEffect(() => { load(); }, [baseUrl, token]);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      const res = await fetch(`${baseUrl}/v1/ring-groups`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          name,
+          extension: extension.startsWith("sip:") ? extension : `sip:${extension}`,
+          strategy,
+          members: members.split(",").map((m) => m.trim()).filter(Boolean).map((m) => m.startsWith("sip:") ? m : `sip:${m}`),
+          fallback_uri: fallback || null,
+        }),
+      });
+      if (!res.ok) throw new Error((await res.json()).error);
+      setName(""); setExtension(""); setMembers(""); setFallback("");
+      toast({ type: "success", title: "Ring group created" });
+      load();
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Failed" });
+    }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await fetch(`${baseUrl}/v1/ring-groups/${id}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+      toast({ type: "success", title: "Ring group deleted" });
+      load();
+    } catch { toast({ type: "error", title: "Failed to delete" }); }
+  };
+
+  return (
+    <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+      <div className="p-3 border-b border-border-subtle flex items-center gap-2">
+        <Users size={17} className="text-accent" />
+        <h2 className="font-medium">Ring Groups</h2>
+      </div>
+      <form onSubmit={submit} className="p-3 grid md:grid-cols-6 gap-2 border-b border-border-subtle">
+        <Field label="Name" value={name} onChange={setName} />
+        <Field label="Extension" value={extension} onChange={setExtension} />
+        <label className="block">
+          <span className="block text-xs text-tertiary mb-1">Strategy</span>
+          <select value={strategy} onChange={(e) => setStrategy(e.target.value)}
+            className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus">
+            <option value="simultaneous">Ring All</option>
+            <option value="sequential">Sequential</option>
+            <option value="random">Random</option>
+          </select>
+        </label>
+        <Field label="Members (SIP URIs)" value={members} onChange={setMembers} />
+        <Field label="Fallback URI" value={fallback} onChange={setFallback} />
+        <button className="h-10 self-end rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium flex items-center justify-center gap-2">
+          <Plus size={16} /> Create
+        </button>
+      </form>
+      <div className="p-3 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="text-tertiary">
+            <tr className="border-b border-border-subtle">
+              {["Name", "Extension", "Strategy", "Members", "Fallback", ""].map((h) => (
+                <th key={h} className="text-left py-2 px-2 font-medium">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {groups.length === 0 ? (
+              <tr><td colSpan={6} className="py-4 px-2 text-secondary">No ring groups</td></tr>
+            ) : groups.map((g) => (
+              <tr key={g.id} className="border-b border-border-subtle">
+                <td className="py-2 px-2">{g.name}</td>
+                <td className="py-2 px-2 text-secondary">{g.extension}</td>
+                <td className="py-2 px-2">{g.strategy}</td>
+                <td className="py-2 px-2 text-secondary max-w-[200px] truncate">{(g.members || []).join(", ")}</td>
+                <td className="py-2 px-2 text-secondary">{g.fallback_uri || "-"}</td>
+                <td className="py-2 px-2 text-right">
+                  <IconButton label="Delete" tone="danger" onClick={() => remove(g.id)}><Trash2 size={16} /></IconButton>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [ivrs, setIvrs] = useState<any[]>([]);
+  const [name, setName] = useState("");
+  const [extension, setExtension] = useState("");
+  const [greeting, setGreeting] = useState("");
+  const [options, setOptions] = useState<{ digit: string; label: string; destination: string; destination_type: string }[]>([
+    { digit: "1", label: "Sales", destination: "", destination_type: "ring_group" },
+    { digit: "2", label: "Support", destination: "", destination_type: "ring_group" },
+    { digit: "0", label: "Operator", destination: "", destination_type: "user" },
+  ]);
+  const [timeoutDest, setTimeoutDest] = useState("");
+  const [invalidDest, setInvalidDest] = useState("");
+
+  const load = async () => {
+    try {
+      const res = await fetch(`${baseUrl}/v1/ivrs`, { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) setIvrs(await res.json());
+    } catch { /* ignore */ }
+  };
+
+  useEffect(() => { load(); }, [baseUrl, token]);
+
+  const addOption = () => {
+    setOptions([...options, { digit: String(options.length + 1), label: "", destination: "", destination_type: "user" }]);
+  };
+
+  const updateOption = (idx: number, field: string, value: string) => {
+    setOptions(options.map((o, i) => i === idx ? { ...o, [field]: value } : o));
+  };
+
+  const removeOption = (idx: number) => {
+    setOptions(options.filter((_, i) => i !== idx));
+  };
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      const res = await fetch(`${baseUrl}/v1/ivrs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          name,
+          extension: extension.startsWith("sip:") ? extension : `sip:${extension}`,
+          greeting_text: greeting || "Welcome. " + options.map((o) => `Press ${o.digit} for ${o.label}`).join(". ") + ".",
+          timeout_destination: timeoutDest || null,
+          invalid_destination: invalidDest || null,
+          options: options.filter((o) => o.destination).map((o) => ({
+            ...o,
+            destination: o.destination.startsWith("sip:") ? o.destination : `sip:${o.destination}`,
+          })),
+        }),
+      });
+      if (!res.ok) throw new Error((await res.json()).error);
+      setName(""); setExtension(""); setGreeting("");
+      toast({ type: "success", title: "IVR created" });
+      load();
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Failed" });
+    }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await fetch(`${baseUrl}/v1/ivrs/${id}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+      toast({ type: "success", title: "IVR deleted" });
+      load();
+    } catch { toast({ type: "error", title: "Failed to delete" }); }
+  };
+
+  return (
+    <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+      <div className="p-3 border-b border-border-subtle flex items-center gap-2">
+        <Router size={17} className="text-accent" />
+        <h2 className="font-medium">IVR / Auto-Attendant</h2>
+      </div>
+      <form onSubmit={submit} className="p-3 space-y-3 border-b border-border-subtle">
+        <div className="grid md:grid-cols-3 gap-2">
+          <Field label="Name" value={name} onChange={setName} />
+          <Field label="Extension (e.g. main@pale.local)" value={extension} onChange={setExtension} />
+          <Field label="Greeting text" value={greeting} onChange={setGreeting} />
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-semibold text-tertiary uppercase tracking-wider">Menu Options</span>
+            <button type="button" onClick={addOption} className="text-xs text-accent hover:underline">+ Add option</button>
+          </div>
+          <div className="space-y-2">
+            {options.map((opt, idx) => (
+              <div key={idx} className="grid grid-cols-5 gap-2 items-end">
+                <label className="block">
+                  <span className="block text-xs text-tertiary mb-1">Digit</span>
+                  <input value={opt.digit} onChange={(e) => updateOption(idx, "digit", e.target.value)}
+                    className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus" />
+                </label>
+                <label className="block">
+                  <span className="block text-xs text-tertiary mb-1">Label</span>
+                  <input value={opt.label} onChange={(e) => updateOption(idx, "label", e.target.value)}
+                    className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus" />
+                </label>
+                <label className="block">
+                  <span className="block text-xs text-tertiary mb-1">Destination</span>
+                  <input value={opt.destination} onChange={(e) => updateOption(idx, "destination", e.target.value)}
+                    placeholder="user@pale.local or group extension"
+                    className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus" />
+                </label>
+                <label className="block">
+                  <span className="block text-xs text-tertiary mb-1">Type</span>
+                  <select value={opt.destination_type} onChange={(e) => updateOption(idx, "destination_type", e.target.value)}
+                    className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus">
+                    <option value="user">User</option>
+                    <option value="ring_group">Ring Group</option>
+                    <option value="ivr">Sub-IVR</option>
+                    <option value="voicemail">Voicemail</option>
+                    <option value="external">External</option>
+                  </select>
+                </label>
+                <button type="button" onClick={() => removeOption(idx)}
+                  className="h-10 px-2 rounded-md hover:bg-elevated text-tertiary hover:text-destructive text-xs">Remove</button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid md:grid-cols-2 gap-2">
+          <Field label="Timeout destination (no input)" value={timeoutDest} onChange={setTimeoutDest} />
+          <Field label="Invalid input destination" value={invalidDest} onChange={setInvalidDest} />
+        </div>
+
+        <button className="h-10 rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium flex items-center justify-center gap-2 px-4">
+          <Plus size={16} /> Create IVR
+        </button>
+      </form>
+      <div className="p-3 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="text-tertiary">
+            <tr className="border-b border-border-subtle">
+              {["Name", "Extension", "Greeting", "Options", ""].map((h) => (
+                <th key={h} className="text-left py-2 px-2 font-medium">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {ivrs.length === 0 ? (
+              <tr><td colSpan={5} className="py-4 px-2 text-secondary">No IVRs configured</td></tr>
+            ) : ivrs.map((ivr) => (
+              <tr key={ivr.id} className="border-b border-border-subtle">
+                <td className="py-2 px-2">{ivr.name}</td>
+                <td className="py-2 px-2 text-secondary">{ivr.extension}</td>
+                <td className="py-2 px-2 text-secondary max-w-[200px] truncate">{ivr.greeting_text}</td>
+                <td className="py-2 px-2">
+                  {(ivr.options || []).map((o: any) => (
+                    <span key={o.digit} className="inline-block mr-1 px-1.5 py-0.5 rounded bg-elevated text-xs">
+                      {o.digit}: {o.label || o.destination}
+                    </span>
+                  ))}
+                </td>
+                <td className="py-2 px-2 text-right">
+                  <IconButton label="Delete IVR" tone="danger" onClick={() => remove(ivr.id)}><Trash2 size={16} /></IconButton>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 
