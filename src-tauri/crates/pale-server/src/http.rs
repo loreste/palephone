@@ -29,6 +29,7 @@ type SharedState = Arc<AppState>;
 pub fn router(state: SharedState) -> Router {
     let max_upload_bytes = state.max_upload_bytes().min(usize::MAX as u64) as usize;
     Router::new()
+        .route("/", get(root))
         .route("/health", get(health))
         .route("/v1/admin/login", post(admin_login))
         .route("/v1/admin/logout", post(admin_logout))
@@ -142,6 +143,23 @@ fn env_bool(name: &str, default: bool) -> bool {
     std::env::var(name)
         .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(default)
+}
+
+async fn root() -> axum::response::Html<&'static str> {
+    axum::response::Html(r#"<!DOCTYPE html>
+<html><head><title>Pale Server</title><style>
+body{font-family:system-ui;background:#09090b;color:#e4e4e7;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+.c{text-align:center;max-width:400px}h1{font-size:2rem;margin-bottom:.5rem}
+p{color:#a1a1aa;font-size:.875rem}a{color:#6366f1;text-decoration:none}
+.status{display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;margin-right:6px}
+code{background:#27272a;padding:2px 6px;border-radius:4px;font-size:.8rem}
+</style></head><body><div class="c">
+<h1>Pale Server</h1>
+<p><span class="status"></span>Running</p>
+<p style="margin-top:1.5rem">API: <code>GET <a href="/health">/health</a></code></p>
+<p>Docs: <code>GET <a href="/metrics">/metrics</a></code></p>
+<p style="margin-top:1.5rem;color:#71717a">Connect the Pale desktop app via<br>Settings &rarr; Server &rarr; <code>http://localhost:8090</code></p>
+</div></body></html>"#)
 }
 
 async fn health(State(state): State<SharedState>) -> Json<serde_json::Value> {
