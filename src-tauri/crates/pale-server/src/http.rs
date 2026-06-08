@@ -74,6 +74,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/messages/{id}", put(edit_message).delete(delete_message))
         .route("/v1/messages/{id}/react", post(react_to_message))
         .route("/v1/users/{id}/avatar", put(upload_avatar))
+        .route("/v1/call-settings", get(get_call_settings).put(update_call_settings))
+        .route("/v1/call-settings/{sip_uri}", get(get_user_call_settings_admin))
         .route("/v1/ldap/config", get(get_ldap_config).put(set_ldap_config))
         .route("/v1/ldap/test", post(test_ldap_connection))
         .route("/v1/ring-groups", get(list_ring_groups).post(create_ring_group))
@@ -1021,6 +1023,41 @@ async fn upload_avatar(
         "file_id": file_id,
         "url": format!("/v1/files/{}", file_id),
     })))
+}
+
+// ─── User Call Settings (Voicemail + Follow-Me) ───
+
+async fn get_call_settings(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::UserCallSettings>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    Ok(Json(state.get_user_call_settings(&principal)))
+}
+
+async fn update_call_settings(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(settings): Json<crate::UserCallSettings>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let mut s = settings;
+    s.user_sip_uri = principal; // Enforce ownership
+    state.set_user_call_settings(s);
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn get_user_call_settings_admin(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(sip_uri): Path<String>,
+) -> Result<Json<crate::UserCallSettings>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    if !state.is_admin_principal(&principal) {
+        return Err(ApiError::Forbidden);
+    }
+    let uri = if sip_uri.starts_with("sip:") { sip_uri } else { format!("sip:{}", sip_uri) };
+    Ok(Json(state.get_user_call_settings(&uri)))
 }
 
 // ─── LDAP / Active Directory ───

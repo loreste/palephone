@@ -208,6 +208,7 @@ pub struct AppState {
     recordings: ShardedMap<Uuid, CallRecording>,
     ring_groups: ShardedMap<Uuid, RingGroup>,
     ivrs: ShardedMap<Uuid, Ivr>,
+    user_call_settings: ShardedMap<String, UserCallSettings>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
     rate_limits: ShardedMap<String, RateLimitBucket>,
     rate_limit_rps: u32,
@@ -320,6 +321,7 @@ impl AppState {
             recordings: ShardedMap::new(),
             ring_groups: ShardedMap::new(),
             ivrs: ShardedMap::new(),
+            user_call_settings: ShardedMap::new(),
             sse_tx: tokio::sync::broadcast::channel(256).0,
             rate_limits: ShardedMap::new(),
             rate_limit_rps: 100,
@@ -1408,6 +1410,23 @@ impl AppState {
         let _ = self.sse_tx.send(event);
     }
 
+    // ─── User Call Settings ───
+
+    pub fn get_user_call_settings(&self, sip_uri: &str) -> UserCallSettings {
+        self.user_call_settings
+            .get(&sip_uri.to_string())
+            .unwrap_or_else(|| {
+                let mut settings = UserCallSettings::default();
+                settings.user_sip_uri = sip_uri.to_string();
+                settings
+            })
+    }
+
+    pub fn set_user_call_settings(&self, settings: UserCallSettings) {
+        self.user_call_settings
+            .insert(settings.user_sip_uri.clone(), settings);
+    }
+
     // ─── Ring Groups ───
 
     pub fn create_ring_group(&self, input: CreateRingGroupRequest) -> Result<RingGroup, String> {
@@ -2343,6 +2362,60 @@ pub struct CreateRoutingRuleRequest {
     pub target: String,
     pub priority: i32,
     pub enabled: bool,
+}
+
+// ─── User Call Settings (Voicemail + Follow-Me) ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserCallSettings {
+    pub user_sip_uri: String,
+
+    // Voicemail
+    pub voicemail_enabled: bool,
+    pub voicemail_greeting_file_id: Option<Uuid>,
+    pub voicemail_greeting_text: String,
+    pub voicemail_timeout: i32,
+
+    // Follow-me
+    pub followme_enabled: bool,
+    pub followme_numbers: Vec<FollowMeEntry>,
+    pub followme_final: String, // "voicemail", "hangup", or SIP URI
+
+    // Call forwarding
+    pub forward_always: Option<String>,
+    pub forward_busy: Option<String>,
+    pub forward_no_answer: Option<String>,
+
+    // DND
+    pub dnd_enabled: bool,
+    pub dnd_forward_to: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FollowMeEntry {
+    pub number: String,      // SIP URI or phone number
+    pub ring_timeout: i32,   // seconds to ring before trying next
+    pub label: String,       // "Office", "Mobile", "Home"
+}
+
+impl Default for UserCallSettings {
+    fn default() -> Self {
+        Self {
+            user_sip_uri: String::new(),
+            voicemail_enabled: true,
+            voicemail_greeting_file_id: None,
+            voicemail_greeting_text: "Please leave a message after the tone.".to_string(),
+            voicemail_timeout: 20,
+            followme_enabled: false,
+            followme_numbers: Vec::new(),
+            followme_final: "voicemail".to_string(),
+            forward_always: None,
+            forward_busy: None,
+            forward_no_answer: None,
+            dnd_enabled: false,
+            dnd_forward_to: None,
+        }
+    }
 }
 
 // ─── Ring Groups ───

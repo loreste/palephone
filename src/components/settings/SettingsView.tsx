@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { User, Volume2, Globe, Info, Server, Bell } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import { User, Volume2, Globe, Info, Server, Bell, Phone } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useAccountStore } from "@/store/accountStore";
 import { useServerStore } from "@/store/serverStore";
@@ -10,10 +10,11 @@ import { adminLogin, adminLogout, adminBaseUrl } from "@/lib/adminApi";
 import { toast } from "@/components/ui/Toast";
 import type { SipAccount } from "@/types";
 
-type SettingsTab = "account" | "audio" | "network" | "server" | "notifications" | "about";
+type SettingsTab = "account" | "audio" | "network" | "server" | "calls" | "notifications" | "about";
 
 const settingsTabs: { id: SettingsTab; label: string; icon: typeof User }[] = [
   { id: "account", label: "Account", icon: User },
+  { id: "calls", label: "Calls", icon: Phone },
   { id: "audio", label: "Audio", icon: Volume2 },
   { id: "network", label: "Network", icon: Globe },
   { id: "server", label: "Server", icon: Server },
@@ -55,6 +56,7 @@ export function SettingsView() {
       <div className="flex-1 overflow-y-auto px-4 pb-4">
         {activeTab === "account" && <AccountSettingsPanel />}
         {activeTab === "audio" && <AudioSettings />}
+        {activeTab === "calls" && <CallSettingsPanel />}
         {activeTab === "network" && <NetworkSettings />}
         {activeTab === "server" && <ServerSettingsPanel />}
         {activeTab === "notifications" && <NotificationSettingsPanel />}
@@ -440,6 +442,166 @@ function NotificationSettingsPanel() {
           )}
         >
           Save
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function CallSettingsPanel() {
+  const { baseUrl, token, connected } = useServerStore();
+  const [settings, setSettings] = useState<any>(null);
+  const [saving, setSaving] = useState(false);
+  const greetingInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!connected || !baseUrl || !token) return;
+    fetch(`${baseUrl}/v1/call-settings`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => { if (data) setSettings(data); })
+      .catch(() => {});
+  }, [connected, baseUrl, token]);
+
+  const save = async () => {
+    if (!baseUrl || !token || !settings) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`${baseUrl}/v1/call-settings`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify(settings),
+      });
+      if (!res.ok) throw new Error("Failed");
+      toast({ type: "success", title: "Call settings saved" });
+    } catch {
+      toast({ type: "error", title: "Failed to save" });
+    }
+    setSaving(false);
+  };
+
+  const addFollowMe = () => {
+    setSettings({ ...settings, followme_numbers: [...(settings.followme_numbers || []), { number: "", ring_timeout: 15, label: "" }] });
+  };
+
+  const updateFollowMe = (idx: number, field: string, value: string | number) => {
+    const nums = [...(settings.followme_numbers || [])];
+    nums[idx] = { ...nums[idx], [field]: value };
+    setSettings({ ...settings, followme_numbers: nums });
+  };
+
+  const removeFollowMe = (idx: number) => {
+    setSettings({ ...settings, followme_numbers: (settings.followme_numbers || []).filter((_: any, i: number) => i !== idx) });
+  };
+
+  const uploadGreeting = async (file: File) => {
+    if (!baseUrl || !token) return;
+    try {
+      const buffer = await file.arrayBuffer();
+      const res = await fetch(`${baseUrl}/v1/files`, {
+        method: "POST",
+        headers: { "Content-Type": file.type || "audio/wav", Authorization: `Bearer ${token}`, "X-Pale-Filename": file.name },
+        body: buffer,
+      });
+      if (!res.ok) throw new Error("Upload failed");
+      const record = await res.json();
+      setSettings({ ...settings, voicemail_greeting_file_id: record.id });
+      toast({ type: "success", title: "Greeting uploaded" });
+    } catch {
+      toast({ type: "error", title: "Upload failed" });
+    }
+  };
+
+  if (!connected) return <p className="text-sm text-tertiary py-8 text-center">Connect to server to manage call settings</p>;
+  if (!settings) return <p className="text-sm text-tertiary py-8 text-center">Loading...</p>;
+
+  return (
+    <div className="space-y-5">
+      <SectionHeader title="Voicemail" />
+
+      <div className="flex items-center justify-between py-1">
+        <div>
+          <span className="text-sm text-primary">Enable voicemail</span>
+          <p className="text-xs text-tertiary">Callers can leave a message when you don't answer</p>
+        </div>
+        <input type="checkbox" checked={settings.voicemail_enabled} onChange={(e) => setSettings({ ...settings, voicemail_enabled: e.target.checked })}
+          className="w-4 h-4 accent-accent" />
+      </div>
+
+      {settings.voicemail_enabled && (
+        <>
+          <FormField label="Ring timeout (seconds before voicemail)" value={String(settings.voicemail_timeout)}
+            onChange={(v) => setSettings({ ...settings, voicemail_timeout: parseInt(v) || 20 })} placeholder="20" />
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-secondary">Voicemail Greeting</label>
+            <div className="flex items-center gap-3">
+              <input ref={greetingInputRef} type="file" accept="audio/*,.wav,.mp3" className="hidden"
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadGreeting(f); }} />
+              <button onClick={() => greetingInputRef.current?.click()} type="button"
+                className={cn("px-3 py-2 rounded-md border border-border-default text-sm", "hover:bg-elevated")}>
+                Upload Audio
+              </button>
+              {settings.voicemail_greeting_file_id && (
+                <audio controls className="h-8" src={`${baseUrl}/v1/files/${settings.voicemail_greeting_file_id}`} />
+              )}
+            </div>
+            <FormField label="Or use text-to-speech" value={settings.voicemail_greeting_text}
+              onChange={(v) => setSettings({ ...settings, voicemail_greeting_text: v })} placeholder="Please leave a message after the tone." />
+          </div>
+        </>
+      )}
+
+      <SectionHeader title="Follow Me" />
+
+      <div className="flex items-center justify-between py-1">
+        <div>
+          <span className="text-sm text-primary">Enable Follow-Me</span>
+          <p className="text-xs text-tertiary">Ring multiple numbers in sequence before going to voicemail</p>
+        </div>
+        <input type="checkbox" checked={settings.followme_enabled} onChange={(e) => setSettings({ ...settings, followme_enabled: e.target.checked })}
+          className="w-4 h-4 accent-accent" />
+      </div>
+
+      {settings.followme_enabled && (
+        <div className="space-y-2">
+          {(settings.followme_numbers || []).map((entry: any, idx: number) => (
+            <div key={idx} className="flex items-end gap-2">
+              <div className="flex items-center justify-center w-6 h-10 text-xs text-tertiary font-mono">{idx + 1}.</div>
+              <FormField label={idx === 0 ? "Number / SIP URI" : ""} value={entry.number}
+                onChange={(v) => updateFollowMe(idx, "number", v)} placeholder="sip:mobile@carrier.com" />
+              <FormField label={idx === 0 ? "Label" : ""} value={entry.label}
+                onChange={(v) => updateFollowMe(idx, "label", v)} placeholder="Mobile" />
+              <FormField label={idx === 0 ? "Ring (sec)" : ""} value={String(entry.ring_timeout)}
+                onChange={(v) => updateFollowMe(idx, "ring_timeout", parseInt(v) || 15)} placeholder="15" />
+              <button onClick={() => removeFollowMe(idx)} className="h-10 px-2 text-tertiary hover:text-destructive text-xs">Remove</button>
+            </div>
+          ))}
+          <button onClick={addFollowMe} className="text-xs text-accent hover:underline">+ Add number</button>
+
+          <div className="space-y-1.5 pt-2">
+            <label className="text-xs font-medium text-secondary">If nobody answers</label>
+            <select value={settings.followme_final} onChange={(e) => setSettings({ ...settings, followme_final: e.target.value })}
+              className={cn("w-full bg-surface border border-border-subtle rounded-md px-3 py-2 text-sm text-primary focus:outline-none focus:border-border-focus")}>
+              <option value="voicemail">Go to voicemail</option>
+              <option value="hangup">Hang up</option>
+            </select>
+          </div>
+        </div>
+      )}
+
+      <SectionHeader title="Call Forwarding" />
+
+      <FormField label="Always forward to (overrides everything)" value={settings.forward_always || ""}
+        onChange={(v) => setSettings({ ...settings, forward_always: v || null })} placeholder="Leave empty to disable" />
+      <FormField label="Forward when busy" value={settings.forward_busy || ""}
+        onChange={(v) => setSettings({ ...settings, forward_busy: v || null })} placeholder="sip:backup@pale.local" />
+      <FormField label="Forward when no answer" value={settings.forward_no_answer || ""}
+        onChange={(v) => setSettings({ ...settings, forward_no_answer: v || null })} placeholder="sip:receptionist@pale.local" />
+
+      <div className="flex gap-2 pt-3">
+        <button onClick={save} disabled={saving}
+          className={cn("flex-1 px-4 py-2 rounded-md text-sm font-medium", "bg-accent text-inverse hover:bg-accent-hover transition-colors", "disabled:opacity-60")}>
+          {saving ? "Saving..." : "Save Call Settings"}
         </button>
       </div>
     </div>
