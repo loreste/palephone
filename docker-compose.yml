@@ -1,13 +1,11 @@
-# Pale Server — Docker Compose with PostgreSQL
+# Pale Server — Docker Compose with PostgreSQL + TURN
 #
 # Quick start:
 #   export PALE_SERVER_TOKEN=$(openssl rand -base64 32)
 #   export PALE_ADMIN_PASSWORD=$(openssl rand -base64 32)
 #   export PALE_STORAGE_KEY=$(openssl rand -base64 32)
+#   export TURN_SECRET=$(openssl rand -base64 32)
 #   docker compose up -d
-#
-# PostgreSQL is the primary data store. SQLite is kept as a local
-# cache/fallback for the encrypted SIP account credentials.
 
 services:
   postgres:
@@ -27,6 +25,20 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  coturn:
+    image: coturn/coturn:latest
+    container_name: pale-coturn
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./turnserver.conf:/etc/turnserver.conf:ro
+    command: ["-c", "/etc/turnserver.conf"]
+    healthcheck:
+      test: ["CMD", "turnadmin", "-l"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   pale-server:
     build:
@@ -52,9 +64,14 @@ services:
       PALE_STORAGE_KEY: "${PALE_STORAGE_KEY:?Set PALE_STORAGE_KEY (min 24 chars)}"
       PALE_ADMIN_USERNAME: "${PALE_ADMIN_USERNAME:-admin}"
       PALE_SIP_BACKEND: "${PALE_SIP_BACKEND:-pjsip}"
-      PALE_ICE: "${PALE_ICE:-true}"
+      PALE_ICE: "true"
       PALE_STUN_SERVERS: "${PALE_STUN_SERVERS:-stun:stun.l.google.com:19302}"
-      PALE_STUN_IGNORE_FAILURE: "${PALE_STUN_IGNORE_FAILURE:-true}"
+      PALE_STUN_IGNORE_FAILURE: "true"
+      PALE_TURN_SERVER: "${PALE_TURN_SERVER:-turn:127.0.0.1:3478}"
+      PALE_TURN_TRANSPORT: "udp"
+      PALE_TURN_USERNAME: "pale"
+      PALE_TURN_PASSWORD: "${TURN_SECRET:-changeme-turn-secret}"
+      PALE_TURN_REALM: "${PALE_TURN_REALM:-pale.local}"
       PALE_SIP_TLS: "${PALE_SIP_TLS:-false}"
       PALE_SIP_SRTP: "${PALE_SIP_SRTP:-false}"
       PALE_MAX_UPLOAD_BYTES: "${PALE_MAX_UPLOAD_BYTES:-104857600}"
