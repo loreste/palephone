@@ -19,7 +19,9 @@ use uuid::Uuid;
 use crate::{
     safe_filename, sip_ha1, AppState, AuthError, CallStatus, CreateCallRequest,
     CreateConferenceRequest, CreateRoutingRuleRequest, CreateSipAccountRequest, CreateUserRequest,
-    AddRoomMemberRequest, CreateIvrRequest, CreateRingGroupRequest, CreateRoomRequest,
+    AddRoomMemberRequest, CreateBusinessHoursRequest, CreateExtensionRequest,
+    CreateHolidayRequest, CreateIvrRequest, CreatePagingGroupRequest, CreateQueueRequest,
+    CreateRingGroupRequest, CreateRoomRequest, CreateSpeedDialRequest,
     FileRecord, JoinConferenceRequest,
     SendRoomMessageRequest, SetPresenceRequest, SyncCallHistoryRequest,
     UpdateCallStatusRequest, UpdateSipAccountStatusRequest,
@@ -75,6 +77,20 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/messages/{id}/react", post(react_to_message))
         .route("/v1/users/{id}/avatar", put(upload_avatar))
         .route("/v1/call-settings", get(get_call_settings).put(update_call_settings))
+        .route("/v1/queues", get(list_queues).post(create_queue))
+        .route("/v1/queues/{id}", get(get_queue).delete(delete_queue))
+        .route("/v1/extensions", get(list_extensions).post(create_extension))
+        .route("/v1/extensions/{ext}", delete(delete_extension))
+        .route("/v1/business-hours", get(list_business_hours).post(create_business_hours))
+        .route("/v1/business-hours/{id}", delete(delete_business_hours_entry))
+        .route("/v1/holidays", get(list_holidays).post(create_holiday))
+        .route("/v1/holidays/{id}", delete(delete_holiday))
+        .route("/v1/park", get(list_parked).post(park_call))
+        .route("/v1/park/{slot}", post(pickup_call))
+        .route("/v1/speed-dials", get(list_speed_dials).post(create_speed_dial))
+        .route("/v1/cdrs", get(list_cdrs))
+        .route("/v1/paging-groups", get(list_paging_groups).post(create_paging_group))
+        .route("/v1/paging-groups/{id}", delete(delete_paging_group))
         .route("/v1/call-settings/{sip_uri}", get(get_user_call_settings_admin))
         .route("/v1/ldap/config", get(get_ldap_config).put(set_ldap_config))
         .route("/v1/ldap/test", post(test_ldap_connection))
@@ -1023,6 +1039,114 @@ async fn upload_avatar(
         "file_id": file_id,
         "url": format!("/v1/files/{}", file_id),
     })))
+}
+
+// ─── PBX Features ───
+
+async fn list_queues(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::CallQueue>>, ApiError> {
+    require_bearer(&headers, &state)?; Ok(Json(state.list_queues()))
+}
+async fn create_queue(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<CreateQueueRequest>) -> Result<Json<crate::CallQueue>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    let q = state.create_queue(input).map_err(|e| ApiError::Conflict(e))?;
+    state.record_audit_event(&p, "queue.created", Some(q.id.to_string()));
+    Ok(Json(q))
+}
+async fn get_queue(State(state): State<SharedState>, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Json<crate::CallQueue>, ApiError> {
+    require_bearer(&headers, &state)?; state.queue(id).map(Json).ok_or(ApiError::NotFound)
+}
+async fn delete_queue(State(state): State<SharedState>, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    state.delete_queue(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&p, "queue.deleted", Some(id.to_string()));
+    Ok(Json(json!({"ok":true})))
+}
+
+async fn list_extensions(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::Extension>>, ApiError> {
+    require_bearer(&headers, &state)?; Ok(Json(state.list_extensions()))
+}
+async fn create_extension(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<CreateExtensionRequest>) -> Result<Json<crate::Extension>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    let e = state.create_extension(input).map_err(|e| ApiError::Conflict(e))?;
+    state.record_audit_event(&p, "extension.created", Some(e.extension.clone()));
+    Ok(Json(e))
+}
+async fn delete_extension(State(state): State<SharedState>, headers: HeaderMap, Path(ext): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    state.delete_extension(&ext).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&p, "extension.deleted", Some(ext)); Ok(Json(json!({"ok":true})))
+}
+
+async fn list_business_hours(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::BusinessHours>>, ApiError> {
+    require_bearer(&headers, &state)?; Ok(Json(state.list_business_hours()))
+}
+async fn create_business_hours(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<CreateBusinessHoursRequest>) -> Result<Json<crate::BusinessHours>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    let bh = state.create_business_hours(input);
+    state.record_audit_event(&p, "business_hours.created", Some(bh.id.to_string()));
+    Ok(Json(bh))
+}
+async fn delete_business_hours_entry(State(state): State<SharedState>, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    state.delete_business_hours(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&p, "business_hours.deleted", Some(id.to_string())); Ok(Json(json!({"ok":true})))
+}
+
+async fn list_holidays(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::Holiday>>, ApiError> {
+    require_bearer(&headers, &state)?; Ok(Json(state.list_holidays()))
+}
+async fn create_holiday(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<CreateHolidayRequest>) -> Result<Json<crate::Holiday>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    let h = state.create_holiday(input);
+    state.record_audit_event(&p, "holiday.created", Some(h.id.to_string()));
+    Ok(Json(h))
+}
+async fn delete_holiday(State(state): State<SharedState>, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    state.delete_holiday(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&p, "holiday.deleted", Some(id.to_string())); Ok(Json(json!({"ok":true})))
+}
+
+#[derive(serde::Deserialize)]
+struct ParkRequest { call_id: String, caller_uri: String, caller_name: Option<String>, slot: String }
+async fn park_call(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<ParkRequest>) -> Result<Json<crate::ParkedCall>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    Ok(Json(state.park_call(&input.slot, &input.call_id, &p, &input.caller_uri, input.caller_name.as_deref().unwrap_or(""))))
+}
+async fn pickup_call(State(state): State<SharedState>, headers: HeaderMap, Path(slot): Path<String>) -> Result<Json<crate::ParkedCall>, ApiError> {
+    require_bearer(&headers, &state)?; state.pickup_parked_call(&slot).map(Json).ok_or(ApiError::NotFound)
+}
+async fn list_parked(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::ParkedCall>>, ApiError> {
+    require_bearer(&headers, &state)?; Ok(Json(state.list_parked_calls()))
+}
+
+async fn list_speed_dials(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::SpeedDial>>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?; Ok(Json(state.speed_dials_for_user(&p)))
+}
+async fn create_speed_dial(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<CreateSpeedDialRequest>) -> Result<Json<crate::SpeedDial>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    Ok(Json(state.set_speed_dial(Some(&p), input)))
+}
+
+#[derive(serde::Deserialize)]
+struct CdrQuery { limit: Option<usize> }
+async fn list_cdrs(State(state): State<SharedState>, headers: HeaderMap, Query(q): Query<CdrQuery>) -> Result<Json<Vec<crate::CallDetailRecord>>, ApiError> {
+    require_bearer(&headers, &state)?; Ok(Json(state.list_cdrs(q.limit.unwrap_or(100))))
+}
+
+async fn list_paging_groups(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::PagingGroup>>, ApiError> {
+    require_bearer(&headers, &state)?; Ok(Json(state.list_paging_groups()))
+}
+async fn create_paging_group(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<CreatePagingGroupRequest>) -> Result<Json<crate::PagingGroup>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    let pg = state.create_paging_group(input);
+    state.record_audit_event(&p, "paging_group.created", Some(pg.id.to_string()));
+    Ok(Json(pg))
+}
+async fn delete_paging_group(State(state): State<SharedState>, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    state.delete_paging_group(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&p, "paging_group.deleted", Some(id.to_string())); Ok(Json(json!({"ok":true})))
 }
 
 // ─── User Call Settings (Voicemail + Follow-Me) ───

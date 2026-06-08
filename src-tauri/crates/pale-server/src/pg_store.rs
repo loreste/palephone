@@ -53,6 +53,7 @@ impl PgStore {
             include_str!("../migrations/005_user_auth.sql"),
             include_str!("../migrations/006_call_routing.sql"),
             include_str!("../migrations/007_voicemail_followme.sql"),
+            include_str!("../migrations/008_pbx_features.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {

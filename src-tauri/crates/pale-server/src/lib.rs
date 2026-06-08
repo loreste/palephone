@@ -209,6 +209,14 @@ pub struct AppState {
     ring_groups: ShardedMap<Uuid, RingGroup>,
     ivrs: ShardedMap<Uuid, Ivr>,
     user_call_settings: ShardedMap<String, UserCallSettings>,
+    call_queues: ShardedMap<Uuid, CallQueue>,
+    extensions: ShardedMap<String, Extension>,
+    business_hours: ShardedMap<Uuid, BusinessHours>,
+    holidays: ShardedMap<Uuid, Holiday>,
+    parked_calls: ShardedMap<String, ParkedCall>,
+    speed_dials: RwLock<Vec<SpeedDial>>,
+    cdrs: RwLock<Vec<CallDetailRecord>>,
+    paging_groups: ShardedMap<Uuid, PagingGroup>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
     rate_limits: ShardedMap<String, RateLimitBucket>,
     rate_limit_rps: u32,
@@ -322,6 +330,14 @@ impl AppState {
             ring_groups: ShardedMap::new(),
             ivrs: ShardedMap::new(),
             user_call_settings: ShardedMap::new(),
+            call_queues: ShardedMap::new(),
+            extensions: ShardedMap::new(),
+            business_hours: ShardedMap::new(),
+            holidays: ShardedMap::new(),
+            parked_calls: ShardedMap::new(),
+            speed_dials: RwLock::new(Vec::new()),
+            cdrs: RwLock::new(Vec::new()),
+            paging_groups: ShardedMap::new(),
             sse_tx: tokio::sync::broadcast::channel(256).0,
             rate_limits: ShardedMap::new(),
             rate_limit_rps: 100,
@@ -1427,6 +1443,176 @@ impl AppState {
             .insert(settings.user_sip_uri.clone(), settings);
     }
 
+    // ─── Call Queues ───
+
+    pub fn create_queue(&self, input: CreateQueueRequest) -> Result<CallQueue, String> {
+        let queue = CallQueue {
+            id: Uuid::new_v4(),
+            name: input.name,
+            extension: input.extension,
+            strategy: input.strategy.unwrap_or_else(|| "round_robin".to_string()),
+            max_wait_time: input.max_wait_time.unwrap_or(300),
+            max_queue_size: input.max_queue_size.unwrap_or(50),
+            wrap_up_time: input.wrap_up_time.unwrap_or(10),
+            announce_position: true,
+            announce_interval: 30,
+            hold_music_file_id: input.hold_music_file_id,
+            overflow_destination: input.overflow_destination,
+            agents: input.agents.into_iter().map(|a| QueueAgent {
+                agent_uri: a.agent_uri,
+                priority: a.priority.unwrap_or(1),
+                skills: a.skills.unwrap_or_default(),
+                state: "available".to_string(),
+                calls_handled: 0,
+            }).collect(),
+            enabled: true,
+            created_at: Utc::now(),
+        };
+        self.call_queues.insert(queue.id, queue.clone());
+        Ok(queue)
+    }
+
+    pub fn list_queues(&self) -> Vec<CallQueue> { self.call_queues.values() }
+    pub fn queue(&self, id: Uuid) -> Option<CallQueue> { self.call_queues.get(&id) }
+    pub fn delete_queue(&self, id: Uuid) -> Option<CallQueue> { self.call_queues.remove(&id) }
+
+    pub fn queue_by_extension(&self, ext: &str) -> Option<CallQueue> {
+        self.call_queues.values().into_iter().find(|q| q.extension == ext && q.enabled)
+    }
+
+    // ─── Extensions ───
+
+    pub fn create_extension(&self, input: CreateExtensionRequest) -> Result<Extension, String> {
+        if self.extensions.get(&input.extension).is_some() {
+            return Err(format!("Extension {} already exists", input.extension));
+        }
+        let ext = Extension {
+            extension: input.extension.clone(),
+            destination: input.destination,
+            destination_type: input.destination_type.unwrap_or_else(|| "user".to_string()),
+            label: input.label.unwrap_or_default(),
+        };
+        self.extensions.insert(input.extension, ext.clone());
+        Ok(ext)
+    }
+
+    pub fn list_extensions(&self) -> Vec<Extension> { self.extensions.values() }
+    pub fn resolve_extension(&self, ext: &str) -> Option<Extension> { self.extensions.get(&ext.to_string()) }
+    pub fn delete_extension(&self, ext: &str) -> Option<Extension> { self.extensions.remove(&ext.to_string()) }
+
+    // ─── Business Hours ───
+
+    pub fn create_business_hours(&self, input: CreateBusinessHoursRequest) -> BusinessHours {
+        let bh = BusinessHours {
+            id: Uuid::new_v4(),
+            name: input.name,
+            timezone: input.timezone.unwrap_or_else(|| "America/New_York".to_string()),
+            schedule: input.schedule,
+            after_hours_destination: input.after_hours_destination,
+            enabled: true,
+            created_at: Utc::now(),
+        };
+        self.business_hours.insert(bh.id, bh.clone());
+        bh
+    }
+
+    pub fn list_business_hours(&self) -> Vec<BusinessHours> { self.business_hours.values() }
+    pub fn delete_business_hours(&self, id: Uuid) -> Option<BusinessHours> { self.business_hours.remove(&id) }
+
+    // ─── Holidays ───
+
+    pub fn create_holiday(&self, input: CreateHolidayRequest) -> Holiday {
+        let h = Holiday {
+            id: Uuid::new_v4(),
+            name: input.name,
+            date: input.date,
+            recurring: input.recurring.unwrap_or(false),
+            destination: input.destination,
+            created_at: Utc::now(),
+        };
+        self.holidays.insert(h.id, h.clone());
+        h
+    }
+
+    pub fn list_holidays(&self) -> Vec<Holiday> { self.holidays.values() }
+    pub fn delete_holiday(&self, id: Uuid) -> Option<Holiday> { self.holidays.remove(&id) }
+
+    // ─── Call Park ───
+
+    pub fn park_call(&self, slot: &str, call_id: &str, parked_by: &str, caller_uri: &str, caller_name: &str) -> ParkedCall {
+        let pc = ParkedCall {
+            slot: slot.to_string(),
+            call_id: call_id.to_string(),
+            parked_by: parked_by.to_string(),
+            caller_uri: caller_uri.to_string(),
+            caller_name: caller_name.to_string(),
+            parked_at: Utc::now(),
+        };
+        self.parked_calls.insert(slot.to_string(), pc.clone());
+        pc
+    }
+
+    pub fn pickup_parked_call(&self, slot: &str) -> Option<ParkedCall> {
+        self.parked_calls.remove(&slot.to_string())
+    }
+
+    pub fn list_parked_calls(&self) -> Vec<ParkedCall> { self.parked_calls.values() }
+
+    // ─── Speed Dial ───
+
+    pub fn set_speed_dial(&self, owner: Option<&str>, input: CreateSpeedDialRequest) -> SpeedDial {
+        let sd = SpeedDial {
+            code: input.code,
+            destination: input.destination,
+            label: input.label.unwrap_or_default(),
+            owner_uri: owner.map(String::from),
+        };
+        let mut dials = self.speed_dials.write().expect("speed dials lock");
+        dials.retain(|d| !(d.code == sd.code && d.owner_uri == sd.owner_uri));
+        dials.push(sd.clone());
+        sd
+    }
+
+    pub fn speed_dials_for_user(&self, owner: &str) -> Vec<SpeedDial> {
+        self.speed_dials.read().expect("speed dials lock")
+            .iter()
+            .filter(|d| d.owner_uri.as_deref() == Some(owner) || d.owner_uri.is_none())
+            .cloned()
+            .collect()
+    }
+
+    // ─── CDR ───
+
+    pub fn record_cdr(&self, cdr: CallDetailRecord) {
+        let mut cdrs = self.cdrs.write().expect("cdrs lock");
+        cdrs.push(cdr);
+        if cdrs.len() > 100_000 {
+            let overflow = cdrs.len() - 100_000;
+            cdrs.drain(..overflow);
+        }
+    }
+
+    pub fn list_cdrs(&self, limit: usize) -> Vec<CallDetailRecord> {
+        let cdrs = self.cdrs.read().expect("cdrs lock");
+        cdrs.iter().rev().take(limit).cloned().collect()
+    }
+
+    // ─── Paging Groups ───
+
+    pub fn create_paging_group(&self, input: CreatePagingGroupRequest) -> PagingGroup {
+        let pg = PagingGroup {
+            id: Uuid::new_v4(),
+            name: input.name,
+            extension: input.extension,
+            members: input.members,
+        };
+        self.paging_groups.insert(pg.id, pg.clone());
+        pg
+    }
+
+    pub fn list_paging_groups(&self) -> Vec<PagingGroup> { self.paging_groups.values() }
+    pub fn delete_paging_group(&self, id: Uuid) -> Option<PagingGroup> { self.paging_groups.remove(&id) }
+
     // ─── Ring Groups ───
 
     pub fn create_ring_group(&self, input: CreateRingGroupRequest) -> Result<RingGroup, String> {
@@ -2498,6 +2684,179 @@ pub struct ResolvedRoute {
     pub destination: String,     // SIP URI or ID
     pub ring_group: Option<RingGroup>,
     pub ivr: Option<Ivr>,
+}
+
+// ─── Call Queues (ACD) ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallQueue {
+    pub id: Uuid,
+    pub name: String,
+    pub extension: String,
+    pub strategy: String,
+    pub max_wait_time: i32,
+    pub max_queue_size: i32,
+    pub wrap_up_time: i32,
+    pub announce_position: bool,
+    pub announce_interval: i32,
+    pub hold_music_file_id: Option<Uuid>,
+    pub overflow_destination: Option<String>,
+    pub agents: Vec<QueueAgent>,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueAgent {
+    pub agent_uri: String,
+    pub priority: i32,
+    pub skills: Vec<String>,
+    pub state: String,
+    pub calls_handled: i32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateQueueRequest {
+    pub name: String,
+    pub extension: String,
+    pub strategy: Option<String>,
+    pub max_wait_time: Option<i32>,
+    pub max_queue_size: Option<i32>,
+    pub wrap_up_time: Option<i32>,
+    pub hold_music_file_id: Option<Uuid>,
+    pub overflow_destination: Option<String>,
+    pub agents: Vec<QueueAgentInput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct QueueAgentInput {
+    pub agent_uri: String,
+    pub priority: Option<i32>,
+    pub skills: Option<Vec<String>>,
+}
+
+// ─── Business Hours ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusinessHours {
+    pub id: Uuid,
+    pub name: String,
+    pub timezone: String,
+    pub schedule: serde_json::Value,
+    pub after_hours_destination: Option<String>,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateBusinessHoursRequest {
+    pub name: String,
+    pub timezone: Option<String>,
+    pub schedule: serde_json::Value,
+    pub after_hours_destination: Option<String>,
+}
+
+// ─── Holiday Calendar ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Holiday {
+    pub id: Uuid,
+    pub name: String,
+    pub date: String,
+    pub recurring: bool,
+    pub destination: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateHolidayRequest {
+    pub name: String,
+    pub date: String,
+    pub recurring: Option<bool>,
+    pub destination: Option<String>,
+}
+
+// ─── Extensions ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Extension {
+    pub extension: String,
+    pub destination: String,
+    pub destination_type: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateExtensionRequest {
+    pub extension: String,
+    pub destination: String,
+    pub destination_type: Option<String>,
+    pub label: Option<String>,
+}
+
+// ─── Call Park ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParkedCall {
+    pub slot: String,
+    pub call_id: String,
+    pub parked_by: String,
+    pub caller_uri: String,
+    pub caller_name: String,
+    pub parked_at: DateTime<Utc>,
+}
+
+// ─── Speed Dial ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeedDial {
+    pub code: String,
+    pub destination: String,
+    pub label: String,
+    pub owner_uri: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateSpeedDialRequest {
+    pub code: String,
+    pub destination: String,
+    pub label: Option<String>,
+}
+
+// ─── CDR ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallDetailRecord {
+    pub id: Uuid,
+    pub call_id: Option<String>,
+    pub caller_uri: String,
+    pub callee_uri: String,
+    pub direction: String,
+    pub start_time: DateTime<Utc>,
+    pub answer_time: Option<DateTime<Utc>>,
+    pub end_time: Option<DateTime<Utc>>,
+    pub duration_secs: i32,
+    pub disposition: String,
+    pub queue_name: Option<String>,
+    pub queue_wait_secs: Option<i32>,
+    pub recorded: bool,
+}
+
+// ─── Paging Groups ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PagingGroup {
+    pub id: Uuid,
+    pub name: String,
+    pub extension: String,
+    pub members: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreatePagingGroupRequest {
+    pub name: String,
+    pub extension: String,
+    pub members: Vec<String>,
 }
 
 /// Parse "sip:user@domain" into (user, domain)
