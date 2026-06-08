@@ -70,6 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(100);
     app_state.set_rate_limit_rps(rate_limit_rps);
+    app_state.set_sip_registrar(config.sip_addr.to_string());
 
     let state = Arc::new(app_state);
     tokio::fs::create_dir_all(state.files_dir()).await?;

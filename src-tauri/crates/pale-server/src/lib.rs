@@ -210,6 +210,7 @@ pub struct AppState {
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
     rate_limits: ShardedMap<String, RateLimitBucket>,
     rate_limit_rps: u32,
+    sip_registrar: String,
     pg: Option<PgStore>,
     pg_failure_count: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -320,9 +321,14 @@ impl AppState {
             sse_tx: tokio::sync::broadcast::channel(256).0,
             rate_limits: ShardedMap::new(),
             rate_limit_rps: 100,
+            sip_registrar: "127.0.0.1:5060".to_string(),
             pg: None,
             pg_failure_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    pub fn set_sip_registrar(&mut self, addr: String) {
+        self.sip_registrar = addr;
     }
 
     pub fn set_rate_limit_rps(&mut self, rps: u32) {
@@ -752,9 +758,9 @@ impl AppState {
             .and_then(|(username, domain)| {
                 self.sip_account(&username, &domain).map(|_| SipCredentials {
                     sip_uri: user.sip_uri.clone(),
-                    registrar_uri: domain.clone(),
+                    registrar_uri: format!("sip:{}", self.sip_registrar),
                     username: username.clone(),
-                    password: password.to_string(), // Return the plaintext for client SIP registration
+                    password: password.to_string(),
                     transport: "udp".to_string(),
                     domain,
                 })
