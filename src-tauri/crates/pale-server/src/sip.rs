@@ -263,13 +263,14 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
     // ── Queue/ACD routing ──
     if let Some(queue) = state.queue_by_extension(&requested_uri) {
         if let Some(agent_uri) = state.next_available_agent(&queue) {
-            state.set_agent_state(&agent_uri, "on_call", None);
-            state.upsert_sip_dialog(UpsertSipDialog {
-                call_id: call_id_str.clone(), from_uri: from_aor.clone(),
-                to_uri: requested_uri.clone(), target_contact: Some(agent_uri.clone()),
-                status: SipDialogStatus::Ringing, media_types: media.clone(),
-            });
+            // Verify agent is registered before marking on_call
             if let Some(reg) = state.registration_for(&agent_uri) {
+                state.set_agent_state(&agent_uri, "on_call", None);
+                state.upsert_sip_dialog(UpsertSipDialog {
+                    call_id: call_id_str.clone(), from_uri: from_aor.clone(),
+                    to_uri: requested_uri.clone(), target_contact: Some(agent_uri.clone()),
+                    status: SipDialogStatus::Ringing, media_types: media.clone(),
+                });
                 return Some(request.response(302, "Moved Temporarily",
                     &[("Contact", format!("<{}>", reg.contact))]));
             }
@@ -453,9 +454,13 @@ fn handle_bye(request: &SipRequest, state: &AppState) -> Option<String> {
         let _ = state.update_sip_dialog_status(call_id, SipDialogStatus::Ended);
         // Finalize CDR with answered disposition (call completed normally)
         state.record_cdr_end(call_id, "answered");
-        // Release agent back to available if this was a queue call
+        // Release agent back to available if they are a queue agent currently on_call
         if let Some(from_uri) = request.header("from").and_then(extract_sip_uri) {
-            state.set_agent_state(&from_uri, "available", Some("call_ended".to_string()));
+            if let Some(profile) = state.agent_profile(&from_uri) {
+                if profile.state == "on_call" {
+                    state.set_agent_state(&from_uri, "available", Some("call_ended".to_string()));
+                }
+            }
         }
     }
     Some(request.response(200, "OK", &[]))
@@ -536,7 +541,9 @@ fn handle_refer(request: &SipRequest, state: &AppState) -> Option<String> {
             .header("from")
             .and_then(extract_sip_uri)
             .unwrap_or_default();
-        state.park_call(slot, call_id, &from_uri, &from_uri, "");
+        // parked_by = person parking (from), caller_uri = original caller (to of the dialog)
+        let to_uri = request.uri();
+        state.park_call(slot, call_id, &from_uri, &to_uri, "");
         if let Some(cid) = request.call_id() {
             let _ = state.update_sip_dialog_status(cid, SipDialogStatus::Ended);
         }

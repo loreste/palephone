@@ -10,6 +10,7 @@ import * as ipc from "@/lib/tauri";
 import { TransferPanel } from "@/components/transfer/TransferPanel";
 import { useCallStore } from "@/store/callStore";
 import { Badge } from "@/components/ui/Badge";
+import { toast } from "@/components/ui/Toast";
 import { CallLineIndicator } from "./CallLineIndicator";
 
 export function ActiveCallView() {
@@ -59,11 +60,17 @@ export function ActiveCallView() {
     setTimeout(() => removeSession(session.id), 300);
   }, [session, removeSession, updateSessionState]);
 
-  const handleParkCall = useCallback(() => {
+  const handleParkCall = useCallback(async () => {
     if (!session) return;
-    // Park the call using blind transfer to a park slot
-    const slot = `sip:park-${700 + Math.floor(Math.random() * 100)}@pale.local`;
-    ipc.blindTransfer(session.id, slot).catch(() => {});
+    // Park the call using blind transfer to an auto-assigned park slot
+    const slot = `sip:park-${701 + (session.id % 99)}@pale.local`;
+    try {
+      await ipc.blindTransfer(session.id, slot);
+      toast({ type: "success", title: `Call parked in slot ${701 + (session.id % 99)}` });
+    } catch {
+      toast({ type: "error", title: "Failed to park call" });
+      return;
+    }
     updateSessionState(session.id, "terminated");
     setTimeout(() => removeSession(session.id), 300);
   }, [session, removeSession, updateSessionState]);

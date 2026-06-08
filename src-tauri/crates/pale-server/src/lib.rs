@@ -1893,7 +1893,8 @@ impl AppState {
                 available.iter().min_by_key(|a| a.calls_handled).map(|a| a.agent_uri.clone())
             }
             "random" => {
-                let idx = rand::Rng::gen_range(&mut rand::thread_rng(), 0..available.len());
+                use rand::Rng;
+                let idx = rand::thread_rng().gen_range(0..available.len());
                 Some(available[idx].agent_uri.clone())
             }
             _ => available.first().map(|a| a.agent_uri.clone()),
