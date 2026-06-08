@@ -685,6 +685,10 @@ impl AppState {
         self.persist(&user);
         let u = user.clone();
         self.pg_spawn(move |pg| Box::pin(async move { pg.insert_user(&u).await }));
+        self.broadcast_sse(SseEvent {
+            event_type: "user_created".to_string(),
+            payload: serde_json::to_value(&user).unwrap_or_default(),
+        });
 
         // Auto-provision SIP account when creating a user with a password
         if let Some(password) = &input.password {

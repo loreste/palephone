@@ -91,6 +91,11 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
         // Read receipt received — could update message badges
       });
 
+      es.addEventListener("user_created", () => {
+        // Trigger admin panel refresh via custom event
+        window.dispatchEvent(new CustomEvent("pale:admin-refresh"));
+      });
+
       es.onerror = () => {
         es.close();
         sourceRef.current = null;

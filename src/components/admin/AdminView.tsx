@@ -89,13 +89,18 @@ export function AdminView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authenticated]);
 
-  // Auto-refresh via polling (uses global SSE connection from useServerEvents, no duplicate)
+  // Auto-refresh via SSE events + polling fallback
   useEffect(() => {
     if (!authenticated || !token) return;
-    const interval = window.setInterval(() => {
-      refresh();
-    }, 30000); // Refresh every 30 seconds
-    return () => window.clearInterval(interval);
+    // Instant refresh on SSE-triggered events
+    const handler = () => refresh();
+    window.addEventListener("pale:admin-refresh", handler);
+    // Polling fallback every 30s
+    const interval = window.setInterval(handler, 30000);
+    return () => {
+      window.removeEventListener("pale:admin-refresh", handler);
+      window.clearInterval(interval);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authenticated, token]);
 
