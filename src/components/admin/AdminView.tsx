@@ -37,17 +37,23 @@ import {
 import { toast } from "@/components/ui/Toast";
 import { useServerStore } from "@/store/serverStore";
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "media" | "calls" | "conferences" | "files" | "directory" | "audit";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "conferences" | "files" | "directory" | "audit";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
   { id: "users", label: "Users", icon: Users },
   { id: "sip", label: "SIP", icon: Server },
+  { id: "extensions", label: "Extensions", icon: Server },
   { id: "routing", label: "Routing", icon: GitBranch },
   { id: "ring_groups", label: "Ring Groups", icon: Users },
+  { id: "queues", label: "Queues", icon: Users },
   { id: "ivr", label: "IVR", icon: Router },
+  { id: "hours", label: "Hours", icon: Activity },
+  { id: "holidays", label: "Holidays", icon: Activity },
+  { id: "paging", label: "Paging", icon: RadioTower },
   { id: "media", label: "Media", icon: RadioTower },
   { id: "calls", label: "Calls", icon: Router },
+  { id: "cdrs", label: "CDR", icon: ClipboardList },
   { id: "conferences", label: "Conferences", icon: Mic },
   { id: "files", label: "Files", icon: FileText },
   { id: "directory", label: "Directory", icon: Users },
@@ -238,9 +244,15 @@ export function AdminView() {
         {activeTab === "users" && <UsersPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
         {activeTab === "sip" && <SipPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
         {activeTab === "routing" && <RoutingPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
+        {activeTab === "extensions" && <CrudPanel baseUrl={baseUrl} token={token} endpoint="extensions" title="Extensions" icon={Server} columns={["Extension", "Destination", "Type", "Label"]} rowFn={(e: any) => [e.extension, e.destination, e.destination_type, e.label || "-"]} fields={[["Extension", "extension"], ["Destination (SIP URI)", "destination"], ["Type", "destination_type", "user"], ["Label", "label"]]} />}
         {activeTab === "ring_groups" && <RingGroupsPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "queues" && <QueuesPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "ivr" && <IvrPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "hours" && <CrudPanel baseUrl={baseUrl} token={token} endpoint="business-hours" title="Business Hours" icon={Activity} columns={["Name", "Timezone", "After Hours"]} rowFn={(h: any) => [h.name, h.timezone, h.after_hours_destination || "voicemail"]} fields={[["Name", "name"], ["Timezone", "timezone", "America/New_York"], ["After Hours Destination", "after_hours_destination"]]} extraJson={{ schedule: { mon: { open: "09:00", close: "17:00" }, tue: { open: "09:00", close: "17:00" }, wed: { open: "09:00", close: "17:00" }, thu: { open: "09:00", close: "17:00" }, fri: { open: "09:00", close: "17:00" } } }} />}
+        {activeTab === "holidays" && <CrudPanel baseUrl={baseUrl} token={token} endpoint="holidays" title="Holidays" icon={Activity} columns={["Name", "Date", "Recurring", "Destination"]} rowFn={(h: any) => [h.name, h.date, h.recurring ? "Yes" : "No", h.destination || "-"]} fields={[["Name", "name"], ["Date (YYYY-MM-DD)", "date"], ["Destination", "destination"]]} extraJson={{ recurring: false }} />}
+        {activeTab === "paging" && <CrudPanel baseUrl={baseUrl} token={token} endpoint="paging-groups" title="Paging Groups" icon={RadioTower} columns={["Name", "Extension", "Members"]} rowFn={(p: any) => [p.name, p.extension, (p.members || []).join(", ")]} fields={[["Name", "name"], ["Extension", "extension"], ["Members (comma-separated)", "members_csv"]]} transformSubmit={(d: any) => ({ ...d, members: (d.members_csv || "").split(",").map((m: string) => m.trim()).filter(Boolean), members_csv: undefined })} />}
         {activeTab === "media" && <MediaPanel snapshot={snapshot} />}
+        {activeTab === "cdrs" && <CdrsPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "calls" && <CallsPanel snapshot={snapshot} />}
         {activeTab === "conferences" && <ConferencesPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
         {activeTab === "files" && <FilesPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
@@ -1165,6 +1177,242 @@ function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
         </table>
       </div>
     </section>
+  );
+}
+
+function CrudPanel({ baseUrl, token, endpoint, title, icon: Icon, columns, rowFn, fields, extraJson, transformSubmit }: {
+  baseUrl: string; token: string; endpoint: string; title: string; icon: LucideIcon;
+  columns: string[]; rowFn: (item: any) => string[];
+  fields: [string, string, string?][]; // [label, key, default?]
+  extraJson?: Record<string, any>;
+  transformSubmit?: (data: any) => any;
+}) {
+  const [items, setItems] = useState<any[]>([]);
+  const [form, setForm] = useState<Record<string, string>>({});
+
+  const load = async () => {
+    try {
+      const res = await fetch(`${baseUrl}/v1/${endpoint}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) setItems(await res.json());
+    } catch { /* ignore */ }
+  };
+
+  useEffect(() => { load(); }, [baseUrl, token]);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      let body: any = { ...form, ...(extraJson || {}) };
+      if (transformSubmit) body = transformSubmit(body);
+      const res = await fetch(`${baseUrl}/v1/${endpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error((await res.json()).error);
+      setForm({});
+      toast({ type: "success", title: `${title} created` });
+      load();
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Failed" });
+    }
+  };
+
+  const remove = async (item: any) => {
+    const key = item.id || item.extension;
+    try {
+      await fetch(`${baseUrl}/v1/${endpoint}/${key}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+      toast({ type: "success", title: "Deleted" }); load();
+    } catch { toast({ type: "error", title: "Failed to delete" }); }
+  };
+
+  return (
+    <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+      <div className="p-3 border-b border-border-subtle flex items-center gap-2">
+        <Icon size={17} className="text-accent" /><h2 className="font-medium">{title}</h2>
+      </div>
+      <form onSubmit={submit} className="p-3 grid md:grid-cols-5 gap-2 border-b border-border-subtle">
+        {fields.map(([label, key, def]) => (
+          <Field key={key} label={label} value={form[key] || def || ""} onChange={(v) => setForm({ ...form, [key]: v })} />
+        ))}
+        <button className="h-10 self-end rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium flex items-center justify-center gap-2">
+          <Plus size={16} /> Create
+        </button>
+      </form>
+      <div className="p-3 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="text-tertiary"><tr className="border-b border-border-subtle">
+            {[...columns, ""].map((h) => <th key={h} className="text-left py-2 px-2 font-medium">{h}</th>)}
+          </tr></thead>
+          <tbody>
+            {items.length === 0 ? <tr><td colSpan={columns.length + 1} className="py-4 px-2 text-secondary">No records</td></tr> :
+              items.map((item, idx) => (
+                <tr key={item.id || idx} className="border-b border-border-subtle">
+                  {rowFn(item).map((cell, ci) => <td key={ci} className="py-2 px-2 max-w-[200px] truncate">{cell}</td>)}
+                  <td className="py-2 px-2 text-right">
+                    <IconButton label="Delete" tone="danger" onClick={() => remove(item)}><Trash2 size={16} /></IconButton>
+                  </td>
+                </tr>
+              ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function QueuesPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [queues, setQueues] = useState<any[]>([]);
+  const [name, setName] = useState("");
+  const [extension, setExtension] = useState("");
+  const [strategy, setStrategy] = useState("round_robin");
+  const [agents, setAgents] = useState("");
+  const [overflow, setOverflow] = useState("");
+
+  const load = async () => {
+    try {
+      const res = await fetch(`${baseUrl}/v1/queues`, { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) setQueues(await res.json());
+    } catch { /* ignore */ }
+  };
+
+  useEffect(() => { load(); }, [baseUrl, token]);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      const agentList = agents.split(",").map((a) => a.trim()).filter(Boolean).map((a) => ({
+        agent_uri: a.startsWith("sip:") ? a : `sip:${a}`,
+      }));
+      const res = await fetch(`${baseUrl}/v1/queues`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          name, extension: extension.startsWith("sip:") ? extension : `sip:${extension}`,
+          strategy, agents: agentList, overflow_destination: overflow || null,
+        }),
+      });
+      if (!res.ok) throw new Error((await res.json()).error);
+      setName(""); setExtension(""); setAgents(""); setOverflow("");
+      toast({ type: "success", title: "Queue created" }); load();
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Failed" });
+    }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await fetch(`${baseUrl}/v1/queues/${id}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+      toast({ type: "success", title: "Queue deleted" }); load();
+    } catch { toast({ type: "error", title: "Failed" }); }
+  };
+
+  return (
+    <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+      <div className="p-3 border-b border-border-subtle flex items-center gap-2">
+        <Users size={17} className="text-accent" /><h2 className="font-medium">Call Queues (ACD)</h2>
+      </div>
+      <form onSubmit={submit} className="p-3 grid md:grid-cols-6 gap-2 border-b border-border-subtle">
+        <Field label="Name" value={name} onChange={setName} />
+        <Field label="Extension" value={extension} onChange={setExtension} />
+        <label className="block">
+          <span className="block text-xs text-tertiary mb-1">Strategy</span>
+          <select value={strategy} onChange={(e) => setStrategy(e.target.value)}
+            className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus">
+            <option value="round_robin">Round Robin</option>
+            <option value="longest_idle">Longest Idle</option>
+            <option value="ring_all">Ring All</option>
+            <option value="random">Random</option>
+            <option value="skills_based">Skills Based</option>
+          </select>
+        </label>
+        <Field label="Agents (SIP URIs)" value={agents} onChange={setAgents} />
+        <Field label="Overflow" value={overflow} onChange={setOverflow} />
+        <button className="h-10 self-end rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium flex items-center justify-center gap-2">
+          <Plus size={16} /> Create
+        </button>
+      </form>
+      <div className="p-3 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="text-tertiary"><tr className="border-b border-border-subtle">
+            {["Name", "Extension", "Strategy", "Agents", "Overflow", ""].map((h) => <th key={h} className="text-left py-2 px-2 font-medium">{h}</th>)}
+          </tr></thead>
+          <tbody>
+            {queues.length === 0 ? <tr><td colSpan={6} className="py-4 px-2 text-secondary">No queues</td></tr> :
+              queues.map((q) => (
+                <tr key={q.id} className="border-b border-border-subtle">
+                  <td className="py-2 px-2">{q.name}</td>
+                  <td className="py-2 px-2 text-secondary">{q.extension}</td>
+                  <td className="py-2 px-2">{q.strategy}</td>
+                  <td className="py-2 px-2 text-secondary max-w-[200px] truncate">{(q.agents || []).map((a: any) => a.agent_uri).join(", ")}</td>
+                  <td className="py-2 px-2 text-secondary">{q.overflow_destination || "-"}</td>
+                  <td className="py-2 px-2 text-right">
+                    <IconButton label="Delete" tone="danger" onClick={() => remove(q.id)}><Trash2 size={16} /></IconButton>
+                  </td>
+                </tr>
+              ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function CdrsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [cdrs, setCdrs] = useState<any[]>([]);
+
+  useEffect(() => {
+    fetch(`${baseUrl}/v1/cdrs?limit=200`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.ok ? r.json() : [])
+      .then(setCdrs)
+      .catch(() => {});
+  }, [baseUrl, token]);
+
+  const answered = cdrs.filter((c) => c.disposition === "answered").length;
+  const missed = cdrs.filter((c) => c.disposition === "no_answer" || c.disposition === "abandoned").length;
+  const avgDuration = cdrs.length > 0 ? Math.round(cdrs.reduce((s, c) => s + c.duration_secs, 0) / cdrs.length) : 0;
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+        <Metric label="Total Calls" value={cdrs.length} />
+        <Metric label="Answered" value={answered} />
+        <Metric label="Missed" value={missed} />
+        <Metric label="Avg Duration (s)" value={avgDuration} />
+      </div>
+      <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+        <div className="p-3 border-b border-border-subtle"><h2 className="font-medium">Call Detail Records</h2></div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="text-tertiary"><tr className="border-b border-border-subtle">
+              {["Time", "Caller", "Callee", "Direction", "Duration", "Disposition", "Queue"].map((h) => (
+                <th key={h} className="text-left py-2 px-2 font-medium">{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {cdrs.length === 0 ? <tr><td colSpan={7} className="py-4 px-2 text-secondary">No records</td></tr> :
+                cdrs.map((c) => (
+                  <tr key={c.id} className="border-b border-border-subtle">
+                    <td className="py-2 px-2 text-secondary">{shortDate(c.start_time)}</td>
+                    <td className="py-2 px-2">{c.caller_uri}</td>
+                    <td className="py-2 px-2">{c.callee_uri}</td>
+                    <td className="py-2 px-2 text-secondary">{c.direction}</td>
+                    <td className="py-2 px-2 tabular-nums">{c.duration_secs}s</td>
+                    <td className="py-2 px-2">
+                      <span className={cn("px-2 py-0.5 rounded-full text-xs font-medium",
+                        c.disposition === "answered" ? "bg-success/20 text-success" :
+                        c.disposition === "voicemail" ? "bg-accent/20 text-accent" :
+                        "bg-destructive/20 text-destructive"
+                      )}>{c.disposition}</span>
+                    </td>
+                    <td className="py-2 px-2 text-secondary">{c.queue_name || "-"}</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
   );
 }
 
