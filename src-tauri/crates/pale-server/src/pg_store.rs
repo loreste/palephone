@@ -50,6 +50,7 @@ impl PgStore {
             include_str!("../migrations/002_rooms_search_receipts_avatars.sql"),
             include_str!("../migrations/003_voicemail_recordings.sql"),
             include_str!("../migrations/004_dba_fixes.sql"),
+            include_str!("../migrations/005_user_auth.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {
@@ -65,10 +66,10 @@ impl PgStore {
     pub async fn insert_user(&self, user: &User) -> Result<(), PgError> {
         let client = self.pool.get().await?;
         client.execute(
-            "INSERT INTO users (id, display_name, sip_uri, matrix_user_id, created_at)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (id) DO UPDATE SET display_name = $2, sip_uri = $3, matrix_user_id = $4",
-            &[&user.id, &user.display_name, &user.sip_uri, &user.matrix_user_id, &user.created_at],
+            "INSERT INTO users (id, display_name, sip_uri, matrix_user_id, password_hash, role, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (id) DO UPDATE SET display_name = $2, sip_uri = $3, matrix_user_id = $4, password_hash = $5, role = $6",
+            &[&user.id, &user.display_name, &user.sip_uri, &user.matrix_user_id, &user.password_hash, &user.role, &user.created_at],
         ).await?;
         Ok(())
     }
@@ -82,7 +83,7 @@ impl PgStore {
     pub async fn load_users(&self) -> Result<Vec<User>, PgError> {
         let client = self.pool.get().await?;
         let rows = client.query(
-            "SELECT id, display_name, sip_uri, matrix_user_id, created_at FROM users ORDER BY created_at",
+            "SELECT id, display_name, sip_uri, matrix_user_id, password_hash, role, created_at FROM users ORDER BY created_at",
             &[],
         ).await?;
 
@@ -91,8 +92,8 @@ impl PgStore {
             display_name: r.get("display_name"),
             sip_uri: r.get("sip_uri"),
             matrix_user_id: r.get("matrix_user_id"),
-            password_hash: None,
-            role: "user".to_string(),
+            password_hash: r.get("password_hash"),
+            role: r.try_get("role").unwrap_or_else(|_| "user".to_string()),
             created_at: r.get("created_at"),
         }).collect())
     }
