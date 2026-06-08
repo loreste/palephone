@@ -663,29 +663,111 @@ function RoutingPanel({
 }
 
 function CallsPanel({ snapshot }: { snapshot: AdminSnapshot | null }) {
+  const activeCalls = (snapshot?.calls ?? []).filter((c) => c.status === "ringing" || c.status === "active" || c.status === "held");
+  const activeDialogs = (snapshot?.dialogs ?? []).filter((d) => d.status === "ringing" || d.status === "routing" || d.status === "held");
+  const endedCalls = (snapshot?.calls ?? []).filter((c) => c.status === "ended" || c.status === "failed");
+
   return (
     <div className="space-y-3">
-      <Table
-        title="Calls"
-        columns={["Caller", "Callees", "Media", "Status", "Updated"]}
-        rows={(snapshot?.calls ?? []).map((call) => [
-          call.caller,
-          call.callees.join(", "),
-          call.media.join(", "),
-          call.status,
-          shortDate(call.updated_at),
-        ])}
-      />
-      <Table
-        title="Dialogs"
-        columns={["Call-ID", "From", "To", "Status"]}
-        rows={(snapshot?.dialogs ?? []).map((dialog) => [
-          dialog.call_id,
-          dialog.from_uri,
-          dialog.to_uri,
-          dialog.status,
-        ])}
-      />
+      <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+        <div className="p-3 border-b border-border-subtle flex items-center gap-2">
+          <span className="relative flex items-center justify-center w-2 h-2">
+            <span className={cn("w-2 h-2 rounded-full", activeCalls.length > 0 ? "bg-success animate-pulse" : "bg-tertiary")} />
+          </span>
+          <h2 className="font-medium">Live Calls</h2>
+          <span className="text-xs text-tertiary">({activeCalls.length} active)</span>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="text-tertiary">
+              <tr className="border-b border-border-subtle">
+                {["Caller", "Callee(s)", "Media", "Status", "Duration"].map((h) => (
+                  <th key={h} className="text-left py-2 px-3 font-medium">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {activeCalls.length === 0 ? (
+                <tr><td colSpan={5} className="py-6 px-3 text-center text-secondary">No active calls</td></tr>
+              ) : activeCalls.map((call) => (
+                <tr key={call.id} className="border-b border-border-subtle">
+                  <td className="py-2 px-3">{call.caller}</td>
+                  <td className="py-2 px-3 text-secondary">{call.callees.join(", ")}</td>
+                  <td className="py-2 px-3">
+                    {call.media.map((m: string) => (
+                      <span key={m} className="inline-block mr-1 px-1.5 py-0.5 rounded bg-accent/20 text-accent text-xs">{m}</span>
+                    ))}
+                  </td>
+                  <td className="py-2 px-3">
+                    <span className={cn(
+                      "px-2 py-0.5 rounded-full text-xs font-medium",
+                      call.status === "active" ? "bg-success/20 text-success" :
+                      call.status === "ringing" ? "bg-warning/20 text-warning" :
+                      "bg-accent/20 text-accent"
+                    )}>
+                      {call.status === "active" ? "In Progress" : call.status === "ringing" ? "Ringing" : "On Hold"}
+                    </span>
+                  </td>
+                  <td className="py-2 px-3 text-secondary tabular-nums">{shortDate(call.updated_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+        <div className="p-3 border-b border-border-subtle flex items-center gap-2">
+          <h2 className="font-medium">Active SIP Dialogs</h2>
+          <span className="text-xs text-tertiary">({activeDialogs.length})</span>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="text-tertiary">
+              <tr className="border-b border-border-subtle">
+                {["Call-ID", "From", "To", "Status", "Media"].map((h) => (
+                  <th key={h} className="text-left py-2 px-3 font-medium">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {activeDialogs.length === 0 ? (
+                <tr><td colSpan={5} className="py-4 px-3 text-secondary">No active dialogs</td></tr>
+              ) : activeDialogs.map((d) => (
+                <tr key={d.call_id} className="border-b border-border-subtle">
+                  <td className="py-2 px-3 font-mono text-xs max-w-[120px] truncate">{d.call_id}</td>
+                  <td className="py-2 px-3">{d.from_uri}</td>
+                  <td className="py-2 px-3">{d.to_uri}</td>
+                  <td className="py-2 px-3">
+                    <span className={cn(
+                      "px-2 py-0.5 rounded-full text-xs font-medium",
+                      d.status === "ringing" ? "bg-warning/20 text-warning" :
+                      d.status === "held" ? "bg-accent/20 text-accent" :
+                      "bg-elevated text-secondary"
+                    )}>
+                      {d.status}
+                    </span>
+                  </td>
+                  <td className="py-2 px-3 text-secondary">{(d as any).media_types?.join(", ") || "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {endedCalls.length > 0 && (
+        <Table
+          title={`Recent ended calls (${endedCalls.length})`}
+          columns={["Caller", "Callees", "Status", "Ended"]}
+          rows={endedCalls.slice(0, 20).map((call) => [
+            call.caller,
+            call.callees.join(", "),
+            call.status,
+            shortDate(call.updated_at),
+          ])}
+        />
+      )}
     </div>
   );
 }
