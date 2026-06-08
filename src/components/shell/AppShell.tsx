@@ -21,7 +21,8 @@ import { ToastContainer } from "@/components/ui/Toast";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { useServerEvents } from "@/hooks/useServerEvents";
 import { useServerStore } from "@/store/serverStore";
-import { getConfig } from "@/lib/tauri";
+import { useAccountStore } from "@/store/accountStore";
+import { getConfig, getSipPassword, paleLogin, registerAccount } from "@/lib/tauri";
 
 const views = {
   dialpad: DialpadView,
@@ -57,20 +58,52 @@ export function AppShell() {
   const setServerConnection = useServerStore((s) => s.setConnection);
   useServerEvents(serverBaseUrl, serverToken);
 
-  // Check if this is first run (no account configured) + auto-connect to server
+  const setAccount = useAccountStore((s) => s.setAccount);
+
+  // Check if this is first run or auto-login with saved credentials
   useEffect(() => {
     getConfig()
-      .then((config) => {
-        if (!config.account && !config.matrix?.homeserver) {
-          setShowWizard(true);
+      .then(async (config) => {
+        // Auto-login: if server is configured with auto_connect, retrieve password from keychain
+        if (config.server?.url && config.server.username && config.server.auto_connect) {
+          try {
+            const savedPassword = await getSipPassword("pale-server-login");
+            if (savedPassword) {
+              const response = await paleLogin(config.server.url, config.server.username, savedPassword);
+              sessionStorage.setItem("pale.admin.token", response.token);
+              setServerConnection(config.server.url, response.token, response.expires_at, response.user.role, response.user.display_name);
+
+              // Auto-register SIP
+              if (response.sip_credentials) {
+                const creds = response.sip_credentials;
+                setAccount({
+                  displayName: response.user.display_name,
+                  sipUri: creds.sip_uri,
+                  registrarUri: creds.registrar_uri,
+                  authUsername: creds.username,
+                  transport: (creds.transport as "udp" | "tcp" | "tls") || "udp",
+                });
+                await registerAccount({
+                  display_name: response.user.display_name,
+                  sip_uri: creds.sip_uri,
+                  registrar_uri: creds.registrar_uri,
+                  auth_username: creds.username,
+                  auth_password: creds.password,
+                  transport: (creds.transport as "udp" | "tcp" | "tls") || "udp",
+                }).catch(() => {});
+              }
+
+              setWizardChecked(true);
+              return;
+            }
+          } catch {
+            // Auto-login failed, fall through to wizard check
+          }
         }
 
-        // Auto-reconnect to pale-server if configured and token is in session
-        if (config.server?.url && config.server.auto_connect) {
-          const token = sessionStorage.getItem("pale.admin.token");
-          if (token) {
-            setServerConnection(config.server.url, token);
-          }
+        // No saved credentials — check if first run
+        if (!config.account && !config.server?.auto_connect) {
+          setShowWizard(true);
         }
 
         setWizardChecked(true);

@@ -67,6 +67,9 @@ function UnifiedLoginStep({ onNext }: { onNext: () => void; onSkip?: () => void 
       sessionStorage.setItem("pale.admin.token", response.token);
       setServerConnection(serverUrl, response.token, response.expires_at, response.user.role, response.user.display_name);
 
+      // Store credentials in OS keychain for auto-login on restart
+      await storeSipPassword("pale-server-login", password).catch(() => {});
+
       // Persist server config
       const config = await getConfig().catch(() => null);
       if (config) {
