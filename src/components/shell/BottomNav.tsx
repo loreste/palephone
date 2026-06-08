@@ -3,21 +3,24 @@ import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/cn";
 import { useUiStore } from "@/store/uiStore";
 import { useChatStore } from "@/store/chatStore";
+import { useServerStore } from "@/store/serverStore";
 import type { Tab } from "@/types";
 
-const tabs: { id: Tab; labelKey: string; icon: typeof Phone }[] = [
+const allTabs: { id: Tab; labelKey: string; icon: typeof Phone; adminOnly?: boolean }[] = [
   { id: "dialpad", labelKey: "nav.calls", icon: Phone },
   { id: "chat", labelKey: "nav.chat", icon: MessageSquare },
   { id: "people", labelKey: "nav.people", icon: Users },
   { id: "files", labelKey: "nav.files", icon: FolderLock },
   { id: "recent", labelKey: "nav.recent", icon: Clock },
-  { id: "admin", labelKey: "nav.admin", icon: ShieldCheck },
+  { id: "admin", labelKey: "nav.admin", icon: ShieldCheck, adminOnly: true },
   { id: "settings", labelKey: "nav.settings", icon: Settings },
 ];
 
 export function BottomNav() {
   const { t } = useTranslation();
   const { activeTab, setActiveTab } = useUiStore();
+  const isAdmin = useServerStore((s) => s.isAdmin);
+  const tabs = allTabs.filter((tab) => !tab.adminOnly || isAdmin());
   const totalUnread = useChatStore((s) =>
     s.rooms.reduce((sum, r) => sum + r.unread_count, 0)
   );

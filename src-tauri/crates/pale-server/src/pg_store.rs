@@ -91,6 +91,8 @@ impl PgStore {
             display_name: r.get("display_name"),
             sip_uri: r.get("sip_uri"),
             matrix_user_id: r.get("matrix_user_id"),
+            password_hash: None,
+            role: "user".to_string(),
             created_at: r.get("created_at"),
         }).collect())
     }

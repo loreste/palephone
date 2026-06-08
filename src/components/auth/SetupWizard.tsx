@@ -1,33 +1,21 @@
 import { useState } from "react";
 import { Phone, MessageSquare, Lock, ArrowRight, Check, Server } from "lucide-react";
 import { Button } from "@/components/ui/Button";
-import { registerAccount, matrixLogin, storeSipPassword, getConfig, saveSettings } from "@/lib/tauri";
-import { adminLogin } from "@/lib/adminApi";
+import { registerAccount, storeSipPassword, getConfig, saveSettings, paleLogin } from "@/lib/tauri";
 import { useServerStore } from "@/store/serverStore";
+import { useAccountStore } from "@/store/accountStore";
 import { toast } from "@/components/ui/Toast";
 
-type WizardStep = "welcome" | "sip" | "matrix" | "server" | "done";
+type WizardStep = "welcome" | "login" | "done";
 
 export function SetupWizard({ onComplete }: { onComplete: () => void }) {
   const [step, setStep] = useState<WizardStep>("welcome");
 
   return (
     <div className="flex flex-col items-center justify-center h-full px-6 py-8">
-      {step === "welcome" && <WelcomeStep onNext={() => setStep("sip")} />}
-      {step === "sip" && (
-        <SipSetupStep
-          onNext={() => setStep("matrix")}
-          onSkip={() => setStep("matrix")}
-        />
-      )}
-      {step === "matrix" && (
-        <MatrixSetupStep
-          onNext={() => setStep("server")}
-          onSkip={() => setStep("server")}
-        />
-      )}
-      {step === "server" && (
-        <ServerSetupStep
+      {step === "welcome" && <WelcomeStep onNext={() => setStep("login")} />}
+      {step === "login" && (
+        <UnifiedLoginStep
           onNext={() => setStep("done")}
           onSkip={() => setStep("done")}
         />
@@ -61,146 +49,71 @@ function WelcomeStep({ onNext }: { onNext: () => void }) {
   );
 }
 
-function SipSetupStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => void }) {
+function UnifiedLoginStep({ onNext }: { onNext: () => void; onSkip?: () => void }) {
+  const [serverUrl, setServerUrl] = useState("http://localhost:8090");
   const [sipUri, setSipUri] = useState("");
-  const [registrar, setRegistrar] = useState("");
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [transport, setTransport] = useState<"udp" | "tcp" | "tls">("tls");
-  const [loading, setLoading] = useState(false);
-
-  const handleSave = async () => {
-    setLoading(true);
-    try {
-      if (password) await storeSipPassword(sipUri, password).catch(() => {});
-      await registerAccount({
-        display_name: username,
-        sip_uri: sipUri,
-        registrar_uri: registrar,
-        auth_username: username,
-        auth_password: password,
-        transport,
-      });
-      toast({ type: "success", title: "SIP account configured" });
-      onNext();
-    } catch (err) {
-      toast({ type: "error", title: "SIP setup failed", description: String(err) });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <div className="w-full max-w-[300px]">
-      <StepHeader
-        icon={Phone}
-        title="SIP Account"
-        description="Configure your SIP account for voice and video calls"
-        step={1}
-      />
-
-      <div className="space-y-3 mb-6">
-        <Input label="SIP URI" value={sipUri} onChange={setSipUri} placeholder="user@sip.company.com" />
-        <Input label="Registrar" value={registrar} onChange={setRegistrar} placeholder="sip.company.com" />
-        <Input label="Username" value={username} onChange={setUsername} placeholder="username" />
-        <Input label="Password" value={password} onChange={setPassword} placeholder="password" type="password" />
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium text-secondary">Transport</label>
-          <select
-            value={transport}
-            onChange={(e) => setTransport(e.target.value as any)}
-            className="w-full bg-surface border border-border-subtle rounded-md px-3 py-2 text-sm text-primary focus:outline-none focus:border-border-focus"
-          >
-            <option value="tls">TLS (Recommended)</option>
-            <option value="tcp">TCP</option>
-            <option value="udp">UDP</option>
-          </select>
-        </div>
-      </div>
-
-      <div className="flex gap-2">
-        <Button variant="ghost" className="flex-1" onClick={onSkip}>Skip</Button>
-        <Button className="flex-1 gap-1" onClick={handleSave} disabled={loading || !sipUri}>
-          {loading ? "Saving..." : "Next"} <ArrowRight size={14} />
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-function MatrixSetupStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => void }) {
-  const [homeserver, setHomeserver] = useState("");
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  const handleLogin = async () => {
-    setLoading(true);
-    try {
-      await matrixLogin(homeserver, username, password);
-      const config = await getConfig().catch(() => null);
-      if (config) {
-        config.matrix = { homeserver, username, user_id: null };
-        await saveSettings(config).catch(() => {});
-      }
-      toast({ type: "success", title: "Matrix connected" });
-      onNext();
-    } catch (err) {
-      toast({ type: "error", title: "Matrix login failed", description: String(err) });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <div className="w-full max-w-[300px]">
-      <StepHeader
-        icon={MessageSquare}
-        title="Chat & Files"
-        description="Connect to your Matrix homeserver for encrypted messaging"
-        step={2}
-      />
-
-      <div className="space-y-3 mb-6">
-        <Input label="Homeserver" value={homeserver} onChange={setHomeserver} placeholder="chat.yourcompany.com" />
-        <Input label="Username" value={username} onChange={setUsername} placeholder="username" />
-        <Input label="Password" value={password} onChange={setPassword} placeholder="password" type="password" />
-      </div>
-
-      <div className="flex gap-2">
-        <Button variant="ghost" className="flex-1" onClick={onSkip}>Skip</Button>
-        <Button className="flex-1 gap-1" onClick={handleLogin} disabled={loading || !homeserver || !username}>
-          {loading ? "Connecting..." : "Next"} <ArrowRight size={14} />
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-function ServerSetupStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => void }) {
-  const [url, setUrl] = useState("http://127.0.0.1:8080");
-  const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const setServerConnection = useServerStore((s) => s.setConnection);
+  const setAccount = useAccountStore((s) => s.setAccount);
 
-  const handleConnect = async () => {
+  const handleLogin = async () => {
+    if (!serverUrl || !sipUri || !password) return;
     setLoading(true);
     try {
-      const session = await adminLogin(url, username, password);
-      sessionStorage.setItem("pale.admin.token", session.token);
-      setServerConnection(url, session.token, session.expires_at);
+      const response = await paleLogin(serverUrl, sipUri, password);
 
+      // Store server connection
+      sessionStorage.setItem("pale.admin.token", response.token);
+      setServerConnection(serverUrl, response.token, response.expires_at, response.user.role, response.user.display_name);
+
+      // Persist server config
       const config = await getConfig().catch(() => null);
       if (config) {
-        config.server = { url, username, auto_connect: true };
+        config.server = { url: serverUrl, username: sipUri, auto_connect: true };
         await saveSettings(config).catch(() => {});
       }
 
-      toast({ type: "success", title: "Connected to server" });
+      // Auto-register SIP if credentials were provisioned
+      if (response.sip_credentials) {
+        const creds = response.sip_credentials;
+        await storeSipPassword(creds.sip_uri, creds.password).catch(() => {});
+
+        setAccount({
+          displayName: response.user.display_name,
+          sipUri: creds.sip_uri,
+          registrarUri: creds.registrar_uri,
+          authUsername: creds.username,
+          transport: (creds.transport as "udp" | "tcp" | "tls") || "udp",
+        });
+
+        await registerAccount({
+          display_name: response.user.display_name,
+          sip_uri: creds.sip_uri,
+          registrar_uri: creds.registrar_uri,
+          auth_username: creds.username,
+          auth_password: creds.password,
+          transport: (creds.transport as "udp" | "tcp" | "tls") || "udp",
+        }).catch(() => {});
+
+        // Persist account config
+        if (config) {
+          config.account = {
+            display_name: response.user.display_name,
+            sip_uri: creds.sip_uri,
+            registrar_uri: creds.registrar_uri,
+            auth_username: creds.username,
+            transport: (creds.transport as "udp" | "tcp" | "tls") || "udp",
+            reg_expiry: 3600,
+          };
+          await saveSettings(config).catch(() => {});
+        }
+      }
+
+      toast({ type: "success", title: `Welcome, ${response.user.display_name}!` });
       onNext();
     } catch (err) {
-      toast({ type: "error", title: "Connection failed", description: String(err) });
+      toast({ type: "error", title: "Login failed", description: String(err) });
     } finally {
       setLoading(false);
     }
@@ -210,23 +123,20 @@ function ServerSetupStep({ onNext, onSkip }: { onNext: () => void; onSkip: () =>
     <div className="w-full max-w-[300px]">
       <StepHeader
         icon={Server}
-        title="Pale Server"
-        description="Connect to your organization's Pale server for presence, conferencing, and admin features"
-        step={3}
+        title="Sign In"
+        description="Connect to your organization's Pale server"
+        step={1}
       />
 
       <div className="space-y-3 mb-6">
-        <Input label="Server URL" value={url} onChange={setUrl} placeholder="http://pale.yourcompany.com" />
-        <Input label="Username" value={username} onChange={setUsername} placeholder="admin" />
+        <Input label="Server URL" value={serverUrl} onChange={setServerUrl} placeholder="https://pale.yourcompany.com" />
+        <Input label="SIP URI" value={sipUri} onChange={setSipUri} placeholder="sip:you@company.com" />
         <Input label="Password" value={password} onChange={setPassword} placeholder="password" type="password" />
       </div>
 
-      <div className="flex gap-2">
-        <Button variant="ghost" className="flex-1" onClick={onSkip}>Skip</Button>
-        <Button className="flex-1 gap-1" onClick={handleConnect} disabled={loading || !url || !password}>
-          {loading ? "Connecting..." : "Next"} <ArrowRight size={14} />
-        </Button>
-      </div>
+      <Button className="w-full gap-1" onClick={handleLogin} disabled={loading || !sipUri || !password}>
+        {loading ? "Signing in..." : "Sign In"} {!loading && <ArrowRight size={14} />}
+      </Button>
     </div>
   );
 }

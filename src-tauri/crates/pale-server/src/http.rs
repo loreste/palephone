@@ -31,6 +31,7 @@ pub fn router(state: SharedState) -> Router {
     Router::new()
         .route("/", get(root))
         .route("/health", get(health))
+        .route("/v1/auth/login", post(user_login))
         .route("/v1/admin/login", post(admin_login))
         .route("/v1/admin/logout", post(admin_logout))
         .route("/v1/admin/refresh", post(admin_refresh))
@@ -219,6 +220,27 @@ async fn admin_refresh(
         .map_err(|_| ApiError::Unauthorized)?;
     state.record_audit_event(&principal, "admin.token.refreshed", None);
     Ok(Json(session))
+}
+
+// ─── User Authentication (unified login) ───
+
+#[derive(serde::Deserialize)]
+struct UserLoginRequest {
+    sip_uri: String,
+    password: SensitiveString,
+}
+
+async fn user_login(
+    State(state): State<SharedState>,
+    Json(input): Json<UserLoginRequest>,
+) -> Result<Json<crate::UserLoginResponse>, ApiError> {
+    state
+        .authenticate_user(&input.sip_uri, input.password.expose())
+        .map(Json)
+        .map_err(|err| match err {
+            AuthError::Unauthorized => ApiError::Unauthorized,
+            AuthError::Locked => ApiError::TooManyRequests,
+        })
 }
 
 async fn list_audit_events(

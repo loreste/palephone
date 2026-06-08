@@ -55,7 +55,7 @@ export function StatusBar() {
 
         {/* Account info */}
         <span className="text-xs text-secondary truncate">
-          {account?.sipUri ?? config.label}
+          {account?.displayName ?? account?.sipUri ?? config.label}
         </span>
 
         {/* Server + presence indicator */}

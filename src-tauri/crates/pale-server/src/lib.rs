@@ -666,11 +666,18 @@ impl AppState {
     }
 
     pub fn create_user(&self, input: CreateUserRequest) -> User {
+        let password_hash = input
+            .password
+            .as_deref()
+            .map(|p| sha256_hex(p.as_bytes()));
+
         let user = User {
             id: Uuid::new_v4(),
-            display_name: input.display_name,
-            sip_uri: input.sip_uri,
+            display_name: input.display_name.clone(),
+            sip_uri: input.sip_uri.clone(),
             matrix_user_id: input.matrix_user_id,
+            password_hash,
+            role: input.role.unwrap_or_else(|| "user".to_string()),
             created_at: Utc::now(),
         };
         self.users.insert(user.id, user.clone());
@@ -678,7 +685,73 @@ impl AppState {
         self.persist(&user);
         let u = user.clone();
         self.pg_spawn(move |pg| Box::pin(async move { pg.insert_user(&u).await }));
+
+        // Auto-provision SIP account when creating a user with a password
+        if let Some(password) = &input.password {
+            if let Some((username, domain)) = split_sip_aor_simple(&input.sip_uri) {
+                self.upsert_sip_account(CreateSipAccountRequest {
+                    username: username.clone(),
+                    domain: domain.clone(),
+                    password_ha1: sip_ha1(&username, &domain, password),
+                    display_name: Some(input.display_name),
+                });
+                log::info!("Auto-provisioned SIP account for {}", input.sip_uri);
+            }
+        }
+
         user
+    }
+
+    /// Authenticate a user (not admin) by SIP URI and password
+    pub fn authenticate_user(
+        &self,
+        sip_uri: &str,
+        password: &str,
+    ) -> Result<UserLoginResponse, AuthError> {
+        let user = self
+            .users
+            .values()
+            .into_iter()
+            .find(|u| u.sip_uri == sip_uri)
+            .ok_or(AuthError::Unauthorized)?;
+
+        let expected_hash = user.password_hash.as_deref().ok_or(AuthError::Unauthorized)?;
+        if sha256_hex(password.as_bytes()) != expected_hash {
+            return Err(AuthError::Unauthorized);
+        }
+
+        // Create session
+        let session = AdminSession {
+            token: Uuid::new_v4().to_string(),
+            principal: user.sip_uri.clone(),
+            expires_at: Utc::now() + Duration::hours(12),
+        };
+        self.admin_sessions
+            .insert(session.token.clone(), session.clone());
+        self.admin_sessions.trim_to_len(MAX_ADMIN_SESSIONS);
+
+        // Get SIP credentials
+        let sip_creds = split_sip_aor_simple(&user.sip_uri)
+            .and_then(|(username, domain)| {
+                self.sip_account(&username, &domain).map(|_| SipCredentials {
+                    sip_uri: user.sip_uri.clone(),
+                    registrar_uri: domain.clone(),
+                    username: username.clone(),
+                    password: password.to_string(), // Return the plaintext for client SIP registration
+                    transport: "udp".to_string(),
+                    domain,
+                })
+            });
+
+        // Set presence to online
+        self.update_presence(&user.sip_uri, PresenceStatus::Online, None);
+
+        Ok(UserLoginResponse {
+            token: session.token,
+            user,
+            sip_credentials: sip_creds,
+            expires_at: session.expires_at,
+        })
     }
 
     pub fn users(&self) -> Vec<User> {
@@ -1490,6 +1563,9 @@ pub struct User {
     pub display_name: String,
     pub sip_uri: String,
     pub matrix_user_id: Option<String>,
+    #[serde(skip_serializing)]
+    pub password_hash: Option<String>,
+    pub role: String, // "admin" or "user"
     pub created_at: DateTime<Utc>,
 }
 
@@ -1498,6 +1574,27 @@ pub struct CreateUserRequest {
     pub display_name: String,
     pub sip_uri: String,
     pub matrix_user_id: Option<String>,
+    pub password: Option<String>,
+    pub role: Option<String>,
+}
+
+/// Response returned after user login — contains everything the client needs
+#[derive(Debug, Clone, Serialize)]
+pub struct UserLoginResponse {
+    pub token: String,
+    pub user: User,
+    pub sip_credentials: Option<SipCredentials>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SipCredentials {
+    pub sip_uri: String,
+    pub registrar_uri: String,
+    pub username: String,
+    pub password: String,
+    pub transport: String,
+    pub domain: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2021,6 +2118,14 @@ pub struct CreateRoutingRuleRequest {
     pub target: String,
     pub priority: i32,
     pub enabled: bool,
+}
+
+/// Parse "sip:user@domain" into (user, domain)
+fn split_sip_aor_simple(aor: &str) -> Option<(String, String)> {
+    let aor = aor.strip_prefix("sip:").or_else(|| aor.strip_prefix("sips:"))?;
+    let bare = aor.split(';').next()?.split('?').next()?;
+    let (username, domain) = bare.split_once('@')?;
+    Some((username.to_string(), domain.to_string()))
 }
 
 pub fn safe_filename(name: &str) -> String {

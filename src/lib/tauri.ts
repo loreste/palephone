@@ -557,6 +557,44 @@ export function paleServerDeleteMessage(
   });
 }
 
+// ─── Unified Login ───
+
+export interface UserLoginResponse {
+  token: string;
+  user: {
+    id: string;
+    display_name: string;
+    sip_uri: string;
+    role: string;
+  };
+  sip_credentials: {
+    sip_uri: string;
+    registrar_uri: string;
+    username: string;
+    password: string;
+    transport: string;
+    domain: string;
+  } | null;
+  expires_at: string;
+}
+
+export async function paleLogin(
+  baseUrl: string,
+  sipUri: string,
+  password: string,
+): Promise<UserLoginResponse> {
+  const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sip_uri: sipUri, password }),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(payload.error || response.statusText);
+  }
+  return response.json();
+}
+
 // ─── Server Files ───
 
 export interface PaleServerFile {
