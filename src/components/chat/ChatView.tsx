@@ -677,6 +677,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
 const presenceColors: Record<PresenceStatus, string> = {
   online: "bg-green-500",
   busy: "bg-red-500",
+  on_call: "bg-red-500",
   away: "bg-yellow-500",
   dnd: "bg-red-600",
   offline: "bg-gray-400",

@@ -17,6 +17,7 @@ const regConfig: Record<RegState, { color: string; label: string; animate: boole
 const presenceOptions: { status: PresenceStatus; label: string; color: string }[] = [
   { status: "online", label: "Online", color: "bg-green-500" },
   { status: "busy", label: "Busy", color: "bg-red-500" },
+  { status: "on_call", label: "On a call", color: "bg-red-500" },
   { status: "away", label: "Away", color: "bg-yellow-500" },
   { status: "dnd", label: "Do Not Disturb", color: "bg-red-600" },
   { status: "offline", label: "Appear Offline", color: "bg-gray-400" },

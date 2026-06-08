@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type PresenceStatus = "online" | "offline" | "busy" | "away" | "dnd";
+export type PresenceStatus = "online" | "offline" | "busy" | "away" | "dnd" | "on_call";
 
 export interface UserPresence {
   sip_uri: string;

@@ -1923,6 +1923,7 @@ pub enum PresenceStatus {
     Busy,
     Away,
     Dnd,
+    OnCall,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

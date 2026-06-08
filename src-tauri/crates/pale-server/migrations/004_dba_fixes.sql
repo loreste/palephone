@@ -45,7 +45,7 @@ END $$;
 
 DO $$ BEGIN
   ALTER TABLE presence ADD CONSTRAINT chk_presence_status
-    CHECK (status IN ('online', 'offline', 'busy', 'away', 'dnd'));
+    CHECK (status IN ('online', 'offline', 'busy', 'away', 'dnd', 'on_call'));
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 

@@ -6,6 +6,7 @@ import {
   onPaleError,
   addCallRecord,
   paleServerSyncCallHistory,
+  paleServerSetPresence,
 } from "@/lib/tauri";
 import { useAccountStore } from "@/store/accountStore";
 import { useCallStore } from "@/store/callStore";
@@ -92,11 +93,25 @@ export function useSipEvents() {
 
           if (state === "connected" && !existing.connectTime) {
             setConnectTime(event.call_id, Date.now());
-            toast({ type: "success", title: "Call connected" });
+            shouldNotify().then((ok) => {
+              if (ok) toast({ type: "success", title: "Call connected" });
+            });
+            // Auto-set presence to "on_call"
+            const { baseUrl, token } = useServerStore.getState();
+            if (baseUrl && token) {
+              paleServerSetPresence(baseUrl, token, "on_call", "On a call").catch(() => {});
+            }
           }
 
           if (state === "terminated") {
-            toast({ type: "info", title: "Call ended" });
+            shouldNotify().then((ok) => {
+              if (ok) toast({ type: "info", title: "Call ended" });
+            });
+            // Auto-reset presence to "online" when call ends
+            const serverState = useServerStore.getState();
+            if (serverState.baseUrl && serverState.token) {
+              paleServerSetPresence(serverState.baseUrl, serverState.token, "online").catch(() => {});
+            }
             // Save to call history
             const durationSecs = existing.connectTime
               ? Math.floor((Date.now() - existing.connectTime) / 1000)

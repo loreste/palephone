@@ -320,7 +320,7 @@ export function onPaleError(
 
 // ─── Pale Server API (HTTP fetch, not Tauri invoke) ───
 
-export type PresenceStatus = "online" | "offline" | "busy" | "away" | "dnd";
+export type PresenceStatus = "online" | "offline" | "busy" | "away" | "dnd" | "on_call";
 
 export interface ServerPresence {
   sip_uri: string;

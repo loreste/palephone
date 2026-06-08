@@ -13,6 +13,7 @@ import { toast } from "@/components/ui/Toast";
 const presenceColors: Record<PresenceStatus, string> = {
   online: "bg-green-500",
   busy: "bg-red-500",
+  on_call: "bg-red-500",
   away: "bg-yellow-500",
   dnd: "bg-red-600",
   offline: "bg-gray-400",
@@ -21,6 +22,7 @@ const presenceColors: Record<PresenceStatus, string> = {
 const presenceLabels: Record<PresenceStatus, string> = {
   online: "Online",
   busy: "Busy",
+  on_call: "On a call",
   away: "Away",
   dnd: "Do Not Disturb",
   offline: "Offline",
