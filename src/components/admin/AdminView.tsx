@@ -37,7 +37,7 @@ import {
 import { toast } from "@/components/ui/Toast";
 import { useServerStore } from "@/store/serverStore";
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "conferences" | "files" | "directory" | "audit";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "conferences" | "files" | "directory" | "audit";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -54,6 +54,9 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "media", label: "Media", icon: RadioTower },
   { id: "calls", label: "Calls", icon: Router },
   { id: "cdrs", label: "CDR", icon: ClipboardList },
+  { id: "agents", label: "Agents", icon: Users },
+  { id: "wallboard", label: "Wallboard", icon: Activity },
+  { id: "qa", label: "QA", icon: ClipboardList },
   { id: "conferences", label: "Conferences", icon: Mic },
   { id: "files", label: "Files", icon: FileText },
   { id: "directory", label: "Directory", icon: Users },
@@ -253,6 +256,9 @@ export function AdminView() {
         {activeTab === "paging" && <CrudPanel baseUrl={baseUrl} token={token} endpoint="paging-groups" title="Paging Groups" icon={RadioTower} columns={["Name", "Extension", "Members"]} rowFn={(p: any) => [p.name, p.extension, (p.members || []).join(", ")]} fields={[["Name", "name"], ["Extension", "extension"], ["Members (comma-separated)", "members_csv"]]} transformSubmit={(d: any) => ({ ...d, members: (d.members_csv || "").split(",").map((m: string) => m.trim()).filter(Boolean), members_csv: undefined })} />}
         {activeTab === "media" && <MediaPanel snapshot={snapshot} />}
         {activeTab === "cdrs" && <CdrsPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "agents" && <AgentsPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "wallboard" && <WallboardPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "qa" && <QaPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "calls" && <CallsPanel snapshot={snapshot} />}
         {activeTab === "conferences" && <ConferencesPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
         {activeTab === "files" && <FilesPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
@@ -1406,6 +1412,293 @@ function CdrsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
                       )}>{c.disposition}</span>
                     </td>
                     <td className="py-2 px-2 text-secondary">{c.queue_name || "-"}</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function AgentsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [agents, setAgents] = useState<any[]>([]);
+  const [sipUri, setSipUri] = useState("");
+  const [role, setRole] = useState("agent");
+  const [displayName, setDisplayName] = useState("");
+  const [skills, setSkills] = useState("");
+
+  const load = async () => {
+    try {
+      const res = await fetch(`${baseUrl}/v1/agents`, { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) setAgents(await res.json());
+    } catch { /* ignore */ }
+  };
+  useEffect(() => { load(); }, [baseUrl, token]);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      const res = await fetch(`${baseUrl}/v1/agents`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          user_sip_uri: sipUri.startsWith("sip:") ? sipUri : `sip:${sipUri}`,
+          role, display_name: displayName,
+          skills: skills ? skills.split(",").map((s) => s.trim()) : [],
+        }),
+      });
+      if (!res.ok) throw new Error((await res.json()).error);
+      setSipUri(""); setDisplayName(""); setSkills("");
+      toast({ type: "success", title: "Agent profile created" }); load();
+    } catch (err) { toast({ type: "error", title: err instanceof Error ? err.message : "Failed" }); }
+  };
+
+  const changeState = async (uri: string, state: string) => {
+    try {
+      await fetch(`${baseUrl}/v1/agents/${encodeURIComponent(uri)}/state`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ state }),
+      });
+      load();
+    } catch { /* ignore */ }
+  };
+
+  const stateColors: Record<string, string> = {
+    available: "bg-success/20 text-success", on_call: "bg-red-500/20 text-red-500",
+    wrap_up: "bg-yellow-500/20 text-yellow-500", break: "bg-accent/20 text-accent",
+    training: "bg-accent/20 text-accent", meeting: "bg-accent/20 text-accent",
+    offline: "bg-elevated text-secondary",
+  };
+
+  return (
+    <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+      <div className="p-3 border-b border-border-subtle flex items-center gap-2">
+        <Users size={17} className="text-accent" /><h2 className="font-medium">Agent Profiles</h2>
+      </div>
+      <form onSubmit={submit} className="p-3 grid md:grid-cols-5 gap-2 border-b border-border-subtle">
+        <Field label="SIP URI" value={sipUri} onChange={setSipUri} />
+        <Field label="Display Name" value={displayName} onChange={setDisplayName} />
+        <label className="block">
+          <span className="block text-xs text-tertiary mb-1">Role</span>
+          <select value={role} onChange={(e) => setRole(e.target.value)}
+            className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus">
+            <option value="agent">Agent</option>
+            <option value="supervisor">Supervisor</option>
+            <option value="qa">QA</option>
+            <option value="admin">Admin</option>
+          </select>
+        </label>
+        <Field label="Skills (comma-separated)" value={skills} onChange={setSkills} />
+        <button className="h-10 self-end rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium flex items-center justify-center gap-2">
+          <Plus size={16} /> Create
+        </button>
+      </form>
+      <div className="p-3 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="text-tertiary"><tr className="border-b border-border-subtle">
+            {["Agent", "Role", "State", "Calls", "Skills", "Actions"].map((h) => <th key={h} className="text-left py-2 px-2 font-medium">{h}</th>)}
+          </tr></thead>
+          <tbody>
+            {agents.length === 0 ? <tr><td colSpan={6} className="py-4 px-2 text-secondary">No agents</td></tr> :
+              agents.map((a) => (
+                <tr key={a.user_sip_uri} className="border-b border-border-subtle">
+                  <td className="py-2 px-2">
+                    <div>{a.display_name || a.user_sip_uri}</div>
+                    <div className="text-xs text-tertiary">{a.user_sip_uri}</div>
+                  </td>
+                  <td className="py-2 px-2">
+                    <span className={cn("px-2 py-0.5 rounded-full text-xs font-medium",
+                      a.role === "supervisor" ? "bg-accent/20 text-accent" :
+                      a.role === "qa" ? "bg-warning/20 text-warning" : "bg-elevated text-secondary"
+                    )}>{a.role}</span>
+                  </td>
+                  <td className="py-2 px-2">
+                    <span className={cn("px-2 py-0.5 rounded-full text-xs font-medium", stateColors[a.state] || "bg-elevated text-secondary")}>
+                      {a.state}
+                    </span>
+                  </td>
+                  <td className="py-2 px-2 tabular-nums">{a.total_calls}</td>
+                  <td className="py-2 px-2 text-secondary">{(a.skills || []).join(", ") || "-"}</td>
+                  <td className="py-2 px-2">
+                    <select value={a.state} onChange={(e) => changeState(a.user_sip_uri, e.target.value)}
+                      className="h-8 rounded-md bg-base border border-border-default px-2 text-xs outline-none">
+                      <option value="available">Available</option>
+                      <option value="on_call">On Call</option>
+                      <option value="wrap_up">Wrap Up</option>
+                      <option value="break">Break</option>
+                      <option value="training">Training</option>
+                      <option value="offline">Offline</option>
+                    </select>
+                  </td>
+                </tr>
+              ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function WallboardPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [data, setData] = useState<any>(null);
+
+  useEffect(() => {
+    const load = () => {
+      fetch(`${baseUrl}/v1/wallboard`, { headers: { Authorization: `Bearer ${token}` } })
+        .then((r) => r.ok ? r.json() : null)
+        .then((d) => { if (d) setData(d); })
+        .catch(() => {});
+    };
+    load();
+    const interval = setInterval(load, 5000); // Refresh every 5 seconds
+    return () => clearInterval(interval);
+  }, [baseUrl, token]);
+
+  if (!data) return <p className="text-sm text-tertiary py-8 text-center">Loading wallboard...</p>;
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+        <Metric label="Agents Available" value={data.agents?.available ?? 0} />
+        <Metric label="On Call" value={data.agents?.on_call ?? 0} />
+        <Metric label="Wrap Up" value={data.agents?.wrap_up ?? 0} />
+        <Metric label="On Break" value={data.agents?.on_break ?? 0} />
+        <Metric label="Offline" value={data.agents?.offline ?? 0} />
+      </div>
+
+      {(data.queues || []).map((q: any) => (
+        <section key={q.queue_id} className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+          <div className="p-3 border-b border-border-subtle flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className={cn("w-2 h-2 rounded-full", q.calls_waiting > 0 ? "bg-warning animate-pulse" : "bg-success")} />
+              <h3 className="font-medium">{q.queue_name}</h3>
+            </div>
+            <span className="text-xs text-tertiary">SLA: {q.sla_percentage.toFixed(0)}%</span>
+          </div>
+          <div className="grid grid-cols-3 md:grid-cols-6 gap-2 p-3">
+            <div className="text-center"><div className="text-xl font-semibold">{q.calls_waiting}</div><div className="text-[10px] text-tertiary">Waiting</div></div>
+            <div className="text-center"><div className="text-xl font-semibold">{q.calls_active}</div><div className="text-[10px] text-tertiary">Active</div></div>
+            <div className="text-center"><div className="text-xl font-semibold">{q.agents_available}</div><div className="text-[10px] text-tertiary">Available</div></div>
+            <div className="text-center"><div className="text-xl font-semibold">{q.longest_wait_secs}s</div><div className="text-[10px] text-tertiary">Longest Wait</div></div>
+            <div className="text-center"><div className="text-xl font-semibold">{q.calls_answered}</div><div className="text-[10px] text-tertiary">Answered</div></div>
+            <div className="text-center"><div className="text-xl font-semibold">{q.calls_abandoned}</div><div className="text-[10px] text-tertiary">Abandoned</div></div>
+          </div>
+        </section>
+      ))}
+
+      <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+        <div className="p-3 border-b border-border-subtle"><h3 className="font-medium">Agent Status</h3></div>
+        <div className="p-3 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="text-tertiary"><tr className="border-b border-border-subtle">
+              {["Agent", "Role", "State", "Since", "Calls"].map((h) => <th key={h} className="text-left py-2 px-2 font-medium">{h}</th>)}
+            </tr></thead>
+            <tbody>
+              {(data.agent_list || []).map((a: any) => (
+                <tr key={a.user_sip_uri} className="border-b border-border-subtle">
+                  <td className="py-2 px-2">{a.display_name || a.user_sip_uri}</td>
+                  <td className="py-2 px-2 text-secondary">{a.role}</td>
+                  <td className="py-2 px-2">
+                    <span className={cn("px-2 py-0.5 rounded-full text-xs font-medium",
+                      a.state === "available" ? "bg-success/20 text-success" :
+                      a.state === "on_call" ? "bg-red-500/20 text-red-500" :
+                      a.state === "wrap_up" ? "bg-yellow-500/20 text-yellow-500" :
+                      "bg-elevated text-secondary"
+                    )}>{a.state}</span>
+                  </td>
+                  <td className="py-2 px-2 text-secondary">{a.state_since ? shortDate(a.state_since) : "-"}</td>
+                  <td className="py-2 px-2 tabular-nums">{a.total_calls}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function QaPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [scorecards, setScorecards] = useState<any[]>([]);
+  const [callId, setCallId] = useState("");
+  const [agentUri, setAgentUri] = useState("");
+  const [totalScore, setTotalScore] = useState("");
+  const [maxScore, setMaxScore] = useState("100");
+  const [comments, setComments] = useState("");
+
+  useEffect(() => {
+    fetch(`${baseUrl}/v1/qa/scorecards`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.ok ? r.json() : []).then(setScorecards).catch(() => {});
+  }, [baseUrl, token]);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      const res = await fetch(`${baseUrl}/v1/qa/scorecards`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          call_id: callId, agent_uri: agentUri.startsWith("sip:") ? agentUri : `sip:${agentUri}`,
+          scores: {}, total_score: parseFloat(totalScore) || 0, max_score: parseFloat(maxScore) || 100,
+          comments,
+        }),
+      });
+      if (!res.ok) throw new Error("Failed");
+      setCallId(""); setAgentUri(""); setTotalScore(""); setComments("");
+      toast({ type: "success", title: "Scorecard saved" });
+      const updated = await fetch(`${baseUrl}/v1/qa/scorecards`, { headers: { Authorization: `Bearer ${token}` } });
+      if (updated.ok) setScorecards(await updated.json());
+    } catch (err) { toast({ type: "error", title: "Failed" }); }
+  };
+
+  const avgScore = scorecards.length > 0
+    ? (scorecards.reduce((s, c) => s + (c.max_score > 0 ? (c.total_score / c.max_score) * 100 : 0), 0) / scorecards.length).toFixed(1)
+    : "0";
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+        <Metric label="Total Reviews" value={scorecards.length} />
+        <Metric label="Avg Score %" value={parseFloat(avgScore)} />
+        <Metric label="Agents Reviewed" value={new Set(scorecards.map((s) => s.agent_uri)).size} />
+      </div>
+
+      <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+        <div className="p-3 border-b border-border-subtle"><h2 className="font-medium">New Scorecard</h2></div>
+        <form onSubmit={submit} className="p-3 grid md:grid-cols-5 gap-2">
+          <Field label="Call ID" value={callId} onChange={setCallId} />
+          <Field label="Agent SIP URI" value={agentUri} onChange={setAgentUri} />
+          <Field label="Score" value={totalScore} onChange={setTotalScore} />
+          <Field label="Max Score" value={maxScore} onChange={setMaxScore} />
+          <button className="h-10 self-end rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium">Score</button>
+        </form>
+      </section>
+
+      <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+        <div className="p-3 border-b border-border-subtle"><h2 className="font-medium">Recent Scorecards</h2></div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="text-tertiary"><tr className="border-b border-border-subtle">
+              {["Date", "Agent", "Reviewer", "Score", "Comments"].map((h) => <th key={h} className="text-left py-2 px-2 font-medium">{h}</th>)}
+            </tr></thead>
+            <tbody>
+              {scorecards.length === 0 ? <tr><td colSpan={5} className="py-4 px-2 text-secondary">No scorecards</td></tr> :
+                scorecards.map((sc) => (
+                  <tr key={sc.id} className="border-b border-border-subtle">
+                    <td className="py-2 px-2 text-secondary">{shortDate(sc.created_at)}</td>
+                    <td className="py-2 px-2">{sc.agent_uri}</td>
+                    <td className="py-2 px-2 text-secondary">{sc.reviewer_uri}</td>
+                    <td className="py-2 px-2">
+                      <span className={cn("px-2 py-0.5 rounded-full text-xs font-medium",
+                        (sc.total_score / sc.max_score) >= 0.8 ? "bg-success/20 text-success" :
+                        (sc.total_score / sc.max_score) >= 0.6 ? "bg-warning/20 text-warning" :
+                        "bg-destructive/20 text-destructive"
+                      )}>{sc.total_score}/{sc.max_score}</span>
+                    </td>
+                    <td className="py-2 px-2 text-secondary max-w-[200px] truncate">{sc.comments || "-"}</td>
                   </tr>
                 ))}
             </tbody>

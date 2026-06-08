@@ -217,6 +217,10 @@ pub struct AppState {
     speed_dials: RwLock<Vec<SpeedDial>>,
     cdrs: RwLock<Vec<CallDetailRecord>>,
     paging_groups: ShardedMap<Uuid, PagingGroup>,
+    agent_profiles: ShardedMap<String, AgentProfile>,
+    monitor_sessions: ShardedMap<Uuid, MonitorSession>,
+    qa_scorecards: RwLock<Vec<QaScorecard>>,
+    canned_responses: ShardedMap<Uuid, CannedResponse>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
     rate_limits: ShardedMap<String, RateLimitBucket>,
     rate_limit_rps: u32,
@@ -338,6 +342,10 @@ impl AppState {
             speed_dials: RwLock::new(Vec::new()),
             cdrs: RwLock::new(Vec::new()),
             paging_groups: ShardedMap::new(),
+            agent_profiles: ShardedMap::new(),
+            monitor_sessions: ShardedMap::new(),
+            qa_scorecards: RwLock::new(Vec::new()),
+            canned_responses: ShardedMap::new(),
             sse_tx: tokio::sync::broadcast::channel(256).0,
             rate_limits: ShardedMap::new(),
             rate_limit_rps: 100,
@@ -1425,6 +1433,133 @@ impl AppState {
     pub fn broadcast_sse(&self, event: SseEvent) {
         let _ = self.sse_tx.send(event);
     }
+
+    // ─── Call Center: Agent Management ───
+
+    pub fn create_agent_profile(&self, input: CreateAgentProfileRequest) -> Result<AgentProfile, String> {
+        if self.agent_profiles.get(&input.user_sip_uri).is_some() {
+            return Err("Agent profile already exists".to_string());
+        }
+        let profile = AgentProfile {
+            id: Uuid::new_v4(),
+            user_sip_uri: input.user_sip_uri.clone(),
+            role: input.role.unwrap_or_else(|| "agent".to_string()),
+            display_name: input.display_name.unwrap_or_default(),
+            queues: input.queues.unwrap_or_default(),
+            skills: input.skills.unwrap_or_default(),
+            max_concurrent: input.max_concurrent.unwrap_or(1),
+            auto_answer: input.auto_answer.unwrap_or(false),
+            state: "offline".to_string(),
+            state_reason: None,
+            state_since: Utc::now(),
+            total_calls: 0,
+            total_talk_secs: 0,
+        };
+        self.agent_profiles.insert(input.user_sip_uri, profile.clone());
+        Ok(profile)
+    }
+
+    pub fn list_agent_profiles(&self) -> Vec<AgentProfile> { self.agent_profiles.values() }
+
+    pub fn agent_profile(&self, uri: &str) -> Option<AgentProfile> {
+        self.agent_profiles.get(&uri.to_string())
+    }
+
+    pub fn set_agent_state(&self, uri: &str, state: &str, reason: Option<String>) -> Option<AgentProfile> {
+        self.agent_profiles.with_write(&uri.to_string(), |profiles| {
+            let profile = profiles.get_mut(uri)?;
+            profile.state = state.to_string();
+            profile.state_reason = reason;
+            profile.state_since = Utc::now();
+            Some(profile.clone())
+        })
+    }
+
+    pub fn delete_agent_profile(&self, uri: &str) -> Option<AgentProfile> {
+        self.agent_profiles.remove(&uri.to_string())
+    }
+
+    pub fn queue_wallboard(&self) -> Vec<QueueMetricsSnapshot> {
+        self.list_queues().into_iter().map(|q| {
+            let agents = q.agents.iter().collect::<Vec<_>>();
+            QueueMetricsSnapshot {
+                queue_id: q.id,
+                queue_name: q.name,
+                calls_waiting: 0,
+                calls_active: 0,
+                agents_available: agents.iter().filter(|a| a.state == "available").count() as i32,
+                agents_busy: agents.iter().filter(|a| a.state == "busy").count() as i32,
+                agents_paused: agents.iter().filter(|a| a.state == "paused" || a.state == "break").count() as i32,
+                longest_wait_secs: 0,
+                avg_wait_secs: 0,
+                avg_talk_secs: 0,
+                calls_answered: 0,
+                calls_abandoned: 0,
+                sla_percentage: 100.0,
+            }
+        }).collect()
+    }
+
+    // ─── Monitor Sessions ───
+
+    pub fn start_monitor(&self, supervisor: &str, input: StartMonitorRequest) -> MonitorSession {
+        let session = MonitorSession {
+            id: Uuid::new_v4(),
+            supervisor_uri: supervisor.to_string(),
+            target_call_id: input.target_call_id,
+            agent_uri: input.agent_uri,
+            mode: input.mode,
+            started_at: Utc::now(),
+        };
+        self.monitor_sessions.insert(session.id, session.clone());
+        session
+    }
+
+    pub fn list_monitor_sessions(&self) -> Vec<MonitorSession> { self.monitor_sessions.values() }
+
+    pub fn end_monitor(&self, id: Uuid) -> Option<MonitorSession> {
+        self.monitor_sessions.remove(&id)
+    }
+
+    // ─── QA Scorecards ───
+
+    pub fn create_scorecard(&self, reviewer: &str, input: CreateScorecardRequest) -> QaScorecard {
+        let sc = QaScorecard {
+            id: Uuid::new_v4(),
+            call_id: input.call_id,
+            agent_uri: input.agent_uri,
+            reviewer_uri: reviewer.to_string(),
+            queue_name: input.queue_name,
+            scores: input.scores,
+            total_score: input.total_score,
+            max_score: input.max_score,
+            comments: input.comments.unwrap_or_default(),
+            created_at: Utc::now(),
+        };
+        self.qa_scorecards.write().expect("qa lock").push(sc.clone());
+        sc
+    }
+
+    pub fn list_scorecards(&self) -> Vec<QaScorecard> {
+        self.qa_scorecards.read().expect("qa lock").clone()
+    }
+
+    // ─── Canned Responses ───
+
+    pub fn create_canned_response(&self, input: CreateCannedResponseRequest) -> CannedResponse {
+        let cr = CannedResponse {
+            id: Uuid::new_v4(),
+            category: input.category.unwrap_or_else(|| "general".to_string()),
+            shortcode: input.shortcode,
+            title: input.title,
+            body: input.body,
+        };
+        self.canned_responses.insert(cr.id, cr.clone());
+        cr
+    }
+
+    pub fn list_canned_responses(&self) -> Vec<CannedResponse> { self.canned_responses.values() }
+    pub fn delete_canned_response(&self, id: Uuid) -> Option<CannedResponse> { self.canned_responses.remove(&id) }
 
     // ─── User Call Settings ───
 
@@ -2857,6 +2992,126 @@ pub struct CreatePagingGroupRequest {
     pub name: String,
     pub extension: String,
     pub members: Vec<String>,
+}
+
+// ─── Call Center: Agent Profiles ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentProfile {
+    pub id: Uuid,
+    pub user_sip_uri: String,
+    pub role: String,           // agent, supervisor, qa, admin
+    pub display_name: String,
+    pub queues: Vec<Uuid>,
+    pub skills: Vec<String>,
+    pub max_concurrent: i32,
+    pub auto_answer: bool,
+    pub state: String,          // available, on_call, wrap_up, break, training, meeting, offline
+    pub state_reason: Option<String>,
+    pub state_since: DateTime<Utc>,
+    pub total_calls: i32,
+    pub total_talk_secs: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateAgentProfileRequest {
+    pub user_sip_uri: String,
+    pub role: Option<String>,
+    pub display_name: Option<String>,
+    pub queues: Option<Vec<Uuid>>,
+    pub skills: Option<Vec<String>>,
+    pub max_concurrent: Option<i32>,
+    pub auto_answer: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SetAgentStateRequest {
+    pub state: String,
+    pub reason: Option<String>,
+}
+
+// ─── Call Center: Queue Metrics ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueMetricsSnapshot {
+    pub queue_id: Uuid,
+    pub queue_name: String,
+    pub calls_waiting: i32,
+    pub calls_active: i32,
+    pub agents_available: i32,
+    pub agents_busy: i32,
+    pub agents_paused: i32,
+    pub longest_wait_secs: i32,
+    pub avg_wait_secs: i32,
+    pub avg_talk_secs: i32,
+    pub calls_answered: i32,
+    pub calls_abandoned: i32,
+    pub sla_percentage: f32,
+}
+
+// ─── Call Center: Monitor Session ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonitorSession {
+    pub id: Uuid,
+    pub supervisor_uri: String,
+    pub target_call_id: String,
+    pub agent_uri: Option<String>,
+    pub mode: String,  // listen, whisper, barge
+    pub started_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StartMonitorRequest {
+    pub target_call_id: String,
+    pub agent_uri: Option<String>,
+    pub mode: String,
+}
+
+// ─── Call Center: QA Scorecard ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QaScorecard {
+    pub id: Uuid,
+    pub call_id: String,
+    pub agent_uri: String,
+    pub reviewer_uri: String,
+    pub queue_name: Option<String>,
+    pub scores: serde_json::Value,
+    pub total_score: f32,
+    pub max_score: f32,
+    pub comments: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateScorecardRequest {
+    pub call_id: String,
+    pub agent_uri: String,
+    pub queue_name: Option<String>,
+    pub scores: serde_json::Value,
+    pub total_score: f32,
+    pub max_score: f32,
+    pub comments: Option<String>,
+}
+
+// ─── Call Center: Canned Responses ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CannedResponse {
+    pub id: Uuid,
+    pub category: String,
+    pub shortcode: String,
+    pub title: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateCannedResponseRequest {
+    pub category: Option<String>,
+    pub shortcode: String,
+    pub title: String,
+    pub body: String,
 }
 
 /// Parse "sip:user@domain" into (user, domain)

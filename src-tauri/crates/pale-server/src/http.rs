@@ -19,9 +19,11 @@ use uuid::Uuid;
 use crate::{
     safe_filename, sip_ha1, AppState, AuthError, CallStatus, CreateCallRequest,
     CreateConferenceRequest, CreateRoutingRuleRequest, CreateSipAccountRequest, CreateUserRequest,
-    AddRoomMemberRequest, CreateBusinessHoursRequest, CreateExtensionRequest,
-    CreateHolidayRequest, CreateIvrRequest, CreatePagingGroupRequest, CreateQueueRequest,
-    CreateRingGroupRequest, CreateRoomRequest, CreateSpeedDialRequest,
+    AddRoomMemberRequest, CreateAgentProfileRequest, CreateBusinessHoursRequest,
+    CreateCannedResponseRequest, CreateExtensionRequest, CreateHolidayRequest,
+    CreateIvrRequest, CreatePagingGroupRequest, CreateQueueRequest, CreateRingGroupRequest,
+    CreateRoomRequest, CreateScorecardRequest, CreateSpeedDialRequest, SetAgentStateRequest,
+    StartMonitorRequest,
     FileRecord, JoinConferenceRequest,
     SendRoomMessageRequest, SetPresenceRequest, SyncCallHistoryRequest,
     UpdateCallStatusRequest, UpdateSipAccountStatusRequest,
@@ -91,6 +93,15 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/cdrs", get(list_cdrs))
         .route("/v1/paging-groups", get(list_paging_groups).post(create_paging_group))
         .route("/v1/paging-groups/{id}", delete(delete_paging_group))
+        .route("/v1/agents", get(list_agents).post(create_agent))
+        .route("/v1/agents/{uri}", get(get_agent).delete(delete_agent))
+        .route("/v1/agents/{uri}/state", put(set_agent_state))
+        .route("/v1/wallboard", get(get_wallboard))
+        .route("/v1/monitor", get(list_monitors).post(start_monitor))
+        .route("/v1/monitor/{id}", delete(end_monitor))
+        .route("/v1/qa/scorecards", get(list_scorecards).post(create_scorecard))
+        .route("/v1/canned-responses", get(list_canned).post(create_canned))
+        .route("/v1/canned-responses/{id}", delete(delete_canned))
         .route("/v1/call-settings/{sip_uri}", get(get_user_call_settings_admin))
         .route("/v1/ldap/config", get(get_ldap_config).put(set_ldap_config))
         .route("/v1/ldap/test", post(test_ldap_connection))
@@ -1039,6 +1050,103 @@ async fn upload_avatar(
         "file_id": file_id,
         "url": format!("/v1/files/{}", file_id),
     })))
+}
+
+// ─── Call Center ───
+
+async fn list_agents(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::AgentProfile>>, ApiError> {
+    require_bearer(&headers, &state)?; Ok(Json(state.list_agent_profiles()))
+}
+async fn create_agent(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<CreateAgentProfileRequest>) -> Result<Json<crate::AgentProfile>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    let a = state.create_agent_profile(input).map_err(|e| ApiError::Conflict(e))?;
+    state.record_audit_event(&p, "agent.created", Some(a.user_sip_uri.clone()));
+    Ok(Json(a))
+}
+async fn get_agent(State(state): State<SharedState>, headers: HeaderMap, Path(uri): Path<String>) -> Result<Json<crate::AgentProfile>, ApiError> {
+    require_bearer(&headers, &state)?;
+    let full = if uri.starts_with("sip:") { uri } else { format!("sip:{}", uri) };
+    state.agent_profile(&full).map(Json).ok_or(ApiError::NotFound)
+}
+async fn delete_agent(State(state): State<SharedState>, headers: HeaderMap, Path(uri): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    let full = if uri.starts_with("sip:") { uri } else { format!("sip:{}", uri) };
+    state.delete_agent_profile(&full).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&p, "agent.deleted", Some(full)); Ok(Json(json!({"ok":true})))
+}
+async fn set_agent_state(State(state): State<SharedState>, headers: HeaderMap, Path(uri): Path<String>, Json(input): Json<SetAgentStateRequest>) -> Result<Json<crate::AgentProfile>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    let full = if uri.starts_with("sip:") { uri } else { format!("sip:{}", uri) };
+    let agent = state.set_agent_state(&full, &input.state, input.reason).ok_or(ApiError::NotFound)?;
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "agent_state".to_string(),
+        payload: serde_json::to_value(&agent).unwrap_or_default(),
+    });
+    Ok(Json(agent))
+}
+
+async fn get_wallboard(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<serde_json::Value>, ApiError> {
+    require_bearer(&headers, &state)?;
+    let metrics = state.queue_wallboard();
+    let agents = state.list_agent_profiles();
+    let available = agents.iter().filter(|a| a.state == "available").count();
+    let on_call = agents.iter().filter(|a| a.state == "on_call").count();
+    let wrap_up = agents.iter().filter(|a| a.state == "wrap_up").count();
+    let on_break = agents.iter().filter(|a| a.state == "break" || a.state == "training" || a.state == "meeting").count();
+    let offline = agents.iter().filter(|a| a.state == "offline").count();
+
+    Ok(Json(json!({
+        "queues": metrics,
+        "agents": {
+            "total": agents.len(),
+            "available": available,
+            "on_call": on_call,
+            "wrap_up": wrap_up,
+            "on_break": on_break,
+            "offline": offline,
+        },
+        "agent_list": agents,
+    })))
+}
+
+async fn list_monitors(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::MonitorSession>>, ApiError> {
+    require_bearer(&headers, &state)?; Ok(Json(state.list_monitor_sessions()))
+}
+async fn start_monitor(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<StartMonitorRequest>) -> Result<Json<crate::MonitorSession>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    let session = state.start_monitor(&p, input);
+    state.record_audit_event(&p, "monitor.started", Some(format!("{}:{}", session.mode, session.target_call_id)));
+    Ok(Json(session))
+}
+async fn end_monitor(State(state): State<SharedState>, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    state.end_monitor(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&p, "monitor.ended", Some(id.to_string())); Ok(Json(json!({"ok":true})))
+}
+
+async fn list_scorecards(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::QaScorecard>>, ApiError> {
+    require_bearer(&headers, &state)?; Ok(Json(state.list_scorecards()))
+}
+async fn create_scorecard(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<CreateScorecardRequest>) -> Result<Json<crate::QaScorecard>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    let sc = state.create_scorecard(&p, input);
+    state.record_audit_event(&p, "scorecard.created", Some(sc.id.to_string()));
+    Ok(Json(sc))
+}
+
+async fn list_canned(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::CannedResponse>>, ApiError> {
+    require_bearer(&headers, &state)?; Ok(Json(state.list_canned_responses()))
+}
+async fn create_canned(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<CreateCannedResponseRequest>) -> Result<Json<crate::CannedResponse>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    let cr = state.create_canned_response(input);
+    state.record_audit_event(&p, "canned_response.created", Some(cr.id.to_string()));
+    Ok(Json(cr))
+}
+async fn delete_canned(State(state): State<SharedState>, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    state.delete_canned_response(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&p, "canned_response.deleted", Some(id.to_string())); Ok(Json(json!({"ok":true})))
 }
 
 // ─── PBX Features ───
