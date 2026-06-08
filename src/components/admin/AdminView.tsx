@@ -43,7 +43,7 @@ async function api<T = any>(baseUrl: string, token: string, path: string, opts?:
   return paleServerApi<T>(baseUrl, token, path, opts);
 }
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "conferences" | "files" | "directory" | "audit";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -63,6 +63,7 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "agents", label: "Agents", icon: Users },
   { id: "wallboard", label: "Wallboard", icon: Activity },
   { id: "qa", label: "QA", icon: ClipboardList },
+  { id: "vip", label: "VIP", icon: Users },
   { id: "conferences", label: "Conferences", icon: Mic },
   { id: "files", label: "Files", icon: FileText },
   { id: "directory", label: "Directory", icon: Users },
@@ -274,6 +275,7 @@ export function AdminView() {
         {activeTab === "agents" && <AgentsPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "wallboard" && <WallboardPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "qa" && <QaPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "vip" && <VipCallersPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "calls" && <CallsPanel snapshot={snapshot} />}
         {activeTab === "conferences" && <ConferencesPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
         {activeTab === "files" && <FilesPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
@@ -1557,6 +1559,9 @@ function QueuesPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
   const [strategy, setStrategy] = useState("round_robin");
   const [agents, setAgents] = useState("");
   const [overflow, setOverflow] = useState("");
+  const [callbackEnabled, setCallbackEnabled] = useState(false);
+  const [callbackThreshold, setCallbackThreshold] = useState("120");
+  const [slaTarget, setSlaTarget] = useState("20");
 
   const load = async () => {
     try {
@@ -1578,9 +1583,13 @@ function QueuesPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
         body: {
           name, extension: extension.startsWith("sip:") ? extension : `sip:${extension}`,
           strategy, agents: agentList, overflow_destination: overflow || null,
+          callback_enabled: callbackEnabled === true,
+          callback_threshold_secs: parseInt(callbackThreshold) || 120,
+          sla_target_secs: parseInt(slaTarget) || 20,
         },
       });
       setName(""); setExtension(""); setAgents(""); setOverflow("");
+      setCallbackEnabled(false); setCallbackThreshold("120"); setSlaTarget("20");
       toast({ type: "success", title: "Queue created" }); load();
     } catch (err) {
       toast({ type: "error", title: err instanceof Error ? err.message : "Failed" });
@@ -1599,7 +1608,7 @@ function QueuesPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
       <div className="p-3 border-b border-border-subtle flex items-center gap-2">
         <Users size={17} className="text-accent" /><h2 className="font-medium">Call Queues (ACD)</h2>
       </div>
-      <form onSubmit={submit} className="p-3 grid md:grid-cols-6 gap-2 border-b border-border-subtle">
+      <form onSubmit={submit} className="p-3 grid md:grid-cols-3 lg:grid-cols-5 gap-2 border-b border-border-subtle">
         <Field label="Name" value={name} onChange={setName} />
         <Field label="Extension" value={extension} onChange={setExtension} />
         <label className="block">
@@ -1615,6 +1624,13 @@ function QueuesPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
         </label>
         <Field label="Agents (SIP URIs)" value={agents} onChange={setAgents} />
         <Field label="Overflow" value={overflow} onChange={setOverflow} />
+        <label className="flex items-center gap-2 self-end h-10">
+          <input type="checkbox" checked={callbackEnabled} onChange={(e) => setCallbackEnabled(e.target.checked)}
+            className="w-4 h-4 rounded border-border-default accent-accent" />
+          <span className="text-xs text-tertiary">Callback enabled</span>
+        </label>
+        <Field label="Callback threshold (s)" value={callbackThreshold} onChange={setCallbackThreshold} />
+        <Field label="SLA target (s)" value={slaTarget} onChange={setSlaTarget} />
         <button className="h-10 self-end rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium flex items-center justify-center gap-2">
           <Plus size={16} /> Create
         </button>
@@ -1708,6 +1724,8 @@ function AgentsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
   const [role, setRole] = useState("agent");
   const [displayName, setDisplayName] = useState("");
   const [skills, setSkills] = useState("");
+  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const [agentHistory, setAgentHistory] = useState<any[]>([]);
 
   const load = async () => {
     try {
@@ -1735,12 +1753,24 @@ function AgentsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
 
   const changeState = async (uri: string, state: string) => {
     try {
-      await api(baseUrl, token, `/v1/agents/${encodeURIComponent(uri)}/state`, {
-        method: "PUT",
-        body: { state },
+      await api(baseUrl, token, `/v1/agents/${encodeURIComponent(uri)}/transition`, {
+        method: "POST",
+        body: { state, reason: null },
       });
       load();
-    } catch { /* ignore */ }
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Invalid state transition" });
+    }
+  };
+
+  const loadHistory = async (uri: string) => {
+    setSelectedAgent(uri);
+    try {
+      const data = await api<any[]>(baseUrl, token, `/v1/agents/${encodeURIComponent(uri)}/history`);
+      setAgentHistory((data || []).slice(0, 10));
+    } catch {
+      setAgentHistory([]);
+    }
   };
 
   const stateColors: Record<string, string> = {
@@ -1781,7 +1811,7 @@ function AgentsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
           <tbody>
             {agents.length === 0 ? <tr><td colSpan={6} className="py-4 px-2 text-secondary">No agents</td></tr> :
               agents.map((a) => (
-                <tr key={a.user_sip_uri} className="border-b border-border-subtle">
+                <tr key={a.user_sip_uri} className={cn("border-b border-border-subtle cursor-pointer hover:bg-elevated/50", selectedAgent === a.user_sip_uri && "bg-elevated/30")} onClick={() => loadHistory(a.user_sip_uri)}>
                   <td className="py-2 px-2">
                     <div>{a.display_name || a.user_sip_uri}</div>
                     <div className="text-xs text-tertiary">{a.user_sip_uri}</div>
@@ -1815,12 +1845,38 @@ function AgentsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
           </tbody>
         </table>
       </div>
+      {selectedAgent && (
+        <div className="p-3 border-t border-border-subtle">
+          <h3 className="font-medium text-sm mb-2">Agent History &mdash; {selectedAgent}</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-tertiary"><tr className="border-b border-border-subtle">
+                {["Time", "From", "To", "Reason", "Duration"].map((h) => <th key={h} className="text-left py-2 px-2 font-medium">{h}</th>)}
+              </tr></thead>
+              <tbody>
+                {agentHistory.length === 0 ? <tr><td colSpan={5} className="py-4 px-2 text-secondary">No history</td></tr> :
+                  agentHistory.map((h, i) => (
+                    <tr key={i} className="border-b border-border-subtle">
+                      <td className="py-2 px-2 text-secondary">{h.timestamp ? shortDate(h.timestamp) : "-"}</td>
+                      <td className="py-2 px-2">{h.from_state || "-"}</td>
+                      <td className="py-2 px-2">{h.to_state || "-"}</td>
+                      <td className="py-2 px-2 text-secondary">{h.reason || "-"}</td>
+                      <td className="py-2 px-2 tabular-nums">{h.duration_secs != null ? `${h.duration_secs}s` : "-"}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
 
 function WallboardPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
   const [data, setData] = useState<any>(null);
+  const [queueCallers, setQueueCallers] = useState<Record<string, any[]>>({});
+  const [queueCallbacks, setQueueCallbacks] = useState<Record<string, any[]>>({});
 
   useEffect(() => {
     const load = () => {
@@ -1833,7 +1889,27 @@ function WallboardPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
     return () => clearInterval(interval);
   }, [baseUrl, token]);
 
+  // Fetch callers and callbacks for each queue
+  useEffect(() => {
+    if (!data?.queues) return;
+    for (const q of data.queues) {
+      if (q.calls_waiting > 0) {
+        api<any[]>(baseUrl, token, `/v1/queues/${q.queue_id}/callers`)
+          .then((callers) => setQueueCallers((prev) => ({ ...prev, [q.queue_id]: callers || [] })))
+          .catch(() => {});
+      }
+      api<any[]>(baseUrl, token, `/v1/queues/${q.queue_id}/callbacks`)
+        .then((cbs) => setQueueCallbacks((prev) => ({ ...prev, [q.queue_id]: cbs || [] })))
+        .catch(() => {});
+    }
+  }, [data, baseUrl, token]);
+
   if (!data) return <p className="text-sm text-tertiary py-8 text-center">Loading wallboard...</p>;
+
+  const waitTimeSince = (enteredAt: string) => {
+    const secs = Math.round((Date.now() - new Date(enteredAt).getTime()) / 1000);
+    return secs > 0 ? `${secs}s` : "0s";
+  };
 
   return (
     <div className="space-y-4">
@@ -1845,14 +1921,20 @@ function WallboardPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
         <Metric label="Offline" value={data.agents?.offline ?? 0} />
       </div>
 
-      {(data.queues || []).map((q: any) => (
+      {(data.queues || []).map((q: any) => {
+        const slaAboveTarget = q.sla_target != null ? q.sla_percentage >= q.sla_target : true;
+        const callers = queueCallers[q.queue_id] || [];
+        const callbacks = queueCallbacks[q.queue_id] || [];
+        return (
         <section key={q.queue_id} className="border border-border-subtle bg-surface rounded-md overflow-hidden">
           <div className="p-3 border-b border-border-subtle flex items-center justify-between">
             <div className="flex items-center gap-2">
               <span className={cn("w-2 h-2 rounded-full", q.calls_waiting > 0 ? "bg-warning animate-pulse" : "bg-success")} />
               <h3 className="font-medium">{q.queue_name}</h3>
             </div>
-            <span className="text-xs text-tertiary">SLA: {q.sla_percentage.toFixed(0)}%</span>
+            <span className={cn("text-xs font-medium", slaAboveTarget ? "text-success" : "text-destructive")}>
+              SLA: {q.sla_percentage.toFixed(0)}%{q.sla_target != null ? ` / ${q.sla_target}% target` : ""}
+            </span>
           </div>
           <div className="grid grid-cols-3 md:grid-cols-6 gap-2 p-3">
             <div className="text-center"><div className="text-xl font-semibold">{q.calls_waiting}</div><div className="text-[10px] text-tertiary">Waiting</div></div>
@@ -1862,8 +1944,49 @@ function WallboardPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
             <div className="text-center"><div className="text-xl font-semibold">{q.calls_answered}</div><div className="text-[10px] text-tertiary">Answered</div></div>
             <div className="text-center"><div className="text-xl font-semibold">{q.calls_abandoned}</div><div className="text-[10px] text-tertiary">Abandoned</div></div>
           </div>
+          {q.calls_waiting > 0 && callers.length > 0 && (
+            <div className="px-3 pb-3">
+              <h4 className="text-xs font-medium text-tertiary mb-1">Callers in Queue</h4>
+              <table className="w-full text-sm">
+                <thead className="text-tertiary"><tr className="border-b border-border-subtle">
+                  {["Position", "Caller", "Wait Time"].map((h) => <th key={h} className="text-left py-1 px-2 font-medium text-xs">{h}</th>)}
+                </tr></thead>
+                <tbody>
+                  {callers.map((c: any, i: number) => (
+                    <tr key={i} className="border-b border-border-subtle last:border-b-0">
+                      <td className="py-1 px-2 tabular-nums">{c.position ?? i + 1}</td>
+                      <td className="py-1 px-2">{c.caller_uri || c.caller || "-"}</td>
+                      <td className="py-1 px-2 tabular-nums">{c.entered_at ? waitTimeSince(c.entered_at) : "-"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {callbacks.length > 0 && (
+            <div className="px-3 pb-3">
+              <h4 className="text-xs font-medium text-tertiary mb-1">Pending Callbacks</h4>
+              <table className="w-full text-sm">
+                <thead className="text-tertiary"><tr className="border-b border-border-subtle">
+                  {["Caller", "Callback #", "Position", "Status", "Requested At"].map((h) => <th key={h} className="text-left py-1 px-2 font-medium text-xs">{h}</th>)}
+                </tr></thead>
+                <tbody>
+                  {callbacks.map((cb: any, i: number) => (
+                    <tr key={i} className="border-b border-border-subtle last:border-b-0">
+                      <td className="py-1 px-2">{cb.caller_uri || cb.caller || "-"}</td>
+                      <td className="py-1 px-2">{cb.callback_number || "-"}</td>
+                      <td className="py-1 px-2 tabular-nums">{cb.position ?? "-"}</td>
+                      <td className="py-1 px-2">{cb.status || "-"}</td>
+                      <td className="py-1 px-2 text-secondary">{cb.requested_at ? shortDate(cb.requested_at) : "-"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </section>
-      ))}
+        );
+      })}
 
       <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
         <div className="p-3 border-b border-border-subtle"><h3 className="font-medium">Agent Status</h3></div>
@@ -1894,6 +2017,94 @@ function WallboardPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
         </div>
       </section>
     </div>
+  );
+}
+
+function VipCallersPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [vipCallers, setVipCallers] = useState<any[]>([]);
+  const [pattern, setPattern] = useState("");
+  const [priority, setPriority] = useState("10");
+  const [label, setLabel] = useState("");
+  const [queueOverride, setQueueOverride] = useState("");
+  const [agentOverride, setAgentOverride] = useState("");
+
+  const load = async () => {
+    try {
+      const data = await api<any[]>(baseUrl, token, "/v1/vip-callers");
+      setVipCallers(data);
+    } catch { /* ignore */ }
+  };
+  useEffect(() => { load(); }, [baseUrl, token]);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      await api(baseUrl, token, "/v1/vip-callers", {
+        method: "POST",
+        body: {
+          pattern,
+          priority: parseInt(priority) || 10,
+          label,
+          queue_override: queueOverride || null,
+          agent_override: agentOverride || null,
+        },
+      });
+      setPattern(""); setPriority("10"); setLabel(""); setQueueOverride(""); setAgentOverride("");
+      toast({ type: "success", title: "VIP caller added" }); load();
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Failed" });
+    }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/vip-callers/${id}`, { method: "DELETE" });
+      toast({ type: "success", title: "VIP caller removed" }); load();
+    } catch { toast({ type: "error", title: "Failed" }); }
+  };
+
+  return (
+    <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+      <div className="p-3 border-b border-border-subtle flex items-center gap-2">
+        <Users size={17} className="text-accent" /><h2 className="font-medium">VIP Callers</h2>
+      </div>
+      <form onSubmit={submit} className="p-3 grid md:grid-cols-6 gap-2 border-b border-border-subtle">
+        <Field label="Pattern" value={pattern} onChange={setPattern} />
+        <label className="block">
+          <span className="block text-xs text-tertiary mb-1">Priority</span>
+          <input type="number" value={priority} onChange={(e) => setPriority(e.target.value)}
+            className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus" />
+        </label>
+        <Field label="Label" value={label} onChange={setLabel} />
+        <Field label="Queue Override" value={queueOverride} onChange={setQueueOverride} />
+        <Field label="Agent Override" value={agentOverride} onChange={setAgentOverride} />
+        <button className="h-10 self-end rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium flex items-center justify-center gap-2">
+          <Plus size={16} /> Create
+        </button>
+      </form>
+      <div className="p-3 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="text-tertiary"><tr className="border-b border-border-subtle">
+            {["Pattern", "Priority", "Label", "Queue Override", "Agent Override", ""].map((h) => <th key={h} className="text-left py-2 px-2 font-medium">{h}</th>)}
+          </tr></thead>
+          <tbody>
+            {vipCallers.length === 0 ? <tr><td colSpan={6} className="py-4 px-2 text-secondary">No VIP callers</td></tr> :
+              vipCallers.map((v) => (
+                <tr key={v.id} className="border-b border-border-subtle">
+                  <td className="py-2 px-2">{v.pattern}</td>
+                  <td className="py-2 px-2 tabular-nums">{v.priority}</td>
+                  <td className="py-2 px-2">{v.label || "-"}</td>
+                  <td className="py-2 px-2 text-secondary">{v.queue_override || "-"}</td>
+                  <td className="py-2 px-2 text-secondary">{v.agent_override || "-"}</td>
+                  <td className="py-2 px-2 text-right">
+                    <IconButton label="Delete" tone="danger" onClick={() => remove(v.id)}><Trash2 size={16} /></IconButton>
+                  </td>
+                </tr>
+              ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 
@@ -2295,7 +2506,7 @@ function Field({
         value={value}
         onChange={(event) => onChange(event.target.value)}
         className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
-        required={label !== "Matrix user ID" && label !== "Display name"}
+        required={!["Matrix user ID", "Display name", "Queue Override", "Agent Override", "Overflow", "Callback threshold (s)", "SLA target (s)"].includes(label)}
       />
     </label>
   );

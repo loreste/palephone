@@ -27,6 +27,7 @@ use crate::{
     FileRecord, JoinConferenceRequest,
     SendRoomMessageRequest, SetPresenceRequest, SyncCallHistoryRequest,
     UpdateCallStatusRequest, UpdateSipAccountStatusRequest,
+    AgentTransitionRequest, CreateVipCallerRequest, RequestCallbackInput,
 };
 
 type SharedState = Arc<AppState>;
@@ -99,6 +100,13 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/agents", get(list_agents).post(create_agent))
         .route("/v1/agents/{uri}", get(get_agent).delete(delete_agent))
         .route("/v1/agents/{uri}/state", put(set_agent_state))
+        .route("/v1/agents/{uri}/transition", post(transition_agent_state_handler))
+        .route("/v1/agents/{uri}/history", get(agent_state_history))
+        .route("/v1/queues/{id}/callers", get(list_queue_callers))
+        .route("/v1/queues/{id}/callback", post(request_queue_callback))
+        .route("/v1/queues/{id}/callbacks", get(list_queue_callbacks))
+        .route("/v1/vip-callers", get(list_vip_callers).post(create_vip_caller))
+        .route("/v1/vip-callers/{id}", delete(delete_vip_caller))
         .route("/v1/wallboard", get(get_wallboard))
         .route("/v1/monitor", get(list_monitors).post(start_monitor))
         .route("/v1/monitor/{id}", delete(end_monitor))
@@ -1078,14 +1086,72 @@ async fn delete_agent(State(state): State<SharedState>, headers: HeaderMap, Path
     state.record_audit_event(&p, "agent.deleted", Some(full)); Ok(Json(json!({"ok":true})))
 }
 async fn set_agent_state(State(state): State<SharedState>, headers: HeaderMap, Path(uri): Path<String>, Json(input): Json<SetAgentStateRequest>) -> Result<Json<crate::AgentProfile>, ApiError> {
-    let p = authenticated_principal(&headers, &state)?;
+    let _p = authenticated_principal(&headers, &state)?;
     let full = if uri.starts_with("sip:") { uri } else { format!("sip:{}", uri) };
-    let agent = state.set_agent_state(&full, &input.state, input.reason).ok_or(ApiError::NotFound)?;
-    state.broadcast_sse(crate::SseEvent {
-        event_type: "agent_state".to_string(),
-        payload: serde_json::to_value(&agent).unwrap_or_default(),
-    });
+    let agent = state.transition_agent_state(&full, &input.state, input.reason)
+        .map_err(|e| ApiError::Conflict(e))?;
     Ok(Json(agent))
+}
+
+async fn transition_agent_state_handler(State(state): State<SharedState>, headers: HeaderMap, Path(uri): Path<String>, Json(input): Json<AgentTransitionRequest>) -> Result<Json<crate::AgentProfile>, ApiError> {
+    let _p = authenticated_principal(&headers, &state)?;
+    let full = if uri.starts_with("sip:") { uri } else { format!("sip:{}", uri) };
+    let agent = state.transition_agent_state(&full, &input.state, input.reason)
+        .map_err(|e| ApiError::Conflict(e))?;
+    // Start wrap-up timer if transitioning to wrap_up
+    if input.state == "wrap_up" {
+        // Find wrap_up_time from agent's queues
+        let wrap_secs = agent.queues.iter()
+            .filter_map(|qid| state.queue(*qid))
+            .map(|q| q.wrap_up_time)
+            .max()
+            .unwrap_or(10);
+        crate::start_wrap_up_timer(state.clone(), full, wrap_secs);
+    }
+    Ok(Json(agent))
+}
+
+async fn agent_state_history(State(state): State<SharedState>, headers: HeaderMap, Path(uri): Path<String>) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    require_bearer(&headers, &state)?;
+    let full = if uri.starts_with("sip:") { uri } else { format!("sip:{}", uri) };
+    let pg = state.pg_store().ok_or(ApiError::NotFound)?;
+    let history = pg.list_agent_state_log(&full, 100).await.map_err(|_| ApiError::NotFound)?;
+    Ok(Json(history))
+}
+
+async fn list_queue_callers(State(state): State<SharedState>, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Json<Vec<crate::QueueCallerEntry>>, ApiError> {
+    require_bearer(&headers, &state)?;
+    Ok(Json(state.queue_callers_waiting(id)))
+}
+
+async fn request_queue_callback(State(state): State<SharedState>, headers: HeaderMap, Path(id): Path<Uuid>, Json(input): Json<RequestCallbackInput>) -> Result<Json<crate::QueueCallback>, ApiError> {
+    require_bearer(&headers, &state)?;
+    state.queue(id).ok_or(ApiError::NotFound)?;
+    Ok(Json(state.request_callback(id, input)))
+}
+
+async fn list_queue_callbacks(State(state): State<SharedState>, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Json<Vec<crate::QueueCallback>>, ApiError> {
+    require_bearer(&headers, &state)?;
+    Ok(Json(state.list_queue_callbacks(id)))
+}
+
+async fn list_vip_callers(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::VipCaller>>, ApiError> {
+    require_bearer(&headers, &state)?;
+    Ok(Json(state.list_vip_callers()))
+}
+
+async fn create_vip_caller(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<CreateVipCallerRequest>) -> Result<Json<crate::VipCaller>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    let vip = state.create_vip_caller(input);
+    state.record_audit_event(&p, "vip_caller.created", Some(vip.caller_pattern.clone()));
+    Ok(Json(vip))
+}
+
+async fn delete_vip_caller(State(state): State<SharedState>, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, ApiError> {
+    let p = authenticated_principal(&headers, &state)?;
+    state.delete_vip_caller(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&p, "vip_caller.deleted", Some(id.to_string()));
+    Ok(Json(json!({"ok": true})))
 }
 
 async fn get_wallboard(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<serde_json::Value>, ApiError> {

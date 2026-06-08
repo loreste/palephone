@@ -7,7 +7,7 @@ description = "Backend infrastructure server for Pale SIP, files, and conference
 
 [dependencies]
 axum = "0.8"
-tokio = { version = ">=1.44.2, <2", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync"] }
+tokio = { version = ">=1.44.2, <2", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

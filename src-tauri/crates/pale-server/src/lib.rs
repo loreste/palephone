@@ -227,6 +227,10 @@ pub struct AppState {
     monitor_sessions: ShardedMap<Uuid, MonitorSession>,
     qa_scorecards: RwLock<Vec<QaScorecard>>,
     canned_responses: ShardedMap<Uuid, CannedResponse>,
+    queue_callers: ShardedMap<Uuid, QueueCallerEntry>,
+    queue_callbacks: ShardedMap<Uuid, QueueCallback>,
+    vip_callers: ShardedMap<Uuid, VipCaller>,
+    agent_assignment_lock: std::sync::Mutex<()>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
     rate_limits: ShardedMap<String, RateLimitBucket>,
     rate_limit_rps: u32,
@@ -352,6 +356,10 @@ impl AppState {
             monitor_sessions: ShardedMap::new(),
             qa_scorecards: RwLock::new(Vec::new()),
             canned_responses: ShardedMap::new(),
+            queue_callers: ShardedMap::new(),
+            queue_callbacks: ShardedMap::new(),
+            vip_callers: ShardedMap::new(),
+            agent_assignment_lock: std::sync::Mutex::new(()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
             rate_limits: ShardedMap::new(),
             rate_limit_rps: 100,
@@ -1553,6 +1561,190 @@ impl AppState {
         self.agent_profiles.remove(&uri.to_string())
     }
 
+    pub fn transition_agent_state(&self, uri: &str, new_state: &str, reason: Option<String>) -> Result<AgentProfile, String> {
+        let profile = self.agent_profile(uri).ok_or("Agent not found")?;
+        let old_state = profile.state.clone();
+
+        let valid = match (old_state.as_str(), new_state) {
+            ("offline", "available") => true,
+            ("available", "on_call") | ("available", "break") | ("available", "training") |
+            ("available", "meeting") | ("available", "offline") => true,
+            ("on_call", "wrap_up") | ("on_call", "available") => true,
+            ("wrap_up", "available") | ("wrap_up", "break") | ("wrap_up", "offline") => true,
+            ("break", "available") | ("break", "offline") => true,
+            ("training", "available") | ("training", "offline") => true,
+            ("meeting", "available") | ("meeting", "offline") => true,
+            (_, "offline") => true,
+            _ => false,
+        };
+        if !valid {
+            return Err(format!("Invalid state transition: {} -> {}", old_state, new_state));
+        }
+
+        let duration = (Utc::now() - profile.state_since).num_seconds() as i32;
+
+        // Log state change
+        let uri_owned = uri.to_string();
+        let old = old_state.clone();
+        let new_s = new_state.to_string();
+        let r = reason.clone();
+        self.pg_spawn(move |pg| Box::pin(async move {
+            pg.insert_agent_state_log(&uri_owned, &old, &new_s, r.as_deref(), duration).await
+        }));
+
+        let updated = self.set_agent_state(uri, new_state, reason)
+            .ok_or("Failed to update agent state")?;
+
+        self.broadcast_sse(SseEvent {
+            event_type: "agent.state".to_string(),
+            payload: serde_json::json!({
+                "agent_uri": uri,
+                "previous_state": old_state,
+                "new_state": new_state,
+                "state_since": updated.state_since,
+            }),
+        });
+
+        Ok(updated)
+    }
+
+    // ─── Queue Caller Tracking ───
+
+    pub fn enqueue_caller(&self, queue_id: Uuid, caller_uri: &str, caller_name: &str) -> QueueCallerEntry {
+        let position = self.queue_callers.values().into_iter()
+            .filter(|c| c.queue_id == queue_id && c.status == "waiting")
+            .count() as i32 + 1;
+        let caller = QueueCallerEntry {
+            id: Uuid::new_v4(),
+            queue_id,
+            caller_uri: caller_uri.to_string(),
+            caller_name: caller_name.to_string(),
+            position,
+            entered_at: Utc::now(),
+            answered_at: None,
+            answered_by: None,
+            status: "waiting".to_string(),
+        };
+        self.queue_callers.insert(caller.id, caller.clone());
+        let c = caller.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.insert_queue_caller(&c).await }));
+        self.broadcast_sse(SseEvent {
+            event_type: "queue.caller_joined".to_string(),
+            payload: serde_json::to_value(&caller).unwrap_or_default(),
+        });
+        caller
+    }
+
+    pub fn dequeue_caller(&self, caller_id: Uuid, agent_uri: &str) {
+        if let Some(mut caller) = self.queue_callers.get(&caller_id) {
+            caller.status = "answered".to_string();
+            caller.answered_at = Some(Utc::now());
+            caller.answered_by = Some(agent_uri.to_string());
+            self.queue_callers.insert(caller_id, caller);
+        }
+    }
+
+    pub fn abandon_caller(&self, caller_id: Uuid) {
+        if let Some(mut caller) = self.queue_callers.get(&caller_id) {
+            caller.status = "abandoned".to_string();
+            self.queue_callers.insert(caller_id, caller.clone());
+            self.broadcast_sse(SseEvent {
+                event_type: "queue.caller_abandoned".to_string(),
+                payload: serde_json::to_value(&caller).unwrap_or_default(),
+            });
+        }
+    }
+
+    pub fn queue_callers_waiting(&self, queue_id: Uuid) -> Vec<QueueCallerEntry> {
+        self.queue_callers.values().into_iter()
+            .filter(|c| c.queue_id == queue_id && c.status == "waiting")
+            .collect()
+    }
+
+    pub fn queue_callers_waiting_count(&self, queue_id: Uuid) -> usize {
+        self.queue_callers.values().into_iter()
+            .filter(|c| c.queue_id == queue_id && c.status == "waiting")
+            .count()
+    }
+
+    // ─── VIP Caller Management ───
+
+    pub fn check_vip(&self, caller_uri: &str) -> Option<VipCaller> {
+        self.vip_callers.values().into_iter()
+            .find(|v| caller_uri.contains(&v.caller_pattern) || v.caller_pattern == caller_uri || caller_uri.ends_with(&v.caller_pattern))
+    }
+
+    pub fn create_vip_caller(&self, input: CreateVipCallerRequest) -> VipCaller {
+        let vip = VipCaller {
+            id: Uuid::new_v4(),
+            caller_pattern: input.caller_pattern,
+            priority: input.priority.unwrap_or(10),
+            label: input.label.unwrap_or_default(),
+            queue_override: input.queue_override,
+            agent_override: input.agent_override,
+            created_at: Utc::now(),
+        };
+        self.vip_callers.insert(vip.id, vip.clone());
+        let v = vip.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.insert_vip_caller(&v).await }));
+        vip
+    }
+
+    pub fn list_vip_callers(&self) -> Vec<VipCaller> {
+        self.vip_callers.values()
+    }
+
+    pub fn delete_vip_caller(&self, id: Uuid) -> Option<VipCaller> {
+        let removed = self.vip_callers.remove(&id);
+        if removed.is_some() {
+            self.pg_spawn(move |pg| Box::pin(async move { pg.delete_vip_caller(id).await }));
+        }
+        removed
+    }
+
+    // ─── Queue Callbacks ───
+
+    pub fn request_callback(&self, queue_id: Uuid, input: RequestCallbackInput) -> QueueCallback {
+        let position = self.queue_callers_waiting_count(queue_id) as i32;
+        let cb = QueueCallback {
+            id: Uuid::new_v4(),
+            queue_id,
+            caller_uri: input.caller_uri,
+            caller_name: input.caller_name.unwrap_or_default(),
+            callback_number: input.callback_number,
+            position,
+            status: "pending".to_string(),
+            requested_at: Utc::now(),
+            scheduled_at: None,
+            attempted_at: None,
+            completed_at: None,
+            attempts: 0,
+            max_attempts: 3,
+        };
+        self.queue_callbacks.insert(cb.id, cb.clone());
+        let c = cb.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.insert_queue_callback(&c).await }));
+        self.broadcast_sse(SseEvent {
+            event_type: "queue.callback_requested".to_string(),
+            payload: serde_json::to_value(&cb).unwrap_or_default(),
+        });
+        cb
+    }
+
+    pub fn list_queue_callbacks(&self, queue_id: Uuid) -> Vec<QueueCallback> {
+        self.queue_callbacks.values().into_iter()
+            .filter(|cb| cb.queue_id == queue_id)
+            .collect()
+    }
+
+    pub fn pending_callbacks(&self, queue_id: Uuid) -> Vec<QueueCallback> {
+        let mut cbs: Vec<_> = self.queue_callbacks.values().into_iter()
+            .filter(|cb| cb.queue_id == queue_id && cb.status == "pending")
+            .collect();
+        cbs.sort_by_key(|cb| cb.position);
+        cbs
+    }
+
     pub fn queue_wallboard(&self) -> Vec<QueueMetricsSnapshot> {
         let all_dialogs = self.sip_dialogs.values();
         let cdrs = self.cdrs.read().expect("cdrs lock");
@@ -1744,9 +1936,13 @@ impl AppState {
                 skills: a.skills.unwrap_or_default(),
                 state: "available".to_string(),
                 calls_handled: 0,
+                penalty: 0,
             }).collect(),
             enabled: true,
             created_at: Utc::now(),
+            callback_enabled: input.callback_enabled.unwrap_or(false),
+            callback_threshold_secs: input.callback_threshold_secs.unwrap_or(120),
+            sla_target_secs: input.sla_target_secs.unwrap_or(20),
         };
         self.call_queues.insert(queue.id, queue.clone());
         Ok(queue)
@@ -2008,23 +2204,80 @@ impl AppState {
 
     /// Pick the next available agent from a queue according to its routing strategy.
     pub fn next_available_agent(&self, queue: &CallQueue) -> Option<String> {
-        let available: Vec<&QueueAgent> = queue.agents.iter()
-            .filter(|a| a.state == "available")
+        self.claim_next_agent(queue, &[])
+    }
+
+    pub fn claim_next_agent(&self, queue: &CallQueue, required_skills: &[String]) -> Option<String> {
+        let _lock = self.agent_assignment_lock.lock().ok()?;
+
+        let mut candidates: Vec<(usize, &QueueAgent)> = queue.agents.iter().enumerate()
+            .filter(|(_, a)| a.state == "available")
+            .filter(|(_, a)| {
+                self.agent_profile(&a.agent_uri)
+                    .map_or(false, |p| p.state == "available")
+            })
+            .filter(|(_, a)| {
+                if required_skills.is_empty() { return true; }
+                required_skills.iter().all(|s| a.skills.contains(s))
+            })
             .collect();
-        if available.is_empty() {
-            return None;
-        }
+
+        if candidates.is_empty() { return None; }
+
+        // Sort by strategy
         match queue.strategy.as_str() {
-            "round_robin" | "longest_idle" => {
-                available.iter().min_by_key(|a| a.calls_handled).map(|a| a.agent_uri.clone())
+            "longest_idle" => {
+                candidates.sort_by(|(_, a), (_, b)| {
+                    let a_since = self.agent_profile(&a.agent_uri).map(|p| p.state_since).unwrap_or_else(Utc::now);
+                    let b_since = self.agent_profile(&b.agent_uri).map(|p| p.state_since).unwrap_or_else(Utc::now);
+                    a_since.cmp(&b_since)
+                });
+            }
+            "round_robin" => {
+                candidates.sort_by_key(|(_, a)| a.calls_handled);
+            }
+            "skills_based" => {
+                candidates.sort_by_key(|(_, a)| a.skills.len());
             }
             "random" => {
-                use rand::Rng;
-                let idx = rand::thread_rng().gen_range(0..available.len());
-                Some(available[idx].agent_uri.clone())
+                use rand::seq::SliceRandom;
+                candidates.shuffle(&mut rand::thread_rng());
             }
-            _ => available.first().map(|a| a.agent_uri.clone()),
+            _ => {}
         }
+
+        // Secondary sort by penalty (lower penalty = higher priority)
+        // Use stable sort to preserve strategy ordering within same penalty
+        candidates.sort_by_key(|(_, a)| a.penalty);
+
+        if let Some((idx, agent)) = candidates.first() {
+            let uri = agent.agent_uri.clone();
+            let queue_id = queue.id;
+            let agent_idx = *idx;
+
+            // Mark agent on_call INSIDE the lock
+            self.set_agent_state(&uri, "on_call", None);
+
+            // Increment calls_handled on the queue
+            self.call_queues.with_write(&queue_id, |queues| {
+                if let Some(q) = queues.get_mut(&queue_id) {
+                    if let Some(qa) = q.agents.get_mut(agent_idx) {
+                        qa.calls_handled += 1;
+                        qa.state = "on_call".to_string();
+                    }
+                }
+            });
+
+            // Increment total_calls on agent profile
+            self.agent_profiles.with_write(&uri, |profiles| {
+                if let Some(p) = profiles.get_mut(&uri) {
+                    p.total_calls += 1;
+                }
+            });
+
+            return Some(uri);
+        }
+        None
     }
 
     /// Start a new CDR, persist it, and return the record.
@@ -2931,6 +3184,7 @@ pub struct UpsertSipDialog {
 pub enum SipDialogStatus {
     Routing,
     Ringing,
+    Queued,
     Held,
     Cancelled,
     Ended,
@@ -3260,6 +3514,9 @@ pub struct CallQueue {
     pub agents: Vec<QueueAgent>,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
+    pub callback_enabled: bool,
+    pub callback_threshold_secs: i32,
+    pub sla_target_secs: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3269,6 +3526,7 @@ pub struct QueueAgent {
     pub skills: Vec<String>,
     pub state: String,
     pub calls_handled: i32,
+    pub penalty: i32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -3282,6 +3540,9 @@ pub struct CreateQueueRequest {
     pub hold_music_file_id: Option<Uuid>,
     pub overflow_destination: Option<String>,
     pub agents: Vec<QueueAgentInput>,
+    pub callback_enabled: Option<bool>,
+    pub callback_threshold_secs: Option<i32>,
+    pub sla_target_secs: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -3494,6 +3755,71 @@ pub struct QueueMetricsSnapshot {
     pub sla_percentage: f32,
 }
 
+// ─── Call Center: Queue Callers & Callbacks ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueCallerEntry {
+    pub id: Uuid,
+    pub queue_id: Uuid,
+    pub caller_uri: String,
+    pub caller_name: String,
+    pub position: i32,
+    pub entered_at: DateTime<Utc>,
+    pub answered_at: Option<DateTime<Utc>>,
+    pub answered_by: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueCallback {
+    pub id: Uuid,
+    pub queue_id: Uuid,
+    pub caller_uri: String,
+    pub caller_name: String,
+    pub callback_number: String,
+    pub position: i32,
+    pub status: String,
+    pub requested_at: DateTime<Utc>,
+    pub scheduled_at: Option<DateTime<Utc>>,
+    pub attempted_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub attempts: i32,
+    pub max_attempts: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VipCaller {
+    pub id: Uuid,
+    pub caller_pattern: String,
+    pub priority: i32,
+    pub label: String,
+    pub queue_override: Option<String>,
+    pub agent_override: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateVipCallerRequest {
+    pub caller_pattern: String,
+    pub priority: Option<i32>,
+    pub label: Option<String>,
+    pub queue_override: Option<String>,
+    pub agent_override: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RequestCallbackInput {
+    pub caller_uri: String,
+    pub caller_name: Option<String>,
+    pub callback_number: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentTransitionRequest {
+    pub state: String,
+    pub reason: Option<String>,
+}
+
 // ─── Call Center: Monitor Session ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3590,6 +3916,17 @@ pub fn md5_hex(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+pub fn start_wrap_up_timer(state: Arc<AppState>, agent_uri: String, wrap_up_secs: i32) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(wrap_up_secs.max(1) as u64)).await;
+        if let Some(profile) = state.agent_profile(&agent_uri) {
+            if profile.state == "wrap_up" {
+                let _ = state.transition_agent_state(&agent_uri, "available", Some("wrap_up_expired".to_string()));
+            }
+        }
+    });
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {

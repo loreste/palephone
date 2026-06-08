@@ -262,10 +262,41 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
 
     // ── Queue/ACD routing ──
     if let Some(queue) = state.queue_by_extension(&requested_uri) {
-        if let Some(agent_uri) = state.next_available_agent(&queue) {
-            // Verify agent is registered before marking on_call
+        // VIP check: priority routing
+        let vip = state.check_vip(&from_aor);
+        if let Some(ref vip_info) = vip {
+            if let Some(ref agent_uri) = vip_info.agent_override {
+                if let Some(reg) = state.registration_for(agent_uri) {
+                    let _ = state.transition_agent_state(agent_uri, "on_call", Some("vip_direct".to_string()));
+                    let caller = state.enqueue_caller(queue.id, &from_aor, "");
+                    state.dequeue_caller(caller.id, agent_uri);
+                    state.upsert_sip_dialog(UpsertSipDialog {
+                        call_id: call_id_str.clone(), from_uri: from_aor.clone(),
+                        to_uri: requested_uri.clone(), target_contact: Some(agent_uri.clone()),
+                        status: SipDialogStatus::Ringing, media_types: media.clone(),
+                    });
+                    return Some(request.response(302, "Moved Temporarily",
+                        &[("Contact", format!("<{}>", reg.contact))]));
+                }
+            }
+        }
+
+        // Check queue capacity
+        let waiting = state.queue_callers_waiting_count(queue.id);
+        if waiting >= queue.max_queue_size as usize {
+            if let Some(overflow) = &queue.overflow_destination {
+                if let Some(resp) = make_redirect(overflow) { return Some(resp); }
+            }
+            state.record_cdr_end(&call_id_str, "no_answer");
+            return Some(request.response(480, "Queue Full", &[]));
+        }
+
+        // Try to claim an agent atomically
+        let required_skills: Vec<String> = vec![];
+        if let Some(agent_uri) = state.claim_next_agent(&queue, &required_skills) {
             if let Some(reg) = state.registration_for(&agent_uri) {
-                state.set_agent_state(&agent_uri, "on_call", None);
+                let caller = state.enqueue_caller(queue.id, &from_aor, "");
+                state.dequeue_caller(caller.id, &agent_uri);
                 state.upsert_sip_dialog(UpsertSipDialog {
                     call_id: call_id_str.clone(), from_uri: from_aor.clone(),
                     to_uri: requested_uri.clone(), target_contact: Some(agent_uri.clone()),
@@ -273,14 +304,21 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
                 });
                 return Some(request.response(302, "Moved Temporarily",
                     &[("Contact", format!("<{}>", reg.contact))]));
+            } else {
+                // Agent not registered - release them
+                let _ = state.transition_agent_state(&agent_uri, "available", Some("not_registered".to_string()));
             }
         }
-        // No agent — try overflow
-        if let Some(overflow) = &queue.overflow_destination {
-            if let Some(resp) = make_redirect(overflow) { return Some(resp); }
-        }
-        state.record_cdr_end(&call_id_str, "no_answer");
-        return Some(request.response(480, "All Agents Busy", &[]));
+
+        // No agent available - enqueue caller and accept the call (hold music)
+        let _caller = state.enqueue_caller(queue.id, &from_aor, "");
+        state.upsert_sip_dialog(UpsertSipDialog {
+            call_id: call_id_str.clone(), from_uri: from_aor.clone(),
+            to_uri: requested_uri.clone(), target_contact: None,
+            status: SipDialogStatus::Queued, media_types: media.clone(),
+        });
+        // Caller waits in queue (200 OK - server plays hold music)
+        return Some(request.response(200, "OK", &[]));
     }
 
     // ── Ring group routing (with strategy) ──
@@ -454,11 +492,11 @@ fn handle_bye(request: &SipRequest, state: &AppState) -> Option<String> {
         let _ = state.update_sip_dialog_status(call_id, SipDialogStatus::Ended);
         // Finalize CDR with answered disposition (call completed normally)
         state.record_cdr_end(call_id, "answered");
-        // Release agent back to available if they are a queue agent currently on_call
+        // Transition agent to wrap_up if they are a queue agent currently on_call
         if let Some(from_uri) = request.header("from").and_then(extract_sip_uri) {
             if let Some(profile) = state.agent_profile(&from_uri) {
                 if profile.state == "on_call" {
-                    state.set_agent_state(&from_uri, "available", Some("call_ended".to_string()));
+                    let _ = state.transition_agent_state(&from_uri, "wrap_up", Some("call_ended".to_string()));
                 }
             }
         }

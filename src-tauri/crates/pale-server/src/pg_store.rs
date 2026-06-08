@@ -6,9 +6,9 @@ use uuid::Uuid;
 
 use crate::{
     AdminAuditEvent, AdminSession, BusinessHours, CallDetailRecord, CallHistoryEntry, CallRecording,
-    CallSession, Conference, FileRecord, Holiday, RoutingRule, SipAccount, SipDialog, SipMessage,
-    SipNotification, SipRegistration, SipSubscription, SipTransaction, User, UserCallSettings,
-    UserPresence, Voicemail,
+    CallSession, Conference, FileRecord, Holiday, QueueCallback, QueueCallerEntry, RoutingRule,
+    SipAccount, SipDialog, SipMessage, SipNotification, SipRegistration, SipSubscription,
+    SipTransaction, User, UserCallSettings, UserPresence, VipCaller, Voicemail,
 };
 
 pub type PgError = Box<dyn std::error::Error + Send + Sync>;
@@ -57,6 +57,7 @@ impl PgStore {
             include_str!("../migrations/008_pbx_features.sql"),
             include_str!("../migrations/009_call_center.sql"),
             include_str!("../migrations/010_extension_user_link.sql"),
+            include_str!("../migrations/011_call_center_enterprise.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {
@@ -653,6 +654,125 @@ impl PgStore {
             &[&Uuid::new_v4(), &agent_uri, &prev, &new_state, &reason, &duration_secs],
         ).await?;
         Ok(())
+    }
+
+    pub async fn list_agent_state_log(&self, agent_uri: &str, limit: i64) -> Result<Vec<serde_json::Value>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT id, agent_uri, previous_state, new_state, reason, duration_secs, created_at
+             FROM agent_state_log WHERE agent_uri = $1 ORDER BY created_at DESC LIMIT $2",
+            &[&agent_uri, &limit],
+        ).await?;
+        Ok(rows.iter().map(|r| {
+            serde_json::json!({
+                "id": r.get::<_, Uuid>("id").to_string(),
+                "agent_uri": r.get::<_, String>("agent_uri"),
+                "previous_state": r.get::<_, String>("previous_state"),
+                "new_state": r.get::<_, String>("new_state"),
+                "reason": r.get::<_, Option<String>>("reason"),
+                "duration_secs": r.get::<_, i32>("duration_secs"),
+                "created_at": r.get::<_, chrono::DateTime<chrono::Utc>>("created_at").to_rfc3339(),
+            })
+        }).collect())
+    }
+
+    // ─── Queue Callers ───
+
+    pub async fn insert_queue_caller(&self, c: &QueueCallerEntry) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO queue_callers (id, queue_id, caller_uri, caller_name, position, entered_at, status)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (id) DO NOTHING",
+            &[&c.id, &c.queue_id, &c.caller_uri, &c.caller_name, &c.position, &c.entered_at, &c.status],
+        ).await?;
+        Ok(())
+    }
+
+    // ─── Queue Callbacks ───
+
+    pub async fn insert_queue_callback(&self, cb: &QueueCallback) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO queue_callbacks (id, queue_id, caller_uri, caller_name, callback_number, position, status, requested_at, attempts, max_attempts)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+             ON CONFLICT (id) DO NOTHING",
+            &[&cb.id, &cb.queue_id, &cb.caller_uri, &cb.caller_name, &cb.callback_number, &cb.position, &cb.status, &cb.requested_at, &cb.attempts, &cb.max_attempts],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn update_queue_callback(&self, cb: &QueueCallback) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "UPDATE queue_callbacks SET status=$1, attempted_at=$2, completed_at=$3, attempts=$4, scheduled_at=$5 WHERE id=$6",
+            &[&cb.status, &cb.attempted_at, &cb.completed_at, &cb.attempts, &cb.scheduled_at, &cb.id],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn load_queue_callbacks(&self) -> Result<Vec<QueueCallback>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT id, queue_id, caller_uri, caller_name, callback_number, position, status, requested_at, scheduled_at, attempted_at, completed_at, attempts, max_attempts
+             FROM queue_callbacks WHERE status = 'pending' ORDER BY requested_at",
+            &[],
+        ).await?;
+        Ok(rows.iter().filter_map(|r| {
+            Some(QueueCallback {
+                id: r.try_get("id").ok()?,
+                queue_id: r.try_get("queue_id").ok()?,
+                caller_uri: r.try_get("caller_uri").ok()?,
+                caller_name: r.try_get("caller_name").unwrap_or_default(),
+                callback_number: r.try_get("callback_number").ok()?,
+                position: r.try_get("position").unwrap_or(0),
+                status: r.try_get("status").unwrap_or_else(|_| "pending".to_string()),
+                requested_at: r.try_get("requested_at").ok()?,
+                scheduled_at: r.try_get("scheduled_at").ok().flatten(),
+                attempted_at: r.try_get("attempted_at").ok().flatten(),
+                completed_at: r.try_get("completed_at").ok().flatten(),
+                attempts: r.try_get("attempts").unwrap_or(0),
+                max_attempts: r.try_get("max_attempts").unwrap_or(3),
+            })
+        }).collect())
+    }
+
+    // ─── VIP Callers ───
+
+    pub async fn insert_vip_caller(&self, vip: &VipCaller) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO vip_callers (id, caller_pattern, priority, label, queue_override, agent_override, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (id) DO UPDATE SET caller_pattern=$2, priority=$3, label=$4, queue_override=$5, agent_override=$6",
+            &[&vip.id, &vip.caller_pattern, &vip.priority, &vip.label, &vip.queue_override, &vip.agent_override, &vip.created_at],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn delete_vip_caller(&self, id: Uuid) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute("DELETE FROM vip_callers WHERE id = $1", &[&id]).await?;
+        Ok(())
+    }
+
+    pub async fn load_vip_callers(&self) -> Result<Vec<VipCaller>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT id, caller_pattern, priority, label, queue_override, agent_override, created_at FROM vip_callers ORDER BY priority DESC",
+            &[],
+        ).await?;
+        Ok(rows.iter().filter_map(|r| {
+            Some(VipCaller {
+                id: r.try_get("id").ok()?,
+                caller_pattern: r.try_get("caller_pattern").ok()?,
+                priority: r.try_get("priority").unwrap_or(10),
+                label: r.try_get("label").unwrap_or_default(),
+                queue_override: r.try_get("queue_override").ok().flatten(),
+                agent_override: r.try_get("agent_override").ok().flatten(),
+                created_at: r.try_get("created_at").ok()?,
+            })
+        }).collect())
     }
 }
 
