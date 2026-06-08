@@ -130,9 +130,11 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         "--enable-shared=no".to_string(),
     ];
 
-    // Windows: MSYS2/MinGW build needs explicit host triple
+    // Windows: MSYS2/MinGW build needs explicit host and build triples
+    // (config.guess from 2012 cannot recognize MSYS_NT systems)
     if target_os == "windows" {
         configure_args.push("--host=x86_64-w64-mingw32".to_string());
+        configure_args.push("--build=x86_64-w64-mingw32".to_string());
     }
 
     // Android cross-compilation
