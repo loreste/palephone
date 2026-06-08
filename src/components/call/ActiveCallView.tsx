@@ -59,6 +59,15 @@ export function ActiveCallView() {
     setTimeout(() => removeSession(session.id), 300);
   }, [session, removeSession, updateSessionState]);
 
+  const handleParkCall = useCallback(() => {
+    if (!session) return;
+    // Park the call using blind transfer to a park slot
+    const slot = `sip:park-${700 + Math.floor(Math.random() * 100)}@pale.local`;
+    ipc.blindTransfer(session.id, slot).catch(() => {});
+    updateSessionState(session.id, "terminated");
+    setTimeout(() => removeSession(session.id), 300);
+  }, [session, removeSession, updateSessionState]);
+
   const handleDtmf = useCallback((digit: string) => {
     if (!session) return;
     ipc.sendDtmf(session.id, digit).catch(() => {});
@@ -148,6 +157,7 @@ export function ActiveCallView() {
           onToggleHold={handleToggleHold}
           onToggleRecord={handleToggleRecord}
           onOpenKeypad={() => setShowDtmf(!showDtmf)}
+          onParkCall={handleParkCall}
           onTransfer={() => setShowTransfer(true)}
         />
       )}

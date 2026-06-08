@@ -1,4 +1,4 @@
-import { MicOff, Mic, Pause, Play, Grid3X3, PhoneForwarded, Circle } from "lucide-react";
+import { MicOff, Mic, Pause, Play, Grid3X3, PhoneForwarded, Circle, ParkingSquare } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { CallControlButton } from "./CallControlButton";
 
@@ -11,6 +11,7 @@ interface CallControlsProps {
   onOpenKeypad: () => void;
   onTransfer: () => void;
   onToggleRecord: () => void;
+  onParkCall: () => void;
 }
 
 export function CallControls({
@@ -22,6 +23,7 @@ export function CallControls({
   onOpenKeypad,
   onTransfer,
   onToggleRecord,
+  onParkCall,
 }: CallControlsProps) {
   return (
     <div
@@ -61,6 +63,11 @@ export function CallControls({
         icon={Grid3X3}
         label="Keypad"
         onClick={onOpenKeypad}
+      />
+      <CallControlButton
+        icon={ParkingSquare}
+        label="Park"
+        onClick={onParkCall}
       />
       <CallControlButton
         icon={PhoneForwarded}

@@ -160,17 +160,15 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
         return Some(request.digest_challenge(&realm, state.issue_sip_nonce()));
     }
 
-    // Re-INVITE detection: if dialog exists, this is a mid-call update (hold/video toggle)
+    // ── Re-INVITE detection (mid-call: hold/video toggle) ──
     if let Some(call_id) = request.call_id() {
         if state.dialog_exists(call_id) {
             let body = request.body_text();
             let hold_status = detect_hold_from_sdp(&body);
             let status = match hold_status {
                 Some(true) => SipDialogStatus::Held,
-                Some(false) => SipDialogStatus::Ringing,
-                None => SipDialogStatus::Ringing,
+                _ => SipDialogStatus::Ringing,
             };
-            // Update media types from re-INVITE SDP
             let media = extract_media_types(&body);
             state.upsert_sip_dialog(UpsertSipDialog {
                 call_id: call_id.to_string(),
@@ -185,119 +183,250 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
     }
 
     let requested_uri = request.uri();
+    let call_id_str = request.call_id().unwrap_or_default().to_string();
+    let media = extract_media_types(&request.body_text());
 
-    // Conference call routing: sip:conf-{uuid}@domain → join conference
+    // ── CDR start ──
+    state.record_cdr_start(Some(&call_id_str), &from_aor, &requested_uri, "inbound");
+
+    // Helper: create dialog and redirect to a target URI
+    let make_redirect = |target: &str| -> Option<String> {
+        state.upsert_sip_dialog(UpsertSipDialog {
+            call_id: call_id_str.clone(),
+            from_uri: from_aor.clone(),
+            to_uri: requested_uri.clone(),
+            target_contact: Some(target.to_string()),
+            status: SipDialogStatus::Routing,
+            media_types: media.clone(),
+        });
+        if let Some(reg) = state.registration_for(target) {
+            Some(request.response(302, "Moved Temporarily", &[("Contact", format!("<{}>", reg.contact))]))
+        } else if target.starts_with("sip:") || target.starts_with("sips:") {
+            Some(request.response(302, "Moved Temporarily", &[("Contact", format!("<{}>", target))]))
+        } else {
+            None
+        }
+    };
+
+    // ── DND check ──
+    let (is_dnd, dnd_forward) = state.check_dnd(&requested_uri);
+    if is_dnd {
+        if let Some(ref fwd) = dnd_forward {
+            if let Some(resp) = make_redirect(fwd) { return Some(resp); }
+        }
+        state.record_cdr_end(&call_id_str, "busy");
+        return Some(request.response(486, "Busy Here (Do Not Disturb)", &[]));
+    }
+
+    // ── Forward-Always ──
+    if let Some(fwd) = state.resolve_call_forwarding(&requested_uri, "always") {
+        if let Some(resp) = make_redirect(&fwd) { return Some(resp); }
+    }
+
+    // ── Holiday check ──
+    if let Some(holiday) = state.active_holiday_today() {
+        if let Some(dest) = &holiday.destination {
+            if !dest.is_empty() {
+                if let Some(resp) = make_redirect(dest) { return Some(resp); }
+            }
+        }
+        // No destination — reject
+        state.record_cdr_end(&call_id_str, "no_answer");
+        return Some(request.response(480, "Holiday - Office Closed", &[]));
+    }
+
+    // ── Business hours check ──
+    let (is_open, after_hours_dest) = state.is_within_business_hours();
+    if !is_open {
+        if let Some(dest) = after_hours_dest {
+            if let Some(resp) = make_redirect(&dest) { return Some(resp); }
+        }
+        state.record_cdr_end(&call_id_str, "no_answer");
+        return Some(request.response(480, "Outside Business Hours", &[]));
+    }
+
+    // ── Conference routing ──
     if let Some(conference) = state.conference_by_uri(&requested_uri) {
         state.upsert_sip_dialog(UpsertSipDialog {
-            call_id: request.call_id().unwrap_or_default().to_string(),
-            from_uri: from_aor.clone(),
-            to_uri: requested_uri,
-            target_contact: None,
-            status: SipDialogStatus::Ringing,
-            media_types: extract_media_types(&request.body_text()),
+            call_id: call_id_str.clone(), from_uri: from_aor.clone(),
+            to_uri: requested_uri.clone(), target_contact: None,
+            status: SipDialogStatus::Ringing, media_types: media.clone(),
         });
         if conference.active {
+            state.record_cdr_end(&call_id_str, "answered");
             return Some(request.response(200, "OK", &[]));
         }
+        state.record_cdr_end(&call_id_str, "no_answer");
         return Some(request.response(480, "Conference Not Active", &[]));
     }
 
-    // Ring group routing: if destination is a ring group, redirect to first available member
+    // ── Queue/ACD routing ──
+    if let Some(queue) = state.queue_by_extension(&requested_uri) {
+        if let Some(agent_uri) = state.next_available_agent(&queue) {
+            state.set_agent_state(&agent_uri, "on_call", None);
+            state.upsert_sip_dialog(UpsertSipDialog {
+                call_id: call_id_str.clone(), from_uri: from_aor.clone(),
+                to_uri: requested_uri.clone(), target_contact: Some(agent_uri.clone()),
+                status: SipDialogStatus::Ringing, media_types: media.clone(),
+            });
+            if let Some(reg) = state.registration_for(&agent_uri) {
+                return Some(request.response(302, "Moved Temporarily",
+                    &[("Contact", format!("<{}>", reg.contact))]));
+            }
+        }
+        // No agent — try overflow
+        if let Some(overflow) = &queue.overflow_destination {
+            if let Some(resp) = make_redirect(overflow) { return Some(resp); }
+        }
+        state.record_cdr_end(&call_id_str, "no_answer");
+        return Some(request.response(480, "All Agents Busy", &[]));
+    }
+
+    // ── Ring group routing (with strategy) ──
     if let Some(group) = state.ring_group_by_extension(&requested_uri) {
         state.upsert_sip_dialog(UpsertSipDialog {
-            call_id: request.call_id().unwrap_or_default().to_string(),
-            from_uri: from_aor.clone(),
-            to_uri: requested_uri.clone(),
-            target_contact: None,
-            status: SipDialogStatus::Ringing,
-            media_types: extract_media_types(&request.body_text()),
+            call_id: call_id_str.clone(), from_uri: from_aor.clone(),
+            to_uri: requested_uri.clone(), target_contact: None,
+            status: SipDialogStatus::Ringing, media_types: media.clone(),
         });
-        // Find first registered member
-        for member in &group.members {
-            if let Some(reg) = state.registration_for(member) {
-                return Some(request.response(
-                    302,
-                    "Moved Temporarily",
-                    &[("Contact", format!("<{}>", reg.contact))],
-                ));
+        let members = match group.strategy {
+            crate::RingStrategy::Random => {
+                use rand::seq::SliceRandom;
+                let mut m = group.members.clone();
+                m.shuffle(&mut rand::thread_rng());
+                m
+            }
+            _ => group.members.clone(), // Sequential and Simultaneous use original order
+        };
+        if group.strategy == crate::RingStrategy::Simultaneous {
+            // Collect all registered contacts for SIP forking
+            let contacts: Vec<String> = members.iter()
+                .filter_map(|m| state.registration_for(m))
+                .map(|r| format!("<{}>", r.contact))
+                .collect();
+            if !contacts.is_empty() {
+                return Some(request.response(302, "Moved Temporarily",
+                    &[("Contact", contacts.join(", "))]));
+            }
+        } else {
+            // Sequential / Random: find first registered member
+            for member in &members {
+                if let Some(reg) = state.registration_for(member) {
+                    return Some(request.response(302, "Moved Temporarily",
+                        &[("Contact", format!("<{}>", reg.contact))]));
+                }
             }
         }
-        // No member available — try fallback
+        // Fallback
         if let Some(fallback) = &group.fallback_uri {
             if let Some(reg) = state.registration_for(fallback) {
-                return Some(request.response(
-                    302,
-                    "Moved Temporarily",
-                    &[("Contact", format!("<{}>", reg.contact))],
-                ));
+                return Some(request.response(302, "Moved Temporarily",
+                    &[("Contact", format!("<{}>", reg.contact))]));
             }
         }
+        state.record_cdr_end(&call_id_str, "no_answer");
         return Some(request.response(480, "No Group Members Available", &[]));
     }
 
-    // IVR routing: if destination is an IVR, accept the call (IVR logic handled by PJSIP)
-    if let Some(ivr) = state.ivr_by_extension(&requested_uri) {
+    // ── IVR routing ──
+    if let Some(_ivr) = state.ivr_by_extension(&requested_uri) {
         state.upsert_sip_dialog(UpsertSipDialog {
-            call_id: request.call_id().unwrap_or_default().to_string(),
-            from_uri: from_aor.clone(),
-            to_uri: requested_uri,
-            target_contact: None,
-            status: SipDialogStatus::Ringing,
-            media_types: extract_media_types(&request.body_text()),
+            call_id: call_id_str.clone(), from_uri: from_aor.clone(),
+            to_uri: requested_uri.clone(), target_contact: None,
+            status: SipDialogStatus::Ringing, media_types: media.clone(),
         });
-        // IVR answers the call — greeting playback handled by media
+        state.record_cdr_end(&call_id_str, "answered");
         return Some(request.response(200, "OK", &[]));
     }
 
+    // ── Extension resolution ──
+    let user_part = crate::sip_user_part(&requested_uri);
+    if let Some(ext) = state.resolve_extension(user_part) {
+        match ext.destination_type.as_str() {
+            "voicemail" => {
+                state.create_voicemail_for_user(&ext.destination, &from_aor, "", 0, None);
+                state.record_cdr_end(&call_id_str, "voicemail");
+                return Some(request.response(200, "OK", &[]));
+            }
+            _ => {
+                // user, external, or other — redirect to destination
+                if let Some(resp) = make_redirect(&ext.destination) { return Some(resp); }
+            }
+        }
+    }
+
+    // ── Routing rules ──
     let routed_uri = state
         .resolve_routing_target(&from_aor, &requested_uri)
         .unwrap_or_else(|| requested_uri.clone());
 
-    match state.registration_for(&routed_uri) {
-        Some(registration) => {
-            state.upsert_sip_dialog(UpsertSipDialog {
-                call_id: request.call_id().unwrap_or_default().to_string(),
-                from_uri: from_aor,
-                to_uri: requested_uri,
-                target_contact: Some(registration.contact.clone()),
-                status: SipDialogStatus::Ringing,
-                media_types: extract_media_types(&request.body_text()),
-            });
-            Some(request.response(
-                302,
-                "Moved Temporarily",
-                &[("Contact", format!("<{}>", registration.contact))],
-            ))
+    // ── Direct registration lookup ──
+    if let Some(registration) = state.registration_for(&routed_uri) {
+        state.upsert_sip_dialog(UpsertSipDialog {
+            call_id: call_id_str.clone(), from_uri: from_aor.clone(),
+            to_uri: requested_uri.clone(), target_contact: Some(registration.contact.clone()),
+            status: SipDialogStatus::Ringing, media_types: media.clone(),
+        });
+        return Some(request.response(302, "Moved Temporarily",
+            &[("Contact", format!("<{}>", registration.contact))]));
+    }
+
+    // ── Follow-me sequential dialing ──
+    let settings = state.get_user_call_settings(&requested_uri);
+    if settings.followme_enabled && !settings.followme_numbers.is_empty() {
+        for entry in &settings.followme_numbers {
+            if let Some(reg) = state.registration_for(&entry.number) {
+                state.upsert_sip_dialog(UpsertSipDialog {
+                    call_id: call_id_str.clone(), from_uri: from_aor.clone(),
+                    to_uri: requested_uri.clone(), target_contact: Some(reg.contact.clone()),
+                    status: SipDialogStatus::Ringing, media_types: media.clone(),
+                });
+                return Some(request.response(302, "Moved Temporarily",
+                    &[("Contact", format!("<{}>", reg.contact))]));
+            }
         }
-        None => {
-            let target_contact = if routed_uri.starts_with("sip:") && routed_uri != requested_uri {
-                Some(routed_uri)
-            } else {
-                None
-            };
-            state.upsert_sip_dialog(UpsertSipDialog {
-                call_id: request.call_id().unwrap_or_default().to_string(),
-                from_uri: from_aor,
-                to_uri: requested_uri,
-                target_contact: target_contact.clone(),
-                status: if target_contact.is_some() {
-                    SipDialogStatus::Routing
-                } else {
-                    SipDialogStatus::Failed
-                },
-                media_types: extract_media_types(&request.body_text()),
-            });
-            target_contact
-                .map(|contact| {
-                    request.response(
-                        302,
-                        "Moved Temporarily",
-                        &[("Contact", format!("<{}>", contact))],
-                    )
-                })
-                .or_else(|| Some(request.response(480, "Temporarily Unavailable", &[])))
+        // Follow-me final action
+        match settings.followme_final.as_str() {
+            "voicemail" => {
+                state.create_voicemail_for_user(&requested_uri, &from_aor, "", 0, None);
+                state.record_cdr_end(&call_id_str, "voicemail");
+                return Some(request.response(200, "OK", &[]));
+            }
+            "hangup" => {
+                state.record_cdr_end(&call_id_str, "no_answer");
+                return Some(request.response(480, "Temporarily Unavailable", &[]));
+            }
+            uri if !uri.is_empty() => {
+                if let Some(resp) = make_redirect(uri) { return Some(resp); }
+            }
+            _ => {}
         }
     }
+
+    // ── Forward-no-answer / voicemail fallback ──
+    if let Some(fwd) = state.resolve_call_forwarding(&requested_uri, "no_answer") {
+        if let Some(resp) = make_redirect(&fwd) { return Some(resp); }
+    }
+    if settings.voicemail_enabled {
+        state.create_voicemail_for_user(&requested_uri, &from_aor, "", 0, None);
+        state.record_cdr_end(&call_id_str, "voicemail");
+        return Some(request.response(200, "OK", &[]));
+    }
+
+    // ── Forward to external if routing rules resolved a different URI ──
+    if routed_uri != requested_uri && routed_uri.starts_with("sip:") {
+        state.upsert_sip_dialog(UpsertSipDialog {
+            call_id: call_id_str.clone(), from_uri: from_aor,
+            to_uri: requested_uri, target_contact: Some(routed_uri.clone()),
+            status: SipDialogStatus::Routing, media_types: media,
+        });
+        return Some(request.response(302, "Moved Temporarily",
+            &[("Contact", format!("<{}>", routed_uri))]));
+    }
+
+    // ── 480 Unavailable ──
+    state.record_cdr_end(&call_id_str, "no_answer");
+    Some(request.response(480, "Temporarily Unavailable", &[]))
 }
 
 fn handle_ack(request: &SipRequest, state: &AppState) -> Option<String> {
@@ -322,6 +451,12 @@ fn handle_bye(request: &SipRequest, state: &AppState) -> Option<String> {
     }
     if let Some(call_id) = request.call_id() {
         let _ = state.update_sip_dialog_status(call_id, SipDialogStatus::Ended);
+        // Finalize CDR with answered disposition (call completed normally)
+        state.record_cdr_end(call_id, "answered");
+        // Release agent back to available if this was a queue call
+        if let Some(from_uri) = request.header("from").and_then(extract_sip_uri) {
+            state.set_agent_state(&from_uri, "available", Some("call_ended".to_string()));
+        }
     }
     Some(request.response(200, "OK", &[]))
 }
@@ -335,6 +470,8 @@ fn handle_cancel(request: &SipRequest, state: &AppState) -> Option<String> {
     }
     if let Some(call_id) = request.call_id() {
         let _ = state.update_sip_dialog_status(call_id, SipDialogStatus::Cancelled);
+        // Finalize CDR with cancelled/no_answer disposition
+        state.record_cdr_end(call_id, "no_answer");
     }
     Some(request.response(200, "OK", &[]))
 }
@@ -390,6 +527,52 @@ fn handle_refer(request: &SipRequest, state: &AppState) -> Option<String> {
     let Some(target) = refer_to else {
         return Some(request.response(400, "Bad Request", &[]));
     };
+
+    // ── Call Park / Pickup via REFER ──
+    let target_user = crate::sip_user_part(&target);
+    if let Some(slot) = target_user.strip_prefix("park-") {
+        let call_id = request.call_id().unwrap_or_default();
+        let from_uri = request
+            .header("from")
+            .and_then(extract_sip_uri)
+            .unwrap_or_default();
+        state.park_call(slot, call_id, &from_uri, &from_uri, "");
+        if let Some(cid) = request.call_id() {
+            let _ = state.update_sip_dialog_status(cid, SipDialogStatus::Ended);
+        }
+        state.record_audit_event(&from_uri, "call.parked", Some(format!("slot={}", slot)));
+        return Some(request.response(
+            202,
+            "Accepted",
+            &[("Subscription-State", "terminated;reason=noresource".to_string())],
+        ));
+    }
+    if let Some(slot) = target_user.strip_prefix("pickup-") {
+        let from_uri = request
+            .header("from")
+            .and_then(extract_sip_uri)
+            .unwrap_or_default();
+        if let Some(parked) = state.pickup_parked_call(slot) {
+            // Redirect the retriever to the original caller
+            if let Some(cid) = request.call_id() {
+                let _ = state.update_sip_dialog_status(cid, SipDialogStatus::Ended);
+            }
+            state.record_audit_event(&from_uri, "call.pickup", Some(format!("slot={}", slot)));
+            if let Some(reg) = state.registration_for(&parked.caller_uri) {
+                return Some(request.response(
+                    302,
+                    "Moved Temporarily",
+                    &[("Contact", format!("<{}>", reg.contact))],
+                ));
+            }
+            return Some(request.response(
+                302,
+                "Moved Temporarily",
+                &[("Contact", format!("<{}>", parked.caller_uri))],
+            ));
+        }
+        return Some(request.response(480, "No Call Parked In Slot", &[]));
+    }
 
     // Check for Replaces header in the Refer-To URI (attended transfer)
     // Format: <sip:target?Replaces=call-id%3Bto-tag%3D...%3Bfrom-tag%3D...>

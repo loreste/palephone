@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Datelike, Duration, Utc, Weekday};
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as ShaDigest, Sha256};
@@ -152,6 +152,12 @@ where
         key.hash(&mut hasher);
         hasher.finish() as usize % SHARDED_MAP_SHARDS
     }
+}
+
+/// Extract user part from SIP URI: "sip:300@example.com" -> "300", "300" -> "300"
+pub fn sip_user_part(uri: &str) -> &str {
+    let stripped = uri.strip_prefix("sips:").or_else(|| uri.strip_prefix("sip:")).unwrap_or(uri);
+    stripped.split('@').next().unwrap_or(stripped)
 }
 
 trait PersistedMapObject: StoredObject {
@@ -441,6 +447,47 @@ impl AppState {
                 }
             }
             Err(e) => log::warn!("Failed to load routing rules from Postgres: {}", e),
+        }
+        match pg.load_user_call_settings().await {
+            Ok(settings) => {
+                for s in settings {
+                    self.user_call_settings.insert(s.user_sip_uri.clone(), s);
+                }
+            }
+            Err(e) => log::warn!("Failed to load user call settings from Postgres: {}", e),
+        }
+        match pg.load_business_hours().await {
+            Ok(hours) => {
+                for bh in hours {
+                    self.business_hours.insert(bh.id, bh);
+                }
+            }
+            Err(e) => log::warn!("Failed to load business hours from Postgres: {}", e),
+        }
+        match pg.load_holidays().await {
+            Ok(holidays) => {
+                for h in holidays {
+                    self.holidays.insert(h.id, h);
+                }
+            }
+            Err(e) => log::warn!("Failed to load holidays from Postgres: {}", e),
+        }
+        match pg.load_cdrs().await {
+            Ok(cdrs) => {
+                let mut cdr_list = self.cdrs.write().expect("cdrs lock poisoned");
+                for cdr in cdrs {
+                    cdr_list.push(cdr);
+                }
+            }
+            Err(e) => log::warn!("Failed to load CDRs from Postgres: {}", e),
+        }
+        match pg.load_recordings().await {
+            Ok(recordings) => {
+                for rec in recordings {
+                    self.recordings.insert(rec.id, rec);
+                }
+            }
+            Err(e) => log::warn!("Failed to load recordings from Postgres: {}", e),
         }
         log::info!("Loaded data from PostgreSQL into memory cache");
     }
@@ -1490,22 +1537,93 @@ impl AppState {
     }
 
     pub fn queue_wallboard(&self) -> Vec<QueueMetricsSnapshot> {
+        let all_dialogs = self.sip_dialogs.values();
+        let cdrs = self.cdrs.read().expect("cdrs lock");
+        let now = Utc::now();
+
         self.list_queues().into_iter().map(|q| {
-            let agents = q.agents.iter().collect::<Vec<_>>();
+            let agent_uris: Vec<&str> = q.agents.iter().map(|a| a.agent_uri.as_str()).collect();
+
+            // Use agent profiles for real-time state where available,
+            // falling back to the queue-level agent state.
+            let mut available = 0i32;
+            let mut busy = 0i32;
+            let mut paused = 0i32;
+            for qa in &q.agents {
+                let state = self.agent_profiles.get(&qa.agent_uri)
+                    .map(|p| p.state.clone())
+                    .unwrap_or_else(|| qa.state.clone());
+                match state.as_str() {
+                    "available" => available += 1,
+                    "busy" | "on_call" => busy += 1,
+                    "paused" | "break" => paused += 1,
+                    _ => {}
+                }
+            }
+
+            // Active calls: dialogs where one side is a queue agent and status is confirmed
+            let calls_active = all_dialogs.iter().filter(|d| {
+                !matches!(d.status, SipDialogStatus::Ended | SipDialogStatus::Cancelled | SipDialogStatus::Failed)
+                    && (agent_uris.contains(&d.from_uri.as_str())
+                        || agent_uris.contains(&d.to_uri.as_str()))
+            }).count() as i32;
+
+            // CDR stats for this queue
+            let queue_cdrs: Vec<_> = cdrs.iter()
+                .filter(|c| c.queue_name.as_deref() == Some(&q.name))
+                .collect();
+            let answered: Vec<_> = queue_cdrs.iter().filter(|c| c.disposition == "answered").collect();
+            let abandoned = queue_cdrs.iter().filter(|c| c.disposition == "abandoned").count() as i32;
+            let calls_answered = answered.len() as i32;
+
+            // Wait time stats from answered CDRs that have queue_wait_secs
+            let wait_times: Vec<i32> = answered.iter()
+                .filter_map(|c| c.queue_wait_secs)
+                .collect();
+            let avg_wait_secs = if wait_times.is_empty() { 0 } else {
+                wait_times.iter().sum::<i32>() / wait_times.len() as i32
+            };
+
+            // Average talk time from answered CDRs
+            let talk_times: Vec<i32> = answered.iter()
+                .map(|c| c.duration_secs)
+                .filter(|&d| d > 0)
+                .collect();
+            let avg_talk_secs = if talk_times.is_empty() { 0 } else {
+                talk_times.iter().sum::<i32>() / talk_times.len() as i32
+            };
+
+            // Longest waiting: unanswered CDRs still in progress for this queue
+            let longest_wait_secs = queue_cdrs.iter()
+                .filter(|c| c.end_time.is_none() && c.disposition == "no_answer")
+                .map(|c| (now - c.start_time).num_seconds() as i32)
+                .max()
+                .unwrap_or(0);
+
+            // Calls waiting: CDRs with no end_time and no_answer disposition
+            let calls_waiting = queue_cdrs.iter()
+                .filter(|c| c.end_time.is_none() && c.disposition == "no_answer")
+                .count() as i32;
+
+            let total = calls_answered + abandoned;
+            let sla_percentage = if total == 0 { 100.0 } else {
+                (calls_answered as f32 / total as f32) * 100.0
+            };
+
             QueueMetricsSnapshot {
                 queue_id: q.id,
                 queue_name: q.name,
-                calls_waiting: 0,
-                calls_active: 0,
-                agents_available: agents.iter().filter(|a| a.state == "available").count() as i32,
-                agents_busy: agents.iter().filter(|a| a.state == "busy").count() as i32,
-                agents_paused: agents.iter().filter(|a| a.state == "paused" || a.state == "break").count() as i32,
-                longest_wait_secs: 0,
-                avg_wait_secs: 0,
-                avg_talk_secs: 0,
-                calls_answered: 0,
-                calls_abandoned: 0,
-                sla_percentage: 100.0,
+                calls_waiting,
+                calls_active,
+                agents_available: available,
+                agents_busy: busy,
+                agents_paused: paused,
+                longest_wait_secs,
+                avg_wait_secs,
+                avg_talk_secs,
+                calls_answered,
+                calls_abandoned: abandoned,
+                sla_percentage,
             }
         }).collect()
     }
@@ -1621,8 +1739,11 @@ impl AppState {
     pub fn queue(&self, id: Uuid) -> Option<CallQueue> { self.call_queues.get(&id) }
     pub fn delete_queue(&self, id: Uuid) -> Option<CallQueue> { self.call_queues.remove(&id) }
 
-    pub fn queue_by_extension(&self, ext: &str) -> Option<CallQueue> {
-        self.call_queues.values().into_iter().find(|q| q.extension == ext && q.enabled)
+    pub fn queue_by_extension(&self, uri: &str) -> Option<CallQueue> {
+        let user = sip_user_part(uri);
+        self.call_queues.values().into_iter().find(|q| {
+            (q.extension == uri || sip_user_part(&q.extension) == user) && q.enabled
+        })
     }
 
     // ─── Extensions ───
@@ -1642,7 +1763,11 @@ impl AppState {
     }
 
     pub fn list_extensions(&self) -> Vec<Extension> { self.extensions.values() }
-    pub fn resolve_extension(&self, ext: &str) -> Option<Extension> { self.extensions.get(&ext.to_string()) }
+    pub fn resolve_extension(&self, uri: &str) -> Option<Extension> {
+        let user = sip_user_part(uri);
+        self.extensions.get(&uri.to_string())
+            .or_else(|| self.extensions.get(&user.to_string()))
+    }
     pub fn delete_extension(&self, ext: &str) -> Option<Extension> { self.extensions.remove(&ext.to_string()) }
 
     // ─── Business Hours ───
@@ -1681,6 +1806,157 @@ impl AppState {
 
     pub fn list_holidays(&self) -> Vec<Holiday> { self.holidays.values() }
     pub fn delete_holiday(&self, id: Uuid) -> Option<Holiday> { self.holidays.remove(&id) }
+
+    /// Returns a holiday matching today's date (recurring holidays match on month/day).
+    pub fn active_holiday_today(&self) -> Option<Holiday> {
+        let today = chrono::Utc::now().date_naive();
+        self.holidays.values().into_iter().find(|h| {
+            if let Ok(hdate) = chrono::NaiveDate::parse_from_str(&h.date, "%Y-%m-%d") {
+                if h.recurring {
+                    hdate.month() == today.month() && hdate.day() == today.day()
+                } else {
+                    hdate == today
+                }
+            } else {
+                false
+            }
+        })
+    }
+
+    /// Check whether the current time falls within configured business hours.
+    /// Returns `(true, None)` when open or no business hours are configured,
+    /// or `(false, Some(after_hours_destination))` when closed.
+    pub fn is_within_business_hours(&self) -> (bool, Option<String>) {
+        let enabled: Vec<_> = self.business_hours.values().into_iter().filter(|bh| bh.enabled).collect();
+        if enabled.is_empty() {
+            return (true, None);
+        }
+        let bh = &enabled[0];
+        let tz: chrono_tz::Tz = bh.timezone.parse().unwrap_or(chrono_tz::America::New_York);
+        let now = chrono::Utc::now().with_timezone(&tz);
+        let day_key = match now.weekday() {
+            Weekday::Mon => "mon",
+            Weekday::Tue => "tue",
+            Weekday::Wed => "wed",
+            Weekday::Thu => "thu",
+            Weekday::Fri => "fri",
+            Weekday::Sat => "sat",
+            Weekday::Sun => "sun",
+        };
+        if let Some(day_schedule) = bh.schedule.get(day_key) {
+            if let (Some(open_str), Some(close_str)) = (
+                day_schedule.get("open").and_then(|v| v.as_str()),
+                day_schedule.get("close").and_then(|v| v.as_str()),
+            ) {
+                let current_time = now.format("%H:%M").to_string();
+                if current_time.as_str() >= open_str && current_time.as_str() < close_str {
+                    return (true, None);
+                }
+            }
+        }
+        (false, bh.after_hours_destination.clone())
+    }
+
+    /// Check whether the target user has Do-Not-Disturb enabled.
+    /// Returns `(true, forward_to)` when DND is active, `(false, None)` otherwise.
+    pub fn check_dnd(&self, target_uri: &str) -> (bool, Option<String>) {
+        let settings = self.get_user_call_settings(target_uri);
+        if settings.dnd_enabled {
+            (true, settings.dnd_forward_to.clone())
+        } else {
+            (false, None)
+        }
+    }
+
+    /// Resolve call forwarding for a target user based on the call state.
+    /// `call_state` should be one of "always", "busy", or "no_answer".
+    pub fn resolve_call_forwarding(&self, target_uri: &str, call_state: &str) -> Option<String> {
+        let settings = self.get_user_call_settings(target_uri);
+        match call_state {
+            "always" => settings.forward_always.clone().filter(|s| !s.is_empty()),
+            "busy" => settings.forward_busy.clone().filter(|s| !s.is_empty()),
+            "no_answer" => settings.forward_no_answer.clone().filter(|s| !s.is_empty()),
+            _ => None,
+        }
+    }
+
+    /// Pick the next available agent from a queue according to its routing strategy.
+    pub fn next_available_agent(&self, queue: &CallQueue) -> Option<String> {
+        let available: Vec<&QueueAgent> = queue.agents.iter()
+            .filter(|a| a.state == "available")
+            .collect();
+        if available.is_empty() {
+            return None;
+        }
+        match queue.strategy.as_str() {
+            "round_robin" | "longest_idle" => {
+                available.iter().min_by_key(|a| a.calls_handled).map(|a| a.agent_uri.clone())
+            }
+            "random" => {
+                let idx = rand::Rng::gen_range(&mut rand::thread_rng(), 0..available.len());
+                Some(available[idx].agent_uri.clone())
+            }
+            _ => available.first().map(|a| a.agent_uri.clone()),
+        }
+    }
+
+    /// Start a new CDR, persist it, and return the record.
+    pub fn record_cdr_start(&self, call_id: Option<&str>, caller_uri: &str, callee_uri: &str, direction: &str) -> CallDetailRecord {
+        let cdr = CallDetailRecord {
+            id: Uuid::new_v4(),
+            call_id: call_id.map(String::from),
+            caller_uri: caller_uri.to_string(),
+            callee_uri: callee_uri.to_string(),
+            direction: direction.to_string(),
+            start_time: Utc::now(),
+            answer_time: None,
+            end_time: None,
+            duration_secs: 0,
+            disposition: "no_answer".to_string(),
+            queue_name: None,
+            queue_wait_secs: None,
+            recorded: false,
+        };
+        self.record_cdr(cdr.clone());
+        cdr
+    }
+
+    /// Finalize a CDR by call_id: set end_time, disposition, and duration.
+    pub fn record_cdr_end(&self, call_id: &str, disposition: &str) {
+        let mut cdrs = self.cdrs.write().expect("cdrs lock");
+        for cdr in cdrs.iter_mut().rev() {
+            if cdr.call_id.as_deref() == Some(call_id) {
+                let now = Utc::now();
+                cdr.end_time = Some(now);
+                cdr.disposition = disposition.to_string();
+                cdr.duration_secs = (now - cdr.start_time).num_seconds() as i32;
+                break;
+            }
+        }
+    }
+
+    /// Create a voicemail record for a user, store it, and emit an SSE event.
+    pub fn create_voicemail_for_user(
+        &self,
+        callee_uri: &str,
+        caller_uri: &str,
+        caller_name: &str,
+        duration_secs: i32,
+        file_id: Option<Uuid>,
+    ) -> Voicemail {
+        let vm = Voicemail {
+            id: Uuid::new_v4(),
+            callee_uri: callee_uri.to_string(),
+            caller_uri: caller_uri.to_string(),
+            caller_name: caller_name.to_string(),
+            duration_secs,
+            file_id,
+            listened: false,
+            created_at: Utc::now(),
+        };
+        self.store_voicemail(vm.clone());
+        vm
+    }
 
     // ─── Call Park ───
 
@@ -1787,8 +2063,11 @@ impl AppState {
         self.ring_groups.get(&id)
     }
 
-    pub fn ring_group_by_extension(&self, extension: &str) -> Option<RingGroup> {
-        self.ring_groups.values().into_iter().find(|g| g.extension == extension && g.enabled)
+    pub fn ring_group_by_extension(&self, uri: &str) -> Option<RingGroup> {
+        let user = sip_user_part(uri);
+        self.ring_groups.values().into_iter().find(|g| {
+            (g.extension == uri || sip_user_part(&g.extension) == user) && g.enabled
+        })
     }
 
     pub fn delete_ring_group(&self, id: Uuid) -> Option<RingGroup> {
@@ -1827,8 +2106,11 @@ impl AppState {
         self.ivrs.get(&id)
     }
 
-    pub fn ivr_by_extension(&self, extension: &str) -> Option<Ivr> {
-        self.ivrs.values().into_iter().find(|i| i.extension == extension && i.enabled)
+    pub fn ivr_by_extension(&self, uri: &str) -> Option<Ivr> {
+        let user = sip_user_part(uri);
+        self.ivrs.values().into_iter().find(|i| {
+            (i.extension == uri || sip_user_part(&i.extension) == user) && i.enabled
+        })
     }
 
     pub fn delete_ivr(&self, id: Uuid) -> Option<Ivr> {
@@ -1934,6 +2216,8 @@ impl AppState {
             event_type: "recording".to_string(),
             payload: serde_json::to_value(&recording).unwrap_or_default(),
         });
+        let r = recording.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.insert_recording(&r).await }));
     }
 
     pub fn recordings_for_user(&self, sip_uri: &str) -> Vec<CallRecording> {

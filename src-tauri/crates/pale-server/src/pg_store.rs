@@ -5,9 +5,10 @@ use tokio_postgres::NoTls;
 use uuid::Uuid;
 
 use crate::{
-    AdminAuditEvent, AdminSession, CallHistoryEntry, CallSession, Conference, FileRecord,
-    RoutingRule, SipAccount, SipDialog, SipMessage, SipNotification, SipRegistration,
-    SipSubscription, SipTransaction, User, UserPresence,
+    AdminAuditEvent, AdminSession, BusinessHours, CallDetailRecord, CallHistoryEntry, CallRecording,
+    CallSession, Conference, FileRecord, Holiday, RoutingRule, SipAccount, SipDialog, SipMessage,
+    SipNotification, SipRegistration, SipSubscription, SipTransaction, User, UserCallSettings,
+    UserPresence, Voicemail,
 };
 
 pub type PgError = Box<dyn std::error::Error + Send + Sync>;
@@ -397,6 +398,224 @@ impl PgStore {
     pub async fn cleanup_expired(&self) -> Result<(), PgError> {
         let client = self.pool.get().await?;
         client.execute("SELECT cleanup_expired()", &[]).await?;
+        Ok(())
+    }
+
+    // ─── CDRs ───
+
+    pub async fn insert_cdr(&self, cdr: &CallDetailRecord) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO call_detail_records (id, call_id, caller_uri, callee_uri, direction, start_time, answer_time, end_time, duration_secs, disposition, queue_name, queue_wait_secs, recorded)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+             ON CONFLICT (id) DO NOTHING",
+            &[&cdr.id, &cdr.call_id, &cdr.caller_uri, &cdr.callee_uri, &cdr.direction, &cdr.start_time, &cdr.answer_time, &cdr.end_time, &cdr.duration_secs, &cdr.disposition, &cdr.queue_name, &cdr.queue_wait_secs, &cdr.recorded],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn update_cdr(&self, cdr: &CallDetailRecord) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "UPDATE call_detail_records SET end_time=$1, duration_secs=$2, disposition=$3, answer_time=$4 WHERE id=$5",
+            &[&cdr.end_time, &cdr.duration_secs, &cdr.disposition, &cdr.answer_time, &cdr.id],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn load_cdrs(&self) -> Result<Vec<CallDetailRecord>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT id, call_id, caller_uri, callee_uri, direction, start_time, answer_time, end_time, duration_secs, disposition, queue_name, queue_wait_secs, recorded FROM call_detail_records ORDER BY start_time DESC LIMIT 1000",
+            &[],
+        ).await?;
+
+        Ok(rows.iter().filter_map(|r| {
+            Some(CallDetailRecord {
+                id: r.try_get("id").ok()?,
+                call_id: r.try_get("call_id").ok().flatten(),
+                caller_uri: r.try_get("caller_uri").ok()?,
+                callee_uri: r.try_get("callee_uri").ok()?,
+                direction: r.try_get("direction").unwrap_or_else(|_| "inbound".to_string()),
+                start_time: r.try_get("start_time").ok()?,
+                answer_time: r.try_get("answer_time").ok().flatten(),
+                end_time: r.try_get("end_time").ok().flatten(),
+                duration_secs: r.try_get("duration_secs").unwrap_or(0),
+                disposition: r.try_get("disposition").unwrap_or_else(|_| "no_answer".to_string()),
+                queue_name: r.try_get("queue_name").ok().flatten(),
+                queue_wait_secs: r.try_get("queue_wait_secs").ok().flatten(),
+                recorded: r.try_get("recorded").unwrap_or(false),
+            })
+        }).collect())
+    }
+
+    // ─── Voicemails ───
+
+    pub async fn insert_voicemail(&self, vm: &Voicemail) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO voicemails (id, callee_uri, caller_uri, caller_name, duration_secs, file_id, listened, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+             ON CONFLICT (id) DO NOTHING",
+            &[&vm.id, &vm.callee_uri, &vm.caller_uri, &vm.caller_name, &vm.duration_secs, &vm.file_id, &vm.listened, &vm.created_at],
+        ).await?;
+        Ok(())
+    }
+
+    // ─── User Call Settings ───
+
+    pub async fn upsert_user_call_settings(&self, s: &UserCallSettings) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        let followme_json = serde_json::to_value(&s.followme_numbers).unwrap_or_default();
+        client.execute(
+            "INSERT INTO user_call_settings (user_sip_uri, voicemail_enabled, voicemail_greeting_file_id, voicemail_greeting_text, voicemail_timeout, followme_enabled, followme_numbers, followme_final, forward_always, forward_busy, forward_no_answer, dnd_enabled, dnd_forward_to)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+             ON CONFLICT (user_sip_uri) DO UPDATE SET voicemail_enabled=$2, voicemail_greeting_file_id=$3, voicemail_greeting_text=$4, voicemail_timeout=$5, followme_enabled=$6, followme_numbers=$7, followme_final=$8, forward_always=$9, forward_busy=$10, forward_no_answer=$11, dnd_enabled=$12, dnd_forward_to=$13",
+            &[&s.user_sip_uri, &s.voicemail_enabled, &s.voicemail_greeting_file_id, &s.voicemail_greeting_text, &s.voicemail_timeout, &s.followme_enabled, &followme_json, &s.followme_final, &s.forward_always, &s.forward_busy, &s.forward_no_answer, &s.dnd_enabled, &s.dnd_forward_to],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn load_user_call_settings(&self) -> Result<Vec<UserCallSettings>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query("SELECT * FROM user_call_settings", &[]).await?;
+
+        Ok(rows.iter().filter_map(|r| {
+            let followme_json: serde_json::Value = r.try_get("followme_numbers").unwrap_or_default();
+            Some(UserCallSettings {
+                user_sip_uri: r.try_get("user_sip_uri").ok()?,
+                voicemail_enabled: r.try_get("voicemail_enabled").unwrap_or(false),
+                voicemail_greeting_file_id: r.try_get("voicemail_greeting_file_id").ok().flatten(),
+                voicemail_greeting_text: r.try_get("voicemail_greeting_text").unwrap_or_default(),
+                voicemail_timeout: r.try_get("voicemail_timeout").unwrap_or(30),
+                followme_enabled: r.try_get("followme_enabled").unwrap_or(false),
+                followme_numbers: serde_json::from_value(followme_json).unwrap_or_default(),
+                followme_final: r.try_get("followme_final").unwrap_or_else(|_| "voicemail".to_string()),
+                forward_always: r.try_get("forward_always").ok().flatten(),
+                forward_busy: r.try_get("forward_busy").ok().flatten(),
+                forward_no_answer: r.try_get("forward_no_answer").ok().flatten(),
+                dnd_enabled: r.try_get("dnd_enabled").unwrap_or(false),
+                dnd_forward_to: r.try_get("dnd_forward_to").ok().flatten(),
+            })
+        }).collect())
+    }
+
+    // ─── Business Hours ───
+
+    pub async fn upsert_business_hours(&self, bh: &BusinessHours) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO business_hours (id, name, timezone, schedule, after_hours_destination, enabled, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (id) DO UPDATE SET name=$2, timezone=$3, schedule=$4, after_hours_destination=$5, enabled=$6",
+            &[&bh.id, &bh.name, &bh.timezone, &bh.schedule, &bh.after_hours_destination, &bh.enabled, &bh.created_at],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn delete_business_hours(&self, id: Uuid) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute("DELETE FROM business_hours WHERE id = $1", &[&id]).await?;
+        Ok(())
+    }
+
+    pub async fn load_business_hours(&self) -> Result<Vec<BusinessHours>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT id, name, timezone, schedule, after_hours_destination, enabled, created_at FROM business_hours",
+            &[],
+        ).await?;
+
+        Ok(rows.iter().map(|r| BusinessHours {
+            id: r.get("id"),
+            name: r.get("name"),
+            timezone: r.get("timezone"),
+            schedule: r.get("schedule"),
+            after_hours_destination: r.get("after_hours_destination"),
+            enabled: r.get("enabled"),
+            created_at: r.get("created_at"),
+        }).collect())
+    }
+
+    // ─── Holidays ───
+
+    pub async fn upsert_holiday(&self, h: &Holiday) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO holidays (id, name, date, recurring, destination, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (id) DO UPDATE SET name=$2, date=$3, recurring=$4, destination=$5",
+            &[&h.id, &h.name, &h.date, &h.recurring, &h.destination, &h.created_at],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn delete_holiday(&self, id: Uuid) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute("DELETE FROM holidays WHERE id = $1", &[&id]).await?;
+        Ok(())
+    }
+
+    pub async fn load_holidays(&self) -> Result<Vec<Holiday>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT id, name, date, recurring, destination, created_at FROM holidays ORDER BY date",
+            &[],
+        ).await?;
+
+        Ok(rows.iter().map(|r| Holiday {
+            id: r.get("id"),
+            name: r.get("name"),
+            date: r.get("date"),
+            recurring: r.get("recurring"),
+            destination: r.get("destination"),
+            created_at: r.get("created_at"),
+        }).collect())
+    }
+
+    // ─── Call Recordings ───
+
+    pub async fn insert_recording(&self, rec: &CallRecording) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO call_recordings (id, call_id, caller_uri, callee_uri, duration_secs, file_id, recorded_by, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+             ON CONFLICT (id) DO NOTHING",
+            &[&rec.id, &rec.call_id, &rec.caller_uri, &rec.callee_uri, &rec.duration_secs, &rec.file_id, &rec.recorded_by, &rec.created_at],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn load_recordings(&self) -> Result<Vec<CallRecording>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT id, call_id, caller_uri, callee_uri, duration_secs, file_id, recorded_by, created_at FROM call_recordings ORDER BY created_at DESC LIMIT 1000",
+            &[],
+        ).await?;
+
+        Ok(rows.iter().filter_map(|r| {
+            Some(CallRecording {
+                id: r.try_get("id").ok()?,
+                call_id: r.try_get("call_id").ok().flatten(),
+                caller_uri: r.try_get("caller_uri").ok()?,
+                callee_uri: r.try_get("callee_uri").ok()?,
+                duration_secs: r.try_get("duration_secs").unwrap_or(0),
+                file_id: r.try_get("file_id").ok().flatten(),
+                recorded_by: r.try_get("recorded_by").ok()?,
+                created_at: r.try_get("created_at").ok()?,
+            })
+        }).collect())
+    }
+
+    // ─── Agent State Log ───
+
+    pub async fn insert_agent_state_log(&self, agent_uri: &str, prev: &str, new_state: &str, reason: Option<&str>, duration_secs: i32) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO agent_state_log (id, agent_uri, previous_state, new_state, reason, duration_secs)
+             VALUES ($1,$2,$3,$4,$5,$6)",
+            &[&Uuid::new_v4(), &agent_uri, &prev, &new_state, &reason, &duration_secs],
+        ).await?;
         Ok(())
     }
 }

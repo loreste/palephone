@@ -185,12 +185,18 @@ function PersonRow({ user }: { user: ServerUser }) {
     >
       <div className="relative shrink-0">
         <CallerAvatar name={user.display_name} size="sm" />
-        <span
-          className={cn(
-            "absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-surface",
-            presenceColors[status]
-          )}
-        />
+        {status === "on_call" ? (
+          <span className="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full border-2 border-surface bg-red-500 flex items-center justify-center">
+            <Phone size={8} className="text-white animate-pulse" fill="currentColor" />
+          </span>
+        ) : (
+          <span
+            className={cn(
+              "absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-surface",
+              presenceColors[status]
+            )}
+          />
+        )}
       </div>
 
       <div className="flex-1 min-w-0">

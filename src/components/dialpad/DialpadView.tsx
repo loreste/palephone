@@ -1,10 +1,11 @@
-import { useState, useCallback } from "react";
-import { Phone, Delete } from "lucide-react";
+import { useState, useCallback, useEffect } from "react";
+import { Phone, Delete, Zap, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { motion } from "framer-motion";
 import { useCallStore } from "@/store/callStore";
 import { toast } from "@/components/ui/Toast";
-import { makeCall as ipcMakeCall } from "@/lib/tauri";
+import { makeCall as ipcMakeCall, paleServerApi } from "@/lib/tauri";
+import { useServerStore } from "@/store/serverStore";
 
 const dialpadKeys = [
   { digit: "1", letters: "" },
@@ -21,8 +22,25 @@ const dialpadKeys = [
   { digit: "#", letters: "" },
 ];
 
+interface SpeedDial {
+  code: string;
+  destination: string;
+  label: string;
+}
+
 export function DialpadView() {
   const [input, setInput] = useState("");
+  const [speedDials, setSpeedDials] = useState<SpeedDial[]>([]);
+  const baseUrl = useServerStore((s) => s.baseUrl);
+  const token = useServerStore((s) => s.token);
+
+  useEffect(() => {
+    if (baseUrl && token) {
+      paleServerApi<SpeedDial[]>(baseUrl, token, "/v1/speed-dials")
+        .then(setSpeedDials)
+        .catch(() => {});
+    }
+  }, [baseUrl, token]);
 
   const handleDigit = useCallback((digit: string) => {
     setInput((prev) => prev + digit);
@@ -104,6 +122,30 @@ export function DialpadView() {
         )}
       </div>
 
+      {/* Speed dials */}
+      {speedDials.length > 0 && (
+        <div className="flex gap-2 w-full overflow-x-auto pb-1 px-1">
+          {speedDials.map((sd) => (
+            <button
+              key={sd.code}
+              onClick={() => {
+                setInput(sd.destination);
+                toast({ type: "info", title: `Calling ${sd.label}...` });
+                ipcMakeCall(sd.destination.startsWith("sip:") ? sd.destination : `sip:${sd.destination}`).catch(() => {});
+              }}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-1.5 rounded-full shrink-0",
+                "bg-surface border border-border-subtle text-sm",
+                "hover:bg-elevated transition-colors"
+              )}
+            >
+              <Zap size={12} className="text-accent" />
+              <span className="text-primary font-medium">{sd.label || sd.code}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Dialpad grid */}
       <div className="grid grid-cols-3 gap-3 w-full max-w-[264px] py-4">
         {dialpadKeys.map(({ digit, letters }) => (
@@ -169,23 +211,5 @@ export function DialpadView() {
         <div className="w-[46px]" /> {/* Spacer to balance layout */}
       </div>
     </div>
-  );
-}
-
-function X({ size }: { size: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M18 6 6 18" />
-      <path d="m6 6 12 12" />
-    </svg>
   );
 }

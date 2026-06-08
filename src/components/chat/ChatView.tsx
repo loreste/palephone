@@ -1,11 +1,11 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2 } from "lucide-react";
+import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Users } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useChatStore, type ChatMessage, type RoomSummary } from "@/store/chatStore";
 import { useMatrixStore } from "@/store/matrixStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
-import { matrixSendMessage, matrixSetTyping, matrixCreateDm, paleServerGetMessages } from "@/lib/tauri";
+import { matrixSendMessage, matrixSetTyping, matrixCreateDm, paleServerGetMessages, makeCall as ipcMakeCall, paleServerApi } from "@/lib/tauri";
 import { toast } from "@/components/ui/Toast";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
 import { EncryptionBadge } from "@/components/encryption/EncryptionBadge";
@@ -122,6 +122,8 @@ function ConversationList({
       </div>
 
       {showNewChat && <NewChatInput onSubmit={handleNewDm} onCreateRoom={handleCreateRoom} />}
+
+      <ActiveConferences />
 
       <div className="flex-1 overflow-y-auto px-2">
         {rooms.length === 0 && !showNewChat ? (
@@ -411,6 +413,78 @@ function ChatRoom({
         </button>
       </div>
     </>
+  );
+}
+
+interface ConferenceSummary {
+  id: string;
+  title: string;
+  mode: "audio" | "video" | "webinar";
+  active: boolean;
+  participants: Array<{ user_id: string; sip_uri: string; role: string; joined_at: string }>;
+  created_at: string;
+}
+
+function ActiveConferences() {
+  const { baseUrl, token, connected } = useServerStore();
+  const [conferences, setConferences] = useState<ConferenceSummary[]>([]);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    if (!connected || !baseUrl || !token) return;
+    paleServerApi<ConferenceSummary[]>(baseUrl, token, "/v1/conferences")
+      .then((all) => setConferences(all.filter((c) => c.active)))
+      .catch(() => {});
+  }, [connected, baseUrl, token]);
+
+  if (!connected || conferences.length === 0) return null;
+
+  return (
+    <div className="px-3 pb-2">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-1.5 text-xs font-semibold text-tertiary hover:text-secondary w-full py-1"
+      >
+        <Users size={13} />
+        <span>Active Conferences ({conferences.length})</span>
+      </button>
+      {expanded && (
+        <div className="space-y-1 mt-1">
+          {conferences.map((conf) => (
+            <div
+              key={conf.id}
+              className={cn(
+                "flex items-center justify-between px-3 py-2 rounded-lg",
+                "bg-surface border border-border-subtle"
+              )}
+            >
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-primary truncate">{conf.title}</p>
+                <p className="text-[10px] text-tertiary">
+                  {conf.mode} &middot; {conf.participants.length} participant{conf.participants.length !== 1 ? "s" : ""}
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  const uri = `sip:conf-${conf.id}@pale.local`;
+                  toast({ type: "info", title: `Joining ${conf.title}...` });
+                  ipcMakeCall(uri).catch(() =>
+                    toast({ type: "error", title: "Failed to join conference" })
+                  );
+                }}
+                className={cn(
+                  "shrink-0 flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium",
+                  "bg-success/10 text-success hover:bg-success/20 transition-colors"
+                )}
+              >
+                <Phone size={12} />
+                Join
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
