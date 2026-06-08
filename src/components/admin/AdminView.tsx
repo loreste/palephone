@@ -847,6 +847,31 @@ function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
   ]);
   const [timeoutDest, setTimeoutDest] = useState("");
   const [invalidDest, setInvalidDest] = useState("");
+  const [greetingMode, setGreetingMode] = useState<"text" | "upload">("text");
+  const [greetingFileId, setGreetingFileId] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const uploadGreeting = async (file: File) => {
+    setUploading(true);
+    try {
+      const buffer = await file.arrayBuffer();
+      const res = await fetch(`${baseUrl}/v1/files`, {
+        method: "POST",
+        headers: {
+          "Content-Type": file.type || "audio/wav",
+          Authorization: `Bearer ${token}`,
+          "X-Pale-Filename": file.name,
+        },
+        body: buffer,
+      });
+      if (!res.ok) throw new Error("Upload failed");
+      const record = await res.json();
+      setGreetingFileId(record.id);
+      toast({ type: "success", title: `Uploaded: ${file.name}` });
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Upload failed" });
+    }
+    setUploading(false);
+  };
 
   const load = async () => {
     try {
@@ -878,7 +903,10 @@ function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
         body: JSON.stringify({
           name,
           extension: extension.startsWith("sip:") ? extension : `sip:${extension}`,
-          greeting_text: greeting || "Welcome. " + options.map((o) => `Press ${o.digit} for ${o.label}`).join(". ") + ".",
+          greeting_text: greetingMode === "text"
+            ? (greeting || "Welcome. " + options.map((o) => `Press ${o.digit} for ${o.label}`).join(". ") + ".")
+            : (greetingFileId ? `[audio:${greetingFileId}]` : "Welcome."),
+          greeting_file_id: greetingMode === "upload" ? greetingFileId : null,
           timeout_destination: timeoutDest || null,
           invalid_destination: invalidDest || null,
           options: options.filter((o) => o.destination).map((o) => ({
@@ -911,10 +939,53 @@ function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
         <h2 className="font-medium">IVR / Auto-Attendant</h2>
       </div>
       <form onSubmit={submit} className="p-3 space-y-3 border-b border-border-subtle">
-        <div className="grid md:grid-cols-3 gap-2">
+        <div className="grid md:grid-cols-2 gap-2">
           <Field label="Name" value={name} onChange={setName} />
           <Field label="Extension (e.g. main@pale.local)" value={extension} onChange={setExtension} />
-          <Field label="Greeting text" value={greeting} onChange={setGreeting} />
+        </div>
+
+        <div>
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-xs font-semibold text-tertiary uppercase tracking-wider">Greeting</span>
+            <div className="flex gap-1">
+              <button type="button" onClick={() => setGreetingMode("text")}
+                className={cn("px-2 py-0.5 text-xs rounded-md", greetingMode === "text" ? "bg-accent-muted text-accent" : "text-tertiary hover:text-secondary")}>
+                Text-to-Speech
+              </button>
+              <button type="button" onClick={() => setGreetingMode("upload")}
+                className={cn("px-2 py-0.5 text-xs rounded-md", greetingMode === "upload" ? "bg-accent-muted text-accent" : "text-tertiary hover:text-secondary")}>
+                Upload Audio
+              </button>
+            </div>
+          </div>
+          {greetingMode === "text" ? (
+            <textarea
+              value={greeting}
+              onChange={(e) => setGreeting(e.target.value)}
+              placeholder="Welcome to our company. Press 1 for sales, press 2 for support..."
+              rows={2}
+              className="w-full rounded-md bg-base border border-border-default px-3 py-2 text-sm outline-none focus:border-border-focus resize-none"
+            />
+          ) : (
+            <div className="flex items-center gap-3">
+              <input
+                type="file"
+                accept="audio/*,.wav,.mp3,.ogg"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) uploadGreeting(file);
+                }}
+                className="text-sm text-secondary file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-sm file:font-medium file:bg-accent file:text-white file:cursor-pointer hover:file:bg-accent-hover"
+              />
+              {uploading && <span className="text-xs text-tertiary">Uploading...</span>}
+              {greetingFileId && !uploading && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-success">Uploaded</span>
+                  <audio controls className="h-8" src={`${baseUrl}/v1/files/${greetingFileId}`} />
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <div>
@@ -984,7 +1055,16 @@ function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
               <tr key={ivr.id} className="border-b border-border-subtle">
                 <td className="py-2 px-2">{ivr.name}</td>
                 <td className="py-2 px-2 text-secondary">{ivr.extension}</td>
-                <td className="py-2 px-2 text-secondary max-w-[200px] truncate">{ivr.greeting_text}</td>
+                <td className="py-2 px-2 text-secondary max-w-[200px]">
+                  {ivr.greeting_file_id ? (
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs bg-accent/20 text-accent px-1.5 py-0.5 rounded">Audio</span>
+                      <audio controls className="h-7" src={`${baseUrl}/v1/files/${ivr.greeting_file_id}`} />
+                    </div>
+                  ) : (
+                    <span className="truncate block">{ivr.greeting_text}</span>
+                  )}
+                </td>
                 <td className="py-2 px-2">
                   {(ivr.options || []).map((o: any) => (
                     <span key={o.digit} className="inline-block mr-1 px-1.5 py-0.5 rounded bg-elevated text-xs">
