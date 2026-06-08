@@ -19,8 +19,8 @@ const allTabs: { id: Tab; labelKey: string; icon: typeof Phone; adminOnly?: bool
 export function BottomNav() {
   const { t } = useTranslation();
   const { activeTab, setActiveTab } = useUiStore();
-  const isAdmin = useServerStore((s) => s.isAdmin);
-  const tabs = allTabs.filter((tab) => !tab.adminOnly || isAdmin());
+  const userRole = useServerStore((s) => s.userRole);
+  const tabs = allTabs.filter((tab) => !tab.adminOnly || userRole === "admin");
   const totalUnread = useChatStore((s) =>
     s.rooms.reduce((sum, r) => sum + r.unread_count, 0)
   );
