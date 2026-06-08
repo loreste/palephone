@@ -64,8 +64,9 @@ export function AppShell() {
   useEffect(() => {
     getConfig()
       .then(async (config) => {
-        // Auto-login: if server is configured with auto_connect, retrieve password from keychain
-        if (config.server?.url && config.server.username && config.server.auto_connect) {
+        // Auto-login: if server is configured with auto_connect and not already connected
+        const alreadyConnected = useServerStore.getState().connected;
+        if (!alreadyConnected && config.server?.url && config.server.username && config.server.auto_connect) {
           try {
             const savedPassword = await getSipPassword("pale-server-login");
             if (savedPassword) {
@@ -101,8 +102,8 @@ export function AppShell() {
           }
         }
 
-        // No saved credentials — check if first run
-        if (!config.account && !config.server?.auto_connect) {
+        // No saved credentials and not connected — show wizard
+        if (!config.account && !config.server?.auto_connect && !useServerStore.getState().connected) {
           setShowWizard(true);
         }
 
