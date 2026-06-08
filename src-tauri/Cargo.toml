@@ -22,6 +22,7 @@ pale-core = { path = "crates/pale-core" }
 pale-matrix = { path = "crates/pale-matrix" }
 pjsip-sys = { path = "crates/pjsip-sys" }
 tokio = { version = ">=1.44.2, <2", features = ["sync", "rt", "rt-multi-thread"] }
+reqwest = { version = "0.12", features = ["json"] }
 tauri-plugin-notification = "2"
 log = "0.4"
 env_logger = "0.11"

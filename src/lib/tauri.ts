@@ -583,16 +583,9 @@ export async function paleLogin(
   sipUri: string,
   password: string,
 ): Promise<UserLoginResponse> {
-  const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/auth/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sip_uri: sipUri, password }),
+  return invoke("pale_server_login", {
+    input: { base_url: baseUrl, sip_uri: sipUri, password },
   });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(payload.error || response.statusText);
-  }
-  return response.json();
 }
 
 // ─── Server Files ───

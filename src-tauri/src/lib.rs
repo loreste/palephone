@@ -193,6 +193,44 @@ fn attended_transfer(
         .map_err(|e| e.to_string())
 }
 
+// ─── Pale Server Login (HTTP from Rust to bypass webview fetch restrictions) ───
+
+#[derive(serde::Deserialize)]
+struct PaleLoginRequest {
+    base_url: String,
+    sip_uri: String,
+    password: String,
+}
+
+#[tauri::command]
+async fn pale_server_login(input: PaleLoginRequest) -> Result<serde_json::Value, String> {
+    let url = format!("{}/v1/auth/login", input.base_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "sip_uri": input.sip_uri,
+        "password": input.password,
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("Login failed ({}): {}", status, text));
+    }
+
+    response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Invalid response: {}", e))
+}
+
 // ─── Config Commands ───
 
 #[tauri::command]
@@ -708,6 +746,8 @@ pub fn run() {
             send_dtmf,
             blind_transfer,
             attended_transfer,
+            // Server login
+            pale_server_login,
             // Call history
             get_call_history,
             add_call_record,
