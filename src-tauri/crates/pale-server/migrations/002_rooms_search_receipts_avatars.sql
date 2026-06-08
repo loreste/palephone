@@ -106,4 +106,5 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_file_id UUID REFERENCES files(
 -- AUTO-UPDATE TRIGGERS for new tables
 -- ============================================================================
 
+DROP TRIGGER IF EXISTS trg_rooms_updated_at ON rooms;
 CREATE TRIGGER trg_rooms_updated_at BEFORE UPDATE ON rooms FOR EACH ROW EXECUTE FUNCTION update_updated_at();

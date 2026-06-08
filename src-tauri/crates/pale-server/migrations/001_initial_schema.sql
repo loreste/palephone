@@ -14,7 +14,7 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 -- USERS & AUTHENTICATION
 -- ============================================================================
 
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     display_name    TEXT NOT NULL,
     sip_uri         TEXT NOT NULL UNIQUE,
@@ -23,23 +23,23 @@ CREATE TABLE users (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_users_sip_uri ON users (sip_uri);
-CREATE INDEX idx_users_matrix_user_id ON users (matrix_user_id) WHERE matrix_user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_users_sip_uri ON users (sip_uri);
+CREATE INDEX IF NOT EXISTS idx_users_matrix_user_id ON users (matrix_user_id) WHERE matrix_user_id IS NOT NULL;
 
-CREATE TABLE admin_sessions (
+CREATE TABLE IF NOT EXISTS admin_sessions (
     token           TEXT PRIMARY KEY,
     principal       TEXT NOT NULL,
     expires_at      TIMESTAMPTZ NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_admin_sessions_expires ON admin_sessions (expires_at);
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires ON admin_sessions (expires_at);
 
 -- ============================================================================
 -- SIP ACCOUNTS & REGISTRATIONS
 -- ============================================================================
 
-CREATE TABLE sip_accounts (
+CREATE TABLE IF NOT EXISTS sip_accounts (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     username        TEXT NOT NULL,
     domain          TEXT NOT NULL,
@@ -51,9 +51,9 @@ CREATE TABLE sip_accounts (
     UNIQUE (username, domain)
 );
 
-CREATE INDEX idx_sip_accounts_aor ON sip_accounts (username, domain);
+CREATE INDEX IF NOT EXISTS idx_sip_accounts_aor ON sip_accounts (username, domain);
 
-CREATE TABLE sip_registrations (
+CREATE TABLE IF NOT EXISTS sip_registrations (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     aor             TEXT NOT NULL UNIQUE,  -- sip:user@domain (Address of Record)
     contact         TEXT NOT NULL,          -- sip:user@ip:port (registered endpoint)
@@ -64,14 +64,14 @@ CREATE TABLE sip_registrations (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_sip_registrations_aor ON sip_registrations (aor);
-CREATE INDEX idx_sip_registrations_expires ON sip_registrations (expires_at);
+CREATE INDEX IF NOT EXISTS idx_sip_registrations_aor ON sip_registrations (aor);
+CREATE INDEX IF NOT EXISTS idx_sip_registrations_expires ON sip_registrations (expires_at);
 
 -- ============================================================================
 -- SIP SIGNALING STATE
 -- ============================================================================
 
-CREATE TABLE sip_dialogs (
+CREATE TABLE IF NOT EXISTS sip_dialogs (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     call_id         TEXT NOT NULL UNIQUE,   -- SIP Call-ID header
     from_uri        TEXT NOT NULL,
@@ -83,12 +83,12 @@ CREATE TABLE sip_dialogs (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_sip_dialogs_call_id ON sip_dialogs (call_id);
-CREATE INDEX idx_sip_dialogs_status ON sip_dialogs (status) WHERE status NOT IN ('ended', 'failed', 'cancelled');
-CREATE INDEX idx_sip_dialogs_from_uri ON sip_dialogs (from_uri);
-CREATE INDEX idx_sip_dialogs_to_uri ON sip_dialogs (to_uri);
+CREATE INDEX IF NOT EXISTS idx_sip_dialogs_call_id ON sip_dialogs (call_id);
+CREATE INDEX IF NOT EXISTS idx_sip_dialogs_status ON sip_dialogs (status) WHERE status NOT IN ('ended', 'failed', 'cancelled');
+CREATE INDEX IF NOT EXISTS idx_sip_dialogs_from_uri ON sip_dialogs (from_uri);
+CREATE INDEX IF NOT EXISTS idx_sip_dialogs_to_uri ON sip_dialogs (to_uri);
 
-CREATE TABLE sip_messages (
+CREATE TABLE IF NOT EXISTS sip_messages (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     call_id         TEXT,
     from_uri        TEXT NOT NULL,
@@ -98,13 +98,13 @@ CREATE TABLE sip_messages (
     received_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_sip_messages_from_uri ON sip_messages (from_uri);
-CREATE INDEX idx_sip_messages_to_uri ON sip_messages (to_uri);
-CREATE INDEX idx_sip_messages_received_at ON sip_messages (received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sip_messages_from_uri ON sip_messages (from_uri);
+CREATE INDEX IF NOT EXISTS idx_sip_messages_to_uri ON sip_messages (to_uri);
+CREATE INDEX IF NOT EXISTS idx_sip_messages_received_at ON sip_messages (received_at DESC);
 -- Composite index for paginated message queries (room_id filter + cursor)
-CREATE INDEX idx_sip_messages_conversation ON sip_messages (from_uri, to_uri, received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sip_messages_conversation ON sip_messages (from_uri, to_uri, received_at DESC);
 
-CREATE TABLE sip_transactions (
+CREATE TABLE IF NOT EXISTS sip_transactions (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     method          TEXT NOT NULL,          -- REGISTER, INVITE, BYE, etc.
     uri             TEXT NOT NULL,
@@ -116,15 +116,15 @@ CREATE TABLE sip_transactions (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_sip_transactions_method ON sip_transactions (method);
-CREATE INDEX idx_sip_transactions_call_id ON sip_transactions (call_id) WHERE call_id IS NOT NULL;
-CREATE INDEX idx_sip_transactions_created_at ON sip_transactions (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sip_transactions_method ON sip_transactions (method);
+CREATE INDEX IF NOT EXISTS idx_sip_transactions_call_id ON sip_transactions (call_id) WHERE call_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_sip_transactions_created_at ON sip_transactions (created_at DESC);
 
 -- ============================================================================
 -- SIP SUBSCRIPTIONS & NOTIFICATIONS (Presence, Dialog Events)
 -- ============================================================================
 
-CREATE TABLE sip_subscriptions (
+CREATE TABLE IF NOT EXISTS sip_subscriptions (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     subscription_id     TEXT NOT NULL UNIQUE,
     subscriber          TEXT NOT NULL,      -- who is subscribing
@@ -135,11 +135,11 @@ CREATE TABLE sip_subscriptions (
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_sip_subscriptions_subscriber ON sip_subscriptions (subscriber);
-CREATE INDEX idx_sip_subscriptions_target ON sip_subscriptions (target);
-CREATE INDEX idx_sip_subscriptions_expires ON sip_subscriptions (expires_at);
+CREATE INDEX IF NOT EXISTS idx_sip_subscriptions_subscriber ON sip_subscriptions (subscriber);
+CREATE INDEX IF NOT EXISTS idx_sip_subscriptions_target ON sip_subscriptions (target);
+CREATE INDEX IF NOT EXISTS idx_sip_subscriptions_expires ON sip_subscriptions (expires_at);
 
-CREATE TABLE sip_notifications (
+CREATE TABLE IF NOT EXISTS sip_notifications (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     subscription_id     TEXT,
     notifier            TEXT NOT NULL,
@@ -151,27 +151,27 @@ CREATE TABLE sip_notifications (
     received_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_sip_notifications_received_at ON sip_notifications (received_at DESC);
-CREATE INDEX idx_sip_notifications_subscription ON sip_notifications (subscription_id) WHERE subscription_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_sip_notifications_received_at ON sip_notifications (received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sip_notifications_subscription ON sip_notifications (subscription_id) WHERE subscription_id IS NOT NULL;
 
 -- ============================================================================
 -- PRESENCE
 -- ============================================================================
 
-CREATE TABLE presence (
+CREATE TABLE IF NOT EXISTS presence (
     sip_uri         TEXT PRIMARY KEY,
     status          TEXT NOT NULL DEFAULT 'offline',  -- online, offline, busy, away, dnd
     note            TEXT,
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_presence_status ON presence (status) WHERE status != 'offline';
+CREATE INDEX IF NOT EXISTS idx_presence_status ON presence (status) WHERE status != 'offline';
 
 -- ============================================================================
 -- CONFERENCES & CALLS
 -- ============================================================================
 
-CREATE TABLE conferences (
+CREATE TABLE IF NOT EXISTS conferences (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     title           TEXT NOT NULL,
     mode            TEXT NOT NULL DEFAULT 'audio',  -- audio, video, webinar
@@ -179,7 +179,7 @@ CREATE TABLE conferences (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE conference_participants (
+CREATE TABLE IF NOT EXISTS conference_participants (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     conference_id   UUID NOT NULL REFERENCES conferences(id) ON DELETE CASCADE,
     user_id         UUID NOT NULL,
@@ -190,9 +190,9 @@ CREATE TABLE conference_participants (
     UNIQUE (conference_id, user_id)
 );
 
-CREATE INDEX idx_conference_participants_conference ON conference_participants (conference_id);
+CREATE INDEX IF NOT EXISTS idx_conference_participants_conference ON conference_participants (conference_id);
 
-CREATE TABLE calls (
+CREATE TABLE IF NOT EXISTS calls (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     conference_id   UUID REFERENCES conferences(id) ON DELETE SET NULL,
     caller          TEXT NOT NULL,
@@ -203,15 +203,15 @@ CREATE TABLE calls (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_calls_status ON calls (status) WHERE status NOT IN ('ended', 'failed');
-CREATE INDEX idx_calls_caller ON calls (caller);
-CREATE INDEX idx_calls_conference ON calls (conference_id) WHERE conference_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_calls_status ON calls (status) WHERE status NOT IN ('ended', 'failed');
+CREATE INDEX IF NOT EXISTS idx_calls_caller ON calls (caller);
+CREATE INDEX IF NOT EXISTS idx_calls_conference ON calls (conference_id) WHERE conference_id IS NOT NULL;
 
 -- ============================================================================
 -- CALL HISTORY (synced from clients)
 -- ============================================================================
 
-CREATE TABLE call_history (
+CREATE TABLE IF NOT EXISTS call_history (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_sip_uri    TEXT NOT NULL,
     direction       TEXT NOT NULL,         -- inbound, outbound
@@ -223,16 +223,16 @@ CREATE TABLE call_history (
     synced_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_call_history_user ON call_history (user_sip_uri);
-CREATE INDEX idx_call_history_start_time ON call_history (user_sip_uri, start_time DESC);
+CREATE INDEX IF NOT EXISTS idx_call_history_user ON call_history (user_sip_uri);
+CREATE INDEX IF NOT EXISTS idx_call_history_start_time ON call_history (user_sip_uri, start_time DESC);
 -- Deduplication index for sync merge
-CREATE UNIQUE INDEX idx_call_history_dedup ON call_history (user_sip_uri, start_time, remote_uri, direction);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_call_history_dedup ON call_history (user_sip_uri, start_time, remote_uri, direction);
 
 -- ============================================================================
 -- FILES
 -- ============================================================================
 
-CREATE TABLE files (
+CREATE TABLE IF NOT EXISTS files (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     owner           TEXT NOT NULL,
     filename        TEXT NOT NULL,
@@ -242,14 +242,14 @@ CREATE TABLE files (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_files_owner ON files (owner);
-CREATE INDEX idx_files_created_at ON files (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_files_owner ON files (owner);
+CREATE INDEX IF NOT EXISTS idx_files_created_at ON files (created_at DESC);
 
 -- ============================================================================
 -- ROUTING RULES
 -- ============================================================================
 
-CREATE TABLE routing_rules (
+CREATE TABLE IF NOT EXISTS routing_rules (
     id                      UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name                    TEXT NOT NULL,
     source_pattern          TEXT NOT NULL DEFAULT '*',
@@ -261,13 +261,13 @@ CREATE TABLE routing_rules (
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_routing_rules_priority ON routing_rules (priority ASC) WHERE enabled = true;
+CREATE INDEX IF NOT EXISTS idx_routing_rules_priority ON routing_rules (priority ASC) WHERE enabled = true;
 
 -- ============================================================================
 -- AUDIT LOG
 -- ============================================================================
 
-CREATE TABLE audit_events (
+CREATE TABLE IF NOT EXISTS audit_events (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     principal       TEXT NOT NULL,
     action          TEXT NOT NULL,
@@ -275,9 +275,9 @@ CREATE TABLE audit_events (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_audit_events_created_at ON audit_events (created_at DESC);
-CREATE INDEX idx_audit_events_principal ON audit_events (principal);
-CREATE INDEX idx_audit_events_action ON audit_events (action);
+CREATE INDEX IF NOT EXISTS idx_audit_events_created_at ON audit_events (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_events_principal ON audit_events (principal);
+CREATE INDEX IF NOT EXISTS idx_audit_events_action ON audit_events (action);
 
 -- ============================================================================
 -- MAINTENANCE: Auto-cleanup of expired data
@@ -304,10 +304,23 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trg_users_updated_at ON users;
 CREATE TRIGGER trg_users_updated_at BEFORE UPDATE ON users FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+DROP TRIGGER IF EXISTS trg_sip_accounts_updated_at ON sip_accounts;
 CREATE TRIGGER trg_sip_accounts_updated_at BEFORE UPDATE ON sip_accounts FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+DROP TRIGGER IF EXISTS trg_sip_registrations_updated_at ON sip_registrations;
 CREATE TRIGGER trg_sip_registrations_updated_at BEFORE UPDATE ON sip_registrations FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+DROP TRIGGER IF EXISTS trg_sip_dialogs_updated_at ON sip_dialogs;
 CREATE TRIGGER trg_sip_dialogs_updated_at BEFORE UPDATE ON sip_dialogs FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+DROP TRIGGER IF EXISTS trg_sip_subscriptions_updated_at ON sip_subscriptions;
 CREATE TRIGGER trg_sip_subscriptions_updated_at BEFORE UPDATE ON sip_subscriptions FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+DROP TRIGGER IF EXISTS trg_calls_updated_at ON calls;
 CREATE TRIGGER trg_calls_updated_at BEFORE UPDATE ON calls FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+DROP TRIGGER IF EXISTS trg_routing_rules_updated_at ON routing_rules;
 CREATE TRIGGER trg_routing_rules_updated_at BEFORE UPDATE ON routing_rules FOR EACH ROW EXECUTE FUNCTION update_updated_at();

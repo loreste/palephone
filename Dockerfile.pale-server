@@ -37,6 +37,10 @@ RUN apt-get update && apt-get install -y \
     nasm \
     libssl-dev \
     libasound2-dev \
+    libopus-dev \
+    uuid-dev \
+    libclang-dev \
+    clang \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -51,6 +55,8 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
+    libasound2 \
+    libopus0 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 

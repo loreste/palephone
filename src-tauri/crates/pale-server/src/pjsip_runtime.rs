@@ -427,7 +427,7 @@ unsafe fn pj_str_to_string(pj: &pjsip_sys::pj_str_t) -> String {
 
 unsafe fn pj_str_from_cstring(value: &CString) -> pjsip_sys::pj_str_t {
     pjsip_sys::pj_str_t {
-        ptr: value.as_ptr() as *mut i8,
+        ptr: value.as_ptr() as *mut _,
         slen: value.as_bytes().len() as _,
     }
 }

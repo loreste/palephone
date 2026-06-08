@@ -21,7 +21,7 @@ services:
     volumes:
       - pale-pgdata:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pale"]
       interval: 10s
@@ -38,7 +38,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "8080:8080"       # HTTP API
+      - "8090:8080"       # HTTP API
       - "5060:5060/udp"   # SIP UDP
       - "5061:5061"       # SIP TLS
     environment:
@@ -55,7 +55,8 @@ services:
       PALE_ICE: "${PALE_ICE:-true}"
       PALE_STUN_SERVERS: "${PALE_STUN_SERVERS:-stun:stun.l.google.com:19302}"
       PALE_STUN_IGNORE_FAILURE: "${PALE_STUN_IGNORE_FAILURE:-true}"
-      PALE_SIP_SRTP: "${PALE_SIP_SRTP:-true}"
+      PALE_SIP_TLS: "${PALE_SIP_TLS:-false}"
+      PALE_SIP_SRTP: "${PALE_SIP_SRTP:-false}"
       PALE_MAX_UPLOAD_BYTES: "${PALE_MAX_UPLOAD_BYTES:-104857600}"
       RUST_LOG: "${RUST_LOG:-info}"
     volumes:
