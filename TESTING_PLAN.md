@@ -38,7 +38,7 @@ docker compose up postgres -d
 export PALE_SERVER_TOKEN=$(openssl rand -base64 32)
 export PALE_ADMIN_PASSWORD=$(openssl rand -base64 32)
 export PALE_STORAGE_KEY=$(openssl rand -base64 32)
-export PALE_DATABASE_URL="host=localhost user=pale password=pale-dev-password dbname=pale"
+export PALE_DATABASE_URL="host=localhost user=pale password=$POSTGRES_PASSWORD dbname=pale"
 
 # Build and run pale-server
 cd src-tauri
@@ -561,7 +561,7 @@ SELECT * FROM room_messages WHERE room_id = 'test-room-id';
 
 ```bash
 # Run the backup script
-PGPASSWORD=pale-dev-password ./scripts/backup.sh
+PGPASSWORD=$POSTGRES_PASSWORD ./scripts/backup.sh
 
 # Verify backup file created
 ls -la backups/pale_*.sql.gz
@@ -575,18 +575,18 @@ gunzip -c backups/pale_$(date +%Y%m%d)*.sql.gz | head -20
 
 ```bash
 # Create a test database
-PGPASSWORD=pale-dev-password createdb -h localhost -U pale pale_recovery_test
+PGPASSWORD=$POSTGRES_PASSWORD createdb -h localhost -U pale pale_recovery_test
 
 # Restore from backup
 gunzip -c backups/pale_$(date +%Y%m%d)*.sql.gz | \
-  PGPASSWORD=pale-dev-password psql -h localhost -U pale pale_recovery_test
+  PGPASSWORD=$POSTGRES_PASSWORD psql -h localhost -U pale pale_recovery_test
 
 # Verify data integrity
-PGPASSWORD=pale-dev-password psql -h localhost -U pale pale_recovery_test \
+PGPASSWORD=$POSTGRES_PASSWORD psql -h localhost -U pale pale_recovery_test \
   -c "SELECT count(*) FROM users; SELECT count(*) FROM sip_accounts; SELECT count(*) FROM audit_events;"
 
 # Clean up
-PGPASSWORD=pale-dev-password dropdb -h localhost -U pale pale_recovery_test
+PGPASSWORD=$POSTGRES_PASSWORD dropdb -h localhost -U pale pale_recovery_test
 ```
 
 **Pass criteria:** Backup completes without errors. Restored database has identical row counts. All tables and indexes present after restore.
@@ -613,9 +613,9 @@ SQL
 
 ```bash
 # Test idempotent migration (run twice)
-PGPASSWORD=pale-dev-password psql -h localhost -U pale -d pale \
+PGPASSWORD=$POSTGRES_PASSWORD psql -h localhost -U pale -d pale \
   -f src-tauri/crates/pale-server/migrations/001_initial_schema.sql
-PGPASSWORD=pale-dev-password psql -h localhost -U pale -d pale \
+PGPASSWORD=$POSTGRES_PASSWORD psql -h localhost -U pale -d pale \
   -f src-tauri/crates/pale-server/migrations/001_initial_schema.sql
 
 # Expected: No errors (all CREATE statements use IF NOT EXISTS)
