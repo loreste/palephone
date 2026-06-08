@@ -56,6 +56,7 @@ impl PgStore {
             include_str!("../migrations/007_voicemail_followme.sql"),
             include_str!("../migrations/008_pbx_features.sql"),
             include_str!("../migrations/009_call_center.sql"),
+            include_str!("../migrations/010_extension_user_link.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {
@@ -603,6 +604,41 @@ impl PgStore {
                 file_id: r.try_get("file_id").ok().flatten(),
                 recorded_by: r.try_get("recorded_by").ok()?,
                 created_at: r.try_get("created_at").ok()?,
+            })
+        }).collect())
+    }
+
+    // ─── Extensions ───
+
+    pub async fn insert_extension(&self, ext: &crate::Extension) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO extensions (extension, destination, destination_type, label, user_id) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (extension) DO UPDATE SET destination=$2, destination_type=$3, label=$4, user_id=$5",
+            &[&ext.extension, &ext.destination, &ext.destination_type, &ext.label, &ext.user_id],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn delete_pg_extension(&self, ext: &str) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute("DELETE FROM extensions WHERE extension = $1", &[&ext]).await?;
+        Ok(())
+    }
+
+    pub async fn load_extensions(&self) -> Result<Vec<crate::Extension>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT e.extension, e.destination, e.destination_type, e.label, e.user_id, u.display_name as user_display_name FROM extensions e LEFT JOIN users u ON e.user_id = u.id ORDER BY e.extension",
+            &[],
+        ).await?;
+        Ok(rows.iter().filter_map(|r| {
+            Some(crate::Extension {
+                extension: r.try_get("extension").ok()?,
+                destination: r.try_get("destination").ok()?,
+                destination_type: r.try_get("destination_type").unwrap_or_else(|_| "user".to_string()),
+                label: r.try_get("label").unwrap_or_default(),
+                user_id: r.try_get("user_id").ok().flatten(),
+                user_display_name: r.try_get("user_display_name").ok().flatten(),
             })
         }).collect())
     }

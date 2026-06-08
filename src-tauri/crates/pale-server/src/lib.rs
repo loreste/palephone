@@ -489,6 +489,16 @@ impl AppState {
             }
             Err(e) => log::warn!("Failed to load recordings from Postgres: {}", e),
         }
+        match pg.load_extensions().await {
+            Ok(extensions) => {
+                let count = extensions.len();
+                for ext in extensions {
+                    self.extensions.insert(ext.extension.clone(), ext);
+                }
+                log::info!("Loaded {} extensions from PostgreSQL", count);
+            }
+            Err(e) => log::warn!("Failed to load extensions from Postgres: {}", e),
+        }
         log::info!("Loaded data from PostgreSQL into memory cache");
     }
 
@@ -932,6 +942,13 @@ impl AppState {
         if user.is_some() {
             self.delete_persisted(User::collection(), id.to_string());
             self.pg_spawn(move |pg| Box::pin(async move { pg.delete_user(id).await }));
+            // Orphan extensions (mirrors ON DELETE SET NULL in PG)
+            for ext in self.extensions_for_user(id) {
+                let mut e = ext;
+                e.user_id = None;
+                e.user_display_name = None;
+                self.extensions.insert(e.extension.clone(), e);
+            }
         }
         user
     }
@@ -1752,13 +1769,20 @@ impl AppState {
         if self.extensions.get(&input.extension).is_some() {
             return Err(format!("Extension {} already exists", input.extension));
         }
+        let user_display_name = input.user_id.and_then(|uid| {
+            self.users.get(&uid).map(|u| u.display_name.clone())
+        });
         let ext = Extension {
             extension: input.extension.clone(),
             destination: input.destination,
             destination_type: input.destination_type.unwrap_or_else(|| "user".to_string()),
             label: input.label.unwrap_or_default(),
+            user_id: input.user_id,
+            user_display_name,
         };
         self.extensions.insert(input.extension, ext.clone());
+        let e = ext.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.insert_extension(&e).await }));
         Ok(ext)
     }
 
@@ -1768,7 +1792,109 @@ impl AppState {
         self.extensions.get(&uri.to_string())
             .or_else(|| self.extensions.get(&user.to_string()))
     }
-    pub fn delete_extension(&self, ext: &str) -> Option<Extension> { self.extensions.remove(&ext.to_string()) }
+    pub fn delete_extension(&self, ext: &str) -> Option<Extension> {
+        let removed = self.extensions.remove(&ext.to_string());
+        if removed.is_some() {
+            let ext_key = ext.to_string();
+            self.pg_spawn(move |pg| Box::pin(async move { pg.delete_pg_extension(&ext_key).await }));
+        }
+        removed
+    }
+
+    pub fn provision_user(&self, input: ProvisionUserRequest) -> Result<ProvisionUserResponse, String> {
+        let default_username = input.display_name.to_lowercase().replace(' ', ".");
+        let sip_username = input.extension_number.as_deref()
+            .unwrap_or(&default_username);
+        let sip_uri = format!("sip:{}@{}", sip_username, input.sip_domain);
+
+        // Check uniqueness
+        if self.users.values().iter().any(|u| u.sip_uri == sip_uri) {
+            return Err(format!("SIP URI {} already taken", sip_uri));
+        }
+        if let Some(ref ext) = input.extension_number {
+            if self.extensions.get(&ext.to_string()).is_some() {
+                return Err(format!("Extension {} already exists", ext));
+            }
+        }
+
+        // Create user (auto-provisions SIP account)
+        let user = self.create_user(CreateUserRequest {
+            display_name: input.display_name.clone(),
+            sip_uri: sip_uri.clone(),
+            matrix_user_id: None,
+            password: Some(input.password.clone()),
+            role: input.role,
+        })?;
+
+        // Create linked extension if requested
+        let extension = if let Some(ext_num) = input.extension_number {
+            Some(self.create_extension(CreateExtensionRequest {
+                extension: ext_num,
+                destination: sip_uri.clone(),
+                destination_type: Some("user".to_string()),
+                label: Some(input.display_name.clone()),
+                user_id: Some(user.id),
+            })?)
+        } else {
+            None
+        };
+
+        // Get SIP credentials
+        let sip_creds = split_sip_aor_simple(&sip_uri).map(|(username, domain)| {
+            SipCredentials {
+                sip_uri: sip_uri.clone(),
+                registrar_uri: format!("sip:{}", self.sip_registrar),
+                username,
+                password: input.password,
+                transport: "udp".to_string(),
+                domain,
+            }
+        });
+
+        Ok(ProvisionUserResponse { user, extension, sip_credentials: sip_creds })
+    }
+
+    pub fn assign_extension(&self, ext: &str, user_id: Uuid) -> Result<Extension, String> {
+        let mut extension = self.extensions.get(&ext.to_string())
+            .ok_or_else(|| format!("Extension {} not found", ext))?;
+        let user = self.users.get(&user_id)
+            .ok_or_else(|| format!("User {} not found", user_id))?;
+        extension.user_id = Some(user_id);
+        extension.user_display_name = Some(user.display_name.clone());
+        extension.destination = user.sip_uri.clone();
+        extension.destination_type = "user".to_string();
+        self.extensions.insert(ext.to_string(), extension.clone());
+        let e = extension.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.insert_extension(&e).await }));
+        Ok(extension)
+    }
+
+    pub fn unassign_extension(&self, ext: &str) -> Result<Extension, String> {
+        let mut extension = self.extensions.get(&ext.to_string())
+            .ok_or_else(|| format!("Extension {} not found", ext))?;
+        extension.user_id = None;
+        extension.user_display_name = None;
+        self.extensions.insert(ext.to_string(), extension.clone());
+        let e = extension.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.insert_extension(&e).await }));
+        Ok(extension)
+    }
+
+    pub fn extensions_for_user(&self, user_id: Uuid) -> Vec<Extension> {
+        self.extensions.values().into_iter()
+            .filter(|e| e.user_id == Some(user_id))
+            .collect()
+    }
+
+    pub fn list_extensions_filtered(&self, unassigned_only: bool) -> Vec<Extension> {
+        if unassigned_only {
+            self.extensions.values().into_iter()
+                .filter(|e| e.user_id.is_none() && e.destination_type == "user")
+                .collect()
+        } else {
+            self.list_extensions()
+        }
+    }
 
     // ─── Business Hours ───
 
@@ -3214,6 +3340,8 @@ pub struct Extension {
     pub destination: String,
     pub destination_type: String,
     pub label: String,
+    pub user_id: Option<Uuid>,
+    pub user_display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -3222,6 +3350,28 @@ pub struct CreateExtensionRequest {
     pub destination: String,
     pub destination_type: Option<String>,
     pub label: Option<String>,
+    pub user_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProvisionUserRequest {
+    pub display_name: String,
+    pub password: String,
+    pub role: Option<String>,
+    pub extension_number: Option<String>,
+    pub sip_domain: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProvisionUserResponse {
+    pub user: User,
+    pub extension: Option<Extension>,
+    pub sip_credentials: Option<SipCredentials>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AssignExtensionRequest {
+    pub user_id: Uuid,
 }
 
 // ─── Call Park ───

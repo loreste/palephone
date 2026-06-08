@@ -23,7 +23,7 @@ use crate::{
     CreateCannedResponseRequest, CreateExtensionRequest, CreateHolidayRequest,
     CreateIvrRequest, CreatePagingGroupRequest, CreateQueueRequest, CreateRingGroupRequest,
     CreateRoomRequest, CreateScorecardRequest, CreateSpeedDialRequest, SetAgentStateRequest,
-    StartMonitorRequest,
+    StartMonitorRequest, ProvisionUserRequest, AssignExtensionRequest,
     FileRecord, JoinConferenceRequest,
     SendRoomMessageRequest, SetPresenceRequest, SyncCallHistoryRequest,
     UpdateCallStatusRequest, UpdateSipAccountStatusRequest,
@@ -81,8 +81,11 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/call-settings", get(get_call_settings).put(update_call_settings))
         .route("/v1/queues", get(list_queues).post(create_queue))
         .route("/v1/queues/{id}", get(get_queue).delete(delete_queue))
+        .route("/v1/users/provision", post(provision_user_handler))
         .route("/v1/extensions", get(list_extensions).post(create_extension))
         .route("/v1/extensions/{ext}", delete(delete_extension))
+        .route("/v1/extensions/{ext}/assign", put(assign_extension_handler))
+        .route("/v1/extensions/{ext}/unassign", put(unassign_extension_handler))
         .route("/v1/business-hours", get(list_business_hours).post(create_business_hours))
         .route("/v1/business-hours/{id}", delete(delete_business_hours_entry))
         .route("/v1/holidays", get(list_holidays).post(create_holiday))
@@ -1170,8 +1173,14 @@ async fn delete_queue(State(state): State<SharedState>, headers: HeaderMap, Path
     Ok(Json(json!({"ok":true})))
 }
 
-async fn list_extensions(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::Extension>>, ApiError> {
-    require_bearer(&headers, &state)?; Ok(Json(state.list_extensions()))
+#[derive(serde::Deserialize)]
+struct ListExtensionsQuery {
+    unassigned: Option<bool>,
+}
+
+async fn list_extensions(State(state): State<SharedState>, headers: HeaderMap, Query(q): Query<ListExtensionsQuery>) -> Result<Json<Vec<crate::Extension>>, ApiError> {
+    require_bearer(&headers, &state)?;
+    Ok(Json(state.list_extensions_filtered(q.unassigned.unwrap_or(false))))
 }
 async fn create_extension(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<CreateExtensionRequest>) -> Result<Json<crate::Extension>, ApiError> {
     let p = authenticated_principal(&headers, &state)?;
@@ -1183,6 +1192,40 @@ async fn delete_extension(State(state): State<SharedState>, headers: HeaderMap, 
     let p = authenticated_principal(&headers, &state)?;
     state.delete_extension(&ext).ok_or(ApiError::NotFound)?;
     state.record_audit_event(&p, "extension.deleted", Some(ext)); Ok(Json(json!({"ok":true})))
+}
+
+async fn provision_user_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<ProvisionUserRequest>,
+) -> Result<Json<crate::ProvisionUserResponse>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let response = state.provision_user(input).map_err(|e| ApiError::Conflict(e))?;
+    state.record_audit_event(&principal, "user.provisioned", Some(response.user.id.to_string()));
+    Ok(Json(response))
+}
+
+async fn assign_extension_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(ext): Path<String>,
+    Json(input): Json<AssignExtensionRequest>,
+) -> Result<Json<crate::Extension>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let extension = state.assign_extension(&ext, input.user_id).map_err(|e| ApiError::Conflict(e))?;
+    state.record_audit_event(&principal, "extension.assigned", Some(format!("{}:{}", ext, input.user_id)));
+    Ok(Json(extension))
+}
+
+async fn unassign_extension_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(ext): Path<String>,
+) -> Result<Json<crate::Extension>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let extension = state.unassign_extension(&ext).map_err(|e| ApiError::Conflict(e))?;
+    state.record_audit_event(&principal, "extension.unassigned", Some(ext));
+    Ok(Json(extension))
 }
 
 async fn list_business_hours(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::BusinessHours>>, ApiError> {

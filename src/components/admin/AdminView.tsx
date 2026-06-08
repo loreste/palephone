@@ -262,7 +262,7 @@ export function AdminView() {
         {activeTab === "users" && <UsersPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
         {activeTab === "sip" && <SipPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
         {activeTab === "routing" && <RoutingPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
-        {activeTab === "extensions" && <CrudPanel baseUrl={baseUrl} token={token} endpoint="extensions" title="Extensions" icon={Server} columns={["Extension", "Destination", "Type", "Label"]} rowFn={(e: any) => [e.extension, e.destination, e.destination_type, e.label || "-"]} fields={[["Extension", "extension"], ["Destination (SIP URI)", "destination"], ["Type", "destination_type", "user"], ["Label", "label"]]} />}
+        {activeTab === "extensions" && <ExtensionsPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "ring_groups" && <RingGroupsPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "queues" && <QueuesPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "ivr" && <IvrPanel baseUrl={baseUrl} token={token} />}
@@ -338,8 +338,49 @@ function UsersPanel({
   const [sipUri, setSipUri] = useState("");
   const [userPassword, setUserPassword] = useState("");
   const [role, setRole] = useState("user");
+  const [mode, setMode] = useState<"provision" | "manual">("provision");
+  const [extensionNumber, setExtensionNumber] = useState("");
+  const [sipDomain, setSipDomain] = useState("pale.local");
+  const [extensions, setExtensions] = useState<any[]>([]);
 
-  const submit = async (event: FormEvent) => {
+  useEffect(() => {
+    api<any[]>(baseUrl, token, "/v1/extensions").then(setExtensions).catch(() => {});
+  }, [baseUrl, token]);
+
+  const nextExtension = () => {
+    const used = new Set(extensions.map(e => parseInt(e.extension)).filter(n => !isNaN(n)));
+    let next = 1001;
+    while (used.has(next)) next++;
+    return next.toString();
+  };
+
+  const submitProvision = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      await api(baseUrl, token, "/v1/users/provision", {
+        method: "POST",
+        body: {
+          display_name: displayName,
+          password: userPassword || undefined,
+          role,
+          extension_number: extensionNumber || undefined,
+          sip_domain: sipDomain,
+        },
+      });
+      setDisplayName("");
+      setUserPassword("");
+      setRole("user");
+      setExtensionNumber("");
+      toast({ type: "success", title: "User provisioned" });
+      // Reload extensions for next-available calculation
+      api<any[]>(baseUrl, token, "/v1/extensions").then(setExtensions).catch(() => {});
+      onChange();
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Failed to provision user" });
+    }
+  };
+
+  const submitManual = async (event: FormEvent) => {
     event.preventDefault();
     try {
       await createAdminUser(baseUrl, token, {
@@ -384,37 +425,90 @@ function UsersPanel({
     }
   };
 
+  // Build user_id -> extension numbers map
+  const extMap = new Map<string, string[]>();
+  for (const ext of extensions) {
+    if (ext.user_id) {
+      const list = extMap.get(ext.user_id) || [];
+      list.push(ext.extension);
+      extMap.set(ext.user_id, list);
+    }
+  }
+
   return (
     <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
       <div className="p-3 border-b border-border-subtle flex items-center gap-2">
         <UserPlus size={17} className="text-accent" />
         <h2 className="font-medium">Users</h2>
       </div>
-      <form onSubmit={submit} className="p-3 grid md:grid-cols-5 gap-2 border-b border-border-subtle">
-        <Field label="Display name" value={displayName} onChange={setDisplayName} />
-        <Field label="SIP URI" value={sipUri} onChange={setSipUri} />
-        <Field label="Password" value={userPassword} onChange={setUserPassword} type="password" />
-        <label className="block">
-          <span className="block text-xs text-tertiary mb-1">Role</span>
-          <select
-            value={role}
-            onChange={(e) => setRole(e.target.value)}
-            className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
-          >
-            <option value="user">User</option>
-            <option value="admin">Admin</option>
-          </select>
-        </label>
-        <button className="h-10 self-end rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium flex items-center justify-center gap-2">
-          <Plus size={16} />
-          Create user
+
+      {/* Mode toggle */}
+      <div className="flex gap-1 border-b border-border-subtle mb-0 px-3 pt-1">
+        <button type="button" onClick={() => setMode("provision")} className={cn("px-3 py-2 text-sm border-b-2", mode === "provision" ? "border-accent text-accent" : "border-transparent text-secondary")}>
+          Quick Provision
         </button>
-      </form>
+        <button type="button" onClick={() => setMode("manual")} className={cn("px-3 py-2 text-sm border-b-2", mode === "manual" ? "border-accent text-accent" : "border-transparent text-secondary")}>
+          Manual Create
+        </button>
+      </div>
+
+      {mode === "provision" ? (
+        <form onSubmit={submitProvision} className="p-3 space-y-2 border-b border-border-subtle">
+          <div className="grid md:grid-cols-3 gap-2">
+            <Field label="Display name" value={displayName} onChange={setDisplayName} />
+            <Field label="Password" value={userPassword} onChange={setUserPassword} type="password" />
+            <label className="block">
+              <span className="block text-xs text-tertiary mb-1">Role</span>
+              <select
+                value={role}
+                onChange={(e) => setRole(e.target.value)}
+                className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+              >
+                <option value="user">User</option>
+                <option value="admin">Admin</option>
+              </select>
+            </label>
+          </div>
+          <div className="grid md:grid-cols-3 gap-2">
+            <div className="flex gap-1">
+              <Field label="Extension number" value={extensionNumber} onChange={setExtensionNumber} />
+              <button type="button" onClick={() => setExtensionNumber(nextExtension())} className="self-end h-10 px-2 rounded-md border border-border-default text-xs hover:bg-elevated">Suggest</button>
+            </div>
+            <Field label="SIP domain" value={sipDomain} onChange={setSipDomain} />
+            <button className="h-10 self-end rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium flex items-center justify-center gap-2">
+              <Plus size={16} />
+              Provision
+            </button>
+          </div>
+        </form>
+      ) : (
+        <form onSubmit={submitManual} className="p-3 grid md:grid-cols-5 gap-2 border-b border-border-subtle">
+          <Field label="Display name" value={displayName} onChange={setDisplayName} />
+          <Field label="SIP URI" value={sipUri} onChange={setSipUri} />
+          <Field label="Password" value={userPassword} onChange={setUserPassword} type="password" />
+          <label className="block">
+            <span className="block text-xs text-tertiary mb-1">Role</span>
+            <select
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+              className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+            >
+              <option value="user">User</option>
+              <option value="admin">Admin</option>
+            </select>
+          </label>
+          <button className="h-10 self-end rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium flex items-center justify-center gap-2">
+            <Plus size={16} />
+            Create user
+          </button>
+        </form>
+      )}
+
       <div className="p-3 overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="text-tertiary">
             <tr className="border-b border-border-subtle">
-              {["Name", "SIP URI", "Role", ""].map((header) => (
+              {["Name", "Ext", "SIP URI", "Role", ""].map((header) => (
                 <th key={header} className="text-left py-2 px-2 font-medium">{header}</th>
               ))}
             </tr>
@@ -423,6 +517,7 @@ function UsersPanel({
             {(snapshot?.users ?? []).map((user) => (
               <tr key={user.id} className="border-b border-border-subtle">
                 <td className="py-2 px-2">{user.display_name}</td>
+                <td className="py-2 px-2 font-mono text-xs text-secondary">{extMap.get(user.id)?.join(", ") || "-"}</td>
                 <td className="py-2 px-2 text-secondary">{user.sip_uri}</td>
                 <td className="py-2 px-2">
                   <span className={cn(
@@ -1258,6 +1353,196 @@ function CrudPanel({ baseUrl, token, endpoint, title, icon: Icon, columns, rowFn
                   </td>
                 </tr>
               ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function ExtensionsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [extensions, setExtensions] = useState<any[]>([]);
+  const [users, setUsers] = useState<any[]>([]);
+  const [showUnassignedOnly, setShowUnassignedOnly] = useState(false);
+  const [assigningExt, setAssigningExt] = useState<string | null>(null);
+  const [selectedUserId, setSelectedUserId] = useState("");
+
+  // Create form state
+  const [newExt, setNewExt] = useState("");
+  const [newType, setNewType] = useState("user");
+  const [newLabel, setNewLabel] = useState("");
+  const [newUserId, setNewUserId] = useState("");
+  const [newDest, setNewDest] = useState("");
+
+  const load = async () => {
+    const qs = showUnassignedOnly ? "?unassigned=true" : "";
+    const [exts, userList] = await Promise.all([
+      api<any[]>(baseUrl, token, `/v1/extensions${qs}`),
+      api<any[]>(baseUrl, token, "/v1/users"),
+    ]);
+    setExtensions(exts);
+    setUsers(userList);
+  };
+  useEffect(() => { load(); }, [baseUrl, token, showUnassignedOnly]);
+
+  const suggestNext = () => {
+    const used = new Set(extensions.map(e => parseInt(e.extension)).filter(n => !isNaN(n)));
+    let next = 1001;
+    while (used.has(next)) next++;
+    setNewExt(next.toString());
+  };
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      const body: any = {
+        extension: newExt,
+        destination: newType === "user" ? (users.find(u => u.id === newUserId)?.sip_uri || newDest) : newDest,
+        destination_type: newType,
+        label: newLabel,
+      };
+      if (newType === "user" && newUserId) body.user_id = newUserId;
+      await api(baseUrl, token, "/v1/extensions", { method: "POST", body });
+      setNewExt(""); setNewLabel(""); setNewUserId(""); setNewDest("");
+      toast({ type: "success", title: "Extension created" });
+      load();
+    } catch (err) { toast({ type: "error", title: err instanceof Error ? err.message : "Failed" }); }
+  };
+
+  const assignUser = async (ext: string) => {
+    if (!selectedUserId) return;
+    try {
+      await api(baseUrl, token, `/v1/extensions/${encodeURIComponent(ext)}/assign`, { method: "PUT", body: { user_id: selectedUserId } });
+      setAssigningExt(null); setSelectedUserId("");
+      toast({ type: "success", title: "Extension assigned" });
+      load();
+    } catch (_err) { toast({ type: "error", title: "Failed to assign" }); }
+  };
+
+  const unassign = async (ext: string) => {
+    try {
+      await api(baseUrl, token, `/v1/extensions/${encodeURIComponent(ext)}/unassign`, { method: "PUT" });
+      toast({ type: "success", title: "Extension unassigned" });
+      load();
+    } catch (_err) { toast({ type: "error", title: "Failed" }); }
+  };
+
+  const remove = async (ext: string) => {
+    try {
+      await api(baseUrl, token, `/v1/extensions/${encodeURIComponent(ext)}`, { method: "DELETE" });
+      toast({ type: "success", title: "Extension deleted" });
+      load();
+    } catch (_err) { toast({ type: "error", title: "Failed" }); }
+  };
+
+  return (
+    <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+      <div className="p-3 border-b border-border-subtle flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Server size={17} className="text-accent" />
+          <h2 className="font-medium">Extensions</h2>
+        </div>
+        <label className="flex items-center gap-2 text-xs text-secondary">
+          <input type="checkbox" checked={showUnassignedOnly} onChange={e => setShowUnassignedOnly(e.target.checked)} className="accent-accent" />
+          Unassigned only
+        </label>
+      </div>
+
+      {/* Create form */}
+      <form onSubmit={submit} className="p-3 grid md:grid-cols-5 gap-2 border-b border-border-subtle">
+        <div className="flex gap-1">
+          <Field label="Extension" value={newExt} onChange={setNewExt} />
+          <button type="button" onClick={suggestNext} className="self-end h-10 px-2 rounded-md border border-border-default text-xs hover:bg-elevated">Auto</button>
+        </div>
+        <label className="block">
+          <span className="block text-xs text-tertiary mb-1">Type</span>
+          <select value={newType} onChange={e => setNewType(e.target.value)}
+            className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus">
+            <option value="user">User</option>
+            <option value="ring_group">Ring Group</option>
+            <option value="ivr">IVR</option>
+            <option value="queue">Queue</option>
+            <option value="park">Park</option>
+            <option value="voicemail">Voicemail</option>
+            <option value="conference">Conference</option>
+            <option value="external">External</option>
+          </select>
+        </label>
+        {newType === "user" ? (
+          <label className="block">
+            <span className="block text-xs text-tertiary mb-1">User</span>
+            <select value={newUserId} onChange={e => setNewUserId(e.target.value)}
+              className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus">
+              <option value="">Select user...</option>
+              {users.map(u => <option key={u.id} value={u.id}>{u.display_name} ({u.sip_uri})</option>)}
+            </select>
+          </label>
+        ) : (
+          <Field label="Destination (SIP URI)" value={newDest} onChange={setNewDest} />
+        )}
+        <Field label="Label" value={newLabel} onChange={setNewLabel} />
+        <button className="h-10 self-end rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium flex items-center justify-center gap-2">
+          <Plus size={16} /> Create
+        </button>
+      </form>
+
+      {/* Table */}
+      <div className="p-3 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="text-tertiary">
+            <tr className="border-b border-border-subtle">
+              {["Extension", "Assigned To", "Type", "Label", ""].map(h => (
+                <th key={h} className="text-left py-2 px-2 font-medium">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {extensions.length === 0 ? (
+              <tr><td colSpan={5} className="py-4 px-2 text-secondary">No extensions</td></tr>
+            ) : extensions.map(ext => (
+              <tr key={ext.extension} className="border-b border-border-subtle">
+                <td className="py-2 px-2 font-mono">{ext.extension}</td>
+                <td className="py-2 px-2">
+                  {assigningExt === ext.extension ? (
+                    <div className="flex items-center gap-1">
+                      <select value={selectedUserId} onChange={e => setSelectedUserId(e.target.value)}
+                        className="h-8 rounded-md bg-base border border-border-default px-2 text-xs">
+                        <option value="">Select user...</option>
+                        {users.map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}
+                      </select>
+                      <button type="button" onClick={() => assignUser(ext.extension)}
+                        className="h-8 px-2 rounded-md bg-accent text-white text-xs">Assign</button>
+                      <button type="button" onClick={() => setAssigningExt(null)}
+                        className="h-8 px-2 rounded-md border border-border-default text-xs">Cancel</button>
+                    </div>
+                  ) : ext.user_display_name ? (
+                    <span className="text-primary">{ext.user_display_name}</span>
+                  ) : ext.destination_type === "user" ? (
+                    <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-warning/20 text-warning">Unassigned</span>
+                  ) : (
+                    <span className="text-secondary">{ext.destination}</span>
+                  )}
+                </td>
+                <td className="py-2 px-2">
+                  <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-elevated text-secondary">{ext.destination_type}</span>
+                </td>
+                <td className="py-2 px-2 text-secondary">{ext.label || "-"}</td>
+                <td className="py-2 px-2 text-right">
+                  <div className="inline-flex items-center gap-1">
+                    {ext.user_id ? (
+                      <button type="button" onClick={() => unassign(ext.extension)}
+                        className="h-8 px-2 rounded-md hover:bg-elevated text-xs text-secondary">Unassign</button>
+                    ) : ext.destination_type === "user" ? (
+                      <button type="button" onClick={() => { setAssigningExt(ext.extension); setSelectedUserId(""); }}
+                        className="h-8 px-2 rounded-md hover:bg-elevated text-xs text-accent">Assign</button>
+                    ) : null}
+                    <IconButton label="Delete" tone="danger" onClick={() => remove(ext.extension)}>
+                      <Trash2 size={16} />
+                    </IconButton>
+                  </div>
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>
