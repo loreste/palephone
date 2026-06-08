@@ -68,6 +68,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/rooms/{id}", get(get_room))
         .route("/v1/rooms/{id}/messages", get(list_room_messages).post(send_room_message))
         .route("/v1/rooms/{id}/members", post(add_room_member).delete(leave_room))
+        .route("/v1/rooms/{id}/typing", post(room_typing))
         .route("/v1/search/messages", get(search_messages))
         .route("/v1/messages/{id}/read", put(mark_message_read))
         .route("/v1/messages/{id}", put(edit_message).delete(delete_message))
@@ -801,6 +802,31 @@ async fn leave_room(
         .remove_room_member(id, &principal)
         .map(Json)
         .ok_or(ApiError::NotFound)
+}
+
+// ─── Typing Indicators ───
+
+#[derive(serde::Deserialize)]
+struct TypingRequest {
+    typing: bool,
+}
+
+async fn room_typing(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<TypingRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "typing".to_string(),
+        payload: json!({
+            "room_id": id,
+            "user": principal,
+            "typing": input.typing,
+        }),
+    });
+    Ok(Json(json!({ "ok": true })))
 }
 
 // ─── Search ───
