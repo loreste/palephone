@@ -74,6 +74,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/messages/{id}", put(edit_message).delete(delete_message))
         .route("/v1/messages/{id}/react", post(react_to_message))
         .route("/v1/users/{id}/avatar", put(upload_avatar))
+        .route("/v1/ldap/config", get(get_ldap_config).put(set_ldap_config))
+        .route("/v1/ldap/test", post(test_ldap_connection))
         .route("/v1/ring-groups", get(list_ring_groups).post(create_ring_group))
         .route("/v1/ring-groups/{id}", get(get_ring_group).delete(delete_ring_group))
         .route("/v1/ivrs", get(list_ivrs).post(create_ivr))
@@ -1019,6 +1021,57 @@ async fn upload_avatar(
         "file_id": file_id,
         "url": format!("/v1/files/{}", file_id),
     })))
+}
+
+// ─── LDAP / Active Directory ───
+
+async fn get_ldap_config(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::ldap_auth::LdapConfig>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    if !state.is_admin_principal(&principal) {
+        return Err(ApiError::Forbidden);
+    }
+    let mut config = state.ldap_config();
+    config.bind_password = "***".to_string(); // Never expose password
+    Ok(Json(config))
+}
+
+async fn set_ldap_config(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(config): Json<crate::ldap_auth::LdapConfig>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    if !state.is_admin_principal(&principal) {
+        return Err(ApiError::Forbidden);
+    }
+    state.set_ldap_config(config);
+    state.record_audit_event(&principal, "ldap.config_updated", None);
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn test_ldap_connection(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    if !state.is_admin_principal(&principal) {
+        return Err(ApiError::Forbidden);
+    }
+    let config = state.ldap_config();
+    match crate::ldap_auth::ldap_authenticate(&config, "test", "test").await {
+        Ok(_) => Ok(Json(json!({ "ok": true, "message": "Connection successful" }))),
+        Err(e) => {
+            if e.contains("connection failed") || e.contains("bind failed") {
+                Ok(Json(json!({ "ok": false, "message": e })))
+            } else {
+                // Connection works, auth failed (expected for test user)
+                Ok(Json(json!({ "ok": true, "message": "Connection successful (test auth rejected as expected)" })))
+            }
+        }
+    }
 }
 
 // ─── Ring Groups ───

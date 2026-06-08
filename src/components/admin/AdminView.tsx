@@ -37,7 +37,7 @@ import {
 import { toast } from "@/components/ui/Toast";
 import { useServerStore } from "@/store/serverStore";
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "media" | "calls" | "conferences" | "files" | "audit";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "media" | "calls" | "conferences" | "files" | "directory" | "audit";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -50,6 +50,7 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "calls", label: "Calls", icon: Router },
   { id: "conferences", label: "Conferences", icon: Mic },
   { id: "files", label: "Files", icon: FileText },
+  { id: "directory", label: "Directory", icon: Users },
   { id: "audit", label: "Audit", icon: ClipboardList },
 ];
 
@@ -243,6 +244,7 @@ export function AdminView() {
         {activeTab === "calls" && <CallsPanel snapshot={snapshot} />}
         {activeTab === "conferences" && <ConferencesPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
         {activeTab === "files" && <FilesPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
+        {activeTab === "directory" && <DirectoryPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "audit" && <AuditPanel snapshot={snapshot} />}
       </div>
     </div>
@@ -1161,6 +1163,133 @@ function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
             ))}
           </tbody>
         </table>
+      </div>
+    </section>
+  );
+}
+
+function DirectoryPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [config, setConfig] = useState({
+    enabled: false,
+    server_url: "ldap://dc.company.com:389",
+    bind_dn: "",
+    bind_password: "",
+    base_dn: "",
+    user_search_filter: "(&(objectClass=user)(sAMAccountName={username}))",
+    user_dn_attribute: "sAMAccountName",
+    display_name_attribute: "displayName",
+    email_attribute: "mail",
+    group_attribute: "memberOf",
+    admin_group: "",
+    sip_domain: "company.com",
+  });
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch(`${baseUrl}/v1/ldap/config`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => { if (data) setConfig(data); })
+      .catch(() => {});
+  }, [baseUrl, token]);
+
+  const save = async () => {
+    try {
+      const res = await fetch(`${baseUrl}/v1/ldap/config`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify(config),
+      });
+      if (!res.ok) throw new Error("Failed");
+      toast({ type: "success", title: "Directory configuration saved" });
+    } catch (err) {
+      toast({ type: "error", title: "Failed to save" });
+    }
+  };
+
+  const testConnection = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await fetch(`${baseUrl}/v1/ldap/test`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      setTestResult(data.ok ? "Connection successful" : data.message);
+    } catch {
+      setTestResult("Connection failed");
+    }
+    setTesting(false);
+  };
+
+  return (
+    <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+      <div className="p-3 border-b border-border-subtle flex items-center gap-2">
+        <Users size={17} className="text-accent" />
+        <h2 className="font-medium">Active Directory / LDAP</h2>
+      </div>
+      <div className="p-4 space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-medium text-primary">Enable Directory Integration</h3>
+            <p className="text-xs text-tertiary">Users will authenticate against Active Directory. New users are auto-provisioned on first login.</p>
+          </div>
+          <input type="checkbox" checked={config.enabled} onChange={(e) => setConfig({ ...config, enabled: e.target.checked })}
+            className="w-5 h-5 accent-accent" />
+        </div>
+
+        {config.enabled && (
+          <>
+            <div className="border-t border-border-subtle pt-4">
+              <h4 className="text-xs font-semibold text-tertiary uppercase tracking-wider mb-3">Connection</h4>
+              <div className="grid md:grid-cols-2 gap-3">
+                <Field label="LDAP Server URL" value={config.server_url} onChange={(v) => setConfig({ ...config, server_url: v })} />
+                <Field label="SIP Domain" value={config.sip_domain} onChange={(v) => setConfig({ ...config, sip_domain: v })} />
+                <Field label="Bind DN (Service Account)" value={config.bind_dn} onChange={(v) => setConfig({ ...config, bind_dn: v })} />
+                <Field label="Bind Password" value={config.bind_password} onChange={(v) => setConfig({ ...config, bind_password: v })} type="password" />
+                <Field label="Base DN" value={config.base_dn} onChange={(v) => setConfig({ ...config, base_dn: v })} />
+              </div>
+            </div>
+
+            <div className="border-t border-border-subtle pt-4">
+              <h4 className="text-xs font-semibold text-tertiary uppercase tracking-wider mb-3">User Mapping</h4>
+              <div className="grid md:grid-cols-2 gap-3">
+                <Field label="User Search Filter" value={config.user_search_filter} onChange={(v) => setConfig({ ...config, user_search_filter: v })} />
+                <Field label="Username Attribute" value={config.user_dn_attribute} onChange={(v) => setConfig({ ...config, user_dn_attribute: v })} />
+                <Field label="Display Name Attribute" value={config.display_name_attribute} onChange={(v) => setConfig({ ...config, display_name_attribute: v })} />
+                <Field label="Email Attribute" value={config.email_attribute} onChange={(v) => setConfig({ ...config, email_attribute: v })} />
+              </div>
+            </div>
+
+            <div className="border-t border-border-subtle pt-4">
+              <h4 className="text-xs font-semibold text-tertiary uppercase tracking-wider mb-3">Role Mapping</h4>
+              <div className="grid md:grid-cols-2 gap-3">
+                <Field label="Group Membership Attribute" value={config.group_attribute} onChange={(v) => setConfig({ ...config, group_attribute: v })} />
+                <Field label="Admin Group DN" value={config.admin_group} onChange={(v) => setConfig({ ...config, admin_group: v })} />
+              </div>
+              <p className="text-xs text-tertiary mt-1">Users in the admin group will be assigned the admin role. Leave empty to make all AD users regular users.</p>
+            </div>
+          </>
+        )}
+
+        <div className="flex items-center gap-3 pt-2 border-t border-border-subtle">
+          {config.enabled && (
+            <button onClick={testConnection} disabled={testing}
+              className="h-10 px-4 rounded-md border border-border-default hover:bg-elevated text-sm disabled:opacity-60">
+              {testing ? "Testing..." : "Test Connection"}
+            </button>
+          )}
+          <button onClick={save}
+            className="h-10 px-4 rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium">
+            Save Configuration
+          </button>
+          {testResult && (
+            <span className={cn("text-xs", testResult.includes("successful") ? "text-success" : "text-destructive")}>
+              {testResult}
+            </span>
+          )}
+        </div>
       </div>
     </section>
   );

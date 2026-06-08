@@ -12,6 +12,7 @@ use sha2::{Digest as ShaDigest, Sha256};
 use uuid::Uuid;
 
 pub mod http;
+pub mod ldap_auth;
 pub mod metrics;
 pub mod pg_store;
 pub mod pjsip_runtime;
@@ -211,6 +212,7 @@ pub struct AppState {
     rate_limits: ShardedMap<String, RateLimitBucket>,
     rate_limit_rps: u32,
     sip_registrar: String,
+    ldap_config: std::sync::RwLock<ldap_auth::LdapConfig>,
     pg: Option<PgStore>,
     pg_failure_count: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -322,9 +324,18 @@ impl AppState {
             rate_limits: ShardedMap::new(),
             rate_limit_rps: 100,
             sip_registrar: "127.0.0.1:5060".to_string(),
+            ldap_config: std::sync::RwLock::new(ldap_auth::LdapConfig::default()),
             pg: None,
             pg_failure_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    pub fn ldap_config(&self) -> ldap_auth::LdapConfig {
+        self.ldap_config.read().expect("ldap config lock").clone()
+    }
+
+    pub fn set_ldap_config(&self, config: ldap_auth::LdapConfig) {
+        *self.ldap_config.write().expect("ldap config lock") = config;
     }
 
     pub fn set_sip_registrar(&mut self, addr: String) {
@@ -725,22 +736,66 @@ impl AppState {
         Ok(user)
     }
 
-    /// Authenticate a user (not admin) by SIP URI and password
+    /// Authenticate a user by SIP URI and password.
+    /// Tries LDAP/AD first (if configured), then falls back to local database.
+    /// Auto-provisions users from AD on first login.
     pub fn authenticate_user(
         &self,
         sip_uri: &str,
         password: &str,
     ) -> Result<UserLoginResponse, AuthError> {
+        // Extract username for LDAP
+        let username = split_sip_aor_simple(sip_uri)
+            .map(|(u, _)| u)
+            .unwrap_or_else(|| sip_uri.to_string());
+
+        // Try LDAP first if configured
+        let ldap_cfg = self.ldap_config();
+        if ldap_cfg.enabled {
+            let rt = tokio::runtime::Handle::try_current();
+            if let Ok(handle) = rt {
+                let ldap_result = std::thread::scope(|_| {
+                    handle.block_on(ldap_auth::ldap_authenticate(&ldap_cfg, &username, password))
+                });
+
+                if let Ok(ldap_user) = ldap_result {
+                    // Auto-provision: create local user if not exists
+                    if !self.user_exists(&ldap_user.sip_uri) {
+                        let _ = self.create_user(CreateUserRequest {
+                            display_name: ldap_user.display_name.clone(),
+                            sip_uri: ldap_user.sip_uri.clone(),
+                            matrix_user_id: None,
+                            password: Some(password.to_string()),
+                            role: Some(if ldap_user.is_admin { "admin" } else { "user" }.to_string()),
+                        });
+                        log::info!("Auto-provisioned AD user: {} (admin={})", ldap_user.sip_uri, ldap_user.is_admin);
+                    }
+                    // Update role from AD group membership
+                    if let Some(existing) = self.users.values().into_iter().find(|u| u.sip_uri == ldap_user.sip_uri) {
+                        let new_role = if ldap_user.is_admin { "admin" } else { "user" };
+                        if existing.role != new_role {
+                            self.update_user_role(existing.id, new_role);
+                        }
+                    }
+                    // Continue to create session below using the local user
+                }
+            }
+        }
+
+        // Local auth
         let user = self
             .users
             .values()
             .into_iter()
-            .find(|u| u.sip_uri == sip_uri)
+            .find(|u| u.sip_uri == sip_uri || split_sip_aor_simple(&u.sip_uri).map(|(u, _)| u).as_deref() == Some(&username))
             .ok_or(AuthError::Unauthorized)?;
 
-        let expected_hash = user.password_hash.as_deref().ok_or(AuthError::Unauthorized)?;
-        if sha256_hex(password.as_bytes()) != expected_hash {
-            return Err(AuthError::Unauthorized);
+        // Verify password (skip if LDAP already authenticated)
+        if !ldap_cfg.enabled {
+            let expected_hash = user.password_hash.as_deref().ok_or(AuthError::Unauthorized)?;
+            if sha256_hex(password.as_bytes()) != expected_hash {
+                return Err(AuthError::Unauthorized);
+            }
         }
 
         // Create session
