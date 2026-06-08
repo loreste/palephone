@@ -257,7 +257,7 @@ async fn create_user(
     Json(input): Json<CreateUserRequest>,
 ) -> Result<Json<crate::User>, ApiError> {
     let principal = authenticated_principal(&headers, &state)?;
-    let user = state.create_user(input);
+    let user = state.create_user(input).map_err(|e| ApiError::Conflict(e))?;
     state.record_audit_event(&principal, "user.created", Some(user.id.to_string()));
     Ok(Json(user))
 }
@@ -1151,6 +1151,8 @@ enum ApiError {
     PayloadTooLarge,
     #[error("too many requests")]
     TooManyRequests,
+    #[error("{0}")]
+    Conflict(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -1163,6 +1165,7 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             ApiError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
+            ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(json!({ "error": self.to_string() }))).into_response()

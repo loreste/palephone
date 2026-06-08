@@ -665,7 +665,16 @@ impl AppState {
         }
     }
 
-    pub fn create_user(&self, input: CreateUserRequest) -> User {
+    pub fn user_exists(&self, sip_uri: &str) -> bool {
+        self.users.values().iter().any(|u| u.sip_uri == sip_uri)
+    }
+
+    pub fn create_user(&self, input: CreateUserRequest) -> Result<User, String> {
+        // Enforce unique SIP URI
+        if self.user_exists(&input.sip_uri) {
+            return Err(format!("User with SIP URI {} already exists", input.sip_uri));
+        }
+
         let password_hash = input
             .password
             .as_deref()
@@ -703,7 +712,7 @@ impl AppState {
             }
         }
 
-        user
+        Ok(user)
     }
 
     /// Authenticate a user (not admin) by SIP URI and password
@@ -2396,7 +2405,9 @@ mod tests {
             display_name: "Alice".to_string(),
             sip_uri: "sip:alice@example.com".to_string(),
             matrix_user_id: None,
-        });
+            password: Some("test123".to_string()),
+            role: None,
+        }).unwrap();
         assert_eq!(state.delete_user(user.id).unwrap().display_name, "Alice");
         assert!(state.users().is_empty());
 

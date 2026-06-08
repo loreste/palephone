@@ -92,7 +92,7 @@ Create or upsert a SIP account.
 
 **Request:**
 ```json
-{ "username": "alice", "domain": "example.com", "password": "secret", "display_name": "Alice" }
+{ "username": "alice", "domain": "example.com", "password": "your-password", "display_name": "Alice" }
 ```
 
 Password is stored as MD5 HA1 digest, never in plaintext.

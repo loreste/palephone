@@ -17,7 +17,7 @@ services:
     environment:
       POSTGRES_DB: pale
       POSTGRES_USER: pale
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-pale-dev-password}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-changeme}"
     volumes:
       - pale-pgdata:/var/lib/postgresql/data
     ports:
@@ -45,7 +45,7 @@ services:
       PALE_HTTP_ADDR: "0.0.0.0:8080"
       PALE_SIP_ADDR: "0.0.0.0:5060"
       PALE_DATA_DIR: "/data"
-      PALE_DATABASE_URL: "host=postgres user=pale password=${POSTGRES_PASSWORD:-pale-dev-password} dbname=pale"
+      PALE_DATABASE_URL: "host=postgres user=pale password=${POSTGRES_PASSWORD:-changeme} dbname=pale"
       PALE_PG_MAX_CONNECTIONS: "20"
       PALE_SERVER_TOKEN: "${PALE_SERVER_TOKEN:?Set PALE_SERVER_TOKEN (min 24 chars)}"
       PALE_ADMIN_PASSWORD: "${PALE_ADMIN_PASSWORD:?Set PALE_ADMIN_PASSWORD (min 24 chars)}"
