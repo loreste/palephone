@@ -9,9 +9,11 @@ use pale_core::{
 };
 use pale_matrix::{MatrixClient, MatrixEvent, RoomSummary};
 use serde::Deserialize;
-use tauri::menu::{MenuBuilder, MenuItemBuilder};
-use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State};
+#[cfg(desktop)]
+use tauri::menu::{MenuBuilder, MenuItemBuilder};
+#[cfg(desktop)]
+use tauri::tray::TrayIconBuilder;
 
 /// Shared engine state accessible from Tauri commands
 struct EngineState(Arc<PjsipEngine>);
@@ -250,7 +252,10 @@ async fn pale_server_login(input: PaleLoginRequest) -> Result<serde_json::Value,
         "password": input.password,
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .use_rustls_tls()
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
     let response = client
         .post(&url)
         .header("Content-Type", "application/json")
@@ -283,7 +288,10 @@ struct PaleServerRequest {
 #[tauri::command]
 async fn pale_server_request(input: PaleServerRequest) -> Result<serde_json::Value, String> {
     let url = format!("{}{}", input.base_url.trim_end_matches('/'), input.path);
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .use_rustls_tls()
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
 
     let mut req = match input.method.to_uppercase().as_str() {
         "POST" => client.post(&url),
@@ -755,8 +763,9 @@ fn start_event_bridge(
     });
 }
 
-// ─── System Tray ───
+// ─── System Tray (desktop only) ───
 
+#[cfg(desktop)]
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let show = MenuItemBuilder::with_id("show", "Show Pale").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
@@ -900,7 +909,8 @@ pub fn run() {
             // Start Matrix event bridge
             start_matrix_event_bridge(app.handle().clone(), matrix_client);
 
-            // Set up system tray
+            // Set up system tray (desktop only)
+            #[cfg(desktop)]
             setup_tray(app)?;
 
             // Close-to-tray: hide window instead of quitting
