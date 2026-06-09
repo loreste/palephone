@@ -304,15 +304,18 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         .unwrap_or(4);
 
     // Build make commands with proper environment
+    let wrapper_dir = pj_src_dir.parent().unwrap_or(pj_src_dir).to_path_buf();
     let setup_make_env = |cmd: &mut Command| {
         if target_os == "android" {
             if let Ok(toolchain) = env::var("PALE_ANDROID_TOOLCHAIN") {
                 let path = format!("{}/bin:{}", toolchain, env::var("PATH").unwrap_or_default());
                 cmd.env("PATH", &path);
-                // Pass CFLAGS to make so the NDK sysroot is used during compilation
-                cmd.env("CFLAGS", &cflags);
-                if let Ok(cc) = env::var("PALE_ANDROID_CC") {
-                    cmd.env("CC", &cc);
+                // Use the wrapper scripts that embed --sysroot
+                let cc_w = wrapper_dir.join("ndk-cc.sh");
+                let cxx_w = wrapper_dir.join("ndk-cxx.sh");
+                if cc_w.exists() {
+                    cmd.env("CC", cc_w.to_string_lossy().as_ref());
+                    cmd.env("CXX", cxx_w.to_string_lossy().as_ref());
                 }
             }
         }
