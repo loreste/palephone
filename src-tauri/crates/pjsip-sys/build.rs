@@ -292,12 +292,14 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
 
     // Determine shell and make commands
     // On Windows, use MSYS2 bash/make (pre-installed on GitHub Actions runners)
-    let (sh_cmd, make_cmd) = if target_os == "windows" {
+    let (sh_cmd, make_cmd) = if target_os == "windows" && !is_windows_cross {
+        // Native Windows: use MSYS2 bash/make
         let msys2 = env::var("MSYS2_PATH").unwrap_or_else(|_| "C:\\msys64".to_string());
         let sh = format!("{}/usr/bin/bash.exe", msys2);
         let mk = format!("{}/usr/bin/make.exe", msys2);
         (sh, mk)
     } else {
+        // Linux (including cross-compile to Windows)
         ("sh".to_string(), "make".to_string())
     };
 
