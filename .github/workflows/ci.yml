@@ -17,7 +17,7 @@ jobs:
           - platform: macos-14
             target: aarch64-apple-darwin
           - platform: windows-2022
-            target: x86_64-pc-windows-msvc
+            target: x86_64-pc-windows-gnu
 
     runs-on: ${{ matrix.platform }}
 
@@ -68,6 +68,7 @@ jobs:
           echo "MSYS2_PATH=C:\msys64" >> $env:GITHUB_ENV
           echo "C:\msys64\usr\bin" >> $env:GITHUB_PATH
           echo "C:\msys64\mingw64\bin" >> $env:GITHUB_PATH
+          rustup target add x86_64-pc-windows-gnu
 
       # Cache PJSIP build (very slow to compile)
       - name: Cache PJSIP build
@@ -105,3 +106,5 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: ${{ matrix.target && format('--target {0}', matrix.target) || '' }}

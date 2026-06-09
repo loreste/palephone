@@ -391,6 +391,10 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
             println!("cargo:rustc-link-lib=mswsock");
             println!("cargo:rustc-link-lib=gdi32");
             println!("cargo:rustc-link-lib=user32");
+            // MinGW C++ runtime (needed for libyuv)
+            if env::var("TARGET").unwrap_or_default().contains("gnu") {
+                println!("cargo:rustc-link-lib=stdc++");
+            }
             // OpenSSL from MSYS2
             let msys2 = env::var("MSYS2_PATH").unwrap_or_else(|_| "C:\\msys64".to_string());
             println!("cargo:rustc-link-search=native={}/mingw64/lib", msys2);
