@@ -179,16 +179,20 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
             _ => panic!("Unsupported Android arch: {}", target_arch),
         };
 
-        let cc = format!("{}/bin/{}{}-clang", toolchain, android_target, api_level);
+        let cc = format!("{}/bin/{}{}-clang --sysroot={}", toolchain, android_target, api_level, sysroot);
+        let cxx = format!("{}/bin/{}{}-clang++ --sysroot={}", toolchain, android_target, api_level, sysroot);
+        let cpp = format!("{}/bin/{}{}-clang -E --sysroot={}", toolchain, android_target, api_level, sysroot);
         configure_args.push(format!("--host={}", android_target));
         configure_args.push(format!("CC={}", cc));
-        configure_args.push(format!("CXX={}++", cc));
+        configure_args.push(format!("CXX={}", cxx));
+        configure_args.push(format!("CPP={}", cpp));
         configure_args.push(format!("AR={}/bin/llvm-ar", toolchain));
         configure_args.push(format!("RANLIB={}/bin/llvm-ranlib", toolchain));
         configure_args.push(format!("STRIP={}/bin/llvm-strip", toolchain));
         configure_args.push(format!("LD={}/bin/ld.lld", toolchain));
+        configure_args.push(format!("LDFLAGS=--sysroot={}", sysroot));
 
-        // Store toolchain info for CFLAGS and make env
+        // Store toolchain info for make env
         env::set_var("PALE_ANDROID_CC", &cc);
         env::set_var("PALE_ANDROID_SYSROOT", &sysroot);
         env::set_var("PALE_ANDROID_TOOLCHAIN", &toolchain);
