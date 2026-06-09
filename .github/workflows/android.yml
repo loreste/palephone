@@ -64,21 +64,14 @@ jobs:
       - name: Build OpenSSL for Android aarch64
         run: |
           export ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.2.12479018
-          export TOOLCHAIN=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64
-          export TARGET=aarch64-linux-android
-          export API=24
-          export AR=$TOOLCHAIN/bin/llvm-ar
-          export CC=$TOOLCHAIN/bin/${TARGET}${API}-clang
-          export CXX=$TOOLCHAIN/bin/${TARGET}${API}-clang++
-          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
-          export STRIP=$TOOLCHAIN/bin/llvm-strip
+          export PATH=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
 
-          # Download and build OpenSSL
-          curl -sL https://www.openssl.org/source/openssl-3.3.1.tar.gz | tar xz
+          # Download and build OpenSSL with NDK
+          curl -sL https://github.com/openssl/openssl/releases/download/openssl-3.3.1/openssl-3.3.1.tar.gz | tar xz
           cd openssl-3.3.1
           ./Configure android-arm64 no-shared no-tests \
             --prefix=$HOME/openssl-android \
-            -D__ANDROID_API__=$API
+            -D__ANDROID_API__=24
           make -j$(nproc) > /dev/null 2>&1
           make install_sw > /dev/null 2>&1
           cd ..
