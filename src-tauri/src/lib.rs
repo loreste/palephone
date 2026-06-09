@@ -252,10 +252,10 @@ async fn pale_server_login(input: PaleLoginRequest) -> Result<serde_json::Value,
         "password": input.password,
     });
 
-    let client = reqwest::Client::builder()
-        .use_rustls_tls()
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let mut builder = reqwest::Client::builder();
+    #[cfg(not(target_os = "android"))]
+    { builder = builder.use_rustls_tls(); }
+    let client = builder.build().map_err(|e| format!("HTTP client error: {}", e))?;
     let response = client
         .post(&url)
         .header("Content-Type", "application/json")
@@ -288,10 +288,10 @@ struct PaleServerRequest {
 #[tauri::command]
 async fn pale_server_request(input: PaleServerRequest) -> Result<serde_json::Value, String> {
     let url = format!("{}{}", input.base_url.trim_end_matches('/'), input.path);
-    let client = reqwest::Client::builder()
-        .use_rustls_tls()
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let mut builder = reqwest::Client::builder();
+    #[cfg(not(target_os = "android"))]
+    { builder = builder.use_rustls_tls(); }
+    let client = builder.build().map_err(|e| format!("HTTP client error: {}", e))?;
 
     let mut req = match input.method.to_uppercase().as_str() {
         "POST" => client.post(&url),
