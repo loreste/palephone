@@ -16,10 +16,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - platform: macos-14
             target: aarch64-apple-darwin
-          # Windows build requires PJSIP compiled with MSVC (not MinGW).
-          # Tracked separately — macOS and Linux are the primary CI targets.
-          # - platform: windows-2022
-          #   target: x86_64-pc-windows-msvc
+          - platform: windows-2022
+            target: x86_64-pc-windows-gnu
 
     runs-on: ${{ matrix.platform }}
 
@@ -71,6 +69,11 @@ jobs:
           echo "C:\msys64\usr\bin" >> $env:GITHUB_PATH
           echo "C:\msys64\mingw64\bin" >> $env:GITHUB_PATH
           rustup target add x86_64-pc-windows-gnu
+          # Ensure MinGW windres is used for resource compilation (not MSVC rc.exe)
+          echo "WINDRES=windres" >> $env:GITHUB_ENV
+          echo "CC=x86_64-w64-mingw32-gcc" >> $env:GITHUB_ENV
+          echo "CXX=x86_64-w64-mingw32-g++" >> $env:GITHUB_ENV
+          echo "AR=x86_64-w64-mingw32-ar" >> $env:GITHUB_ENV
 
       # Cache PJSIP build (very slow to compile)
       - name: Cache PJSIP build

@@ -130,8 +130,8 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         "--enable-shared=no".to_string(),
     ];
 
-    // Windows: MSYS2/MinGW build needs explicit host and build triples
-    // (config.guess from 2012 cannot recognize MSYS_NT systems)
+    // Windows: Use MSYS2/MinGW to compile PJSIP, producing static .a libraries.
+    // The Rust target must be x86_64-pc-windows-gnu to link with these.
     if target_os == "windows" {
         configure_args.push("--host=x86_64-w64-mingw32".to_string());
         configure_args.push("--build=x86_64-w64-mingw32".to_string());
@@ -141,10 +141,10 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
     if target_os == "android" {
         let ndk_home = env::var("NDK_HOME")
             .or_else(|_| env::var("ANDROID_NDK_HOME"))
+            .or_else(|_| env::var("ANDROID_NDK_ROOT"))
             .unwrap_or_else(|_| {
                 let android_home = env::var("ANDROID_HOME")
                     .expect("NDK_HOME or ANDROID_HOME must be set for Android builds");
-                // Find the latest NDK version
                 let ndk_dir = Path::new(&android_home).join("ndk");
                 if let Ok(entries) = fs::read_dir(&ndk_dir) {
                     let mut versions: Vec<String> = entries
@@ -168,7 +168,8 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         };
 
         let toolchain = format!("{}/toolchains/llvm/prebuilt/{}", ndk_home, host_tag);
-        let api_level = "24"; // Android 7.0 minimum
+        let sysroot = format!("{}/sysroot", toolchain);
+        let api_level = "24";
 
         let android_target = match target_arch {
             "aarch64" => "aarch64-linux-android",
@@ -184,6 +185,13 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         configure_args.push(format!("CXX={}++", cc));
         configure_args.push(format!("AR={}/bin/llvm-ar", toolchain));
         configure_args.push(format!("RANLIB={}/bin/llvm-ranlib", toolchain));
+        configure_args.push(format!("STRIP={}/bin/llvm-strip", toolchain));
+        configure_args.push(format!("LD={}/bin/ld.lld", toolchain));
+
+        // Store toolchain info for CFLAGS and make env
+        env::set_var("PALE_ANDROID_CC", &cc);
+        env::set_var("PALE_ANDROID_SYSROOT", &sysroot);
+        env::set_var("PALE_ANDROID_TOOLCHAIN", &toolchain);
     }
 
     // iOS cross-compilation
@@ -225,12 +233,13 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
 
 
     // Set CFLAGS
+    let android_sysroot = env::var("PALE_ANDROID_SYSROOT").unwrap_or_default();
     let cflags = format!(
         "-O2 -fPIC -DPJMEDIA_HAS_SRTP=1 -DPJ_HAS_IPV6=1 {}",
         match target_os {
-            "macos" => "-mmacosx-version-min=11.0",
-            "android" => "-DPJ_ANDROID=1",
-            _ => "",
+            "macos" => "-mmacosx-version-min=11.0".to_string(),
+            "android" => format!("-DPJ_ANDROID=1 --sysroot={}", android_sysroot),
+            _ => String::new(),
         }
     );
 
@@ -246,33 +255,51 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
     };
 
     // Run configure
-    let status = Command::new(&sh_cmd)
+    let mut configure_cmd = Command::new(&sh_cmd);
+    configure_cmd
         .arg("-c")
         .arg(&configure_args.join(" "))
         .env("CFLAGS", &cflags)
-        .current_dir(pj_src_dir)
-        .status()
-        .expect("Failed to run PJSIP configure");
+        .current_dir(pj_src_dir);
+
+    // For Android, ensure NDK toolchain is on PATH so configure finds the compiler
+    if target_os == "android" {
+        if let Ok(toolchain) = env::var("PALE_ANDROID_TOOLCHAIN") {
+            let path = format!("{}/bin:{}", toolchain, env::var("PATH").unwrap_or_default());
+            configure_cmd.env("PATH", &path);
+            configure_cmd.env("LDFLAGS", format!("--sysroot={}", android_sysroot));
+        }
+    }
+
+    let status = configure_cmd.status().expect("Failed to run PJSIP configure");
     assert!(status.success(), "PJSIP configure failed");
 
     let num_jobs = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
 
+    // Build make commands with proper environment
+    let mut make_env = |cmd: &mut Command| {
+        if target_os == "android" {
+            if let Ok(toolchain) = env::var("PALE_ANDROID_TOOLCHAIN") {
+                let path = format!("{}/bin:{}", toolchain, env::var("PATH").unwrap_or_default());
+                cmd.env("PATH", &path);
+            }
+        }
+    };
+
     // Run make dep
-    let status = Command::new(&make_cmd)
-        .args(["dep", &format!("-j{}", num_jobs)])
-        .current_dir(pj_src_dir)
-        .status()
-        .expect("Failed to run make dep");
+    let mut dep_cmd = Command::new(&make_cmd);
+    dep_cmd.args(["dep", &format!("-j{}", num_jobs)]).current_dir(pj_src_dir);
+    make_env(&mut dep_cmd);
+    let status = dep_cmd.status().expect("Failed to run make dep");
     assert!(status.success(), "PJSIP make dep failed");
 
     // Run make
-    let status = Command::new(&make_cmd)
-        .arg(&format!("-j{}", num_jobs))
-        .current_dir(pj_src_dir)
-        .status()
-        .expect("Failed to run make");
+    let mut build_cmd = Command::new(&make_cmd);
+    build_cmd.arg(&format!("-j{}", num_jobs)).current_dir(pj_src_dir);
+    make_env(&mut build_cmd);
+    let status = build_cmd.status().expect("Failed to run make");
     assert!(status.success(), "PJSIP make failed");
 
     eprintln!("cargo:warning=PJSIP build complete.");
