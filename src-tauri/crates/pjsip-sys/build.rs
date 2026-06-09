@@ -433,13 +433,23 @@ fn generate_bindings(pj_src_dir: &Path, out_dir: &Path, _target_os: &str) {
         .clang_arg("-DPJ_IS_LITTLE_ENDIAN=1")
         .clang_arg("-DPJ_IS_BIG_ENDIAN=0");
 
-    // Windows: tell PJSIP headers we're on Win32 so they skip unistd.h
+    // Windows: PJSIP was built under MSYS2 (which has unistd.h), but bindgen
+    // uses MSVC's clang which does NOT have unistd.h. Override the autoconf
+    // detection and set Windows-specific defines so headers use winsock2.h.
     if _target_os == "windows" {
         builder = builder
             .clang_arg("-DPJ_WIN32=1")
             .clang_arg("-DPJ_WIN64=1")
             .clang_arg("-D_WIN32")
-            .clang_arg("-DPJMEDIA_AUDIO_DEV_HAS_WMME=1");
+            .clang_arg("-D_WIN64")
+            .clang_arg("-DPJMEDIA_AUDIO_DEV_HAS_WMME=1")
+            // Override autoconf: unistd.h is NOT available to MSVC clang
+            .clang_arg("-DPJ_HAS_UNISTD_H=0")
+            .clang_arg("-DPJ_HAS_SYS_SOCKET_H=0")
+            .clang_arg("-DPJ_HAS_ARPA_INET_H=0")
+            .clang_arg("-DPJ_HAS_NETDB_H=0")
+            .clang_arg("-DPJ_HAS_NETINET_IN_H=0")
+            .clang_arg("-DPJ_HAS_IFADDRS_H=0");
     }
 
     let bindings = builder
