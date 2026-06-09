@@ -182,10 +182,9 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         let cc = format!("{}/bin/{}{}-clang", toolchain, android_target, api_level);
         let cxx = format!("{}/bin/{}{}-clang++", toolchain, android_target, api_level);
         configure_args.push(format!("--host={}", android_target));
-        // Quote CC/CXX/CPP values so --sysroot isn't parsed as a configure arg
-        configure_args.push(format!("CC=\"{} --sysroot={}\"", cc, sysroot));
-        configure_args.push(format!("CXX=\"{} --sysroot={}\"", cxx, sysroot));
-        configure_args.push(format!("CPP=\"{} -E --sysroot={}\"", cc, sysroot));
+        configure_args.push(format!("CC={}", cc));
+        configure_args.push(format!("CXX={}", cxx));
+        configure_args.push(format!("CPP={} -E", cc));
         configure_args.push(format!("AR={}/bin/llvm-ar", toolchain));
         configure_args.push(format!("RANLIB={}/bin/llvm-ranlib", toolchain));
         configure_args.push(format!("STRIP={}/bin/llvm-strip", toolchain));
@@ -245,6 +244,30 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
             _ => String::new(),
         }
     );
+
+    // For Android, write a wrapper script that sets CC with --sysroot
+    // This avoids shell quoting issues when passing CC with spaces to configure
+    if target_os == "android" && !android_sysroot.is_empty() {
+        let wrapper_dir = pj_src_dir.parent().unwrap_or(pj_src_dir);
+        // Create CC wrapper script
+        let cc_wrapper = wrapper_dir.join("ndk-cc.sh");
+        let cc_path = env::var("PALE_ANDROID_CC").unwrap_or_default();
+        fs::write(&cc_wrapper, format!("#!/bin/sh\nexec {} --sysroot={} \"$@\"\n", cc_path, android_sysroot)).ok();
+        let _ = Command::new("chmod").arg("+x").arg(&cc_wrapper).status();
+        // Replace CC/CXX/CPP in configure args with wrapper
+        let cc_w = cc_wrapper.to_string_lossy().to_string();
+        configure_args.retain(|a| !a.starts_with("CC=") && !a.starts_with("CXX=") && !a.starts_with("CPP="));
+        configure_args.push(format!("CC={}", cc_w));
+        let cxx_wrapper = wrapper_dir.join("ndk-cxx.sh");
+        let cxx_path = cc_path.replace("clang", "clang++");
+        fs::write(&cxx_wrapper, format!("#!/bin/sh\nexec {} --sysroot={} \"$@\"\n", cxx_path, android_sysroot)).ok();
+        let _ = Command::new("chmod").arg("+x").arg(&cxx_wrapper).status();
+        configure_args.push(format!("CXX={}", cxx_wrapper.to_string_lossy()));
+        let cpp_wrapper = wrapper_dir.join("ndk-cpp.sh");
+        fs::write(&cpp_wrapper, format!("#!/bin/sh\nexec {} -E --sysroot={} \"$@\"\n", cc_path, android_sysroot)).ok();
+        let _ = Command::new("chmod").arg("+x").arg(&cpp_wrapper).status();
+        configure_args.push(format!("CPP={}", cpp_wrapper.to_string_lossy()));
+    }
 
     // Determine shell and make commands
     // On Windows, use MSYS2 bash/make (pre-installed on GitHub Actions runners)
