@@ -190,7 +190,6 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         configure_args.push(format!("RANLIB={}/bin/llvm-ranlib", toolchain));
         configure_args.push(format!("STRIP={}/bin/llvm-strip", toolchain));
         configure_args.push(format!("LD={}/bin/ld.lld", toolchain));
-        configure_args.push(format!("LDFLAGS=--sysroot={}", sysroot));
 
         // Store toolchain info for make env
         env::set_var("PALE_ANDROID_CC", &cc);
