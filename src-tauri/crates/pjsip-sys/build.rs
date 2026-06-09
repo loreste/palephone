@@ -426,12 +426,23 @@ fn generate_bindings(pj_src_dir: &Path, out_dir: &Path, _target_os: &str) {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let wrapper_h = manifest_dir.join("wrapper.h");
 
-    let bindings = bindgen::Builder::default()
+    let mut builder = bindgen::Builder::default()
         .header(wrapper_h.to_str().unwrap())
         // Defines needed for PJSIP headers (use autoconf-generated config)
         .clang_arg("-DPJ_AUTOCONF=1")
         .clang_arg("-DPJ_IS_LITTLE_ENDIAN=1")
-        .clang_arg("-DPJ_IS_BIG_ENDIAN=0")
+        .clang_arg("-DPJ_IS_BIG_ENDIAN=0");
+
+    // Windows: tell PJSIP headers we're on Win32 so they skip unistd.h
+    if _target_os == "windows" {
+        builder = builder
+            .clang_arg("-DPJ_WIN32=1")
+            .clang_arg("-DPJ_WIN64=1")
+            .clang_arg("-D_WIN32")
+            .clang_arg("-DPJMEDIA_AUDIO_DEV_HAS_WMME=1");
+    }
+
+    let bindings = builder
         // Include paths for all PJSIP sub-libraries
         .clang_arg(format!("-I{}/pjlib/include", pj_src_dir.display()))
         .clang_arg(format!("-I{}/pjlib-util/include", pj_src_dir.display()))
