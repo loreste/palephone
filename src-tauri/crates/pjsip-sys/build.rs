@@ -224,6 +224,11 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         let msys2_unix = msys2.replace('\\', "/").replace("C:", "/c");
         configure_args.push(format!("--with-ssl={}/mingw64", msys2_unix));
         configure_args.push(format!("--with-opus={}/mingw64", msys2_unix));
+    } else if target_os == "android" {
+        // Android: disable OpenSSL and Opus in PJSIP to avoid host /usr/include contamination.
+        // TLS is handled by the Rust layer (reqwest + rustls), not PJSIP.
+        configure_args.push("--disable-ssl".to_string());
+        configure_args.push("--disable-opus".to_string());
     } else {
         if let Some(ref ssl_prefix) = openssl_prefix {
             configure_args.push(format!("--with-ssl={}", ssl_prefix));
