@@ -270,7 +270,6 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         if let Ok(toolchain) = env::var("PALE_ANDROID_TOOLCHAIN") {
             let path = format!("{}/bin:{}", toolchain, env::var("PATH").unwrap_or_default());
             configure_cmd.env("PATH", &path);
-            configure_cmd.env("LDFLAGS", format!("--sysroot={}", android_sysroot));
         }
     }
 
