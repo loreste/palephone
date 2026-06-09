@@ -179,13 +179,13 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
             _ => panic!("Unsupported Android arch: {}", target_arch),
         };
 
-        let cc = format!("{}/bin/{}{}-clang --sysroot={}", toolchain, android_target, api_level, sysroot);
-        let cxx = format!("{}/bin/{}{}-clang++ --sysroot={}", toolchain, android_target, api_level, sysroot);
-        let cpp = format!("{}/bin/{}{}-clang -E --sysroot={}", toolchain, android_target, api_level, sysroot);
+        let cc = format!("{}/bin/{}{}-clang", toolchain, android_target, api_level);
+        let cxx = format!("{}/bin/{}{}-clang++", toolchain, android_target, api_level);
         configure_args.push(format!("--host={}", android_target));
-        configure_args.push(format!("CC={}", cc));
-        configure_args.push(format!("CXX={}", cxx));
-        configure_args.push(format!("CPP={}", cpp));
+        // Quote CC/CXX/CPP values so --sysroot isn't parsed as a configure arg
+        configure_args.push(format!("CC=\"{} --sysroot={}\"", cc, sysroot));
+        configure_args.push(format!("CXX=\"{} --sysroot={}\"", cxx, sysroot));
+        configure_args.push(format!("CPP=\"{} -E --sysroot={}\"", cc, sysroot));
         configure_args.push(format!("AR={}/bin/llvm-ar", toolchain));
         configure_args.push(format!("RANLIB={}/bin/llvm-ranlib", toolchain));
         configure_args.push(format!("STRIP={}/bin/llvm-strip", toolchain));
