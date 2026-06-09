@@ -130,11 +130,17 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         "--enable-shared=no".to_string(),
     ];
 
-    // Windows: Use MSYS2/MinGW to compile PJSIP, producing static .a libraries.
-    // The Rust target must be x86_64-pc-windows-gnu to link with these.
+    // Windows: MinGW cross-compilation for PJSIP.
+    let is_windows_cross = target_os == "windows" && cfg!(target_os = "linux");
     if target_os == "windows" {
         configure_args.push("--host=x86_64-w64-mingw32".to_string());
-        configure_args.push("--build=x86_64-w64-mingw32".to_string());
+        if is_windows_cross {
+            // Cross-compiling from Linux — set build triple to linux
+            configure_args.push("--build=x86_64-pc-linux-gnu".to_string());
+        } else {
+            // Native Windows (MSYS2) — build triple matches host
+            configure_args.push("--build=x86_64-w64-mingw32".to_string());
+        }
     }
 
     // Android cross-compilation
@@ -217,10 +223,20 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
             sdk_path, min_ios, if target_arch == "aarch64" { "arm64" } else { "x86_64" }));
     }
 
-    if target_os == "windows" {
-        // Use MSYS2 MinGW OpenSSL and Opus
+    if target_os == "windows" && is_windows_cross {
+        // Cross-compiling from Linux: use custom-built OpenSSL/Opus
+        let home = env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+        let ssl_dir = env::var("OPENSSL_DIR").unwrap_or_else(|_| format!("{}/openssl-win64", home));
+        let opus_dir = env::var("OPUS_DIR").unwrap_or_else(|_| format!("{}/opus-win64", home));
+        if Path::new(&ssl_dir).exists() {
+            configure_args.push(format!("--with-ssl={}", ssl_dir));
+        }
+        if Path::new(&opus_dir).exists() {
+            configure_args.push(format!("--with-opus={}", opus_dir));
+        }
+    } else if target_os == "windows" {
+        // Native Windows (MSYS2)
         let msys2 = env::var("MSYS2_PATH").unwrap_or_else(|_| "C:\\msys64".to_string());
-        // Convert Windows path to MSYS2 path for configure
         let msys2_unix = msys2.replace('\\', "/").replace("C:", "/c");
         configure_args.push(format!("--with-ssl={}/mingw64", msys2_unix));
         configure_args.push(format!("--with-opus={}/mingw64", msys2_unix));
@@ -460,12 +476,23 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
             if env::var("TARGET").unwrap_or_default().contains("gnu") {
                 println!("cargo:rustc-link-lib=stdc++");
             }
-            // OpenSSL from MSYS2
-            let msys2 = env::var("MSYS2_PATH").unwrap_or_else(|_| "C:\\msys64".to_string());
-            println!("cargo:rustc-link-search=native={}/mingw64/lib", msys2);
+            // OpenSSL and Opus
+            if cfg!(target_os = "linux") {
+                // Cross-compiling from Linux
+                let home = env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+                let ssl_dir = env::var("OPENSSL_DIR").unwrap_or_else(|_| format!("{}/openssl-win64", home));
+                let opus_dir = env::var("OPUS_DIR").unwrap_or_else(|_| format!("{}/opus-win64", home));
+                println!("cargo:rustc-link-search=native={}/lib", ssl_dir);
+                println!("cargo:rustc-link-search=native={}/lib", opus_dir);
+            } else {
+                // Native Windows (MSYS2)
+                let msys2 = env::var("MSYS2_PATH").unwrap_or_else(|_| "C:\\msys64".to_string());
+                println!("cargo:rustc-link-search=native={}/mingw64/lib", msys2);
+            }
             println!("cargo:rustc-link-lib=ssl");
             println!("cargo:rustc-link-lib=crypto");
             println!("cargo:rustc-link-lib=opus");
+            println!("cargo:rustc-link-lib=crypt32");
         }
         "android" => {
             println!("cargo:rustc-link-lib=OpenSLES");
