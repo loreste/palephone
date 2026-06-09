@@ -69,11 +69,11 @@ jobs:
           echo "C:\msys64\usr\bin" >> $env:GITHUB_PATH
           echo "C:\msys64\mingw64\bin" >> $env:GITHUB_PATH
           rustup target add x86_64-pc-windows-gnu
-          # Ensure MinGW windres is used for resource compilation (not MSVC rc.exe)
+          # Use MinGW tools (available as non-prefixed names in MSYS2 mingw64/bin)
+          echo "CC=gcc" >> $env:GITHUB_ENV
+          echo "CXX=g++" >> $env:GITHUB_ENV
+          echo "AR=ar" >> $env:GITHUB_ENV
           echo "WINDRES=windres" >> $env:GITHUB_ENV
-          echo "CC=x86_64-w64-mingw32-gcc" >> $env:GITHUB_ENV
-          echo "CXX=x86_64-w64-mingw32-g++" >> $env:GITHUB_ENV
-          echo "AR=x86_64-w64-mingw32-ar" >> $env:GITHUB_ENV
 
       # Cache PJSIP build (very slow to compile)
       - name: Cache PJSIP build

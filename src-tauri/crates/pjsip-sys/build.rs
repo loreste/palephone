@@ -279,11 +279,16 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         .unwrap_or(4);
 
     // Build make commands with proper environment
-    let mut make_env = |cmd: &mut Command| {
+    let setup_make_env = |cmd: &mut Command| {
         if target_os == "android" {
             if let Ok(toolchain) = env::var("PALE_ANDROID_TOOLCHAIN") {
                 let path = format!("{}/bin:{}", toolchain, env::var("PATH").unwrap_or_default());
                 cmd.env("PATH", &path);
+                // Pass CFLAGS to make so the NDK sysroot is used during compilation
+                cmd.env("CFLAGS", &cflags);
+                if let Ok(cc) = env::var("PALE_ANDROID_CC") {
+                    cmd.env("CC", &cc);
+                }
             }
         }
     };
@@ -291,14 +296,14 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
     // Run make dep
     let mut dep_cmd = Command::new(&make_cmd);
     dep_cmd.args(["dep", &format!("-j{}", num_jobs)]).current_dir(pj_src_dir);
-    make_env(&mut dep_cmd);
+    setup_make_env(&mut dep_cmd);
     let status = dep_cmd.status().expect("Failed to run make dep");
     assert!(status.success(), "PJSIP make dep failed");
 
     // Run make
     let mut build_cmd = Command::new(&make_cmd);
     build_cmd.arg(&format!("-j{}", num_jobs)).current_dir(pj_src_dir);
-    make_env(&mut build_cmd);
+    setup_make_env(&mut build_cmd);
     let status = build_cmd.status().expect("Failed to run make");
     assert!(status.success(), "PJSIP make failed");
 
