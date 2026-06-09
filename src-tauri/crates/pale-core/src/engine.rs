@@ -716,7 +716,7 @@ impl Drop for PjsipEngine {
 /// Helper: create a pj_str_t from a CString (borrows the CString's data)
 unsafe fn pj_str_from_cstring(s: &CString) -> pjsip_sys::pj_str_t {
     pjsip_sys::pj_str_t {
-        ptr: s.as_ptr() as *mut i8,
+        ptr: s.as_ptr() as *mut _,
         slen: s.as_bytes().len() as _,
     }
 }
