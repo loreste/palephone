@@ -486,6 +486,45 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
 
 /// Emit cargo:rustc-link-lib and cargo:rustc-link-search directives
 fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
+    let is_msvc = env::var("TARGET").unwrap_or_default().contains("msvc");
+
+    // MSVC path: look for .lib files directly (created by msbuild + copy step)
+    if is_msvc && target_os == "windows" {
+        let subdirs = ["pjlib", "pjlib-util", "pjnath", "pjmedia", "pjsip", "third_party"];
+        for subdir in &subdirs {
+            let lib_dir = pj_src_dir.join(subdir).join("lib");
+            if lib_dir.exists() {
+                println!("cargo:rustc-link-search=native={}", lib_dir.display());
+            }
+        }
+        // Link PJSIP libs by their simplified names
+        let pjsip_libs = [
+            "pjsua", "pjsip-ua", "pjsip-simple", "pjsip", "pjmedia-codec",
+            "pjmedia", "pjmedia-audiodev", "pjmedia-videodev",
+            "pjnath", "pjlib-util", "pj", "srtp", "resample",
+            "g7221codec", "ilbccodec", "speex", "gsmcodec", "webrtc", "yuv",
+        ];
+        for lib in &pjsip_libs {
+            // Try both naming conventions
+            let subdirs_search: Vec<_> = subdirs.iter()
+                .map(|s| pj_src_dir.join(s).join("lib"))
+                .collect();
+            let found = subdirs_search.iter().any(|dir| {
+                dir.join(format!("{}.lib", lib)).exists() ||
+                dir.join(format!("lib{}.a", lib)).exists()
+            });
+            if found {
+                println!("cargo:rustc-link-lib=static={}", lib);
+            }
+        }
+        // Platform libs handled below, so don't return here
+    }
+
+    // Skip the .a suffix detection path for MSVC
+    if is_msvc && target_os == "windows" {
+        // Already handled above, skip to platform libs
+    } else {
+
     let lib_dirs = find_pjsip_lib_dirs(pj_src_dir);
 
     // PJSIP names its static libs with the host triple suffix, e.g.:
@@ -548,6 +587,8 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
             println!("cargo:rustc-link-lib=static={}", lib);
         }
     }
+
+    } // close else block for non-MSVC path
 
     // Platform system libraries
     match target_os {
