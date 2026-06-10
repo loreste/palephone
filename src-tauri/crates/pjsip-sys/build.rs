@@ -327,16 +327,16 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
             fs::write(&config_site_msvc, "#define PJMEDIA_HAS_SRTP 1\n#define PJ_HAS_IPV6 1\n#define PJMEDIA_AUDIO_DEV_HAS_WMME 1\n").ok();
         }
 
-        // Find msbuild
+        // Find msbuild and solution file
         let msbuild = find_msbuild().unwrap_or_else(|| "msbuild".to_string());
-        let sln = pj_src_dir.join("pjproject-vs16.sln");
-        if !sln.exists() {
-            // Try older solution file names
-            let sln14 = pj_src_dir.join("pjproject-vs14.sln");
-            if sln14.exists() {
-                eprintln!("cargo:warning=Using VS14 solution file");
-            }
-        }
+        let sln = ["pjproject-vs16.sln", "pjproject-vs14.sln", "pjproject-vs17.sln"]
+            .iter()
+            .map(|name| pj_src_dir.join(name))
+            .find(|p| p.exists())
+            .unwrap_or_else(|| {
+                panic!("No Visual Studio solution file found in {}", pj_src_dir.display());
+            });
+        eprintln!("cargo:warning=Using solution: {}", sln.file_name().unwrap().to_string_lossy());
 
         let status = Command::new(&msbuild)
             .arg(sln.to_str().unwrap())
