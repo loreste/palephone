@@ -89,7 +89,11 @@ jobs:
       - name: Build Android APK
         run: npm run tauri android build
         env:
-          NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+          NDK_HOME: ${{ env.NDK_HOME }}
+          ANDROID_NDK_ROOT: ${{ env.NDK_HOME }}
+          PALE_ANDROID_CC: ${{ env.NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          PALE_ANDROID_SYSROOT: ${{ env.NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot
+          PALE_ANDROID_TOOLCHAIN: ${{ env.NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64
 
       # Upload APK as artifact
       - name: Upload APK
