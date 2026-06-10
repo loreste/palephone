@@ -76,7 +76,7 @@ jobs:
           path: |
             src-tauri/target/debug/build/pjsip-sys-*/out/pjproject-*
             src-tauri/target/release/build/pjsip-sys-*/out/pjproject-*
-          key: pjsip-${{ matrix.target }}-v2.14.1-${{ hashFiles('src-tauri/crates/pjsip-sys/build.rs') }}
+          key: pjsip-${{ matrix.target }}-v2.14.1-v2-${{ hashFiles('src-tauri/crates/pjsip-sys/build.rs') }}
           restore-keys: |
             pjsip-${{ matrix.target }}-v2.14.1-
 
