@@ -17,7 +17,7 @@ jobs:
           - platform: macos-14
             target: aarch64-apple-darwin
           - platform: windows-2022
-            target: x86_64-pc-windows-gnu
+            target: x86_64-pc-windows-msvc
 
     runs-on: ${{ matrix.platform }}
 
@@ -68,12 +68,6 @@ jobs:
           echo "MSYS2_PATH=C:\msys64" >> $env:GITHUB_ENV
           echo "C:\msys64\usr\bin" >> $env:GITHUB_PATH
           echo "C:\msys64\mingw64\bin" >> $env:GITHUB_PATH
-          rustup target add x86_64-pc-windows-gnu
-          # Use MinGW tools (available as non-prefixed names in MSYS2 mingw64/bin)
-          echo "CC=gcc" >> $env:GITHUB_ENV
-          echo "CXX=g++" >> $env:GITHUB_ENV
-          echo "AR=ar" >> $env:GITHUB_ENV
-          echo "WINDRES=windres" >> $env:GITHUB_ENV
 
       # Cache PJSIP build (very slow to compile)
       - name: Cache PJSIP build

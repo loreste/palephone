@@ -115,6 +115,22 @@ fn write_config_site(pj_src_dir: &Path, target_os: &str) {
 }
 
 /// Configure and build PJSIP from source
+/// Find msbuild.exe on Windows (VS 2019/2022)
+fn find_msbuild() -> Option<String> {
+    // Try vswhere first
+    let vswhere = Command::new("C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe")
+        .args(["-latest", "-requires", "Microsoft.Component.MSBuild", "-find", "MSBuild\\**\\Bin\\MSBuild.exe"])
+        .output()
+        .ok()?;
+    let path = String::from_utf8_lossy(&vswhere.stdout).trim().to_string();
+    if !path.is_empty() { return Some(path); }
+    // Fallback: check PATH
+    if Command::new("msbuild").arg("/version").output().is_ok() {
+        return Some("msbuild".to_string());
+    }
+    None
+}
+
 fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
     eprintln!(
         "cargo:warning=Building PJSIP {} for {}/{}...",
@@ -130,15 +146,15 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         "--enable-shared=no".to_string(),
     ];
 
-    // Windows: MinGW cross-compilation for PJSIP.
+    // Windows cross/native compilation
     let is_windows_cross = target_os == "windows" && cfg!(target_os = "linux");
-    if target_os == "windows" {
+    let is_windows_msvc = target_os == "windows" && env::var("TARGET").unwrap_or_default().contains("msvc");
+    if target_os == "windows" && !is_windows_msvc {
+        // GNU target: use MinGW
         configure_args.push("--host=x86_64-w64-mingw32".to_string());
         if is_windows_cross {
-            // Cross-compiling from Linux — set build triple to linux
             configure_args.push("--build=x86_64-pc-linux-gnu".to_string());
         } else {
-            // Native Windows (MSYS2) — build triple matches host
             configure_args.push("--build=x86_64-w64-mingw32".to_string());
         }
     }
@@ -303,7 +319,38 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         ("sh".to_string(), "make".to_string())
     };
 
-    // Run configure
+    // MSVC Windows: use msbuild with Visual Studio solution instead of autotools
+    if is_windows_msvc {
+        // Write config_site.h for MSVC build
+        let config_site_msvc = pj_src_dir.join("pjlib/include/pj/config_site.h");
+        if !config_site_msvc.exists() || fs::read_to_string(&config_site_msvc).unwrap_or_default().is_empty() {
+            fs::write(&config_site_msvc, "#define PJMEDIA_HAS_SRTP 1\n#define PJ_HAS_IPV6 1\n#define PJMEDIA_AUDIO_DEV_HAS_WMME 1\n").ok();
+        }
+
+        // Find msbuild
+        let msbuild = find_msbuild().unwrap_or_else(|| "msbuild".to_string());
+        let sln = pj_src_dir.join("pjproject-vs16.sln");
+        if !sln.exists() {
+            // Try older solution file names
+            let sln14 = pj_src_dir.join("pjproject-vs14.sln");
+            if sln14.exists() {
+                eprintln!("cargo:warning=Using VS14 solution file");
+            }
+        }
+
+        let status = Command::new(&msbuild)
+            .arg(sln.to_str().unwrap())
+            .args(["/p:Configuration=Release", "/p:Platform=x64", "/m", "/verbosity:minimal"])
+            .current_dir(pj_src_dir)
+            .status()
+            .expect("Failed to run msbuild for PJSIP");
+        assert!(status.success(), "PJSIP msbuild failed");
+
+        eprintln!("cargo:warning=PJSIP build complete (MSVC).");
+        return;
+    }
+
+    // Run configure (autotools path for non-MSVC)
     let mut configure_cmd = Command::new(&sh_cmd);
     configure_cmd
         .arg("-c")
@@ -487,7 +534,7 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
                 println!("cargo:rustc-link-search=native={}/lib", ssl_dir);
                 println!("cargo:rustc-link-search=native={}/lib", opus_dir);
             } else {
-                // Native Windows (MSYS2)
+                // Native Windows — check for MSVC build output, then MSYS2
                 let msys2 = env::var("MSYS2_PATH").unwrap_or_else(|_| "C:\\msys64".to_string());
                 println!("cargo:rustc-link-search=native={}/mingw64/lib", msys2);
             }
