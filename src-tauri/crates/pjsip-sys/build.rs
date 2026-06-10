@@ -422,6 +422,38 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
             }
         }
 
+        // Debug: list what msbuild produced
+        for subdir in &subdirs {
+            let lib_dir = pj_src_dir.join(subdir).join("lib");
+            let output_dir = pj_src_dir.join(subdir).join("output");
+            if let Ok(entries) = fs::read_dir(&lib_dir) {
+                for e in entries.flatten() {
+                    eprintln!("cargo:warning=  lib/{}: {}", subdir, e.file_name().to_string_lossy());
+                }
+            }
+            if let Ok(entries) = fs::read_dir(&output_dir) {
+                for e in entries.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        if let Ok(sub) = fs::read_dir(&p) {
+                            for se in sub.flatten() {
+                                eprintln!("cargo:warning=  output/{}/{}: {}", subdir, p.file_name().unwrap().to_string_lossy(), se.file_name().to_string_lossy());
+                            }
+                        }
+                    } else {
+                        eprintln!("cargo:warning=  output/{}: {}", subdir, e.file_name().to_string_lossy());
+                    }
+                }
+            }
+        }
+        // Also check pjsua-lib separately
+        let pjsua_output = pj_src_dir.join("pjsip-apps").join("lib");
+        if let Ok(entries) = fs::read_dir(&pjsua_output) {
+            for e in entries.flatten() {
+                eprintln!("cargo:warning=  pjsip-apps/lib: {}", e.file_name().to_string_lossy());
+            }
+        }
+
         eprintln!("cargo:warning=PJSIP build complete (MSVC).");
         return;
     }
