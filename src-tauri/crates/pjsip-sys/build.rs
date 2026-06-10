@@ -115,6 +115,41 @@ fn write_config_site(pj_src_dir: &Path, target_os: &str) {
 }
 
 /// Configure and build PJSIP from source
+/// Simplify MSVC lib name: "pjlib-x86_64-x64-vc14-Release.lib" → "pj.lib"
+fn simplify_msvc_lib_name(name: &str) -> String {
+    // PJSIP MSVC lib names: pjlib-..., pjsua-lib-..., pjmedia-..., etc.
+    let stem = name.strip_suffix(".lib").unwrap_or(name);
+    // Map known PJSIP library names
+    let mappings = [
+        ("pjsua2-lib", "pjsua2"),
+        ("pjsua-lib", "pjsua"),
+        ("pjsip-ua", "pjsip-ua"),
+        ("pjsip-simple", "pjsip-simple"),
+        ("pjsip-core", "pjsip"),
+        ("pjmedia-codec", "pjmedia-codec"),
+        ("pjmedia-audiodev", "pjmedia-audiodev"),
+        ("pjmedia-videodev", "pjmedia-videodev"),
+        ("pjmedia", "pjmedia"),
+        ("pjnath", "pjnath"),
+        ("pjlib-util", "pjlib-util"),
+        ("pjlib", "pj"),
+        ("libsrtp", "srtp"),
+        ("libresample", "resample"),
+        ("libg7221codec", "g7221codec"),
+        ("libilbccodec", "ilbccodec"),
+        ("libspeex", "speex"),
+        ("libgsmcodec", "gsmcodec"),
+        ("libwebrtc", "webrtc"),
+        ("libyuv", "yuv"),
+    ];
+    for (prefix, lib_name) in &mappings {
+        if stem.starts_with(prefix) {
+            return format!("{}.lib", lib_name);
+        }
+    }
+    String::new()
+}
+
 /// Find msbuild.exe on Windows (VS 2019/2022)
 fn find_msbuild() -> Option<String> {
     // Try vswhere first
@@ -345,6 +380,47 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
             .status()
             .expect("Failed to run msbuild for PJSIP");
         assert!(status.success(), "PJSIP msbuild failed");
+
+        // MSVC build puts libs in output/ dirs with versioned names. Copy them to lib/ dirs
+        // with the names our link directives expect (libXXX.a → XXX.lib pattern).
+        let subdirs = ["pjlib", "pjlib-util", "pjnath", "pjmedia", "pjsip", "third_party"];
+        for subdir in &subdirs {
+            let lib_dir = pj_src_dir.join(subdir).join("lib");
+            let output_dir = pj_src_dir.join(subdir).join("output");
+            fs::create_dir_all(&lib_dir).ok();
+            // Find .lib files in output/ and subdirs
+            if let Ok(entries) = fs::read_dir(&output_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        // Check subdirectories (e.g., output/pjlib-x86_64-x64-vc14-Release/)
+                        if let Ok(sub_entries) = fs::read_dir(&path) {
+                            for sub_entry in sub_entries.flatten() {
+                                let sub_path = sub_entry.path();
+                                if sub_path.extension().map_or(false, |e| e == "lib") {
+                                    let fname = sub_path.file_name().unwrap().to_string_lossy().to_string();
+                                    // Copy to lib/ dir
+                                    let dest = lib_dir.join(&fname);
+                                    fs::copy(&sub_path, &dest).ok();
+                                    // Also create a simplified name: pjlib-i386-Win32-vc14-Release.lib → pj.lib
+                                    let simple = simplify_msvc_lib_name(&fname);
+                                    if !simple.is_empty() {
+                                        fs::copy(&sub_path, lib_dir.join(&simple)).ok();
+                                    }
+                                }
+                            }
+                        }
+                    } else if path.extension().map_or(false, |e| e == "lib") {
+                        let fname = path.file_name().unwrap().to_string_lossy().to_string();
+                        fs::copy(&path, lib_dir.join(&fname)).ok();
+                        let simple = simplify_msvc_lib_name(&fname);
+                        if !simple.is_empty() {
+                            fs::copy(&path, lib_dir.join(&simple)).ok();
+                        }
+                    }
+                }
+            }
+        }
 
         eprintln!("cargo:warning=PJSIP build complete (MSVC).");
         return;
