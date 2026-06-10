@@ -750,6 +750,14 @@ fn generate_bindings(pj_src_dir: &Path, out_dir: &Path, _target_os: &str) {
             .clang_arg("-DPJ_HAS_STDINT_H=1")
             .clang_arg("-DPJ_HAS_STRING_H=1")
             .clang_arg("-DPJ_HAS_STDDEF_H=1");
+    } else if _target_os == "android" {
+        // Android: use autoconf config but point clang to NDK sysroot
+        builder = builder.clang_arg("-DPJ_AUTOCONF=1");
+        if let Ok(sysroot) = env::var("PALE_ANDROID_SYSROOT") {
+            builder = builder
+                .clang_arg(format!("--sysroot={}", sysroot))
+                .clang_arg("--target=aarch64-linux-android24");
+        }
     } else {
         // Unix: use autoconf-generated config_site.h
         builder = builder.clang_arg("-DPJ_AUTOCONF=1");
