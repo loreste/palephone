@@ -340,7 +340,7 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
 
         let status = Command::new(&msbuild)
             .arg(sln.to_str().unwrap())
-            .args(["/p:Configuration=Release", "/p:Platform=x64", "/m", "/verbosity:minimal"])
+            .args(["/p:Configuration=Release", "/p:Platform=x64", "/p:PlatformToolset=v143", "/p:WindowsTargetPlatformVersion=10.0", "/m", "/verbosity:minimal"])
             .current_dir(pj_src_dir)
             .status()
             .expect("Failed to run msbuild for PJSIP");
