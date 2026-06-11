@@ -35,7 +35,14 @@ fn main() {
         write_config_site(&pj_src_dir, &target_os);
         build_pjsip(&pj_src_dir, &target_os, &target_arch);
     } else {
-        eprintln!("cargo:warning=PJSIP already built, skipping compilation.");
+        println!("cargo:warning=PJSIP already built, skipping compilation.");
+    }
+
+    // MSVC names libs with versioned suffixes; normalize them (also for
+    // cache-restored trees, where the build step is skipped) before linking.
+    let is_msvc = env::var("TARGET").unwrap_or_default().contains("msvc");
+    if target_os == "windows" && is_msvc {
+        normalize_msvc_libs(&pj_src_dir);
     }
 
     // Step 3: Emit linker directives
@@ -50,7 +57,7 @@ fn download_pjsip(out_dir: &Path) {
     let tarball_path = out_dir.join(PJSIP_TARBALL);
 
     if !tarball_path.exists() {
-        eprintln!("cargo:warning=Downloading PJSIP {}...", PJSIP_VERSION);
+        println!("cargo:warning=Downloading PJSIP {}...", PJSIP_VERSION);
         let status = Command::new("curl")
             .args([
                 "-L",
@@ -63,7 +70,7 @@ fn download_pjsip(out_dir: &Path) {
         assert!(status.success(), "Failed to download PJSIP tarball");
     }
 
-    eprintln!("cargo:warning=Extracting PJSIP...");
+    println!("cargo:warning=Extracting PJSIP...");
     let status = Command::new("tar")
         .args(["xzf", tarball_path.to_str().unwrap()])
         .current_dir(out_dir)
@@ -83,7 +90,9 @@ fn write_config_site(pj_src_dir: &Path, target_os: &str) {
     config.push_str("#define PJMEDIA_HAS_VIDEO 1\n");
     config.push_str("#define PJMEDIA_VIDEO_DEV_HAS_NULL 1\n");
     config.push_str("#define PJMEDIA_AUDIO_DEV_HAS_PORTAUDIO 0\n");
-    config.push_str("#define PJMEDIA_AUDIO_DEV_HAS_WMME 0\n");
+    if target_os != "windows" {
+        config.push_str("#define PJMEDIA_AUDIO_DEV_HAS_WMME 0\n");
+    }
 
     match target_os {
         "macos" => {
@@ -95,6 +104,15 @@ fn write_config_site(pj_src_dir: &Path, target_os: &str) {
         }
         "windows" => {
             config.push_str("#define PJMEDIA_AUDIO_DEV_HAS_WMME 1\n");
+            config.push_str("#define PJMEDIA_VIDEO_DEV_HAS_DSHOW 0\n");
+            if let Some(vcpkg) = vcpkg_installed_dir() {
+                if vcpkg_has_lib(&vcpkg, "libssl") && vcpkg_has_lib(&vcpkg, "libcrypto") {
+                    config.push_str("#define PJ_HAS_SSL_SOCK 1\n");
+                }
+                if vcpkg_has_lib(&vcpkg, "opus") {
+                    config.push_str("#define PJMEDIA_HAS_OPUS_CODEC 1\n");
+                }
+            }
         }
         "android" => {
             config.push_str("#define PJMEDIA_AUDIO_DEV_HAS_OPENSL 1\n");
@@ -114,24 +132,25 @@ fn write_config_site(pj_src_dir: &Path, target_os: &str) {
         .unwrap_or_else(|e| panic!("Failed to write config_site.h: {}", e));
 }
 
-/// Configure and build PJSIP from source
-/// Simplify MSVC lib name: "pjlib-x86_64-x64-vc14-Release.lib" → "pj.lib"
+/// Simplify an MSVC lib name produced by the pjproject solution build.
+/// msbuild names libs `<project>-<cpu>-<platform>-vc<ver>-<config>.lib`
+/// (e.g. "pjsua_lib-x86_64-x64-vc14-Release.lib" → "pjsua.lib").
+/// Project names come from pjproject-vs14.sln and use underscores.
 fn simplify_msvc_lib_name(name: &str) -> String {
-    // PJSIP MSVC lib names: pjlib-..., pjsua-lib-..., pjmedia-..., etc.
     let stem = name.strip_suffix(".lib").unwrap_or(name);
-    // Map known PJSIP library names
+    // Longest/most-specific prefixes first — "pjlib" would otherwise match "pjlib_util".
     let mappings = [
-        ("pjsua2-lib", "pjsua2"),
-        ("pjsua-lib", "pjsua"),
-        ("pjsip-ua", "pjsip-ua"),
-        ("pjsip-simple", "pjsip-simple"),
-        ("pjsip-core", "pjsip"),
-        ("pjmedia-codec", "pjmedia-codec"),
-        ("pjmedia-audiodev", "pjmedia-audiodev"),
-        ("pjmedia-videodev", "pjmedia-videodev"),
+        ("pjsua2_lib", "pjsua2"),
+        ("pjsua_lib", "pjsua"),
+        ("pjsip_ua", "pjsip-ua"),
+        ("pjsip_simple", "pjsip-simple"),
+        ("pjsip_core", "pjsip"),
+        ("pjmedia_codec", "pjmedia-codec"),
+        ("pjmedia_audiodev", "pjmedia-audiodev"),
+        ("pjmedia_videodev", "pjmedia-videodev"),
         ("pjmedia", "pjmedia"),
         ("pjnath", "pjnath"),
-        ("pjlib-util", "pjlib-util"),
+        ("pjlib_util", "pjlib-util"),
         ("pjlib", "pj"),
         ("libsrtp", "srtp"),
         ("libresample", "resample"),
@@ -139,6 +158,8 @@ fn simplify_msvc_lib_name(name: &str) -> String {
         ("libilbccodec", "ilbccodec"),
         ("libspeex", "speex"),
         ("libgsmcodec", "gsmcodec"),
+        ("libmilenage", "milenage"),
+        ("libbaseclasses", "baseclasses"),
         ("libwebrtc", "webrtc"),
         ("libyuv", "yuv"),
     ];
@@ -148,6 +169,63 @@ fn simplify_msvc_lib_name(name: &str) -> String {
         }
     }
     String::new()
+}
+
+/// Directories where the pjproject msbuild solution drops .lib files.
+/// OutDir is `..\lib\` relative to each .vcxproj; third_party projects live
+/// one level deeper (third_party/build/<name>/), so their libs land in
+/// third_party/build/lib.
+fn msvc_lib_dirs(pj_src_dir: &Path) -> Vec<PathBuf> {
+    [
+        "pjlib/lib",
+        "pjlib-util/lib",
+        "pjnath/lib",
+        "pjmedia/lib",
+        "pjsip/lib",
+        "third_party/lib",
+        "third_party/build/lib",
+    ]
+    .iter()
+    .map(|sub| pj_src_dir.join(sub))
+    .filter(|p| p.exists())
+    .collect()
+}
+
+/// Copy versioned MSVC libs to the plain names the link directives use.
+fn normalize_msvc_libs(pj_src_dir: &Path) {
+    for dir in msvc_lib_dirs(pj_src_dir) {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.extension().map_or(false, |e| e == "lib") {
+                continue;
+            }
+            let fname = path.file_name().unwrap().to_string_lossy().to_string();
+            let simple = simplify_msvc_lib_name(&fname);
+            if !simple.is_empty() && simple != fname {
+                let dest = dir.join(&simple);
+                if !dest.exists() {
+                    fs::copy(&path, &dest).ok();
+                }
+                println!("cargo:warning=MSVC lib: {} -> {}", fname, simple);
+            }
+        }
+    }
+}
+
+/// Locate the vcpkg installed-triplet dir (for OpenSSL/Opus on Windows MSVC).
+fn vcpkg_installed_dir() -> Option<PathBuf> {
+    let triplet =
+        env::var("PALE_VCPKG_TRIPLET").unwrap_or_else(|_| "x64-windows-static-md".to_string());
+    let root = env::var("VCPKG_ROOT")
+        .or_else(|_| env::var("VCPKG_INSTALLATION_ROOT"))
+        .ok()?;
+    let dir = Path::new(&root).join("installed").join(triplet);
+    dir.exists().then_some(dir)
+}
+
+fn vcpkg_has_lib(installed: &Path, lib: &str) -> bool {
+    installed.join("lib").join(format!("{}.lib", lib)).exists()
 }
 
 /// Find msbuild.exe on Windows (VS 2019/2022)
@@ -167,7 +245,7 @@ fn find_msbuild() -> Option<String> {
 }
 
 fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
-    eprintln!(
+    println!(
         "cargo:warning=Building PJSIP {} for {}/{}...",
         PJSIP_VERSION, target_os, target_arch
     );
@@ -356,12 +434,6 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
 
     // MSVC Windows: use msbuild with Visual Studio solution instead of autotools
     if is_windows_msvc {
-        // Write config_site.h for MSVC build
-        let config_site_msvc = pj_src_dir.join("pjlib/include/pj/config_site.h");
-        if !config_site_msvc.exists() || fs::read_to_string(&config_site_msvc).unwrap_or_default().is_empty() {
-            fs::write(&config_site_msvc, "#define PJMEDIA_HAS_SRTP 1\n#define PJ_HAS_IPV6 1\n#define PJMEDIA_AUDIO_DEV_HAS_WMME 1\n").ok();
-        }
-
         // Find msbuild and solution file
         let msbuild = find_msbuild().unwrap_or_else(|| "msbuild".to_string());
         let sln = ["pjproject-vs16.sln", "pjproject-vs14.sln", "pjproject-vs17.sln"]
@@ -371,90 +443,32 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
             .unwrap_or_else(|| {
                 panic!("No Visual Studio solution file found in {}", pj_src_dir.display());
             });
-        eprintln!("cargo:warning=Using solution: {}", sln.file_name().unwrap().to_string_lossy());
+        println!("cargo:warning=Using solution: {}", sln.file_name().unwrap().to_string_lossy());
 
-        let status = Command::new(&msbuild)
+        let mut msbuild_cmd = Command::new(&msbuild);
+        msbuild_cmd
             .arg(sln.to_str().unwrap())
             .args(["/p:Configuration=Release", "/p:Platform=x64", "/p:PlatformToolset=v143", "/p:WindowsTargetPlatformVersion=10.0", "/m", "/verbosity:minimal"])
-            .current_dir(pj_src_dir)
-            .status()
-            .expect("Failed to run msbuild for PJSIP");
+            .current_dir(pj_src_dir);
+
+        // Make vcpkg OpenSSL/Opus headers visible to every cl.exe invocation.
+        // (cl.exe prepends options from the CL env var; msbuild passes it through.)
+        if let Some(vcpkg) = vcpkg_installed_dir() {
+            let mut cl = env::var("CL").unwrap_or_default();
+            if !cl.is_empty() {
+                cl.push(' ');
+            }
+            cl.push_str(&format!("/I\"{}\"", vcpkg.join("include").display()));
+            msbuild_cmd.env("CL", &cl);
+            println!("cargo:warning=Using vcpkg headers from {}", vcpkg.join("include").display());
+        } else {
+            println!("cargo:warning=vcpkg not found: building PJSIP without OpenSSL (no SIP TLS) and without Opus");
+        }
+
+        let status = msbuild_cmd.status().expect("Failed to run msbuild for PJSIP");
         assert!(status.success(), "PJSIP msbuild failed");
 
-        // MSVC build puts libs in output/ dirs with versioned names. Copy them to lib/ dirs
-        // with the names our link directives expect (libXXX.a → XXX.lib pattern).
-        let subdirs = ["pjlib", "pjlib-util", "pjnath", "pjmedia", "pjsip", "third_party"];
-        for subdir in &subdirs {
-            let lib_dir = pj_src_dir.join(subdir).join("lib");
-            let output_dir = pj_src_dir.join(subdir).join("output");
-            fs::create_dir_all(&lib_dir).ok();
-            // Find .lib files in output/ and subdirs
-            if let Ok(entries) = fs::read_dir(&output_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        // Check subdirectories (e.g., output/pjlib-x86_64-x64-vc14-Release/)
-                        if let Ok(sub_entries) = fs::read_dir(&path) {
-                            for sub_entry in sub_entries.flatten() {
-                                let sub_path = sub_entry.path();
-                                if sub_path.extension().map_or(false, |e| e == "lib") {
-                                    let fname = sub_path.file_name().unwrap().to_string_lossy().to_string();
-                                    // Copy to lib/ dir
-                                    let dest = lib_dir.join(&fname);
-                                    fs::copy(&sub_path, &dest).ok();
-                                    // Also create a simplified name: pjlib-i386-Win32-vc14-Release.lib → pj.lib
-                                    let simple = simplify_msvc_lib_name(&fname);
-                                    if !simple.is_empty() {
-                                        fs::copy(&sub_path, lib_dir.join(&simple)).ok();
-                                    }
-                                }
-                            }
-                        }
-                    } else if path.extension().map_or(false, |e| e == "lib") {
-                        let fname = path.file_name().unwrap().to_string_lossy().to_string();
-                        fs::copy(&path, lib_dir.join(&fname)).ok();
-                        let simple = simplify_msvc_lib_name(&fname);
-                        if !simple.is_empty() {
-                            fs::copy(&path, lib_dir.join(&simple)).ok();
-                        }
-                    }
-                }
-            }
-        }
-
-        // Debug: list what msbuild produced
-        for subdir in &subdirs {
-            let lib_dir = pj_src_dir.join(subdir).join("lib");
-            let output_dir = pj_src_dir.join(subdir).join("output");
-            if let Ok(entries) = fs::read_dir(&lib_dir) {
-                for e in entries.flatten() {
-                    eprintln!("cargo:warning=  lib/{}: {}", subdir, e.file_name().to_string_lossy());
-                }
-            }
-            if let Ok(entries) = fs::read_dir(&output_dir) {
-                for e in entries.flatten() {
-                    let p = e.path();
-                    if p.is_dir() {
-                        if let Ok(sub) = fs::read_dir(&p) {
-                            for se in sub.flatten() {
-                                eprintln!("cargo:warning=  output/{}/{}: {}", subdir, p.file_name().unwrap().to_string_lossy(), se.file_name().to_string_lossy());
-                            }
-                        }
-                    } else {
-                        eprintln!("cargo:warning=  output/{}: {}", subdir, e.file_name().to_string_lossy());
-                    }
-                }
-            }
-        }
-        // Also check pjsua-lib separately
-        let pjsua_output = pj_src_dir.join("pjsip-apps").join("lib");
-        if let Ok(entries) = fs::read_dir(&pjsua_output) {
-            for e in entries.flatten() {
-                eprintln!("cargo:warning=  pjsip-apps/lib: {}", e.file_name().to_string_lossy());
-            }
-        }
-
-        eprintln!("cargo:warning=PJSIP build complete (MSVC).");
+        println!("cargo:warning=PJSIP build complete (MSVC).");
         return;
     }
 
@@ -513,40 +527,35 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
     let status = build_cmd.status().expect("Failed to run make");
     assert!(status.success(), "PJSIP make failed");
 
-    eprintln!("cargo:warning=PJSIP build complete.");
+    println!("cargo:warning=PJSIP build complete.");
 }
 
 /// Emit cargo:rustc-link-lib and cargo:rustc-link-search directives
 fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
     let is_msvc = env::var("TARGET").unwrap_or_default().contains("msvc");
 
-    // MSVC path: look for .lib files directly (created by msbuild + copy step)
+    // MSVC path: look for .lib files directly (normalized from the msbuild output)
     if is_msvc && target_os == "windows" {
-        let subdirs = ["pjlib", "pjlib-util", "pjnath", "pjmedia", "pjsip", "third_party"];
-        for subdir in &subdirs {
-            let lib_dir = pj_src_dir.join(subdir).join("lib");
-            if lib_dir.exists() {
-                println!("cargo:rustc-link-search=native={}", lib_dir.display());
-            }
+        let lib_dirs = msvc_lib_dirs(pj_src_dir);
+        for dir in &lib_dirs {
+            println!("cargo:rustc-link-search=native={}", dir.display());
         }
         // Link PJSIP libs by their simplified names
         let pjsip_libs = [
             "pjsua", "pjsip-ua", "pjsip-simple", "pjsip", "pjmedia-codec",
             "pjmedia", "pjmedia-audiodev", "pjmedia-videodev",
             "pjnath", "pjlib-util", "pj", "srtp", "resample",
-            "g7221codec", "ilbccodec", "speex", "gsmcodec", "webrtc", "yuv",
+            "g7221codec", "ilbccodec", "speex", "gsmcodec", "milenage",
+            "baseclasses", "webrtc", "yuv",
         ];
         for lib in &pjsip_libs {
-            // Try both naming conventions
-            let subdirs_search: Vec<_> = subdirs.iter()
-                .map(|s| pj_src_dir.join(s).join("lib"))
-                .collect();
-            let found = subdirs_search.iter().any(|dir| {
-                dir.join(format!("{}.lib", lib)).exists() ||
-                dir.join(format!("lib{}.a", lib)).exists()
-            });
+            let found = lib_dirs
+                .iter()
+                .any(|dir| dir.join(format!("{}.lib", lib)).exists());
             if found {
                 println!("cargo:rustc-link-lib=static={}", lib);
+            } else {
+                println!("cargo:warning=PJSIP lib not found, skipping: {}", lib);
             }
         }
         // Platform libs handled below, so don't return here
@@ -566,7 +575,7 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
     // Detect the suffix from libpj-*.a (which is unambiguous) then strip it from all libs.
     let platform_suffix = detect_platform_suffix(&lib_dirs);
     if let Some(ref suffix) = platform_suffix {
-        eprintln!("cargo:warning=Detected PJSIP platform suffix: -{}", suffix);
+        println!("cargo:warning=Detected PJSIP platform suffix: -{}", suffix);
         for dir in &lib_dirs {
             if let Ok(entries) = fs::read_dir(dir) {
                 for entry in entries.flatten() {
@@ -670,26 +679,41 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
             println!("cargo:rustc-link-lib=mswsock");
             println!("cargo:rustc-link-lib=gdi32");
             println!("cargo:rustc-link-lib=user32");
-            // MinGW C++ runtime (needed for libyuv)
-            if env::var("TARGET").unwrap_or_default().contains("gnu") {
-                println!("cargo:rustc-link-lib=stdc++");
-            }
-            // OpenSSL and Opus
-            if cfg!(target_os = "linux") {
-                // Cross-compiling from Linux
-                let home = env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-                let ssl_dir = env::var("OPENSSL_DIR").unwrap_or_else(|_| format!("{}/openssl-win64", home));
-                let opus_dir = env::var("OPUS_DIR").unwrap_or_else(|_| format!("{}/opus-win64", home));
-                println!("cargo:rustc-link-search=native={}/lib", ssl_dir);
-                println!("cargo:rustc-link-search=native={}/lib", opus_dir);
+            let is_msvc = env::var("TARGET").unwrap_or_default().contains("msvc");
+            if is_msvc {
+                // OpenSSL and Opus from vcpkg (static, matching the /MD CRT).
+                // PJSIP was only built against them if vcpkg was present when
+                // config_site.h was written, so missing vcpkg just means no TLS/Opus.
+                if let Some(vcpkg) = vcpkg_installed_dir() {
+                    println!("cargo:rustc-link-search=native={}", vcpkg.join("lib").display());
+                    if vcpkg_has_lib(&vcpkg, "libssl") && vcpkg_has_lib(&vcpkg, "libcrypto") {
+                        println!("cargo:rustc-link-lib=static=libssl");
+                        println!("cargo:rustc-link-lib=static=libcrypto");
+                    }
+                    if vcpkg_has_lib(&vcpkg, "opus") {
+                        println!("cargo:rustc-link-lib=static=opus");
+                    }
+                }
             } else {
-                // Native Windows — check for MSVC build output, then MSYS2
-                let msys2 = env::var("MSYS2_PATH").unwrap_or_else(|_| "C:\\msys64".to_string());
-                println!("cargo:rustc-link-search=native={}/mingw64/lib", msys2);
+                // MinGW C++ runtime (needed for libyuv)
+                println!("cargo:rustc-link-lib=stdc++");
+                // OpenSSL and Opus
+                if cfg!(target_os = "linux") {
+                    // Cross-compiling from Linux
+                    let home = env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+                    let ssl_dir = env::var("OPENSSL_DIR").unwrap_or_else(|_| format!("{}/openssl-win64", home));
+                    let opus_dir = env::var("OPUS_DIR").unwrap_or_else(|_| format!("{}/opus-win64", home));
+                    println!("cargo:rustc-link-search=native={}/lib", ssl_dir);
+                    println!("cargo:rustc-link-search=native={}/lib", opus_dir);
+                } else {
+                    // Native Windows GNU — MSYS2
+                    let msys2 = env::var("MSYS2_PATH").unwrap_or_else(|_| "C:\\msys64".to_string());
+                    println!("cargo:rustc-link-search=native={}/mingw64/lib", msys2);
+                }
+                println!("cargo:rustc-link-lib=ssl");
+                println!("cargo:rustc-link-lib=crypto");
+                println!("cargo:rustc-link-lib=opus");
             }
-            println!("cargo:rustc-link-lib=ssl");
-            println!("cargo:rustc-link-lib=crypto");
-            println!("cargo:rustc-link-lib=opus");
             println!("cargo:rustc-link-lib=crypt32");
         }
         "android" => {
@@ -815,7 +839,7 @@ fn generate_bindings(pj_src_dir: &Path, out_dir: &Path, _target_os: &str) {
         .write_to_file(&out_path)
         .expect("Failed to write bindings.rs");
 
-    eprintln!(
+    println!(
         "cargo:warning=Generated PJSIP bindings at {}",
         out_path.display()
     );

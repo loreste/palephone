@@ -16,10 +16,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - platform: macos-14
             target: aarch64-apple-darwin
-          # Windows MSVC: PJSIP VS build outputs libs in non-standard paths.
-          # Requires mapping VS output dirs to link directives. Tracked for later.
-          # - platform: windows-2022
-          #   target: x86_64-pc-windows-msvc
+          - platform: windows-2022
+            target: x86_64-pc-windows-msvc
 
     runs-on: ${{ matrix.platform }}
 
@@ -57,19 +55,17 @@ jobs:
         run: |
           brew install openssl@3 opus autoconf automake
 
-      # Windows dependencies — use MSYS2 for PJSIP build
-      - name: Install Windows dependencies
+      # Windows dependencies — OpenSSL and Opus from vcpkg (MSVC-native static libs)
+      - name: Cache vcpkg packages
         if: runner.os == 'Windows'
-        run: |
-          C:\msys64\usr\bin\pacman.exe -S --noconfirm autoconf automake make mingw-w64-x86_64-openssl mingw-w64-x86_64-opus
-        shell: cmd
+        uses: actions/cache@v4
+        with:
+          path: C:\vcpkg\installed
+          key: vcpkg-x64-windows-static-md-openssl-opus-v1
 
-      - name: Set Windows MSYS2 env
+      - name: Install Windows dependencies (vcpkg)
         if: runner.os == 'Windows'
-        run: |
-          echo "MSYS2_PATH=C:\msys64" >> $env:GITHUB_ENV
-          echo "C:\msys64\usr\bin" >> $env:GITHUB_PATH
-          echo "C:\msys64\mingw64\bin" >> $env:GITHUB_PATH
+        run: vcpkg install openssl:x64-windows-static-md opus:x64-windows-static-md
 
       # Cache PJSIP build (very slow to compile)
       - name: Cache PJSIP build
@@ -78,9 +74,9 @@ jobs:
           path: |
             src-tauri/target/debug/build/pjsip-sys-*/out/pjproject-*
             src-tauri/target/release/build/pjsip-sys-*/out/pjproject-*
-          key: pjsip-${{ matrix.target }}-v2.14.1-v2-${{ hashFiles('src-tauri/crates/pjsip-sys/build.rs') }}
+          key: pjsip-${{ matrix.target }}-v2.14.1-v3-${{ hashFiles('src-tauri/crates/pjsip-sys/build.rs') }}
           restore-keys: |
-            pjsip-${{ matrix.target }}-v2.14.1-
+            pjsip-${{ matrix.target }}-v2.14.1-v3-
 
       # Cache Cargo registry and target
       - name: Cache Cargo
