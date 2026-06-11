@@ -27,7 +27,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Install Prometheus metrics recorder
     let prom_handle = Arc::new(metrics::install_recorder());
 
-    let config = config_from_env();
+    let config = match config_from_env() {
+        Ok(config) => config,
+        Err(message) => {
+            eprintln!("pale-server: {message}");
+            std::process::exit(1);
+        }
+    };
     let mut app_state = AppState::persistent(
         config.data_dir.clone(),
         config.http_token.clone(),
@@ -72,11 +78,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     app_state.set_rate_limit_rps(rate_limit_rps);
     // Use PALE_SIP_EXTERNAL_ADDR if set (public-facing SIP address for clients),
     // otherwise derive from HTTP bind address, replacing 0.0.0.0 with 127.0.0.1
-    let sip_external = std::env::var("PALE_SIP_EXTERNAL_ADDR").unwrap_or_else(|_| {
-        let addr = config.sip_addr.to_string();
-        addr.replace("0.0.0.0", "127.0.0.1")
-    });
-    app_state.set_sip_registrar(sip_external);
+    let sip_external = match std::env::var("PALE_SIP_EXTERNAL_ADDR") {
+        Ok(addr) => addr,
+        Err(_) => {
+            let addr = config.sip_addr.to_string();
+            if addr.starts_with("0.0.0.0") {
+                log::warn!(
+                    "PALE_SIP_EXTERNAL_ADDR is not set — advertising the SIP registrar as 127.0.0.1, \
+                     so only clients on this machine can register. Set PALE_SIP_EXTERNAL_ADDR to this \
+                     server's public hostname or IP for remote clients."
+                );
+            }
+            addr.replace("0.0.0.0", "127.0.0.1")
+        }
+    };
+    app_state.set_sip_registrar(sip_external.clone());
 
     let state = Arc::new(app_state);
     tokio::fs::create_dir_all(state.files_dir()).await?;
@@ -86,13 +102,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         SipBackend::Pjsip => {
             let tls = tls_config_from_env(config.sip_addr.port())?;
             let encrypted_by_default = tls.is_some();
+            let enable_udp = env_bool("PALE_SIP_UDP", !encrypted_by_default);
+            let enable_tcp = env_bool("PALE_SIP_TCP", false);
+            let require_srtp = env_bool("PALE_SIP_SRTP", true);
+            log::info!(
+                "Config: HTTP {} (TLS {}) | SIP {} [UDP {} / TCP {} / TLS {}] SRTP {} | registrar advertised as {} | storage: {} | TURN: {} | rate limit {} req/s",
+                config.http_addr,
+                onoff(config.http_tls_cert.is_some() && config.http_tls_key.is_some()),
+                config.sip_addr,
+                onoff(enable_udp),
+                onoff(enable_tcp),
+                tls.as_ref().map(|t| format!("on (port {})", t.port)).unwrap_or_else(|| "off".to_string()),
+                onoff(require_srtp),
+                sip_external,
+                if state.pg_store().is_some() {
+                    "PostgreSQL".to_string()
+                } else {
+                    format!("SQLite at {} (set PALE_DATABASE_URL for PostgreSQL)", config.data_dir.display())
+                },
+                config.media.turn.as_ref().map(|t| t.server.as_str()).unwrap_or("none"),
+                rate_limit_rps,
+            );
             let runtime = PjsipRuntime::start(
                 PjsipRuntimeConfig {
                     sip_addr: config.sip_addr,
-                    enable_udp: env_bool("PALE_SIP_UDP", !encrypted_by_default),
-                    enable_tcp: env_bool("PALE_SIP_TCP", false),
+                    enable_udp,
+                    enable_tcp,
                     tls,
-                    require_srtp: env_bool("PALE_SIP_SRTP", true),
+                    require_srtp,
                     media: config.media.clone(),
                 },
                 state.clone(),
@@ -184,22 +221,35 @@ impl EnvAddr for ServerConfig {
     }
 }
 
-fn config_from_env() -> ServerConfig {
-    ServerConfig {
+fn config_from_env() -> Result<ServerConfig, String> {
+    let mut errors = Vec::new();
+    let http_token = checked_secret("PALE_SERVER_TOKEN", &mut errors);
+    let admin_password = checked_secret("PALE_ADMIN_PASSWORD", &mut errors);
+    let storage_key = checked_secret("PALE_STORAGE_KEY", &mut errors);
+    if !errors.is_empty() {
+        return Err(format!(
+            "configuration errors:\n  - {}\n\n\
+             Generate a strong secret with: openssl rand -base64 32\n\
+             See .env.example for the full list of settings.",
+            errors.join("\n  - ")
+        ));
+    }
+
+    Ok(ServerConfig {
         http_addr: ServerConfig::read_addr("PALE_HTTP_ADDR", "127.0.0.1:8080"),
         sip_addr: ServerConfig::read_addr("PALE_SIP_ADDR", "0.0.0.0:5060"),
         data_dir: std::env::var("PALE_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("./pale-data")),
-        http_token: required_secret("PALE_SERVER_TOKEN"),
+        http_token: http_token.expect("validated above"),
         admin_username: std::env::var("PALE_ADMIN_USERNAME")
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "admin".to_string()),
         admin_password_hash: pale_server::sha256_hex(
-            required_secret("PALE_ADMIN_PASSWORD").as_bytes(),
+            admin_password.expect("validated above").as_bytes(),
         ),
-        storage_key: required_secret("PALE_STORAGE_KEY"),
+        storage_key: storage_key.expect("validated above"),
         max_upload_bytes: std::env::var("PALE_MAX_UPLOAD_BYTES")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -207,7 +257,7 @@ fn config_from_env() -> ServerConfig {
         http_tls_cert: optional_env("PALE_HTTP_TLS_CERT").map(PathBuf::from),
         http_tls_key: optional_env("PALE_HTTP_TLS_KEY").map(PathBuf::from),
         media: media_config_from_env(),
-    }
+    })
 }
 
 fn media_config_from_env() -> MediaConfig {
@@ -250,15 +300,31 @@ fn turn_transport_from_env() -> TurnTransport {
     }
 }
 
-fn required_secret(name: &str) -> String {
-    std::env::var(name)
-        .ok()
-        .filter(|value| value.len() >= 24)
-        .unwrap_or_else(|| panic!("{} must be set to at least 24 characters", name))
+fn checked_secret(name: &str, errors: &mut Vec<String>) -> Option<String> {
+    match std::env::var(name) {
+        Ok(value) if value.len() >= 24 => Some(value),
+        Ok(_) => {
+            errors.push(format!("{name} is set but shorter than 24 characters"));
+            None
+        }
+        Err(_) => {
+            errors.push(format!("{name} is not set"));
+            None
+        }
+    }
 }
 
 fn tls_config_from_env(sip_port: u16) -> Result<Option<TlsConfig>, Box<dyn std::error::Error + Send + Sync>> {
-    if !env_bool("PALE_SIP_TLS", true) {
+    // Explicit PALE_SIP_TLS=true/false wins. When unset, TLS is enabled
+    // exactly when a cert and key are provided.
+    let certs_present =
+        optional_env("PALE_SIP_TLS_CERT").is_some() && optional_env("PALE_SIP_TLS_KEY").is_some();
+    if !env_bool("PALE_SIP_TLS", certs_present) {
+        if certs_present {
+            log::warn!("PALE_SIP_TLS_CERT/KEY are set but PALE_SIP_TLS=false; SIP TLS stays disabled");
+        } else {
+            log::info!("SIP TLS disabled — set PALE_SIP_TLS_CERT and PALE_SIP_TLS_KEY to enable it");
+        }
         return Ok(None);
     }
 
@@ -293,6 +359,14 @@ fn optional_env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())
+}
+
+fn onoff(value: bool) -> &'static str {
+    if value {
+        "on"
+    } else {
+        "off"
+    }
 }
 
 fn env_bool(name: &str, default: bool) -> bool {

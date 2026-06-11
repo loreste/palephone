@@ -16,7 +16,18 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 
 /// Shared engine state accessible from Tauri commands
-struct EngineState(Arc<PjsipEngine>);
+struct EngineState {
+    engine: Option<Arc<PjsipEngine>>,
+    init_error: String,
+}
+
+impl EngineState {
+    fn get(&self) -> Result<&Arc<PjsipEngine>, String> {
+        self.engine
+            .as_ref()
+            .ok_or_else(|| format!("SIP engine unavailable: {}", self.init_error))
+    }
+}
 
 /// Shared call history database
 struct HistoryState(Arc<Mutex<CallHistoryDb>>);
@@ -87,7 +98,7 @@ fn register_account(
     };
 
     engine
-        .0
+        .get()?
         .send_command(EngineCommand::AddAccount(account.clone()))
         .map_err(|e| e.to_string())?;
 
@@ -117,7 +128,7 @@ fn make_call(
         .unwrap_or(0);
 
     state
-        .0
+        .get()?
         .send_command(EngineCommand::MakeCall { account_id, uri })
         .map_err(|e| e.to_string())
 }
@@ -125,7 +136,7 @@ fn make_call(
 #[tauri::command]
 fn answer_call(state: State<EngineState>, call_id: i32) -> Result<(), String> {
     state
-        .0
+        .get()?
         .send_command(EngineCommand::AnswerCall { call_id, code: 200 })
         .map_err(|e| e.to_string())
 }
@@ -133,7 +144,7 @@ fn answer_call(state: State<EngineState>, call_id: i32) -> Result<(), String> {
 #[tauri::command]
 fn hangup_call(state: State<EngineState>, call_id: i32) -> Result<(), String> {
     state
-        .0
+        .get()?
         .send_command(EngineCommand::HangupCall(call_id))
         .map_err(|e| e.to_string())
 }
@@ -141,7 +152,7 @@ fn hangup_call(state: State<EngineState>, call_id: i32) -> Result<(), String> {
 #[tauri::command]
 fn hold_call(state: State<EngineState>, call_id: i32) -> Result<(), String> {
     state
-        .0
+        .get()?
         .send_command(EngineCommand::HoldCall(call_id))
         .map_err(|e| e.to_string())
 }
@@ -149,7 +160,7 @@ fn hold_call(state: State<EngineState>, call_id: i32) -> Result<(), String> {
 #[tauri::command]
 fn unhold_call(state: State<EngineState>, call_id: i32) -> Result<(), String> {
     state
-        .0
+        .get()?
         .send_command(EngineCommand::UnholdCall(call_id))
         .map_err(|e| e.to_string())
 }
@@ -157,7 +168,7 @@ fn unhold_call(state: State<EngineState>, call_id: i32) -> Result<(), String> {
 #[tauri::command]
 fn set_mute(state: State<EngineState>, call_id: i32, muted: bool) -> Result<(), String> {
     state
-        .0
+        .get()?
         .send_command(EngineCommand::SetMute { call_id, muted })
         .map_err(|e| e.to_string())
 }
@@ -166,7 +177,7 @@ fn set_mute(state: State<EngineState>, call_id: i32, muted: bool) -> Result<(), 
 fn send_dtmf(state: State<EngineState>, call_id: i32, digits: String) -> Result<(), String> {
     validate_no_nul("digits", &digits)?;
     state
-        .0
+        .get()?
         .send_command(EngineCommand::SendDtmf { call_id, digits })
         .map_err(|e| e.to_string())
 }
@@ -175,7 +186,7 @@ fn send_dtmf(state: State<EngineState>, call_id: i32, digits: String) -> Result<
 fn blind_transfer(state: State<EngineState>, call_id: i32, target: String) -> Result<(), String> {
     validate_no_nul("target", &target)?;
     state
-        .0
+        .get()?
         .send_command(EngineCommand::BlindTransfer { call_id, target })
         .map_err(|e| e.to_string())
 }
@@ -187,7 +198,7 @@ fn attended_transfer(
     target_call_id: i32,
 ) -> Result<(), String> {
     state
-        .0
+        .get()?
         .send_command(EngineCommand::AttendedTransfer {
             call_id,
             target_call_id,
@@ -217,7 +228,7 @@ fn start_recording(
     let file_path_str = file_path.to_string_lossy().to_string();
 
     state
-        .0
+        .get()?
         .send_command(EngineCommand::StartRecording {
             call_id,
             file_path: file_path_str.clone(),
@@ -230,7 +241,7 @@ fn start_recording(
 #[tauri::command]
 fn stop_recording(state: State<EngineState>, call_id: i32) -> Result<(), String> {
     state
-        .0
+        .get()?
         .send_command(EngineCommand::StopRecording { call_id })
         .map_err(|e| e.to_string())
 }
@@ -444,7 +455,7 @@ fn make_video_call(
         .unwrap_or(0);
 
     state
-        .0
+        .get()?
         .send_command(EngineCommand::MakeVideoCall { account_id, uri })
         .map_err(|e| e.to_string())
 }
@@ -452,7 +463,7 @@ fn make_video_call(
 #[tauri::command]
 fn toggle_video(state: State<EngineState>, call_id: i32, enabled: bool) -> Result<(), String> {
     state
-        .0
+        .get()?
         .send_command(EngineCommand::ToggleVideo { call_id, enabled })
         .map_err(|e| e.to_string())
 }
@@ -463,7 +474,7 @@ fn start_screen_share(state: State<EngineState>, call_id: i32, enabled: bool) ->
     // When enabled=true, PJSIP switches the video capture device to desktop capture
     // When enabled=false, switches back to camera
     state
-        .0
+        .get()?
         .send_command(EngineCommand::ToggleVideo { call_id, enabled })
         .map_err(|e| e.to_string())
 }
@@ -479,7 +490,9 @@ struct AudioDeviceInfo {
 }
 
 #[tauri::command]
-fn list_audio_devices() -> Result<Vec<AudioDeviceInfo>, String> {
+fn list_audio_devices(state: State<EngineState>) -> Result<Vec<AudioDeviceInfo>, String> {
+    // Don't touch PJSIP FFI if the engine never initialized.
+    state.get()?;
     unsafe {
         let count = pjsip_sys::pjmedia_aud_dev_count() as i32;
         let mut devices = Vec::new();
@@ -815,8 +828,16 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    // Initialize PJSIP engine
-    let engine = Arc::new(PjsipEngine::new().expect("Failed to initialize PJSIP engine"));
+    // Initialize PJSIP engine. A failure (e.g. no audio device, missing OS
+    // permissions) must not crash the app — chat, history, and settings still
+    // work, and SIP commands return the init error to the UI instead.
+    let (engine, engine_init_error) = match PjsipEngine::new() {
+        Ok(engine) => (Some(Arc::new(engine)), String::new()),
+        Err(e) => {
+            log::error!("Failed to initialize PJSIP engine: {e}");
+            (None, e.to_string())
+        }
+    };
 
     let engine_for_bridge = engine.clone();
     let runtime = Arc::new(SipRuntimeState {
@@ -827,7 +848,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
-        .manage(EngineState(engine))
+        .manage(EngineState {
+            engine,
+            init_error: engine_init_error,
+        })
         .manage(runtime)
         .invoke_handler(tauri::generate_handler![
             // SIP commands
@@ -878,7 +902,7 @@ pub fn run() {
             let app_data = app
                 .path()
                 .app_data_dir()
-                .expect("Failed to get app data dir");
+                .map_err(|e| format!("failed to resolve the app data directory: {e}"))?;
             std::fs::create_dir_all(&app_data).ok();
 
             // Load persisted config
@@ -892,9 +916,9 @@ pub fn run() {
 
             // Initialize call history database
             let db_path = app_data.join("call_history.db");
-            let history_db = Arc::new(Mutex::new(
-                CallHistoryDb::open(&db_path).expect("Failed to open call history database"),
-            ));
+            let history_db = Arc::new(Mutex::new(CallHistoryDb::open(&db_path).map_err(
+                |e| format!("failed to open call history database at {}: {e}", db_path.display()),
+            )?));
             app.manage(HistoryState(history_db.clone()));
             log::info!("Call history DB opened at {:?}", db_path);
             let call_tracker = Arc::new(Mutex::new(HashMap::new()));
@@ -922,13 +946,17 @@ pub fn run() {
                 });
             }
 
-            start_event_bridge(
-                app.handle().clone(),
-                engine_for_bridge,
-                history_db,
-                call_tracker,
-                runtime_for_bridge,
-            );
+            if let Some(engine) = engine_for_bridge {
+                start_event_bridge(
+                    app.handle().clone(),
+                    engine,
+                    history_db,
+                    call_tracker,
+                    runtime_for_bridge,
+                );
+            } else {
+                log::warn!("SIP engine unavailable — event bridge not started");
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

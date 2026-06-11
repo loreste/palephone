@@ -183,12 +183,8 @@ sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libasound2-dev \
 ### Deploy Pale Server
 
 ```bash
-# Generate secrets
-export PALE_SERVER_TOKEN=$(openssl rand -base64 32)
-export PALE_ADMIN_PASSWORD=$(openssl rand -base64 32)
-export PALE_STORAGE_KEY=$(openssl rand -base64 32)
-export TURN_SECRET=$(openssl rand -base64 32)
-export POSTGRES_PASSWORD=$(openssl rand -base64 32)
+# Generate secrets (writes .env, which docker compose reads automatically)
+./scripts/generate-secrets.sh
 
 # Start server stack (PostgreSQL + pale-server + TURN relay)
 docker compose up -d
@@ -203,6 +199,15 @@ The server exposes:
 - **SIP UDP** on port 5060
 - **SIP TLS** on port 5061
 - **TURN relay** on port 3478
+
+All settings are environment variables — see [`.env.example`](.env.example)
+for the full annotated list. Two you will almost certainly want in production:
+
+- `PALE_SIP_EXTERNAL_ADDR` — the public hostname/IP clients use to reach SIP.
+  Without it the registrar is advertised as `127.0.0.1` and only local
+  clients can register.
+- `PALE_SIP_TLS_CERT` / `PALE_SIP_TLS_KEY` — providing both enables SIP over
+  TLS automatically (and disables plain UDP by default).
 
 ### Build & Run Desktop Client
 

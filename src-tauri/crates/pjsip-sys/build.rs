@@ -253,10 +253,17 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
     // Determine OpenSSL path
     let openssl_prefix = find_openssl_prefix(target_os);
 
-    // Build configure arguments
+    // Build configure arguments.
+    // Pin auto-detected optional video deps off so builds don't depend on
+    // whatever happens to be installed on the build machine (e.g. a Homebrew
+    // ffmpeg whose API doesn't match what PJSIP 2.14 expects).
     let mut configure_args = vec![
         "./configure".to_string(),
         "--enable-shared=no".to_string(),
+        "--disable-ffmpeg".to_string(),
+        "--disable-openh264".to_string(),
+        "--disable-vpx".to_string(),
+        "--disable-sdl".to_string(),
     ];
 
     // Windows cross/native compilation
