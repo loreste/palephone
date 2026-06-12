@@ -2,10 +2,11 @@ import { useState, useCallback, useEffect } from "react";
 import { Phone, Delete, Zap, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { motion } from "framer-motion";
-import { useCallStore } from "@/store/callStore";
 import { toast } from "@/components/ui/Toast";
 import { makeCall as ipcMakeCall, paleServerApi } from "@/lib/tauri";
 import { useServerStore } from "@/store/serverStore";
+import { useAccountStore } from "@/store/accountStore";
+import type { SipAccount } from "@/types";
 
 const dialpadKeys = [
   { digit: "1", letters: "" },
@@ -26,6 +27,22 @@ interface SpeedDial {
   code: string;
   destination: string;
   label: string;
+}
+
+/**
+ * Derive the SIP domain to use for bare-number dialing from the registered
+ * account: prefer the host part of the account's SIP URI, falling back to
+ * the registrar URI (stripped of scheme/params).
+ */
+function accountDomain(account: SipAccount | null): string | null {
+  if (!account) return null;
+  const fromSipUri = account.sipUri?.split("@")[1]?.split(/[;>]/)[0]?.trim();
+  if (fromSipUri) return fromSipUri;
+  const fromRegistrar = account.registrarUri
+    ?.replace(/^sips?:/, "")
+    .split(/[;>]/)[0]
+    ?.trim();
+  return fromRegistrar || null;
 }
 
 export function DialpadView() {
@@ -54,45 +71,37 @@ export function DialpadView() {
     setInput("");
   }, []);
 
-  const { addSession, setActiveCallId, setConnectTime } = useCallStore();
+  const account = useAccountStore((s) => s.account);
+  const regState = useAccountStore((s) => s.regState);
+  const defaultDomain = accountDomain(account);
+
+  // Bare numbers (no "@") need a registered account to supply the domain;
+  // full SIP URIs can be dialed directly.
+  const isBareNumber = input.trim().length > 0 && !input.includes("@");
+  const canCall =
+    input.trim().length > 0 &&
+    (!isBareNumber || (regState === "registered" && !!defaultDomain));
 
   const handleCall = useCallback(async () => {
-    if (!input.trim()) return;
-    const uri = input.includes("@")
-      ? (input.startsWith("sip:") ? input : `sip:${input}`)
-      : `sip:${input}@example.com`;
-    const name = input.includes("@") ? input.split("@")[0]?.replace("sip:", "") : input;
+    const trimmed = input.trim();
+    if (!trimmed) return;
+    if (!trimmed.includes("@") && (regState !== "registered" || !defaultDomain)) return;
+
+    const uri = trimmed.includes("@")
+      ? (trimmed.startsWith("sip:") ? trimmed : `sip:${trimmed}`)
+      : `sip:${trimmed}@${defaultDomain}`;
+    const name = trimmed.includes("@") ? trimmed.split("@")[0]?.replace("sip:", "") : trimmed;
 
     toast({ type: "info", title: `Calling ${name}...` });
 
     try {
-      // Try real PJSIP call via Tauri IPC
-      // The backend will emit CallState events that useSipEvents picks up
+      // Real PJSIP call via Tauri IPC — the backend emits CallState events
+      // that useSipEvents picks up to create the call session.
       await ipcMakeCall(uri);
-    } catch {
-      // Fallback to mock if IPC fails (e.g., no account registered)
-      const callId = Date.now();
-      addSession({
-        id: callId,
-        direction: "outbound",
-        state: "dialing",
-        remoteUri: uri,
-        remoteName: name,
-        startTime: Date.now(),
-        connectTime: null,
-        isMuted: false,
-        isHeld: false,
-        isRecording: false,
-      });
-      setActiveCallId(callId);
-
-      setTimeout(() => {
-        setConnectTime(callId, Date.now());
-        useCallStore.getState().updateSessionState(callId, "connected");
-        toast({ type: "success", title: "Call connected (mock)" });
-      }, 2000);
+    } catch (err) {
+      toast({ type: "error", title: "Call failed", description: String(err) });
     }
-  }, [input, addSession, setActiveCallId, setConnectTime]);
+  }, [input, regState, defaultDomain]);
 
   return (
     <div className="flex flex-col items-center justify-between h-full px-6 py-4">
@@ -102,6 +111,12 @@ export function DialpadView() {
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && canCall) {
+              e.preventDefault();
+              handleCall();
+            }
+          }}
           placeholder="Enter number or SIP URI"
           className={cn(
             "w-full bg-surface border border-border-subtle rounded-lg",
@@ -120,6 +135,11 @@ export function DialpadView() {
             <X size={16} />
           </button>
         )}
+        {isBareNumber && !canCall && (
+          <p className="mt-1.5 text-xs text-tertiary text-center">
+            Register a SIP account to dial numbers, or enter a full SIP URI (user@domain)
+          </p>
+        )}
       </div>
 
       {/* Speed dials */}
@@ -131,7 +151,9 @@ export function DialpadView() {
               onClick={() => {
                 setInput(sd.destination);
                 toast({ type: "info", title: `Calling ${sd.label}...` });
-                ipcMakeCall(sd.destination.startsWith("sip:") ? sd.destination : `sip:${sd.destination}`).catch(() => {});
+                ipcMakeCall(sd.destination.startsWith("sip:") ? sd.destination : `sip:${sd.destination}`).catch((err) =>
+                  toast({ type: "error", title: "Call failed", description: String(err) })
+                );
               }}
               className={cn(
                 "flex items-center gap-1.5 px-3 py-1.5 rounded-full shrink-0",
@@ -188,7 +210,7 @@ export function DialpadView() {
           whileTap={{ scale: 0.9 }}
           transition={{ type: "spring", stiffness: 400, damping: 20 }}
           onClick={handleCall}
-          disabled={!input.trim()}
+          disabled={!canCall}
           className={cn(
             "flex items-center justify-center gap-2",
             "w-[72px] h-[56px] rounded-full",
@@ -196,11 +218,11 @@ export function DialpadView() {
             "hover:brightness-110 active:brightness-90",
             "disabled:opacity-40 disabled:cursor-not-allowed",
             "transition-all shadow-md",
-            input.trim() && "shadow-glow-success"
+            canCall && "shadow-glow-success"
           )}
           aria-label="Make call"
           style={{
-            boxShadow: input.trim()
+            boxShadow: canCall
               ? "0 0 16px rgba(34, 197, 94, 0.25)"
               : undefined,
           }}

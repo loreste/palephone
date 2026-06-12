@@ -7,6 +7,7 @@ import { AudioSettings } from "./AudioSettings";
 import { NetworkSettings } from "./NetworkSettings";
 import { registerAccount, storeSipPassword, getConfig, saveSettings } from "@/lib/tauri";
 import { adminLogin, adminLogout, adminBaseUrl } from "@/lib/adminApi";
+import { disconnectServer } from "@/lib/session";
 import { toast } from "@/components/ui/Toast";
 import type { SipAccount } from "@/types";
 
@@ -199,7 +200,7 @@ function AccountSettingsPanel() {
 }
 
 function ServerSettingsPanel() {
-  const { baseUrl, connected, setConnection, disconnect } = useServerStore();
+  const { baseUrl, connected, setConnection } = useServerStore();
   const [url, setUrl] = useState(baseUrl ?? adminBaseUrl());
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
@@ -234,8 +235,8 @@ function ServerSettingsPanel() {
     if (token && baseUrl) {
       adminLogout(baseUrl, token).catch(() => {});
     }
-    sessionStorage.removeItem("pale.admin.token");
-    disconnect();
+    // Clears server connection plus stale presence, server rooms, and files
+    disconnectServer();
     toast({ type: "info", title: "Disconnected from server" });
   };
 

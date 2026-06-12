@@ -550,12 +550,21 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
     let status = dep_cmd.status().expect("Failed to run make dep");
     assert!(status.success(), "PJSIP make dep failed");
 
-    // Run make
+    // Run make. PJSIP's makefiles have a dependency race under -jN that
+    // intermittently fails mid-build; a serial retry from where it stopped
+    // always converges.
     let mut build_cmd = Command::new(&make_cmd);
     build_cmd.arg(&format!("-j{}", num_jobs)).current_dir(pj_src_dir);
     setup_make_env(&mut build_cmd);
     let status = build_cmd.status().expect("Failed to run make");
-    assert!(status.success(), "PJSIP make failed");
+    if !status.success() {
+        println!("cargo:warning=PJSIP parallel make failed; retrying serially...");
+        let mut retry_cmd = Command::new(&make_cmd);
+        retry_cmd.current_dir(pj_src_dir);
+        setup_make_env(&mut retry_cmd);
+        let status = retry_cmd.status().expect("Failed to run make (serial retry)");
+        assert!(status.success(), "PJSIP make failed");
+    }
 
     println!("cargo:warning=PJSIP build complete.");
 }

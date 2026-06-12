@@ -26,6 +26,11 @@ const MAX_SIP_MESSAGES: usize = 10_000;
 const MAX_SIP_TRANSACTIONS: usize = 20_000;
 const MAX_SIP_NOTIFICATIONS: usize = 10_000;
 const MAX_ADMIN_SESSIONS: usize = 10_000;
+
+/// Role string granting administrative privileges on management endpoints.
+pub const ROLE_ADMIN: &str = "admin";
+/// Default role for regular (non-admin) users.
+pub const ROLE_USER: &str = "user";
 const MAX_USERS: usize = 100_000;
 const MAX_SIP_ACCOUNTS: usize = 100_000;
 const MAX_REGISTRATIONS: usize = 100_000;
@@ -234,7 +239,10 @@ pub struct AppState {
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
     rate_limits: ShardedMap<String, RateLimitBucket>,
     rate_limit_rps: u32,
-    sip_registrar: String,
+    /// Address advertised to clients as their SIP registrar. `None` when the
+    /// active SIP backend cannot register clients (e.g. the pjsip backend),
+    /// in which case login/provisioning responses must not advertise one.
+    sip_registrar: Option<String>,
     ldap_config: std::sync::RwLock<ldap_auth::LdapConfig>,
     pg: Option<PgStore>,
     pg_failure_count: Arc<std::sync::atomic::AtomicU64>,
@@ -363,7 +371,7 @@ impl AppState {
             sse_tx: tokio::sync::broadcast::channel(256).0,
             rate_limits: ShardedMap::new(),
             rate_limit_rps: 100,
-            sip_registrar: "127.0.0.1:5060".to_string(),
+            sip_registrar: None,
             ldap_config: std::sync::RwLock::new(ldap_auth::LdapConfig::default()),
             pg: None,
             pg_failure_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -378,8 +386,16 @@ impl AppState {
         *self.ldap_config.write().expect("ldap config lock") = config;
     }
 
+    /// Advertise `addr` as the SIP registrar in login/provisioning responses.
+    /// Only call this when the active SIP backend actually implements
+    /// REGISTER (currently only the udp-parser backend does).
     pub fn set_sip_registrar(&mut self, addr: String) {
-        self.sip_registrar = addr;
+        self.sip_registrar = Some(addr);
+    }
+
+    /// Whether the active SIP backend can register clients.
+    pub fn sip_registration_available(&self) -> bool {
+        self.sip_registrar.is_some()
     }
 
     pub fn set_rate_limit_rps(&mut self, rps: u32) {
@@ -548,7 +564,7 @@ impl AppState {
         }
 
         if username != self.admin_username
-            || sha256_hex(password.as_bytes()) != self.admin_password_hash
+            || !verify_password(password, &self.admin_password_hash)
         {
             self.record_login_failure(source);
             self.record_audit_event(username, "admin.login.failed", Some(source.to_string()));
@@ -559,6 +575,7 @@ impl AppState {
         let session = AdminSession {
             token: Uuid::new_v4().to_string(),
             principal: self.admin_username.clone(),
+            role: ROLE_ADMIN.to_string(),
             expires_at: Utc::now() + Duration::hours(12),
         };
         self.admin_sessions
@@ -611,15 +628,23 @@ impl AppState {
     }
 
     pub fn principal_for_bearer(&self, bearer: &str) -> Option<String> {
+        self.principal_role_for_bearer(bearer)
+            .map(|(principal, _)| principal)
+    }
+
+    /// Resolve a bearer token to `(principal, role)`. The static server token
+    /// maps to the superuser admin; session tokens carry the role recorded at
+    /// login time. Returns `None` for unknown or expired tokens.
+    pub fn principal_role_for_bearer(&self, bearer: &str) -> Option<(String, String)> {
         if bearer == self.http_token {
-            return Some(self.admin_username.clone());
+            return Some((self.admin_username.clone(), ROLE_ADMIN.to_string()));
         }
 
         self.admin_sessions
             .retain(|_, session| session.expires_at > Utc::now());
         self.admin_sessions
             .get(&bearer.to_string())
-            .map(|session| session.principal)
+            .map(|session| (session.principal, session.role))
     }
 
     pub fn refresh_admin_session(&self, old_token: &str) -> Result<AdminSession, AuthError> {
@@ -633,6 +658,7 @@ impl AppState {
         let new_session = AdminSession {
             token: Uuid::new_v4().to_string(),
             principal: old_session.principal,
+            role: old_session.role,
             expires_at: Utc::now() + Duration::hours(12),
         };
         self.admin_sessions
@@ -787,10 +813,7 @@ impl AppState {
             return Err(format!("User with SIP URI {} already exists", input.sip_uri));
         }
 
-        let password_hash = input
-            .password
-            .as_deref()
-            .map(|p| sha256_hex(p.as_bytes()));
+        let password_hash = input.password.as_deref().map(hash_password);
 
         let user = User {
             id: Uuid::new_v4(),
@@ -840,7 +863,11 @@ impl AppState {
             .map(|(u, _)| u)
             .unwrap_or_else(|| sip_uri.to_string());
 
-        // Try LDAP first if configured
+        // Try LDAP first if configured. Track whether LDAP actually verified
+        // this password: if the LDAP server is unreachable, the bind fails, or
+        // no runtime is available, we MUST fall back to verified local auth
+        // instead of skipping password verification entirely (fail closed).
+        let mut ldap_authenticated = false;
         let ldap_cfg = self.ldap_config();
         if ldap_cfg.enabled {
             let rt = tokio::runtime::Handle::try_current();
@@ -850,6 +877,7 @@ impl AppState {
                 });
 
                 if let Ok(ldap_user) = ldap_result {
+                    ldap_authenticated = true;
                     // Auto-provision: create local user if not exists
                     if !self.user_exists(&ldap_user.sip_uri) {
                         let _ = self.create_user(CreateUserRequest {
@@ -881,18 +909,21 @@ impl AppState {
             .find(|u| u.sip_uri == sip_uri || split_sip_aor_simple(&u.sip_uri).map(|(u, _)| u).as_deref() == Some(&username))
             .ok_or(AuthError::Unauthorized)?;
 
-        // Verify password (skip if LDAP already authenticated)
-        if !ldap_cfg.enabled {
+        // Verify password locally unless LDAP itself verified it. LDAP being
+        // merely *enabled* is not enough — an unreachable or failing
+        // directory must not bypass password verification.
+        if !ldap_authenticated {
             let expected_hash = user.password_hash.as_deref().ok_or(AuthError::Unauthorized)?;
-            if sha256_hex(password.as_bytes()) != expected_hash {
+            if !verify_password(password, expected_hash) {
                 return Err(AuthError::Unauthorized);
             }
         }
 
-        // Create session
+        // Create session carrying the user's role (consulted by admin-only endpoints)
         let session = AdminSession {
             token: Uuid::new_v4().to_string(),
             principal: user.sip_uri.clone(),
+            role: user.role.clone(),
             expires_at: Utc::now() + Duration::hours(12),
         };
         self.admin_sessions
@@ -914,7 +945,11 @@ impl AppState {
                 }
                 SipCredentials {
                     sip_uri: user.sip_uri.clone(),
-                    registrar_uri: format!("sip:{}", self.sip_registrar),
+                    registrar_uri: self
+                        .sip_registrar
+                        .as_ref()
+                        .map(|registrar| format!("sip:{}", registrar)),
+                    registration_available: self.sip_registrar.is_some(),
                     username: username.clone(),
                     password: password.to_string(),
                     transport: "udp".to_string(),
@@ -2039,7 +2074,11 @@ impl AppState {
         let sip_creds = split_sip_aor_simple(&sip_uri).map(|(username, domain)| {
             SipCredentials {
                 sip_uri: sip_uri.clone(),
-                registrar_uri: format!("sip:{}", self.sip_registrar),
+                registrar_uri: self
+                    .sip_registrar
+                    .as_ref()
+                    .map(|registrar| format!("sip:{}", registrar)),
+                registration_available: self.sip_registrar.is_some(),
                 username,
                 password: input.password,
                 transport: "udp".to_string(),
@@ -2828,7 +2867,11 @@ pub struct UserLoginResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct SipCredentials {
     pub sip_uri: String,
-    pub registrar_uri: String,
+    /// Registrar to REGISTER against. `None` when the active SIP backend
+    /// cannot register clients — clients should skip auto-registration.
+    pub registrar_uri: Option<String>,
+    /// True only when the server runs a backend that implements REGISTER.
+    pub registration_available: bool,
     pub username: String,
     pub password: String,
     pub transport: String,
@@ -2839,6 +2882,11 @@ pub struct SipCredentials {
 pub struct AdminSession {
     pub token: String,
     pub principal: String,
+    /// Role attached to this session ("admin" or "user"). Sessions created
+    /// before role separation deserialize to an empty string, which is
+    /// treated as non-admin (fail closed).
+    #[serde(default)]
+    pub role: String,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -3929,6 +3977,33 @@ pub fn start_wrap_up_timer(state: Arc<AppState>, agent_uri: String, wrap_up_secs
     });
 }
 
+/// Hash a password for storage with argon2id (PHC string format).
+pub fn hash_password(password: &str) -> String {
+    use argon2::password_hash::{PasswordHasher, SaltString};
+    let salt = SaltString::generate(&mut rand::rngs::OsRng);
+    argon2::Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .expect("argon2 hashing cannot fail with valid parameters")
+        .to_string()
+}
+
+/// Verify a password against a stored hash. Accepts argon2 PHC strings and,
+/// for records created before the argon2 migration, legacy unsalted
+/// SHA-256 hex digests.
+pub fn verify_password(password: &str, stored: &str) -> bool {
+    if stored.starts_with("$argon2") {
+        use argon2::password_hash::{PasswordHash, PasswordVerifier};
+        let Ok(parsed) = PasswordHash::new(stored) else {
+            return false;
+        };
+        return argon2::Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok();
+    }
+    // Legacy SHA-256 hex digest
+    sha256_hex(password.as_bytes()) == stored
+}
+
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     ShaDigest::update(&mut hasher, bytes);
@@ -4037,6 +4112,21 @@ impl PersistedMapObject for AdminAuditEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn argon2_hash_roundtrip() {
+        let hash = hash_password("correct horse battery staple");
+        assert!(hash.starts_with("$argon2"));
+        assert!(verify_password("correct horse battery staple", &hash));
+        assert!(!verify_password("wrong password", &hash));
+    }
+
+    #[test]
+    fn legacy_sha256_hashes_still_verify() {
+        let legacy = sha256_hex("old-password".as_bytes());
+        assert!(verify_password("old-password", &legacy));
+        assert!(!verify_password("not-it", &legacy));
+    }
 
     #[test]
     fn conference_join_is_idempotent() {

@@ -40,7 +40,14 @@ interface ChatStoreState {
   setActiveRoomId: (id: string | null) => void;
   addMessage: (msg: ChatMessage) => void;
   setMessages: (roomId: string, msgs: ChatMessage[]) => void;
+  removeMessage: (roomId: string, eventId: string) => void;
   setTypingUsers: (roomId: string, userIds: string[]) => void;
+  clearServerData: () => void;
+}
+
+/** Pale-server room ids are UUIDs; Matrix room ids start with "!". */
+export function isServerRoomId(roomId: string): boolean {
+  return !roomId.startsWith("!");
 }
 
 export const useChatStore = create<ChatStoreState>((set) => ({
@@ -76,8 +83,31 @@ export const useChatStore = create<ChatStoreState>((set) => ({
       messages: { ...state.messages, [roomId]: msgs },
     })),
 
+  removeMessage: (roomId, eventId) =>
+    set((state) => ({
+      messages: {
+        ...state.messages,
+        [roomId]: (state.messages[roomId] ?? []).filter((m) => m.event_id !== eventId),
+      },
+    })),
+
   setTypingUsers: (roomId, userIds) =>
     set((state) => ({
       typingByRoom: { ...state.typingByRoom, [roomId]: userIds },
+    })),
+
+  // Drop all pale-server rooms/messages (e.g. on server disconnect),
+  // keeping Matrix data intact.
+  clearServerData: () =>
+    set((state) => ({
+      rooms: state.rooms.filter((r) => !isServerRoomId(r.room_id)),
+      messages: Object.fromEntries(
+        Object.entries(state.messages).filter(([roomId]) => !isServerRoomId(roomId))
+      ),
+      typingByRoom: Object.fromEntries(
+        Object.entries(state.typingByRoom).filter(([roomId]) => !isServerRoomId(roomId))
+      ),
+      activeRoomId:
+        state.activeRoomId && isServerRoomId(state.activeRoomId) ? null : state.activeRoomId,
     })),
 }));

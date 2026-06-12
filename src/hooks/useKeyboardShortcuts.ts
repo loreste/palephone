@@ -1,6 +1,13 @@
 import { useEffect } from "react";
 import { useUiStore } from "@/store/uiStore";
 import { useCallStore } from "@/store/callStore";
+import {
+  answerIncomingCall,
+  rejectIncomingCall,
+  hangupCall,
+  toggleMute,
+  toggleHold,
+} from "@/hooks/useCallActions";
 
 interface ShortcutHandlers {
   onOpenCommandPalette: () => void;
@@ -9,8 +16,7 @@ interface ShortcutHandlers {
 
 export function useKeyboardShortcuts({ onOpenCommandPalette, onOpenSearch }: ShortcutHandlers) {
   const setActiveTab = useUiStore((s) => s.setActiveTab);
-  const { activeCallId, sessions, incomingCall, setMuted, setHeld, updateSessionState, removeSession, setIncomingCall, addSession, setActiveCallId } =
-    useCallStore();
+  const { activeCallId, sessions, incomingCall } = useCallStore();
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -55,11 +61,11 @@ export function useKeyboardShortcuts({ onOpenCommandPalette, onOpenSearch }: Sho
 
       const activeSession = sessions.find((s) => s.id === activeCallId);
 
-      // M — Toggle mute (during call)
+      // M — Toggle mute (during call) — drives the SIP engine, not just UI state
       if (e.key === "m" || e.key === "M") {
         if (activeSession && activeSession.state === "connected") {
           e.preventDefault();
-          setMuted(activeSession.id, !activeSession.isMuted);
+          toggleMute(activeSession.id);
         }
         return;
       }
@@ -68,35 +74,30 @@ export function useKeyboardShortcuts({ onOpenCommandPalette, onOpenSearch }: Sho
       if (e.key === "h" || e.key === "H") {
         if (activeSession && (activeSession.state === "connected" || activeSession.state === "on_hold")) {
           e.preventDefault();
-          const newHeld = !activeSession.isHeld;
-          setHeld(activeSession.id, newHeld);
-          updateSessionState(activeSession.id, newHeld ? "on_hold" : "connected");
+          toggleHold(activeSession.id);
         }
         return;
       }
 
-      // Enter — Answer incoming call
+      // Enter — Answer incoming call (via ipc.answerCall, same path as the Accept button)
       if (e.key === "Enter") {
         if (incomingCall) {
           e.preventDefault();
-          addSession({ ...incomingCall, state: "connected", connectTime: Date.now() });
-          setActiveCallId(incomingCall.id);
-          setIncomingCall(null);
+          answerIncomingCall();
         }
         return;
       }
 
-      // Escape — Hangup / reject / back
+      // Escape — Reject incoming / hang up active call (on the wire)
       if (e.key === "Escape") {
         if (incomingCall) {
           e.preventDefault();
-          setIncomingCall(null);
+          rejectIncomingCall();
           return;
         }
         if (activeSession) {
           e.preventDefault();
-          updateSessionState(activeSession.id, "terminated");
-          setTimeout(() => removeSession(activeSession.id), 300);
+          hangupCall(activeSession.id);
         }
         return;
       }
@@ -106,8 +107,6 @@ export function useKeyboardShortcuts({ onOpenCommandPalette, onOpenSearch }: Sho
     return () => window.removeEventListener("keydown", handler);
   }, [
     activeCallId, sessions, incomingCall,
-    setActiveTab, setMuted, setHeld, updateSessionState,
-    removeSession, setIncomingCall, addSession, setActiveCallId,
-    onOpenCommandPalette,
+    setActiveTab, onOpenCommandPalette, onOpenSearch,
   ]);
 }

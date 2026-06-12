@@ -36,6 +36,7 @@ import {
 } from "@/lib/adminApi";
 import { toast } from "@/components/ui/Toast";
 import { useServerStore } from "@/store/serverStore";
+import { disconnectServer } from "@/lib/session";
 import { paleServerApi } from "@/lib/tauri";
 
 // Helper: all server calls go through Tauri invoke (not webview fetch)
@@ -82,7 +83,6 @@ export function AdminView() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const setServerConnection = useServerStore((s) => s.setConnection);
-  const disconnectServer = useServerStore((s) => s.disconnect);
 
   // Sync token from serverStore if it changes (e.g. after wizard login)
   useEffect(() => {
@@ -216,9 +216,9 @@ export function AdminView() {
             <button
               onClick={async () => {
                 adminLogout(baseUrl, token).catch(() => {});
-                sessionStorage.removeItem("pale.admin.token");
                 setToken("");
                 setSnapshot(null);
+                // Clears the token, server connection, and stale presence/rooms/files
                 disconnectServer();
               }}
               className="h-9 px-3 rounded-md border border-border-default hover:bg-elevated text-sm"

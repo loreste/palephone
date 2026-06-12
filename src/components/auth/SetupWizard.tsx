@@ -10,6 +10,7 @@ type WizardStep = "welcome" | "login" | "done";
 
 export function SetupWizard({ onComplete }: { onComplete: () => void }) {
   const [step, setStep] = useState<WizardStep>("welcome");
+  const [skipped, setSkipped] = useState(false);
 
   return (
     <div className="flex flex-col items-center justify-center h-full px-6 py-8">
@@ -17,10 +18,13 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
       {step === "login" && (
         <UnifiedLoginStep
           onNext={() => setStep("done")}
-          onSkip={() => setStep("done")}
+          onSkip={() => {
+            setSkipped(true);
+            setStep("done");
+          }}
         />
       )}
-      {step === "done" && <DoneStep onComplete={onComplete} />}
+      {step === "done" && <DoneStep skipped={skipped} onComplete={onComplete} />}
     </div>
   );
 }
@@ -49,8 +53,8 @@ function WelcomeStep({ onNext }: { onNext: () => void }) {
   );
 }
 
-function UnifiedLoginStep({ onNext }: { onNext: () => void; onSkip?: () => void }) {
-  const [serverUrl, setServerUrl] = useState("http://localhost:8090");
+function UnifiedLoginStep({ onNext, onSkip }: { onNext: () => void; onSkip?: () => void }) {
+  const [serverUrl, setServerUrl] = useState("http://localhost:8080");
   const [sipUri, setSipUri] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -132,7 +136,13 @@ function UnifiedLoginStep({ onNext }: { onNext: () => void; onSkip?: () => void 
       />
 
       <div className="space-y-3 mb-6">
-        <Input label="Server URL" value={serverUrl} onChange={setServerUrl} placeholder="https://pale.yourcompany.com" />
+        <Input
+          label="Server URL"
+          value={serverUrl}
+          onChange={setServerUrl}
+          placeholder="http://localhost:8080"
+          hint="Server default is port 8080; the docker-compose setup maps it to 8090 externally."
+        />
         <Input label="SIP URI" value={sipUri} onChange={setSipUri} placeholder="sip:you@company.com" />
         <Input label="Password" value={password} onChange={setPassword} placeholder="password" type="password" />
       </div>
@@ -140,11 +150,20 @@ function UnifiedLoginStep({ onNext }: { onNext: () => void; onSkip?: () => void 
       <Button className="w-full gap-1" onClick={handleLogin} disabled={loading || !sipUri || !password}>
         {loading ? "Signing in..." : "Sign In"} {!loading && <ArrowRight size={14} />}
       </Button>
+
+      {onSkip && (
+        <Button variant="ghost" className="w-full mt-2" onClick={onSkip} disabled={loading}>
+          Skip for now — use local SIP only
+        </Button>
+      )}
+      <p className="text-[10px] text-tertiary text-center mt-2">
+        You can connect to a Pale server later in Settings &gt; Server.
+      </p>
     </div>
   );
 }
 
-function DoneStep({ onComplete }: { onComplete: () => void }) {
+function DoneStep({ skipped, onComplete }: { skipped: boolean; onComplete: () => void }) {
   return (
     <div className="text-center max-w-[300px]">
       <div className="w-16 h-16 rounded-full bg-success/10 flex items-center justify-center mx-auto mb-4">
@@ -152,7 +171,9 @@ function DoneStep({ onComplete }: { onComplete: () => void }) {
       </div>
       <h2 className="text-xl font-bold text-primary mb-2">You're all set!</h2>
       <p className="text-sm text-tertiary mb-6">
-        Pale is ready. You can update your settings anytime.
+        {skipped
+          ? "Pale is running in local SIP-only mode. Add your SIP account in Settings > Account, and connect to a Pale server anytime in Settings > Server."
+          : "Pale is ready. You can update your settings anytime."}
       </p>
       <Button className="w-full" onClick={onComplete}>
         Start Using Pale
@@ -203,12 +224,14 @@ function Input({
   onChange,
   placeholder,
   type = "text",
+  hint,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   placeholder: string;
   type?: string;
+  hint?: string;
 }) {
   return (
     <div className="space-y-1.5">
@@ -220,6 +243,7 @@ function Input({
         placeholder={placeholder}
         className="w-full bg-surface border border-border-subtle rounded-md px-3 py-2 text-sm text-primary placeholder:text-tertiary focus:outline-none focus:border-border-focus focus:ring-1 focus:ring-accent/30"
       />
+      {hint && <p className="text-[10px] text-tertiary">{hint}</p>}
     </div>
   );
 }

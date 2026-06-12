@@ -3,37 +3,14 @@ import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/cn";
 import { CallerAvatar } from "./CallerAvatar";
 import { useCallStore } from "@/store/callStore";
-import { toast } from "@/components/ui/Toast";
-import * as ipc from "@/lib/tauri";
+import { useCallActions } from "@/hooks/useCallActions";
 
 export function IncomingCallOverlay() {
-  const { incomingCall, setIncomingCall, addSession, setActiveCallId, removeSession } =
-    useCallStore();
+  const incomingCall = useCallStore((s) => s.incomingCall);
+  const { answerIncomingCall, rejectIncomingCall } = useCallActions();
 
-  const handleAccept = () => {
-    if (!incomingCall) return;
-    const call = incomingCall;
-    ipc.answerCall(call.id).catch((err) => {
-      toast({ type: "error", title: "Failed to answer call", description: String(err) });
-      removeSession(call.id);
-      setActiveCallId(null);
-    });
-    addSession({
-      ...call,
-      state: "connected",
-      connectTime: Date.now(),
-    });
-    setActiveCallId(call.id);
-    setIncomingCall(null);
-  };
-
-  const handleReject = () => {
-    if (!incomingCall) return;
-    ipc.hangupCall(incomingCall.id).catch((err) => {
-      toast({ type: "error", title: "Failed to reject call", description: String(err) });
-    });
-    setIncomingCall(null);
-  };
+  const handleAccept = () => answerIncomingCall();
+  const handleReject = () => rejectIncomingCall();
 
   return (
     <AnimatePresence>

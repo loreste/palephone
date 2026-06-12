@@ -76,13 +76,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(100);
     app_state.set_rate_limit_rps(rate_limit_rps);
+
+    let sip_backend = sip_backend_from_env();
+
     // Use PALE_SIP_EXTERNAL_ADDR if set (public-facing SIP address for clients),
     // otherwise derive from HTTP bind address, replacing 0.0.0.0 with 127.0.0.1
     let sip_external = match std::env::var("PALE_SIP_EXTERNAL_ADDR") {
         Ok(addr) => addr,
         Err(_) => {
             let addr = config.sip_addr.to_string();
-            if addr.starts_with("0.0.0.0") {
+            if addr.starts_with("0.0.0.0") && matches!(sip_backend, SipBackend::UdpParser) {
                 log::warn!(
                     "PALE_SIP_EXTERNAL_ADDR is not set — advertising the SIP registrar as 127.0.0.1, \
                      so only clients on this machine can register. Set PALE_SIP_EXTERNAL_ADDR to this \
@@ -92,12 +95,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             addr.replace("0.0.0.0", "127.0.0.1")
         }
     };
-    app_state.set_sip_registrar(sip_external.clone());
+    // Only advertise a registrar when the active backend implements REGISTER.
+    // The pjsip backend cannot register clients, so login/provisioning
+    // responses must not point clients at it.
+    match sip_backend {
+        SipBackend::UdpParser => app_state.set_sip_registrar(sip_external.clone()),
+        SipBackend::Pjsip => log::info!(
+            "SIP backend 'pjsip' does not implement REGISTER; login responses will not advertise a SIP registrar"
+        ),
+    }
 
     let state = Arc::new(app_state);
     tokio::fs::create_dir_all(state.files_dir()).await?;
-
-    let sip_backend = sip_backend_from_env();
     let _pjsip_runtime = match sip_backend {
         SipBackend::Pjsip => {
             let tls = tls_config_from_env(config.sip_addr.port())?;
@@ -114,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 onoff(enable_tcp),
                 tls.as_ref().map(|t| format!("on (port {})", t.port)).unwrap_or_else(|| "off".to_string()),
                 onoff(require_srtp),
-                sip_external,
+                "none (pjsip backend has no registrar)",
                 if state.pg_store().is_some() {
                     "PostgreSQL".to_string()
                 } else {
@@ -140,14 +149,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         SipBackend::UdpParser => {
             state.set_runtime_event_persistence(false);
+            // Bind synchronously at startup: if the SIP listener cannot
+            // start, the process must exit nonzero instead of silently
+            // serving HTTP with no SIP listener.
+            let socket = match sip::bind_udp_socket(config.sip_addr).await {
+                Ok(socket) => socket,
+                Err(err) => {
+                    log::error!(
+                        "failed to start SIP parser server on {}: {}",
+                        config.sip_addr,
+                        err
+                    );
+                    std::process::exit(1);
+                }
+            };
+            log::info!("Pale SIP parser UDP server listening on {}", config.sip_addr);
             let sip_state = state.clone();
-            let sip_addr = config.sip_addr;
             tokio::spawn(async move {
-                if let Err(err) = sip::run_udp_server(sip_addr, sip_state).await {
+                if let Err(err) = sip::serve_udp(socket, sip_state).await {
+                    // The receive loop only exits on unrecoverable socket
+                    // errors; treat that as a fatal outage rather than
+                    // continuing to serve HTTP with no SIP listener.
                     log::error!("SIP parser server stopped: {}", err);
+                    std::process::exit(1);
                 }
             });
-            log::info!("Pale SIP parser UDP server listening on {}", config.sip_addr);
             None
         }
     };
@@ -246,9 +272,7 @@ fn config_from_env() -> Result<ServerConfig, String> {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "admin".to_string()),
-        admin_password_hash: pale_server::sha256_hex(
-            admin_password.expect("validated above").as_bytes(),
-        ),
+        admin_password_hash: pale_server::hash_password(&admin_password.expect("validated above")),
         storage_key: storage_key.expect("validated above"),
         max_upload_bytes: std::env::var("PALE_MAX_UPLOAD_BYTES")
             .ok()

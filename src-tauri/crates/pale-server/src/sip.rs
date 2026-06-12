@@ -17,10 +17,12 @@ use crate::{
     UpsertSipSubscription,
 };
 
-pub async fn run_udp_server(
+/// Perform the startup half of the UDP SIP server: gate check and socket
+/// bind. Errors here mean the SIP listener cannot start and must be treated
+/// as fatal by the caller — never swallowed inside a spawned task.
+pub async fn bind_udp_socket(
     addr: SocketAddr,
-    state: Arc<AppState>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Arc<UdpSocket>, Box<dyn std::error::Error + Send + Sync>> {
     if !allow_insecure_udp_parser() {
         return Err(
             "UDP SIP parser is insecure and disabled; set PALE_ALLOW_INSECURE_SIP_UDP=1 for development fallback use"
@@ -28,7 +30,22 @@ pub async fn run_udp_server(
         );
     }
 
-    let socket = Arc::new(UdpSocket::bind(addr).await?);
+    Ok(Arc::new(UdpSocket::bind(addr).await?))
+}
+
+pub async fn run_udp_server(
+    addr: SocketAddr,
+    state: Arc<AppState>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let socket = bind_udp_socket(addr).await?;
+    serve_udp(socket, state).await
+}
+
+/// Receive loop over an already-bound socket. Only returns on socket errors.
+pub async fn serve_udp(
+    socket: Arc<UdpSocket>,
+    state: Arc<AppState>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut buf = vec![0_u8; 8192];
 
     loop {

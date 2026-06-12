@@ -24,6 +24,13 @@ import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
 import { getConfig, getSipPassword, paleLogin, registerAccount } from "@/lib/tauri";
 
+/**
+ * Persisted on the frontend (localStorage) rather than in config.ui: the Rust
+ * UiPersist struct only round-trips known fields, so an extra TS-only field
+ * would be silently dropped by save_settings.
+ */
+const SETUP_COMPLETE_KEY = "pale.setup_complete";
+
 const views = {
   dialpad: DialpadView,
   chat: ChatView,
@@ -102,15 +109,22 @@ export function AppShell() {
           }
         }
 
-        // Show wizard if not connected to server — need credentials
-        if (!useServerStore.getState().connected) {
+        // Show wizard if not connected to server and the user has never
+        // completed (or skipped) setup. Skipped users run in local SIP-only
+        // mode and can connect later via Settings > Server.
+        if (
+          !useServerStore.getState().connected &&
+          localStorage.getItem(SETUP_COMPLETE_KEY) !== "1"
+        ) {
           setShowWizard(true);
         }
 
         setWizardChecked(true);
       })
       .catch(() => {
-        setShowWizard(true);
+        if (localStorage.getItem(SETUP_COMPLETE_KEY) !== "1") {
+          setShowWizard(true);
+        }
         setWizardChecked(true);
       });
   }, []);
@@ -122,7 +136,12 @@ export function AppShell() {
       <div className="flex flex-col h-screen w-screen overflow-hidden safe-area-top safe-area-bottom">
         {!mobile && <TitleBar />}
         <main className="flex-1 overflow-y-auto">
-          <SetupWizard onComplete={() => setShowWizard(false)} />
+          <SetupWizard
+            onComplete={() => {
+              localStorage.setItem(SETUP_COMPLETE_KEY, "1");
+              setShowWizard(false);
+            }}
+          />
         </main>
         <ToastContainer />
       </div>

@@ -297,7 +297,7 @@ async fn list_audit_events(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<crate::AdminAuditEvent>>, ApiError> {
-    require_bearer(&headers, &state)?;
+    authenticated_admin(&headers, &state)?;
     Ok(Json(state.audit_events()))
 }
 
@@ -306,7 +306,7 @@ async fn create_user(
     headers: HeaderMap,
     Json(input): Json<CreateUserRequest>,
 ) -> Result<Json<crate::User>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     let user = state.create_user(input).map_err(|e| ApiError::Conflict(e))?;
     state.record_audit_event(&principal, "user.created", Some(user.id.to_string()));
     Ok(Json(user))
@@ -325,7 +325,7 @@ async fn delete_user(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<crate::User>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     let user = state.delete_user(id).ok_or(ApiError::NotFound)?;
     state.record_audit_event(&principal, "user.deleted", Some(id.to_string()));
     Ok(Json(user))
@@ -342,7 +342,7 @@ async fn update_user_role(
     Path(id): Path<Uuid>,
     Json(input): Json<UpdateRoleRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     state.update_user_role(id, &input.role).ok_or(ApiError::NotFound)?;
     state.record_audit_event(&principal, "user.role_updated", Some(format!("{}:{}", id, input.role)));
     Ok(Json(json!({ "ok": true })))
@@ -353,7 +353,7 @@ async fn create_sip_account(
     headers: HeaderMap,
     Json(input): Json<AdminCreateSipAccountRequest>,
 ) -> Result<Json<crate::SipAccount>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     let account = state.upsert_sip_account(CreateSipAccountRequest {
         password_ha1: sip_ha1(&input.username, &input.domain, input.password.expose()),
         username: input.username,
@@ -368,7 +368,7 @@ async fn list_sip_accounts(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<crate::SipAccount>>, ApiError> {
-    require_bearer(&headers, &state)?;
+    authenticated_admin(&headers, &state)?;
     Ok(Json(state.sip_accounts()))
 }
 
@@ -378,7 +378,7 @@ async fn update_sip_account_status(
     Path((username, domain)): Path<(String, String)>,
     Json(input): Json<UpdateSipAccountStatusRequest>,
 ) -> Result<Json<crate::SipAccount>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     let account = state
         .update_sip_account_enabled(&username, &domain, input.enabled)
         .ok_or(ApiError::NotFound)?;
@@ -391,7 +391,7 @@ async fn delete_sip_account(
     headers: HeaderMap,
     Path((username, domain)): Path<(String, String)>,
 ) -> Result<Json<crate::SipAccount>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     let account = state
         .delete_sip_account(&username, &domain)
         .ok_or(ApiError::NotFound)?;
@@ -403,7 +403,7 @@ async fn list_sip_registrations(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<crate::SipRegistration>>, ApiError> {
-    require_bearer(&headers, &state)?;
+    authenticated_admin(&headers, &state)?;
     Ok(Json(state.registrations()))
 }
 
@@ -411,7 +411,7 @@ async fn list_sip_dialogs(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<crate::SipDialog>>, ApiError> {
-    require_bearer(&headers, &state)?;
+    authenticated_admin(&headers, &state)?;
     Ok(Json(state.sip_dialogs()))
 }
 
@@ -453,7 +453,7 @@ async fn list_sip_transactions(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<crate::SipTransaction>>, ApiError> {
-    require_bearer(&headers, &state)?;
+    authenticated_admin(&headers, &state)?;
     Ok(Json(state.sip_transactions()))
 }
 
@@ -524,7 +524,7 @@ async fn create_call(
     headers: HeaderMap,
     Json(input): Json<CreateCallRequest>,
 ) -> Result<Json<crate::CallSession>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     let call = state.create_call(input);
     state.record_audit_event(&principal, "call.created", Some(call.id.to_string()));
     Ok(Json(call))
@@ -534,7 +534,7 @@ async fn list_calls(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<crate::CallSession>>, ApiError> {
-    require_bearer(&headers, &state)?;
+    authenticated_admin(&headers, &state)?;
     Ok(Json(state.calls()))
 }
 
@@ -544,7 +544,7 @@ async fn update_call_status(
     Path(id): Path<Uuid>,
     Json(input): Json<UpdateCallStatusRequest>,
 ) -> Result<Json<crate::CallSession>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     let status: CallStatus = input.status;
     let call = state
         .update_call_status(id, status)
@@ -558,7 +558,7 @@ async fn create_routing_rule(
     headers: HeaderMap,
     Json(input): Json<CreateRoutingRuleRequest>,
 ) -> Result<Json<crate::RoutingRule>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     let rule = state.create_routing_rule(input);
     state.record_audit_event(&principal, "routing_rule.created", Some(rule.id.to_string()));
     Ok(Json(rule))
@@ -568,7 +568,7 @@ async fn list_routing_rules(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<crate::RoutingRule>>, ApiError> {
-    require_bearer(&headers, &state)?;
+    authenticated_admin(&headers, &state)?;
     Ok(Json(state.routing_rules()))
 }
 
@@ -577,7 +577,7 @@ async fn delete_routing_rule(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<crate::RoutingRule>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     let rule = state
         .delete_routing_rule(id)
         .ok_or(ApiError::NotFound)?;
@@ -591,7 +591,7 @@ async fn update_routing_rule(
     Path(id): Path<Uuid>,
     Json(input): Json<CreateRoutingRuleRequest>,
 ) -> Result<Json<crate::RoutingRule>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     let rule = state
         .update_routing_rule(id, input)
         .ok_or(ApiError::NotFound)?;
@@ -705,7 +705,7 @@ async fn list_sip_subscriptions(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<crate::SipSubscription>>, ApiError> {
-    require_bearer(&headers, &state)?;
+    authenticated_admin(&headers, &state)?;
     Ok(Json(state.sip_subscriptions()))
 }
 
@@ -713,7 +713,7 @@ async fn list_sip_notifications(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<crate::SipNotification>>, ApiError> {
-    require_bearer(&headers, &state)?;
+    authenticated_admin(&headers, &state)?;
     Ok(Json(state.sip_notifications()))
 }
 
@@ -1136,26 +1136,26 @@ async fn list_queue_callbacks(State(state): State<SharedState>, headers: HeaderM
 }
 
 async fn list_vip_callers(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::VipCaller>>, ApiError> {
-    require_bearer(&headers, &state)?;
+    authenticated_admin(&headers, &state)?;
     Ok(Json(state.list_vip_callers()))
 }
 
 async fn create_vip_caller(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<CreateVipCallerRequest>) -> Result<Json<crate::VipCaller>, ApiError> {
-    let p = authenticated_principal(&headers, &state)?;
+    let p = authenticated_admin(&headers, &state)?;
     let vip = state.create_vip_caller(input);
     state.record_audit_event(&p, "vip_caller.created", Some(vip.caller_pattern.clone()));
     Ok(Json(vip))
 }
 
 async fn delete_vip_caller(State(state): State<SharedState>, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, ApiError> {
-    let p = authenticated_principal(&headers, &state)?;
+    let p = authenticated_admin(&headers, &state)?;
     state.delete_vip_caller(id).ok_or(ApiError::NotFound)?;
     state.record_audit_event(&p, "vip_caller.deleted", Some(id.to_string()));
     Ok(Json(json!({"ok": true})))
 }
 
 async fn get_wallboard(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<serde_json::Value>, ApiError> {
-    require_bearer(&headers, &state)?;
+    authenticated_admin(&headers, &state)?;
     let metrics = state.queue_wallboard();
     let agents = state.list_agent_profiles();
     let available = agents.iter().filter(|a| a.state == "available").count();
@@ -1179,25 +1179,25 @@ async fn get_wallboard(State(state): State<SharedState>, headers: HeaderMap) -> 
 }
 
 async fn list_monitors(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::MonitorSession>>, ApiError> {
-    require_bearer(&headers, &state)?; Ok(Json(state.list_monitor_sessions()))
+    authenticated_admin(&headers, &state)?; Ok(Json(state.list_monitor_sessions()))
 }
 async fn start_monitor(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<StartMonitorRequest>) -> Result<Json<crate::MonitorSession>, ApiError> {
-    let p = authenticated_principal(&headers, &state)?;
+    let p = authenticated_admin(&headers, &state)?;
     let session = state.start_monitor(&p, input);
     state.record_audit_event(&p, "monitor.started", Some(format!("{}:{}", session.mode, session.target_call_id)));
     Ok(Json(session))
 }
 async fn end_monitor(State(state): State<SharedState>, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, ApiError> {
-    let p = authenticated_principal(&headers, &state)?;
+    let p = authenticated_admin(&headers, &state)?;
     state.end_monitor(id).ok_or(ApiError::NotFound)?;
     state.record_audit_event(&p, "monitor.ended", Some(id.to_string())); Ok(Json(json!({"ok":true})))
 }
 
 async fn list_scorecards(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::QaScorecard>>, ApiError> {
-    require_bearer(&headers, &state)?; Ok(Json(state.list_scorecards()))
+    authenticated_admin(&headers, &state)?; Ok(Json(state.list_scorecards()))
 }
 async fn create_scorecard(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<CreateScorecardRequest>) -> Result<Json<crate::QaScorecard>, ApiError> {
-    let p = authenticated_principal(&headers, &state)?;
+    let p = authenticated_admin(&headers, &state)?;
     let sc = state.create_scorecard(&p, input);
     state.record_audit_event(&p, "scorecard.created", Some(sc.id.to_string()));
     Ok(Json(sc))
@@ -1207,13 +1207,13 @@ async fn list_canned(State(state): State<SharedState>, headers: HeaderMap) -> Re
     require_bearer(&headers, &state)?; Ok(Json(state.list_canned_responses()))
 }
 async fn create_canned(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<CreateCannedResponseRequest>) -> Result<Json<crate::CannedResponse>, ApiError> {
-    let p = authenticated_principal(&headers, &state)?;
+    let p = authenticated_admin(&headers, &state)?;
     let cr = state.create_canned_response(input);
     state.record_audit_event(&p, "canned_response.created", Some(cr.id.to_string()));
     Ok(Json(cr))
 }
 async fn delete_canned(State(state): State<SharedState>, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, ApiError> {
-    let p = authenticated_principal(&headers, &state)?;
+    let p = authenticated_admin(&headers, &state)?;
     state.delete_canned_response(id).ok_or(ApiError::NotFound)?;
     state.record_audit_event(&p, "canned_response.deleted", Some(id.to_string())); Ok(Json(json!({"ok":true})))
 }
@@ -1224,7 +1224,7 @@ async fn list_queues(State(state): State<SharedState>, headers: HeaderMap) -> Re
     require_bearer(&headers, &state)?; Ok(Json(state.list_queues()))
 }
 async fn create_queue(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<CreateQueueRequest>) -> Result<Json<crate::CallQueue>, ApiError> {
-    let p = authenticated_principal(&headers, &state)?;
+    let p = authenticated_admin(&headers, &state)?;
     let q = state.create_queue(input).map_err(|e| ApiError::Conflict(e))?;
     state.record_audit_event(&p, "queue.created", Some(q.id.to_string()));
     Ok(Json(q))
@@ -1233,7 +1233,7 @@ async fn get_queue(State(state): State<SharedState>, headers: HeaderMap, Path(id
     require_bearer(&headers, &state)?; state.queue(id).map(Json).ok_or(ApiError::NotFound)
 }
 async fn delete_queue(State(state): State<SharedState>, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, ApiError> {
-    let p = authenticated_principal(&headers, &state)?;
+    let p = authenticated_admin(&headers, &state)?;
     state.delete_queue(id).ok_or(ApiError::NotFound)?;
     state.record_audit_event(&p, "queue.deleted", Some(id.to_string()));
     Ok(Json(json!({"ok":true})))
@@ -1249,13 +1249,13 @@ async fn list_extensions(State(state): State<SharedState>, headers: HeaderMap, Q
     Ok(Json(state.list_extensions_filtered(q.unassigned.unwrap_or(false))))
 }
 async fn create_extension(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<CreateExtensionRequest>) -> Result<Json<crate::Extension>, ApiError> {
-    let p = authenticated_principal(&headers, &state)?;
+    let p = authenticated_admin(&headers, &state)?;
     let e = state.create_extension(input).map_err(|e| ApiError::Conflict(e))?;
     state.record_audit_event(&p, "extension.created", Some(e.extension.clone()));
     Ok(Json(e))
 }
 async fn delete_extension(State(state): State<SharedState>, headers: HeaderMap, Path(ext): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {
-    let p = authenticated_principal(&headers, &state)?;
+    let p = authenticated_admin(&headers, &state)?;
     state.delete_extension(&ext).ok_or(ApiError::NotFound)?;
     state.record_audit_event(&p, "extension.deleted", Some(ext)); Ok(Json(json!({"ok":true})))
 }
@@ -1265,7 +1265,7 @@ async fn provision_user_handler(
     headers: HeaderMap,
     Json(input): Json<ProvisionUserRequest>,
 ) -> Result<Json<crate::ProvisionUserResponse>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     let response = state.provision_user(input).map_err(|e| ApiError::Conflict(e))?;
     state.record_audit_event(&principal, "user.provisioned", Some(response.user.id.to_string()));
     Ok(Json(response))
@@ -1277,7 +1277,7 @@ async fn assign_extension_handler(
     Path(ext): Path<String>,
     Json(input): Json<AssignExtensionRequest>,
 ) -> Result<Json<crate::Extension>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     let extension = state.assign_extension(&ext, input.user_id).map_err(|e| ApiError::Conflict(e))?;
     state.record_audit_event(&principal, "extension.assigned", Some(format!("{}:{}", ext, input.user_id)));
     Ok(Json(extension))
@@ -1288,38 +1288,38 @@ async fn unassign_extension_handler(
     headers: HeaderMap,
     Path(ext): Path<String>,
 ) -> Result<Json<crate::Extension>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     let extension = state.unassign_extension(&ext).map_err(|e| ApiError::Conflict(e))?;
     state.record_audit_event(&principal, "extension.unassigned", Some(ext));
     Ok(Json(extension))
 }
 
 async fn list_business_hours(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::BusinessHours>>, ApiError> {
-    require_bearer(&headers, &state)?; Ok(Json(state.list_business_hours()))
+    authenticated_admin(&headers, &state)?; Ok(Json(state.list_business_hours()))
 }
 async fn create_business_hours(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<CreateBusinessHoursRequest>) -> Result<Json<crate::BusinessHours>, ApiError> {
-    let p = authenticated_principal(&headers, &state)?;
+    let p = authenticated_admin(&headers, &state)?;
     let bh = state.create_business_hours(input);
     state.record_audit_event(&p, "business_hours.created", Some(bh.id.to_string()));
     Ok(Json(bh))
 }
 async fn delete_business_hours_entry(State(state): State<SharedState>, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, ApiError> {
-    let p = authenticated_principal(&headers, &state)?;
+    let p = authenticated_admin(&headers, &state)?;
     state.delete_business_hours(id).ok_or(ApiError::NotFound)?;
     state.record_audit_event(&p, "business_hours.deleted", Some(id.to_string())); Ok(Json(json!({"ok":true})))
 }
 
 async fn list_holidays(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::Holiday>>, ApiError> {
-    require_bearer(&headers, &state)?; Ok(Json(state.list_holidays()))
+    authenticated_admin(&headers, &state)?; Ok(Json(state.list_holidays()))
 }
 async fn create_holiday(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<CreateHolidayRequest>) -> Result<Json<crate::Holiday>, ApiError> {
-    let p = authenticated_principal(&headers, &state)?;
+    let p = authenticated_admin(&headers, &state)?;
     let h = state.create_holiday(input);
     state.record_audit_event(&p, "holiday.created", Some(h.id.to_string()));
     Ok(Json(h))
 }
 async fn delete_holiday(State(state): State<SharedState>, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, ApiError> {
-    let p = authenticated_principal(&headers, &state)?;
+    let p = authenticated_admin(&headers, &state)?;
     state.delete_holiday(id).ok_or(ApiError::NotFound)?;
     state.record_audit_event(&p, "holiday.deleted", Some(id.to_string())); Ok(Json(json!({"ok":true})))
 }
@@ -1348,20 +1348,20 @@ async fn create_speed_dial(State(state): State<SharedState>, headers: HeaderMap,
 #[derive(serde::Deserialize)]
 struct CdrQuery { limit: Option<usize> }
 async fn list_cdrs(State(state): State<SharedState>, headers: HeaderMap, Query(q): Query<CdrQuery>) -> Result<Json<Vec<crate::CallDetailRecord>>, ApiError> {
-    require_bearer(&headers, &state)?; Ok(Json(state.list_cdrs(q.limit.unwrap_or(100))))
+    authenticated_admin(&headers, &state)?; Ok(Json(state.list_cdrs(q.limit.unwrap_or(100))))
 }
 
 async fn list_paging_groups(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::PagingGroup>>, ApiError> {
-    require_bearer(&headers, &state)?; Ok(Json(state.list_paging_groups()))
+    authenticated_admin(&headers, &state)?; Ok(Json(state.list_paging_groups()))
 }
 async fn create_paging_group(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<CreatePagingGroupRequest>) -> Result<Json<crate::PagingGroup>, ApiError> {
-    let p = authenticated_principal(&headers, &state)?;
+    let p = authenticated_admin(&headers, &state)?;
     let pg = state.create_paging_group(input);
     state.record_audit_event(&p, "paging_group.created", Some(pg.id.to_string()));
     Ok(Json(pg))
 }
 async fn delete_paging_group(State(state): State<SharedState>, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, ApiError> {
-    let p = authenticated_principal(&headers, &state)?;
+    let p = authenticated_admin(&headers, &state)?;
     state.delete_paging_group(id).ok_or(ApiError::NotFound)?;
     state.record_audit_event(&p, "paging_group.deleted", Some(id.to_string())); Ok(Json(json!({"ok":true})))
 }
@@ -1393,7 +1393,7 @@ async fn get_user_call_settings_admin(
     headers: HeaderMap,
     Path(sip_uri): Path<String>,
 ) -> Result<Json<crate::UserCallSettings>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     if !state.is_admin_principal(&principal) {
         return Err(ApiError::Forbidden);
     }
@@ -1407,7 +1407,7 @@ async fn get_ldap_config(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<Json<crate::ldap_auth::LdapConfig>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     if !state.is_admin_principal(&principal) {
         return Err(ApiError::Forbidden);
     }
@@ -1421,7 +1421,7 @@ async fn set_ldap_config(
     headers: HeaderMap,
     Json(config): Json<crate::ldap_auth::LdapConfig>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     if !state.is_admin_principal(&principal) {
         return Err(ApiError::Forbidden);
     }
@@ -1434,7 +1434,7 @@ async fn test_ldap_connection(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     if !state.is_admin_principal(&principal) {
         return Err(ApiError::Forbidden);
     }
@@ -1458,7 +1458,7 @@ async fn list_ring_groups(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<crate::RingGroup>>, ApiError> {
-    require_bearer(&headers, &state)?;
+    authenticated_admin(&headers, &state)?;
     Ok(Json(state.list_ring_groups()))
 }
 
@@ -1467,7 +1467,7 @@ async fn create_ring_group(
     headers: HeaderMap,
     Json(input): Json<CreateRingGroupRequest>,
 ) -> Result<Json<crate::RingGroup>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     let group = state.create_ring_group(input).map_err(|e| ApiError::Conflict(e))?;
     state.record_audit_event(&principal, "ring_group.created", Some(group.id.to_string()));
     Ok(Json(group))
@@ -1478,7 +1478,7 @@ async fn get_ring_group(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<crate::RingGroup>, ApiError> {
-    require_bearer(&headers, &state)?;
+    authenticated_admin(&headers, &state)?;
     state.ring_group(id).map(Json).ok_or(ApiError::NotFound)
 }
 
@@ -1487,7 +1487,7 @@ async fn delete_ring_group(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     state.delete_ring_group(id).ok_or(ApiError::NotFound)?;
     state.record_audit_event(&principal, "ring_group.deleted", Some(id.to_string()));
     Ok(Json(json!({ "ok": true })))
@@ -1499,7 +1499,7 @@ async fn list_ivrs(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<crate::Ivr>>, ApiError> {
-    require_bearer(&headers, &state)?;
+    authenticated_admin(&headers, &state)?;
     Ok(Json(state.list_ivrs()))
 }
 
@@ -1508,7 +1508,7 @@ async fn create_ivr(
     headers: HeaderMap,
     Json(input): Json<CreateIvrRequest>,
 ) -> Result<Json<crate::Ivr>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     let ivr = state.create_ivr(input).map_err(|e| ApiError::Conflict(e))?;
     state.record_audit_event(&principal, "ivr.created", Some(ivr.id.to_string()));
     Ok(Json(ivr))
@@ -1519,7 +1519,7 @@ async fn get_ivr(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<crate::Ivr>, ApiError> {
-    require_bearer(&headers, &state)?;
+    authenticated_admin(&headers, &state)?;
     state.ivr(id).map(Json).ok_or(ApiError::NotFound)
 }
 
@@ -1528,7 +1528,7 @@ async fn delete_ivr(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     state.delete_ivr(id).ok_or(ApiError::NotFound)?;
     state.record_audit_event(&principal, "ivr.deleted", Some(id.to_string()));
     Ok(Json(json!({ "ok": true })))
@@ -1541,7 +1541,7 @@ async fn resolve_route(
     headers: HeaderMap,
     Path(uri): Path<String>,
 ) -> Result<Json<crate::ResolvedRoute>, ApiError> {
-    require_bearer(&headers, &state)?;
+    authenticated_admin(&headers, &state)?;
     let full_uri = if uri.starts_with("sip:") { uri } else { format!("sip:{}", uri) };
     Ok(Json(state.resolve_inbound_route(&full_uri)))
 }
@@ -1582,7 +1582,7 @@ async fn list_recordings(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<crate::CallRecording>>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     Ok(Json(state.recordings_for_user(&principal)))
 }
 
@@ -1591,7 +1591,7 @@ async fn delete_recording(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_admin(&headers, &state)?;
     state.delete_recording(id).ok_or(ApiError::NotFound)?;
     state.record_audit_event(&principal, "recording.deleted", Some(id.to_string()));
     Ok(Json(json!({ "ok": true })))
@@ -1647,14 +1647,25 @@ fn require_bearer(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError>
     authenticated_principal(headers, state).map(|_| ())
 }
 
-fn authenticated_principal(headers: &HeaderMap, state: &AppState) -> Result<String, ApiError> {
-    let provided = headers
+fn bearer_token(headers: &HeaderMap) -> &str {
+    headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .unwrap_or("");
-    let principal = state
-        .principal_for_bearer(provided)
+        .unwrap_or("")
+}
+
+fn authenticated_principal(headers: &HeaderMap, state: &AppState) -> Result<String, ApiError> {
+    authenticated_principal_role(headers, state).map(|(principal, _)| principal)
+}
+
+/// Authenticate the request and return `(principal, role)`.
+fn authenticated_principal_role(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<(String, String), ApiError> {
+    let (principal, role) = state
+        .principal_role_for_bearer(bearer_token(headers))
         .ok_or(ApiError::Unauthorized)?;
 
     // Rate limit per principal
@@ -1662,6 +1673,18 @@ fn authenticated_principal(headers: &HeaderMap, state: &AppState) -> Result<Stri
         return Err(ApiError::TooManyRequests);
     }
 
+    Ok((principal, role))
+}
+
+/// Authenticate the request and require the admin role. Admin-only
+/// management endpoints must use this instead of `authenticated_principal`:
+/// a valid user-role session token is authenticated but NOT authorized for
+/// administration and gets 403.
+fn authenticated_admin(headers: &HeaderMap, state: &AppState) -> Result<String, ApiError> {
+    let (principal, role) = authenticated_principal_role(headers, state)?;
+    if role != crate::ROLE_ADMIN {
+        return Err(ApiError::Forbidden);
+    }
     Ok(principal)
 }
 
@@ -1744,5 +1767,96 @@ impl IntoResponse for ApiError {
             ApiError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(json!({ "error": self.to_string() }))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn bearer_headers(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        headers
+    }
+
+    #[test]
+    fn user_role_token_is_forbidden_on_admin_endpoints() {
+        let state = crate::AppState::new(
+            PathBuf::from("/tmp/pale-test-http-auth"),
+            "012345678901234567890123".to_string(),
+            crate::hash_password("admin-password-equally-long"),
+        );
+        state
+            .create_user(crate::CreateUserRequest {
+                display_name: "Bob".to_string(),
+                sip_uri: "sip:bob@example.com".to_string(),
+                matrix_user_id: None,
+                password: Some("user-password".to_string()),
+                role: None,
+            })
+            .expect("create user");
+        let login = state
+            .authenticate_user("sip:bob@example.com", "user-password")
+            .expect("user login");
+
+        let headers = bearer_headers(&login.token);
+        // Authenticated as a user...
+        assert!(authenticated_principal(&headers, &state).is_ok());
+        // ...but NOT authorized for admin-only management endpoints.
+        assert!(matches!(
+            authenticated_admin(&headers, &state),
+            Err(ApiError::Forbidden)
+        ));
+
+        // The static server token retains full admin access.
+        let admin_headers = bearer_headers("012345678901234567890123");
+        assert!(authenticated_admin(&admin_headers, &state).is_ok());
+    }
+
+    #[test]
+    fn ldap_enabled_but_unverifiable_still_requires_local_password() {
+        let state = crate::AppState::new(
+            PathBuf::from("/tmp/pale-test-http-ldap"),
+            "012345678901234567890124".to_string(),
+            crate::hash_password("admin-password-equally-long"),
+        );
+        state.set_ldap_config(crate::ldap_auth::LdapConfig {
+            enabled: true,
+            server_url: "ldap://127.0.0.1:1".to_string(), // unreachable
+            bind_dn: String::new(),
+            bind_password: String::new(),
+            base_dn: String::new(),
+            user_search_filter: "(sAMAccountName={username})".to_string(),
+            user_dn_attribute: "sAMAccountName".to_string(),
+            display_name_attribute: "displayName".to_string(),
+            email_attribute: "mail".to_string(),
+            group_attribute: "memberOf".to_string(),
+            admin_group: String::new(),
+            sip_domain: "example.com".to_string(),
+        });
+        state
+            .create_user(crate::CreateUserRequest {
+                display_name: "Carol".to_string(),
+                sip_uri: "sip:carol@example.com".to_string(),
+                matrix_user_id: None,
+                password: Some("carol-password".to_string()),
+                role: None,
+            })
+            .expect("create user");
+
+        // LDAP cannot verify (unreachable) — the wrong local password MUST
+        // still be rejected (fail closed, no auth bypass)...
+        assert!(state
+            .authenticate_user("sip:carol@example.com", "wrong-password")
+            .is_err());
+        // ...and the correct local password still works.
+        assert!(state
+            .authenticate_user("sip:carol@example.com", "carol-password")
+            .is_ok());
     }
 }

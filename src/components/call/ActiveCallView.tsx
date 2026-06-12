@@ -9,14 +9,16 @@ import { DtmfOverlay } from "./DtmfOverlay";
 import * as ipc from "@/lib/tauri";
 import { TransferPanel } from "@/components/transfer/TransferPanel";
 import { useCallStore } from "@/store/callStore";
+import { useCallActions } from "@/hooks/useCallActions";
 import { Badge } from "@/components/ui/Badge";
 import { toast } from "@/components/ui/Toast";
 import { CallLineIndicator } from "./CallLineIndicator";
 
 export function ActiveCallView() {
-  const { sessions, activeCallId, setMuted, setHeld, setRecording, removeSession, updateSessionState } =
+  const { sessions, activeCallId, setHeld, setRecording, removeSession, updateSessionState } =
     useCallStore();
   const session = sessions.find((s) => s.id === activeCallId);
+  const { toggleMute, toggleHold, hangupCall } = useCallActions();
 
   const [showDtmf, setShowDtmf] = useState(false);
   const [showTransfer, setShowTransfer] = useState(false);
@@ -24,41 +26,31 @@ export function ActiveCallView() {
 
   const handleToggleMute = useCallback(() => {
     if (!session) return;
-    const newMuted = !session.isMuted;
-    setMuted(session.id, newMuted);
-    ipc.setMute(session.id, newMuted).catch(() => {});
-  }, [session, setMuted]);
+    toggleMute(session.id);
+  }, [session, toggleMute]);
 
   const handleToggleHold = useCallback(() => {
     if (!session) return;
-    const newHeld = !session.isHeld;
-    setHeld(session.id, newHeld);
-    updateSessionState(session.id, newHeld ? "on_hold" : "connected");
-    (newHeld ? ipc.holdCall(session.id) : ipc.unholdCall(session.id)).catch(() => {});
-  }, [session, setHeld, updateSessionState]);
+    toggleHold(session.id);
+  }, [session, toggleHold]);
 
   const handleToggleRecord = useCallback(() => {
     if (!session) return;
     if (session.isRecording) {
-      ipc.stopRecording(session.id).catch(() => {});
-      setRecording(session.id, false);
+      ipc.stopRecording(session.id)
+        .then(() => setRecording(session.id, false))
+        .catch((err) => toast({ type: "error", title: "Failed to stop recording", description: String(err) }));
     } else {
       ipc.startRecording(session.id)
         .then(() => setRecording(session.id, true))
-        .catch(() => {});
+        .catch((err) => toast({ type: "error", title: "Failed to start recording", description: String(err) }));
     }
   }, [session, setRecording]);
 
   const handleHangup = useCallback(() => {
     if (!session) return;
-    // Stop recording if active before hanging up
-    if (session.isRecording) {
-      ipc.stopRecording(session.id).catch(() => {});
-    }
-    ipc.hangupCall(session.id).catch(() => {});
-    updateSessionState(session.id, "terminated");
-    setTimeout(() => removeSession(session.id), 300);
-  }, [session, removeSession, updateSessionState]);
+    hangupCall(session.id);
+  }, [session, hangupCall]);
 
   const handleParkCall = useCallback(async () => {
     if (!session) return;
@@ -77,7 +69,9 @@ export function ActiveCallView() {
 
   const handleDtmf = useCallback((digit: string) => {
     if (!session) return;
-    ipc.sendDtmf(session.id, digit).catch(() => {});
+    ipc.sendDtmf(session.id, digit).catch((err) =>
+      toast({ type: "error", title: "Failed to send digit", description: String(err) })
+    );
   }, [session]);
 
   if (!session) return null;
@@ -140,18 +134,30 @@ export function ActiveCallView() {
         <TransferPanel
           onClose={() => setShowTransfer(false)}
           onBlindTransfer={(target) => {
-            if (session) ipc.blindTransfer(session.id, target).catch(() => {});
+            if (session) {
+              ipc.blindTransfer(session.id, target).catch((err) =>
+                toast({ type: "error", title: "Transfer failed", description: String(err) })
+              );
+            }
             setShowTransfer(false);
           }}
           onAttendedTransfer={(target) => {
             if (!session) return;
+            const callId = session.id;
             // Step 1: Hold the current call
-            setHeld(session.id, true);
-            updateSessionState(session.id, "on_hold");
-            ipc.holdCall(session.id).catch(() => {});
+            setHeld(callId, true);
+            updateSessionState(callId, "on_hold");
+            ipc.holdCall(callId).catch((err) => {
+              setHeld(callId, false);
+              updateSessionState(callId, "connected");
+              toast({ type: "error", title: "Failed to hold call", description: String(err) });
+            });
             // Step 2: Initiate consultation call to target
             setConsultationTarget(target);
-            ipc.makeCall(target).catch(() => {});
+            ipc.makeCall(target).catch((err) => {
+              setConsultationTarget(null);
+              toast({ type: "error", title: "Consultation call failed", description: String(err) });
+            });
             setShowTransfer(false);
           }}
         />
@@ -184,7 +190,9 @@ export function ActiveCallView() {
             const originalCall = sessions.find((s) => s.isHeld);
             const consultCall = sessions.find((s) => s.id !== originalCall?.id && s.state === "connected");
             if (originalCall && consultCall) {
-              ipc.attendedTransfer(originalCall.id, consultCall.id).catch(() => {});
+              ipc.attendedTransfer(originalCall.id, consultCall.id).catch((err) =>
+                toast({ type: "error", title: "Transfer failed", description: String(err) })
+              );
               setConsultationTarget(null);
               // Both calls will be terminated by PJSIP after successful transfer
             }
