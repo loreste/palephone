@@ -722,6 +722,18 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
                     }
                     if vcpkg_has_lib(&vcpkg, "opus") {
                         println!("cargo:rustc-link-lib=static=opus");
+                        // PJSIP's opus.c embeds `#pragma comment(lib, "libopus.a")`
+                        // (GNU naming) into MSVC objects. link.exe must be able to
+                        // open that exact filename, so shim a copy of vcpkg's
+                        // opus.lib under it.
+                        let shim_dir =
+                            PathBuf::from(env::var("OUT_DIR").unwrap()).join("msvc-link-shim");
+                        fs::create_dir_all(&shim_dir).ok();
+                        let shim = shim_dir.join("libopus.a");
+                        if !shim.exists() {
+                            fs::copy(vcpkg.join("lib").join("opus.lib"), &shim).ok();
+                        }
+                        println!("cargo:rustc-link-search=native={}", shim_dir.display());
                     }
                 }
             } else {
