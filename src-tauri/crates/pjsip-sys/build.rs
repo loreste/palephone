@@ -138,18 +138,30 @@ fn write_config_site(pj_src_dir: &Path, target_os: &str) {
 /// Project names come from pjproject-vs14.sln and use underscores.
 fn simplify_msvc_lib_name(name: &str) -> String {
     let stem = name.strip_suffix(".lib").unwrap_or(name);
-    // Longest/most-specific prefixes first — "pjlib" would otherwise match "pjlib_util".
+    // Longest/most-specific prefixes first — "pjlib" would otherwise match
+    // "pjlib-util". The projects override TargetName with hyphenated stems
+    // (pjsua-lib-x86_64-x64-vc14-Release.lib); underscore variants are kept
+    // as a fallback in case a project uses its raw name.
     let mappings = [
+        ("pjsua2-lib", "pjsua2"),
         ("pjsua2_lib", "pjsua2"),
+        ("pjsua-lib", "pjsua"),
         ("pjsua_lib", "pjsua"),
+        ("pjsip-ua", "pjsip-ua"),
         ("pjsip_ua", "pjsip-ua"),
+        ("pjsip-simple", "pjsip-simple"),
         ("pjsip_simple", "pjsip-simple"),
+        ("pjsip-core", "pjsip"),
         ("pjsip_core", "pjsip"),
+        ("pjmedia-codec", "pjmedia-codec"),
         ("pjmedia_codec", "pjmedia-codec"),
+        ("pjmedia-audiodev", "pjmedia-audiodev"),
         ("pjmedia_audiodev", "pjmedia-audiodev"),
+        ("pjmedia-videodev", "pjmedia-videodev"),
         ("pjmedia_videodev", "pjmedia-videodev"),
         ("pjmedia", "pjmedia"),
         ("pjnath", "pjnath"),
+        ("pjlib-util", "pjlib-util"),
         ("pjlib_util", "pjlib-util"),
         ("pjlib", "pj"),
         ("libsrtp", "srtp"),
@@ -452,9 +464,20 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
             });
         println!("cargo:warning=Using solution: {}", sln.file_name().unwrap().to_string_lossy());
 
+        // Build only the static libraries we link against. The solution's
+        // test/sample/app executables are skipped: they are not needed and
+        // their nmake link steps cannot see the vcpkg OpenSSL libs.
+        let lib_targets = [
+            "pjlib", "pjlib_util", "pjnath", "pjmedia", "pjmedia_audiodev",
+            "pjmedia_codec", "pjmedia_videodev", "pjsip_core", "pjsip_simple",
+            "pjsip_ua", "pjsua_lib", "libbaseclasses", "libg7221codec",
+            "libgsmcodec", "libilbccodec", "libmilenage", "libresample",
+            "libspeex", "libsrtp", "libwebrtc", "libyuv",
+        ];
         let mut msbuild_cmd = Command::new(&msbuild);
         msbuild_cmd
             .arg(sln.to_str().unwrap())
+            .arg(format!("/t:{}", lib_targets.join(";")))
             .args(["/p:Configuration=Release", "/p:Platform=x64", "/p:PlatformToolset=v143", "/p:WindowsTargetPlatformVersion=10.0", "/m", "/verbosity:minimal"])
             .current_dir(pj_src_dir);
 
