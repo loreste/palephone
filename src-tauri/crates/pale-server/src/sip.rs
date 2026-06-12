@@ -75,17 +75,76 @@ async fn handle_udp_packet(
     state: &AppState,
 ) -> Option<String> {
     let request = SipRequest::parse(packet)?;
-    if request.method() == "INVITE" {
-        if let Some(outcome) = proxy_invite(socket, packet, &request, state).await {
-            record_transaction(&request, peer, Some(outcome.as_str()), state);
-            return Some(outcome);
+    let has_to_tag = request
+        .header("to")
+        .map(|to| to.contains("tag="))
+        .unwrap_or(false);
+
+    match request.method().as_str() {
+        // Initial INVITE: stateful one-shot proxy toward the routed target.
+        "INVITE" if !has_to_tag => {
+            if let Some(outcome) = proxy_invite(socket, packet, &request, peer, state).await {
+                record_transaction(&request, peer, Some(outcome.as_str()), state);
+                return Some(outcome);
+            }
         }
-    }
-    if request.method() == "MESSAGE" {
-        if let Some(outcome) = relay_message(socket, &request, peer, state).await {
-            record_transaction(&request, peer, Some(outcome.as_str()), state);
-            return Some(outcome);
+        "MESSAGE" => {
+            if let Some(outcome) = relay_message(socket, &request, peer, state).await {
+                record_transaction(&request, peer, Some(outcome.as_str()), state);
+                return Some(outcome);
+            }
         }
+        // CANCEL matches an in-flight proxied INVITE by its top-Via branch;
+        // the proxy task forwards the CANCEL upstream and answers the INVITE
+        // with 487. The sync handler below still produces the hop-by-hop
+        // 200 OK for the CANCEL itself.
+        "CANCEL" => {
+            if let Some(branch) = top_via_branch(&request) {
+                state.cancel_pending_invite(&branch);
+            }
+        }
+        // In-dialog requests are relayed to the peer leg when the dialog has
+        // peer addressing (proxied calls). REFERs aimed at the server itself
+        // (call park/pickup) stay local.
+        "INVITE" | "INFO" | "BYE" | "UPDATE" | "ACK" => {
+            if let Some(outcome) =
+                relay_in_dialog_request(socket, packet, &request, state).await
+            {
+                record_transaction(&request, peer, Some(outcome.as_str()), state);
+                return Some(outcome);
+            }
+        }
+        "REFER" => {
+            if !refer_targets_server(&request) {
+                if let Some(outcome) =
+                    relay_in_dialog_request(socket, packet, &request, state).await
+                {
+                    record_transaction(&request, peer, Some(outcome.as_str()), state);
+                    return Some(outcome);
+                }
+            }
+            let response = handle_request(&request, peer, state);
+            record_transaction(&request, peer, response.as_deref(), state);
+            // RFC 3515 implicit subscription: a 202 must be followed by a
+            // NOTIFY with a sipfrag result, unless RFC 4488 Refer-Sub: false.
+            if let Some(text) = &response {
+                let accepted = parse_response_status(text)
+                    .map(|(code, _)| code == 202)
+                    .unwrap_or(false);
+                if accepted && !refer_sub_disabled(&request) {
+                    // Park/pickup transfers are executed by the server (200);
+                    // anything else was not executed (503) — honest sipfrag.
+                    let sipfrag = if refer_targets_server(&request) {
+                        "SIP/2.0 200 OK"
+                    } else {
+                        "SIP/2.0 503 Service Unavailable"
+                    };
+                    send_refer_notify(socket, &request, peer, sipfrag).await;
+                }
+            }
+            return response;
+        }
+        _ => {}
     }
 
     let response = handle_request(&request, peer, state);
@@ -178,24 +237,44 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
     }
 
     // ── Re-INVITE detection (mid-call: hold/video toggle) ──
-    if let Some(call_id) = request.call_id() {
-        if state.dialog_exists(call_id) {
-            let body = request.body_text();
-            let hold_status = detect_hold_from_sdp(&body);
-            let status = match hold_status {
-                Some(true) => SipDialogStatus::Held,
-                _ => SipDialogStatus::Ringing,
-            };
-            let media = extract_media_types(&body);
-            state.upsert_sip_dialog(UpsertSipDialog {
-                call_id: call_id.to_string(),
-                from_uri: from_aor.clone(),
-                to_uri: request.uri(),
-                target_contact: None,
-                status,
-                media_types: media,
+    // In-dialog requests carry a To-tag (RFC 3261 §12.2.2); a tag-less INVITE
+    // reusing a stale Call-ID is a NEW call and takes the routing path below.
+    let has_to_tag = request
+        .header("to")
+        .map(|to| to.contains("tag="))
+        .unwrap_or(false);
+    if has_to_tag {
+        if let Some(call_id) = request.call_id() {
+            let live = state.dialog_for(call_id).map(|dialog| {
+                !matches!(
+                    dialog.status,
+                    SipDialogStatus::Ended | SipDialogStatus::Cancelled | SipDialogStatus::Failed
+                )
             });
-            return Some(request.response(200, "OK", &[]));
+            match live {
+                Some(true) => {
+                    let body = request.body_text();
+                    let hold_status = detect_hold_from_sdp(&body);
+                    let status = match hold_status {
+                        Some(true) => SipDialogStatus::Held,
+                        _ => SipDialogStatus::Answered,
+                    };
+                    let media = extract_media_types(&body);
+                    state.upsert_sip_dialog(UpsertSipDialog {
+                        call_id: call_id.to_string(),
+                        from_uri: from_aor.clone(),
+                        to_uri: request.uri(),
+                        target_contact: None,
+                        status,
+                        media_types: media,
+                        peer: Default::default(),
+                    });
+                    return Some(request.response(200, "OK", &[]));
+                }
+                _ => {
+                    return Some(request.response(481, "Call/Transaction Does Not Exist", &[]))
+                }
+            }
         }
     }
 
@@ -215,6 +294,7 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
             target_contact: Some(target.to_string()),
             status: SipDialogStatus::Routing,
             media_types: media.clone(),
+            peer: Default::default(),
         });
         if let Some(reg) = state.registration_for(target) {
             Some(request.response(302, "Moved Temporarily", &[("Contact", format!("<{}>", reg.contact))]))
@@ -268,6 +348,7 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
             call_id: call_id_str.clone(), from_uri: from_aor.clone(),
             to_uri: requested_uri.clone(), target_contact: None,
             status: SipDialogStatus::Ringing, media_types: media.clone(),
+            peer: Default::default(),
         });
         if conference.active {
             state.record_cdr_end(&call_id_str, "answered");
@@ -291,6 +372,7 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
                         call_id: call_id_str.clone(), from_uri: from_aor.clone(),
                         to_uri: requested_uri.clone(), target_contact: Some(agent_uri.clone()),
                         status: SipDialogStatus::Ringing, media_types: media.clone(),
+                        peer: Default::default(),
                     });
                     return Some(request.response(302, "Moved Temporarily",
                         &[("Contact", format!("<{}>", reg.contact))]));
@@ -318,6 +400,7 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
                     call_id: call_id_str.clone(), from_uri: from_aor.clone(),
                     to_uri: requested_uri.clone(), target_contact: Some(agent_uri.clone()),
                     status: SipDialogStatus::Ringing, media_types: media.clone(),
+                    peer: Default::default(),
                 });
                 return Some(request.response(302, "Moved Temporarily",
                     &[("Contact", format!("<{}>", reg.contact))]));
@@ -333,6 +416,7 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
             call_id: call_id_str.clone(), from_uri: from_aor.clone(),
             to_uri: requested_uri.clone(), target_contact: None,
             status: SipDialogStatus::Queued, media_types: media.clone(),
+            peer: Default::default(),
         });
         // Caller waits in queue (200 OK - server plays hold music)
         return Some(request.response(200, "OK", &[]));
@@ -344,6 +428,7 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
             call_id: call_id_str.clone(), from_uri: from_aor.clone(),
             to_uri: requested_uri.clone(), target_contact: None,
             status: SipDialogStatus::Ringing, media_types: media.clone(),
+            peer: Default::default(),
         });
         let members = match group.strategy {
             crate::RingStrategy::Random => {
@@ -390,6 +475,7 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
             call_id: call_id_str.clone(), from_uri: from_aor.clone(),
             to_uri: requested_uri.clone(), target_contact: None,
             status: SipDialogStatus::Ringing, media_types: media.clone(),
+            peer: Default::default(),
         });
         state.record_cdr_end(&call_id_str, "answered");
         return Some(request.response(200, "OK", &[]));
@@ -422,6 +508,7 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
             call_id: call_id_str.clone(), from_uri: from_aor.clone(),
             to_uri: requested_uri.clone(), target_contact: Some(registration.contact.clone()),
             status: SipDialogStatus::Ringing, media_types: media.clone(),
+            peer: Default::default(),
         });
         return Some(request.response(302, "Moved Temporarily",
             &[("Contact", format!("<{}>", registration.contact))]));
@@ -436,6 +523,7 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
                     call_id: call_id_str.clone(), from_uri: from_aor.clone(),
                     to_uri: requested_uri.clone(), target_contact: Some(reg.contact.clone()),
                     status: SipDialogStatus::Ringing, media_types: media.clone(),
+                    peer: Default::default(),
                 });
                 return Some(request.response(302, "Moved Temporarily",
                     &[("Contact", format!("<{}>", reg.contact))]));
@@ -475,6 +563,7 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
             call_id: call_id_str.clone(), from_uri: from_aor,
             to_uri: requested_uri, target_contact: Some(routed_uri.clone()),
             status: SipDialogStatus::Routing, media_types: media,
+            peer: Default::default(),
         });
         return Some(request.response(302, "Moved Temporarily",
             &[("Contact", format!("<{}>", routed_uri))]));
@@ -486,14 +575,10 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
 }
 
 fn handle_ack(request: &SipRequest, state: &AppState) -> Option<String> {
-    let Some(realm) = request.sender_realm() else {
-        return None;
-    };
-    if !request.is_authorized(state, &realm) {
-        return None;
-    }
+    // ACK is never challenged (RFC 3261 §22.2 — its Authorization carries the
+    // INVITE's already-consumed nonce) and confirms the dialog.
     if let Some(call_id) = request.call_id() {
-        let _ = state.update_sip_dialog_status(call_id, SipDialogStatus::Ringing);
+        let _ = state.update_sip_dialog_status(call_id, SipDialogStatus::Answered);
     }
     None
 }
@@ -505,29 +590,19 @@ fn handle_bye(request: &SipRequest, state: &AppState) -> Option<String> {
     if !request.is_authorized(state, &realm) {
         return Some(request.digest_challenge(&realm, state.issue_sip_nonce()));
     }
-    if let Some(call_id) = request.call_id() {
-        let _ = state.update_sip_dialog_status(call_id, SipDialogStatus::Ended);
-        // Finalize CDR with answered disposition (call completed normally)
-        state.record_cdr_end(call_id, "answered");
-        // Transition agent to wrap_up if they are a queue agent currently on_call
-        if let Some(from_uri) = request.header("from").and_then(extract_sip_uri) {
-            if let Some(profile) = state.agent_profile(&from_uri) {
-                if profile.state == "on_call" {
-                    let _ = state.transition_agent_state(&from_uri, "wrap_up", Some("call_ended".to_string()));
-                }
-            }
+    match request.call_id().map(|call_id| state.dialog_exists(call_id)) {
+        Some(true) => bye_bookkeeping(request, state),
+        Some(false) => {
+            return Some(request.response(481, "Call/Transaction Does Not Exist", &[]))
         }
+        None => {}
     }
     Some(request.response(200, "OK", &[]))
 }
 
 fn handle_cancel(request: &SipRequest, state: &AppState) -> Option<String> {
-    let Some(realm) = request.sender_realm() else {
-        return Some(request.response(400, "Bad Request", &[]));
-    };
-    if !request.is_authorized(state, &realm) {
-        return Some(request.digest_challenge(&realm, state.issue_sip_nonce()));
-    }
+    // RFC 3261 §22.1: a CANCEL MUST NOT be challenged — clients cannot supply
+    // fresh credentials in it. It is answered hop-by-hop with 200 OK.
     if let Some(call_id) = request.call_id() {
         let _ = state.update_sip_dialog_status(call_id, SipDialogStatus::Cancelled);
         // Finalize CDR with cancelled/no_answer disposition
@@ -542,6 +617,13 @@ fn handle_info(request: &SipRequest, state: &AppState) -> Option<String> {
     };
     if !request.is_authorized(state, &realm) {
         return Some(request.digest_challenge(&realm, state.issue_sip_nonce()));
+    }
+    // In-dialog INFO for proxied dialogs is relayed before reaching here;
+    // this local path only answers dialogs the server itself terminates.
+    if let Some(call_id) = request.call_id() {
+        if !state.dialog_exists(call_id) {
+            return Some(request.response(481, "Call/Transaction Does Not Exist", &[]));
+        }
     }
     Some(request.response(200, "OK", &[]))
 }
@@ -603,11 +685,9 @@ fn handle_refer(request: &SipRequest, state: &AppState) -> Option<String> {
             let _ = state.update_sip_dialog_status(cid, SipDialogStatus::Ended);
         }
         state.record_audit_event(&from_uri, "call.parked", Some(format!("slot={}", slot)));
-        return Some(request.response(
-            202,
-            "Accepted",
-            &[("Subscription-State", "terminated;reason=noresource".to_string())],
-        ));
+        // Subscription-State is only legal on NOTIFY (RFC 6665 §7.2); the
+        // implicit subscription is closed by the NOTIFY the async path sends.
+        return Some(request.response(202, "Accepted", &[]));
     }
     if let Some(slot) = target_user.strip_prefix("pickup-") {
         let from_uri = request
@@ -655,12 +735,9 @@ fn handle_refer(request: &SipRequest, state: &AppState) -> Option<String> {
         None
     };
 
-    // End the original dialog
-    if let Some(call_id) = request.call_id() {
-        let _ = state.update_sip_dialog_status(call_id, SipDialogStatus::Ended);
-    }
-
-    // For attended transfer, also end the consultation leg
+    // The transfer dialogs are NOT marked Ended here: a blind-transfer dialog
+    // ends when the subsequent BYE arrives (RFC 3515 §2.4.5). Only the
+    // attended-transfer consultation leg, which Replaces consumes, is closed.
     if let Some(replaces_id) = &replaces_call_id {
         let _ = state.update_sip_dialog_status(replaces_id, SipDialogStatus::Ended);
     }
@@ -673,11 +750,7 @@ fn handle_refer(request: &SipRequest, state: &AppState) -> Option<String> {
     let transfer_type = if is_attended { "call.attended_transfer" } else { "call.blind_transfer" };
     state.record_audit_event(&from_uri, transfer_type, Some(target.clone()));
 
-    Some(request.response(
-        202,
-        "Accepted",
-        &[("Subscription-State", "terminated;reason=noresource".to_string())],
-    ))
+    Some(request.response(202, "Accepted", &[]))
 }
 
 const SUPPORTED_EVENTS: &[&str] = &["presence", "dialog", "message-summary", "conference"];
@@ -829,12 +902,16 @@ async fn relay_message(
     let Some((_, realm)) = split_sip_aor(&from_uri) else {
         return None;
     };
+
+    // Resolve the target BEFORE the auth check: is_authorized consumes the
+    // single-use nonce, and an unresolvable target must fall through to
+    // handle_message's store-and-forward with the nonce still valid —
+    // otherwise the fallback re-challenges and the client loops on 401.
+    let to_uri = request.uri();
+    let (target_contact, target_addr) = invite_target(state, &to_uri)?;
     if !request.is_authorized(state, &realm) {
         return None;
     }
-
-    let to_uri = request.uri();
-    let (target_contact, target_addr) = invite_target(state, &to_uri)?;
 
     let content_type = request
         .header("content-type")
@@ -865,6 +942,7 @@ async fn relay_message(
     let forwarded = format!(
         "MESSAGE {} SIP/2.0\r\n\
          Via: SIP/2.0/UDP {};branch={}\r\n\
+         Max-Forwards: {}\r\n\
          From: {}\r\n\
          To: {}\r\n\
          Call-ID: {}\r\n\
@@ -874,6 +952,7 @@ async fn relay_message(
         target_contact,
         sip_sent_by(local_addr),
         branch,
+        max_forwards(request).unwrap_or(70).saturating_sub(1),
         from,
         to,
         call_id,
@@ -892,7 +971,24 @@ async fn proxy_invite(
     server_socket: &UdpSocket,
     packet: &str,
     request: &SipRequest,
+    peer: SocketAddr,
     state: &AppState,
+) -> Option<String> {
+    let received_branch = top_via_branch(request);
+    let result = proxy_invite_inner(server_socket, packet, request, peer, state, &received_branch).await;
+    if let Some(branch) = &received_branch {
+        state.remove_pending_invite(branch);
+    }
+    result
+}
+
+async fn proxy_invite_inner(
+    server_socket: &UdpSocket,
+    packet: &str,
+    request: &SipRequest,
+    peer: SocketAddr,
+    state: &AppState,
+    received_branch: &Option<String>,
 ) -> Option<String> {
     let Some(from_aor) = request.header("from").and_then(extract_sip_uri) else {
         return None;
@@ -900,6 +996,9 @@ async fn proxy_invite(
     let Some((_, realm)) = split_sip_aor(&from_aor) else {
         return None;
     };
+    if max_forwards(request) == Some(0) {
+        return Some(request.response(483, "Too Many Hops", &[]));
+    }
     let requested_uri = request.uri();
     let routed_uri = state
         .resolve_routing_target(&from_aor, &requested_uri)
@@ -921,7 +1020,7 @@ async fn proxy_invite(
         Ok(addr) => addr,
         Err(_) => return Some(request.response(502, "Bad Gateway", &[])),
     };
-    let Some(forwarded) = rewrite_invite_for_proxy(packet, &target_contact, local_addr, &branch)
+    let Some(forwarded) = rewrite_request_for_proxy(packet, &target_contact, local_addr, &branch)
     else {
         return Some(request.response(400, "Bad Request", &[]));
     };
@@ -930,9 +1029,14 @@ async fn proxy_invite(
         call_id: request.call_id().unwrap_or_default().to_string(),
         from_uri: from_aor,
         to_uri: requested_uri,
-        target_contact: Some(target_contact),
+        target_contact: Some(target_contact.clone()),
         status: SipDialogStatus::Routing,
         media_types: extract_media_types(packet),
+        peer: crate::DialogPeerInfo {
+            from_contact: request.header("contact").and_then(extract_sip_uri),
+            from_source: Some(peer.to_string()),
+            to_source: Some(target_addr.to_string()),
+        },
     });
 
     if proxy_socket
@@ -942,30 +1046,369 @@ async fn proxy_invite(
     {
         return Some(request.response(502, "Bad Gateway", &[]));
     }
-    let mut response = vec![0_u8; 16 * 1024];
-    let (len, _) = match timeout(
-        StdDuration::from_secs(5),
-        proxy_socket.recv_from(&mut response),
-    )
-    .await
-    {
-        Ok(Ok(received)) => received,
-        Ok(Err(_)) => return Some(request.response(502, "Bad Gateway", &[])),
-        Err(_) => return Some(request.response(504, "Gateway Timeout", &[])),
-    };
-    let response = String::from_utf8_lossy(&response[..len]).to_string();
-    let relayed = strip_proxy_via(&response, &branch).unwrap_or(response);
-    if let Some((status, _)) = parse_response_status(&relayed) {
-        let status = if status >= 200 {
-            SipDialogStatus::Ended
+
+    // Register for CANCEL matching only once the INVITE is actually in flight.
+    let cancel_notify = received_branch
+        .as_deref()
+        .map(|branch| state.register_pending_invite(branch));
+    let mut cancel_requested = false;
+
+    // Relay every provisional immediately; return on the final response or
+    // an overall Timer C-style deadline (RFC 3261 §16.6/§16.8).
+    let deadline = tokio::time::Instant::now() + StdDuration::from_secs(32);
+    let mut buf = vec![0_u8; 16 * 1024];
+    loop {
+        let received = tokio::select! {
+            received = proxy_socket.recv_from(&mut buf) => received,
+            _ = async {
+                match &cancel_notify {
+                    Some(notify) => notify.notified().await,
+                    None => std::future::pending().await,
+                }
+            }, if !cancel_requested => {
+                cancel_requested = true;
+                let cancel = build_proxy_cancel(request, &target_contact, local_addr, &branch);
+                let _ = proxy_socket.send_to(cancel.as_bytes(), target_addr).await;
+                continue;
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                // Stop the UAS from ringing forever, then report the timeout.
+                if !cancel_requested {
+                    let cancel = build_proxy_cancel(request, &target_contact, local_addr, &branch);
+                    let _ = proxy_socket.send_to(cancel.as_bytes(), target_addr).await;
+                }
+                if let Some(call_id) = request.call_id() {
+                    let _ = state.update_sip_dialog_status(call_id, SipDialogStatus::Failed);
+                }
+                return Some(request.response(504, "Gateway Timeout", &[]));
+            }
+        };
+        let Ok((len, _)) = received else {
+            return Some(request.response(502, "Bad Gateway", &[]));
+        };
+        let text = String::from_utf8_lossy(&buf[..len]).to_string();
+        // Responses to our hop-by-hop CANCEL are consumed here, not relayed.
+        if response_cseq_method(&text).as_deref() == Some("CANCEL") {
+            continue;
+        }
+        let relayed = strip_proxy_via(&text, &branch).unwrap_or_else(|| text.clone());
+        let Some((status, _)) = parse_response_status(&relayed) else {
+            continue;
+        };
+        if status < 200 {
+            let _ = server_socket.send_to(relayed.as_bytes(), peer).await;
+            if let Some(call_id) = request.call_id() {
+                let _ = state.update_sip_dialog_status(call_id, SipDialogStatus::Ringing);
+            }
+            continue;
+        }
+        // Final response: ACK non-2xx hop-by-hop so the UAS stops
+        // retransmitting (RFC 3261 §17.1.1.3). The 2xx is ACKed end-to-end
+        // by the caller directly (we do not Record-Route).
+        if !(200..300).contains(&status) {
+            let ack = build_proxy_ack(request, &target_contact, local_addr, &branch, &relayed);
+            let _ = proxy_socket.send_to(ack.as_bytes(), target_addr).await;
+        }
+        let dialog_status = if (200..300).contains(&status) {
+            SipDialogStatus::Answered
+        } else if cancel_requested || status == 487 {
+            SipDialogStatus::Cancelled
         } else {
-            SipDialogStatus::Ringing
+            SipDialogStatus::Ended
         };
         if let Some(call_id) = request.call_id() {
-            let _ = state.update_sip_dialog_status(call_id, status);
+            let _ = state.update_sip_dialog_status(call_id, dialog_status);
+        }
+        return Some(relayed);
+    }
+}
+
+/// Relay an in-dialog request (INFO, BYE, UPDATE, re-INVITE, REFER, ACK) to
+/// the dialog's peer leg and pass the peer's response back. Returns `None`
+/// when the dialog is unknown or has no peer addressing, so the caller can
+/// fall through to local handling.
+async fn relay_in_dialog_request(
+    server_socket: &UdpSocket,
+    packet: &str,
+    request: &SipRequest,
+    state: &AppState,
+) -> Option<String> {
+    let call_id = request.call_id()?;
+    let dialog = state.dialog_for(call_id)?;
+    let from_uri = request.header("from").and_then(extract_sip_uri)?;
+
+    // Direction: requests from the dialog's caller go toward the callee leg.
+    let toward_callee = crate::sip_user_part(&from_uri) == crate::sip_user_part(&dialog.from_uri);
+    let (contact, source, fallback_uri) = if toward_callee {
+        (dialog.target_contact, dialog.to_source, dialog.to_uri)
+    } else {
+        (dialog.from_contact, dialog.from_source, dialog.from_uri)
+    };
+    let target_uri = contact.unwrap_or(fallback_uri);
+    let target_addr: SocketAddr = match source.as_deref().and_then(|s| s.parse().ok()) {
+        Some(addr) => addr,
+        None => invite_target(state, &target_uri).map(|(_, addr)| addr)?,
+    };
+
+    if max_forwards(request) == Some(0) {
+        return Some(request.response(483, "Too Many Hops", &[]));
+    }
+
+    // Digest-check locally registered senders. The remote leg of a dialog
+    // cannot answer a local-realm challenge, so unregistered senders relay
+    // through (their requests are scoped to an established dialog). ACK is
+    // never challengeable (RFC 3261 §22).
+    let method = request.method();
+    if method != "ACK" && state.registration_for(&from_uri).is_some() {
+        if let Some((_, realm)) = split_sip_aor(&from_uri) {
+            if !request.is_authorized(state, &realm) {
+                return Some(request.digest_challenge(&realm, state.issue_sip_nonce()));
+            }
         }
     }
+
+    let branch = format!("z9hG4bK-pale-{}", Uuid::new_v4());
+    let proxy_bind = server_socket.local_addr().ok().map(proxy_bind_addr)?;
+    let proxy_socket = UdpSocket::bind(proxy_bind).await.ok()?;
+    let local_addr = proxy_socket.local_addr().ok()?;
+    let forwarded = rewrite_request_for_proxy(packet, &target_uri, local_addr, &branch)?;
+    proxy_socket
+        .send_to(forwarded.as_bytes(), target_addr)
+        .await
+        .ok()?;
+
+    if method == "ACK" {
+        // ACK confirms the dialog; it has no response to relay.
+        let _ = state.update_sip_dialog_status(call_id, SipDialogStatus::Answered);
+        return None;
+    }
+
+    let mut buf = vec![0_u8; 16 * 1024];
+    let relayed = match timeout(StdDuration::from_secs(5), proxy_socket.recv_from(&mut buf)).await
+    {
+        Ok(Ok((len, _))) => {
+            let text = String::from_utf8_lossy(&buf[..len]).to_string();
+            strip_proxy_via(&text, &branch).unwrap_or(text)
+        }
+        Ok(Err(_)) => request.response(502, "Bad Gateway", &[]),
+        Err(_) => request.response(408, "Request Timeout", &[]),
+    };
+
+    match method.as_str() {
+        "BYE" => bye_bookkeeping(request, state),
+        "REFER" => {
+            let transfer_type = if packet.contains("Replaces=") || packet.contains("replaces=") {
+                "call.attended_transfer"
+            } else {
+                "call.blind_transfer"
+            };
+            state.record_audit_event(&from_uri, transfer_type, request.header("refer-to").map(ToOwned::to_owned));
+        }
+        _ => {}
+    }
+
     Some(relayed)
+}
+
+/// Shared BYE bookkeeping: dialog teardown, CDR disposition derived from the
+/// dialog state at hangup time, and agent wrap-up transition.
+fn bye_bookkeeping(request: &SipRequest, state: &AppState) {
+    let Some(call_id) = request.call_id() else {
+        return;
+    };
+    let disposition = match state.dialog_for(call_id).map(|d| d.status) {
+        Some(SipDialogStatus::Answered) | Some(SipDialogStatus::Held) => "answered",
+        _ => "no_answer",
+    };
+    let _ = state.update_sip_dialog_status(call_id, SipDialogStatus::Ended);
+    state.record_cdr_end(call_id, disposition);
+    if let Some(from_uri) = request.header("from").and_then(extract_sip_uri) {
+        if let Some(profile) = state.agent_profile(&from_uri) {
+            if profile.state == "on_call" {
+                let _ = state.transition_agent_state(&from_uri, "wrap_up", Some("call_ended".to_string()));
+            }
+        }
+    }
+}
+
+/// Build the hop-by-hop CANCEL for a forwarded INVITE: same R-URI, same Via
+/// branch as the INVITE it cancels (RFC 3261 §9.1).
+fn build_proxy_cancel(
+    request: &SipRequest,
+    target_uri: &str,
+    proxy_addr: SocketAddr,
+    branch: &str,
+) -> String {
+    let cseq_num = request
+        .header("cseq")
+        .and_then(|cseq| cseq.split_whitespace().next())
+        .unwrap_or("1");
+    format!(
+        "CANCEL {} SIP/2.0\r\n\
+         Via: SIP/2.0/UDP {};branch={}\r\n\
+         Max-Forwards: 70\r\n\
+         From: {}\r\n\
+         To: {}\r\n\
+         Call-ID: {}\r\n\
+         CSeq: {} CANCEL\r\n\
+         Content-Length: 0\r\n\r\n",
+        target_uri,
+        sip_sent_by(proxy_addr),
+        branch,
+        request.header("from").unwrap_or(""),
+        request.header("to").unwrap_or(""),
+        request.call_id().unwrap_or(""),
+        cseq_num,
+    )
+}
+
+/// Build the hop-by-hop ACK for a non-2xx final response to a forwarded
+/// INVITE (RFC 3261 §17.1.1.3). To is taken from the response (it carries
+/// the UAS to-tag).
+fn build_proxy_ack(
+    request: &SipRequest,
+    target_uri: &str,
+    proxy_addr: SocketAddr,
+    branch: &str,
+    response: &str,
+) -> String {
+    let cseq_num = request
+        .header("cseq")
+        .and_then(|cseq| cseq.split_whitespace().next())
+        .unwrap_or("1");
+    let to = response_header_line(response, "to")
+        .unwrap_or_else(|| request.header("to").unwrap_or("").to_string());
+    format!(
+        "ACK {} SIP/2.0\r\n\
+         Via: SIP/2.0/UDP {};branch={}\r\n\
+         Max-Forwards: 70\r\n\
+         From: {}\r\n\
+         To: {}\r\n\
+         Call-ID: {}\r\n\
+         CSeq: {} ACK\r\n\
+         Content-Length: 0\r\n\r\n",
+        target_uri,
+        sip_sent_by(proxy_addr),
+        branch,
+        request.header("from").unwrap_or(""),
+        to,
+        request.call_id().unwrap_or(""),
+        cseq_num,
+    )
+}
+
+/// Send the RFC 3515 terminal NOTIFY that closes a REFER's implicit
+/// subscription, carrying the transfer result as a message/sipfrag body.
+async fn send_refer_notify(
+    socket: &UdpSocket,
+    request: &SipRequest,
+    peer: SocketAddr,
+    sipfrag: &str,
+) {
+    let Ok(local_addr) = socket.local_addr() else {
+        return;
+    };
+    let target_uri = request
+        .header("contact")
+        .and_then(extract_sip_uri)
+        .unwrap_or_else(|| format!("sip:{}", sip_sent_by(peer)));
+    let refer_cseq = request
+        .header("cseq")
+        .and_then(|cseq| cseq.split_whitespace().next())
+        .unwrap_or("1");
+    // From/To are swapped relative to the REFER; the notifier (us) needs a
+    // tag on From when the REFER's To had none.
+    let mut from = request.header("to").unwrap_or("").to_string();
+    if !from.contains("tag=") {
+        from = format!("{};tag={}", from, request.derived_to_tag());
+    }
+    let to = request.header("from").unwrap_or("");
+    let body = format!("{}\r\n", sipfrag);
+    let notify = format!(
+        "NOTIFY {} SIP/2.0\r\n\
+         Via: SIP/2.0/UDP {};branch=z9hG4bK-pale-{}\r\n\
+         Max-Forwards: 70\r\n\
+         From: {}\r\n\
+         To: {}\r\n\
+         Call-ID: {}\r\n\
+         CSeq: 1 NOTIFY\r\n\
+         Event: refer;id={}\r\n\
+         Subscription-State: terminated;reason=noresource\r\n\
+         Contact: <sip:pale@{}>\r\n\
+         Content-Type: message/sipfrag;version=2.0\r\n\
+         Content-Length: {}\r\n\r\n{}",
+        target_uri,
+        sip_sent_by(local_addr),
+        Uuid::new_v4(),
+        from,
+        to,
+        request.call_id().unwrap_or(""),
+        refer_cseq,
+        sip_sent_by(local_addr),
+        body.len(),
+        body,
+    );
+    let _ = socket.send_to(notify.as_bytes(), peer).await;
+}
+
+/// True when a REFER's Refer-To targets the server's own park/pickup logic.
+fn refer_targets_server(request: &SipRequest) -> bool {
+    let refer_to = request
+        .header("refer-to")
+        .map(|v| v.trim().to_string());
+    let target = refer_to
+        .as_deref()
+        .and_then(extract_sip_uri)
+        .or(refer_to.clone());
+    match target {
+        Some(target) => {
+            let user = crate::sip_user_part(&target);
+            user.starts_with("park-") || user.starts_with("pickup-")
+        }
+        None => false,
+    }
+}
+
+/// RFC 4488: Refer-Sub: false asks for no implicit subscription (no NOTIFY).
+fn refer_sub_disabled(request: &SipRequest) -> bool {
+    request
+        .header("refer-sub")
+        .map(|v| v.trim().eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
+}
+
+fn top_via_branch(request: &SipRequest) -> Option<String> {
+    request.header("via").and_then(|via| {
+        via.split(';')
+            .find_map(|param| param.trim().strip_prefix("branch="))
+            .map(|branch| branch.trim().to_string())
+    })
+}
+
+fn max_forwards(request: &SipRequest) -> Option<u32> {
+    request
+        .header("max-forwards")
+        .and_then(|value| value.trim().parse().ok())
+}
+
+/// Extract a header line's value from a raw response text (used where the
+/// response is not worth fully parsing).
+fn response_header_line(response: &str, name: &str) -> Option<String> {
+    let lower = format!("{}:", name.to_ascii_lowercase());
+    for line in response.split("\r\n") {
+        if line.is_empty() {
+            break;
+        }
+        if line.to_ascii_lowercase().starts_with(&lower) {
+            return line.splitn(2, ':').nth(1).map(|v| v.trim().to_string());
+        }
+    }
+    None
+}
+
+fn response_cseq_method(response: &str) -> Option<String> {
+    response_header_line(response, "cseq")
+        .and_then(|cseq| cseq.split_whitespace().nth(1).map(ToOwned::to_owned))
 }
 
 fn invite_target(state: &AppState, routed_uri: &str) -> Option<(String, SocketAddr)> {
@@ -989,7 +1432,10 @@ fn proxy_bind_addr(local_addr: SocketAddr) -> SocketAddr {
     }
 }
 
-fn rewrite_invite_for_proxy(
+/// Rewrite a request for forwarding: retarget the R-URI, push our Via on top
+/// of the existing chain, and decrement Max-Forwards (RFC 3261 §16.6,
+/// inserting 69 when the original had none).
+fn rewrite_request_for_proxy(
     packet: &str,
     target_uri: &str,
     proxy_addr: SocketAddr,
@@ -1001,9 +1447,6 @@ fn rewrite_invite_for_proxy(
     let method = parts.next()?;
     let _uri = parts.next()?;
     let version = parts.next().unwrap_or("SIP/2.0");
-    if method != "INVITE" {
-        return None;
-    }
 
     let mut out = String::new();
     out.push_str(&format!("{method} {target_uri} {version}\r\n"));
@@ -1011,7 +1454,30 @@ fn rewrite_invite_for_proxy(
         "Via: SIP/2.0/UDP {};branch={branch}\r\n",
         sip_sent_by(proxy_addr)
     ));
+    let mut wrote_max_forwards = false;
+    let mut in_headers = true;
     for line in lines {
+        if in_headers {
+            if line == "\r\n" {
+                if !wrote_max_forwards {
+                    out.push_str("Max-Forwards: 69\r\n");
+                }
+                in_headers = false;
+                out.push_str(line);
+                continue;
+            }
+            let lower = line.to_ascii_lowercase();
+            if lower.starts_with("max-forwards:") {
+                let value: u32 = line
+                    .splitn(2, ':')
+                    .nth(1)
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(70);
+                out.push_str(&format!("Max-Forwards: {}\r\n", value.saturating_sub(1)));
+                wrote_max_forwards = true;
+                continue;
+            }
+        }
         out.push_str(line);
     }
     Some(out)
@@ -1140,11 +1606,29 @@ impl SipRequest {
         )
     }
 
+    /// Deterministic local tag for this request's To header (RFC 3261
+    /// §8.2.6.2 requires one on every non-100 response). Stable across
+    /// retransmissions of the same request.
+    fn derived_to_tag(&self) -> String {
+        let seed = format!(
+            "{}|{}|{}",
+            self.call_id().unwrap_or(""),
+            self.header("from").unwrap_or(""),
+            self.header("cseq").unwrap_or(""),
+        );
+        md5_hex(seed.as_bytes())[..16].to_string()
+    }
+
     fn response(&self, code: u16, reason: &str, extra_headers: &[(&str, String)]) -> String {
         let mut headers = Vec::new();
         for header in ["via", "from", "to", "call-id", "cseq"] {
             if let Some(value) = self.header(header) {
-                headers.push(response_header(header, value.to_string()));
+                let value = if header == "to" && code != 100 && !value.contains("tag=") {
+                    format!("{};tag={}", value, self.derived_to_tag())
+                } else {
+                    value.to_string()
+                };
+                headers.push(response_header(header, value));
             }
         }
         for (name, value) in extra_headers {
@@ -1532,23 +2016,28 @@ Authorization: {}\r\n\r\n",
             let (len, proxy_addr) = downstream.recv_from(&mut buf).await.unwrap();
             let forwarded = String::from_utf8_lossy(&buf[..len]).to_string();
             assert!(forwarded.starts_with(&format!("INVITE sip:bob@{} SIP/2.0", downstream_addr)));
+            // The proxy must decrement Max-Forwards (or insert 69 when absent).
+            assert!(forwarded.contains("Max-Forwards: 69\r\n"));
             let top_via = forwarded
                 .lines()
                 .find(|line| line.contains("z9hG4bK-pale-"))
                 .unwrap()
                 .to_string();
-            let response = format!(
-                "SIP/2.0 180 Ringing\r\n{}\r\nVia: SIP/2.0/UDP 127.0.0.1:5062;branch=z9hG4bKcaller\r\nFrom: <sip:alice@example.com>;tag=1\r\nTo: <sip:bob@example.com>;tag=2\r\nCall-ID: invite-proxy\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n",
-                top_via
-            );
-            downstream
-                .send_to(response.as_bytes(), proxy_addr)
-                .await
-                .unwrap();
+            let tail = "Via: SIP/2.0/UDP 127.0.0.1:5062;branch=z9hG4bKcaller\r\nFrom: <sip:alice@example.com>;tag=1\r\nTo: <sip:bob@example.com>;tag=2\r\nCall-ID: invite-proxy\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n";
+            // 180 first, then the 200 final — the proxy must relay BOTH.
+            for status_line in ["SIP/2.0 180 Ringing", "SIP/2.0 200 OK"] {
+                let response = format!("{}\r\n{}\r\n{}", status_line, top_via, tail);
+                downstream
+                    .send_to(response.as_bytes(), proxy_addr)
+                    .await
+                    .unwrap();
+            }
         });
 
         let server_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
+        // A real caller socket so the mid-flight provisional relay can be observed.
+        let caller_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer: SocketAddr = caller_socket.local_addr().unwrap();
         let nonce = state.issue_sip_nonce();
         let auth = authorization(
             "alice",
@@ -1574,10 +2063,27 @@ Authorization: {}\r\n\r\n",
             .unwrap();
 
         downstream_task.await.unwrap();
-        assert!(response.starts_with("SIP/2.0 180 Ringing"));
+        // The provisional was relayed to the caller out-of-band...
+        let mut buf = vec![0_u8; 8192];
+        let (len, _) = tokio::time::timeout(
+            StdDuration::from_secs(2),
+            caller_socket.recv_from(&mut buf),
+        )
+        .await
+        .expect("provisional relayed to caller")
+        .unwrap();
+        let provisional = String::from_utf8_lossy(&buf[..len]).to_string();
+        assert!(provisional.starts_with("SIP/2.0 180 Ringing"));
+        assert!(!provisional.contains("z9hG4bK-pale-"));
+        // ...and the FINAL response is what the transaction returns.
+        assert!(response.starts_with("SIP/2.0 200 OK"));
         assert!(!response.contains("z9hG4bK-pale-"));
         assert!(response.contains("z9hG4bKcaller"));
-        assert_eq!(state.sip_dialogs()[0].status, SipDialogStatus::Ringing);
+        assert_eq!(state.sip_dialogs()[0].status, SipDialogStatus::Answered);
+        // Peer addressing was captured for in-dialog relays.
+        let dialog = state.dialog_for("invite-proxy").unwrap();
+        assert!(dialog.to_source.is_some());
+        assert_eq!(dialog.from_source.as_deref(), Some(peer.to_string().as_str()));
     }
 
     #[test]
@@ -1590,6 +2096,7 @@ Authorization: {}\r\n\r\n",
             target_contact: Some("sip:bob@10.0.0.2:5060".to_string()),
             status: SipDialogStatus::Ringing,
             media_types: vec![],
+            peer: Default::default(),
         });
         let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
 
@@ -1642,6 +2149,7 @@ Authorization: {}\r\n\r\n", auth);
             target_contact: Some("sip:bob@10.0.0.2:5060".to_string()),
             status: SipDialogStatus::Ringing,
             media_types: vec![],
+            peer: Default::default(),
         });
         let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
         let bye = "BYE sip:bob@example.com SIP/2.0\r\n\
@@ -1946,6 +2454,36 @@ Authorization: {}\r\n\r\n{}",
             target_contact: None,
             status: SipDialogStatus::Ringing,
             media_types: vec![],
+            peer: Default::default(),
+        });
+        let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
+        let nonce = state.issue_sip_nonce();
+        let auth = authorization("alice", "example.com", "secret", "INVITE", "sip:bob@example.com", &nonce);
+        let packet = format!(
+            "INVITE sip:bob@example.com SIP/2.0\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>;tag=2\r\n\
+Call-ID: reinvite-1\r\n\
+CSeq: 2 INVITE\r\n\
+Authorization: {}\r\n\r\nv=0\r\nm=audio 5004 RTP/AVP 0\r\na=sendonly\r\n", auth);
+
+        let response = handle_packet(&packet, peer, &state).unwrap();
+        assert!(response.starts_with("SIP/2.0 200 OK"));
+        assert_eq!(state.sip_dialogs()[0].status, SipDialogStatus::Held);
+    }
+
+    #[test]
+    fn tagless_invite_with_stale_call_id_is_not_a_re_invite() {
+        let state = test_state();
+        // An Ended dialog whose Call-ID a new (tag-less) INVITE happens to reuse.
+        state.upsert_sip_dialog(UpsertSipDialog {
+            call_id: "stale-1".to_string(),
+            from_uri: "sip:alice@example.com".to_string(),
+            to_uri: "sip:bob@example.com".to_string(),
+            target_contact: None,
+            status: SipDialogStatus::Ended,
+            media_types: vec![],
+            peer: Default::default(),
         });
         let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
         let nonce = state.issue_sip_nonce();
@@ -1954,13 +2492,37 @@ Authorization: {}\r\n\r\n{}",
             "INVITE sip:bob@example.com SIP/2.0\r\n\
 From: <sip:alice@example.com>;tag=1\r\n\
 To: <sip:bob@example.com>\r\n\
-Call-ID: reinvite-1\r\n\
+Call-ID: stale-1\r\n\
+CSeq: 1 INVITE\r\n\
+Authorization: {}\r\n\r\n", auth);
+
+        let _response = handle_packet(&packet, peer, &state).unwrap();
+        // Takes the initial-INVITE routing path: the re-INVITE shortcut would
+        // have flipped the dialog to Answered/Held — that must not happen for
+        // a tag-less INVITE, even when its Call-ID matches a stale dialog.
+        let status = state.dialog_for("stale-1").unwrap().status;
+        assert!(!matches!(
+            status,
+            SipDialogStatus::Answered | SipDialogStatus::Held
+        ));
+    }
+
+    #[test]
+    fn in_dialog_invite_for_dead_dialog_gets_481() {
+        let state = test_state();
+        let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
+        let nonce = state.issue_sip_nonce();
+        let auth = authorization("alice", "example.com", "secret", "INVITE", "sip:bob@example.com", &nonce);
+        let packet = format!(
+            "INVITE sip:bob@example.com SIP/2.0\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>;tag=2\r\n\
+Call-ID: unknown-dialog\r\n\
 CSeq: 2 INVITE\r\n\
-Authorization: {}\r\n\r\nv=0\r\nm=audio 5004 RTP/AVP 0\r\na=sendonly\r\n", auth);
+Authorization: {}\r\n\r\n", auth);
 
         let response = handle_packet(&packet, peer, &state).unwrap();
-        assert!(response.starts_with("SIP/2.0 200 OK"));
-        assert_eq!(state.sip_dialogs()[0].status, SipDialogStatus::Held);
+        assert!(response.starts_with("SIP/2.0 481"));
     }
 
     #[test]
@@ -1973,6 +2535,7 @@ Authorization: {}\r\n\r\nv=0\r\nm=audio 5004 RTP/AVP 0\r\na=sendonly\r\n", auth)
             target_contact: None,
             status: SipDialogStatus::Ringing,
             media_types: vec![],
+            peer: Default::default(),
         });
         let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
         let nonce = state.issue_sip_nonce();
@@ -1988,7 +2551,165 @@ Authorization: {}\r\n\r\n", auth);
 
         let response = handle_packet(&packet, peer, &state).unwrap();
         assert!(response.starts_with("SIP/2.0 202 Accepted"));
-        assert_eq!(state.sip_dialogs()[0].status, SipDialogStatus::Ended);
+        // Subscription-State is only legal on NOTIFY, not on the 202.
+        assert!(!response.contains("Subscription-State"));
+        // RFC 3515: the REFER alone does not end the dialog — the BYE does.
+        assert_eq!(state.sip_dialogs()[0].status, SipDialogStatus::Ringing);
+    }
+
+    #[test]
+    fn cancel_is_never_digest_challenged() {
+        let state = test_state();
+        state.upsert_sip_dialog(UpsertSipDialog {
+            call_id: "cancel-1".to_string(),
+            from_uri: "sip:alice@example.com".to_string(),
+            to_uri: "sip:bob@example.com".to_string(),
+            target_contact: None,
+            status: SipDialogStatus::Ringing,
+            media_types: vec![],
+            peer: Default::default(),
+        });
+        let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
+        // No Authorization header at all — RFC 3261 §22.1 forbids challenging CANCEL.
+        let packet = "CANCEL sip:bob@example.com SIP/2.0\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: cancel-1\r\n\
+CSeq: 1 CANCEL\r\n\r\n";
+
+        let response = handle_packet(packet, peer, &state).unwrap();
+        assert!(response.starts_with("SIP/2.0 200 OK"));
+        assert_eq!(state.sip_dialogs()[0].status, SipDialogStatus::Cancelled);
+    }
+
+    #[test]
+    fn bye_for_unknown_dialog_gets_481() {
+        let state = test_state();
+        let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
+        let nonce = state.issue_sip_nonce();
+        let auth = authorization("alice", "example.com", "secret", "BYE", "sip:bob@example.com", &nonce);
+        let packet = format!(
+            "BYE sip:bob@example.com SIP/2.0\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>;tag=2\r\n\
+Call-ID: nonexistent\r\n\
+CSeq: 2 BYE\r\n\
+Authorization: {}\r\n\r\n", auth);
+
+        let response = handle_packet(&packet, peer, &state).unwrap();
+        assert!(response.starts_with("SIP/2.0 481"));
+    }
+
+    #[test]
+    fn non_100_responses_carry_a_stable_to_tag() {
+        let state = test_state();
+        let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
+        // Unauthorized REGISTER → 401 challenge, which must carry a To-tag.
+        let packet = "REGISTER sip:example.com SIP/2.0\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:alice@example.com>\r\n\
+Call-ID: tag-test\r\n\
+CSeq: 1 REGISTER\r\n\r\n";
+        let first = handle_packet(packet, peer, &state).unwrap();
+        let second = handle_packet(packet, peer, &state).unwrap();
+        let tag_of = |response: &str| {
+            response
+                .lines()
+                .find(|line| line.to_ascii_lowercase().starts_with("to:"))
+                .and_then(|line| line.split("tag=").nth(1))
+                .map(|tag| tag.trim().to_string())
+        };
+        let first_tag = tag_of(&first).expect("To-tag on non-100 response");
+        // Retransmissions get the same tag.
+        assert_eq!(Some(first_tag), tag_of(&second));
+    }
+
+    #[tokio::test]
+    async fn in_dialog_info_is_relayed_to_peer_leg() {
+        let state = test_state();
+        let callee = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let callee_addr = callee.local_addr().unwrap();
+        // Established proxied dialog with peer addressing.
+        state.upsert_sip_dialog(UpsertSipDialog {
+            call_id: "dtmf-1".to_string(),
+            from_uri: "sip:alice@example.com".to_string(),
+            to_uri: "sip:bob@example.com".to_string(),
+            target_contact: Some(format!("sip:bob@{}", callee_addr)),
+            status: SipDialogStatus::Answered,
+            media_types: vec![],
+            peer: crate::DialogPeerInfo {
+                from_contact: Some("sip:alice@127.0.0.1:5062".to_string()),
+                from_source: Some("127.0.0.1:5062".to_string()),
+                to_source: Some(callee_addr.to_string()),
+            },
+        });
+
+        let callee_task = tokio::spawn(async move {
+            let mut buf = vec![0_u8; 8192];
+            let (len, proxy_addr) = callee.recv_from(&mut buf).await.unwrap();
+            let forwarded = String::from_utf8_lossy(&buf[..len]).to_string();
+            // The DTMF INFO reached the callee leg with its body intact.
+            assert!(forwarded.starts_with(&format!("INFO sip:bob@{} SIP/2.0", callee_addr)));
+            assert!(forwarded.contains("Signal=5"));
+            let top_via = forwarded
+                .lines()
+                .find(|line| line.contains("z9hG4bK-pale-"))
+                .unwrap()
+                .to_string();
+            let response = format!(
+                "SIP/2.0 200 OK\r\n{}\r\nFrom: <sip:alice@example.com>;tag=1\r\nTo: <sip:bob@example.com>;tag=2\r\nCall-ID: dtmf-1\r\nCSeq: 2 INFO\r\nContent-Length: 0\r\n\r\n",
+                top_via
+            );
+            callee.send_to(response.as_bytes(), proxy_addr).await.unwrap();
+        });
+
+        let server_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
+        let body = "Signal=5\r\nDuration=160\r\n";
+        let packet = format!(
+            "INFO sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:5062;branch=z9hG4bKinfo\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>;tag=2\r\n\
+Call-ID: dtmf-1\r\n\
+CSeq: 2 INFO\r\n\
+Content-Type: application/dtmf-relay\r\n\
+Content-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let response = handle_udp_packet(&server_socket, &packet, peer, &state)
+            .await
+            .unwrap();
+        callee_task.await.unwrap();
+        // The peer's 200 OK came back to the sender, our Via stripped.
+        assert!(response.starts_with("SIP/2.0 200 OK"));
+        assert!(!response.contains("z9hG4bK-pale-"));
+    }
+
+    #[test]
+    fn rewrite_decrements_max_forwards_and_handles_any_method() {
+        let addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
+        let packet = "INFO sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:5062;branch=z9hG4bKcaller\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>;tag=2\r\n\
+Call-ID: info-1\r\n\
+CSeq: 2 INFO\r\n\
+Content-Length: 0\r\n\r\n";
+        let rewritten =
+            rewrite_request_for_proxy(packet, "sip:bob@10.0.0.9:5080", addr, "z9hG4bK-pale-x")
+                .unwrap();
+        assert!(rewritten.starts_with("INFO sip:bob@10.0.0.9:5080 SIP/2.0"));
+        assert!(rewritten.contains("Max-Forwards: 69\r\n"));
+        // Original Via chain preserved below ours.
+        assert!(rewritten.contains("z9hG4bKcaller"));
+        let ours = rewritten.find("z9hG4bK-pale-x").unwrap();
+        let theirs = rewritten.find("z9hG4bKcaller").unwrap();
+        assert!(ours < theirs);
     }
 
     #[test]

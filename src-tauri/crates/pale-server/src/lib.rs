@@ -202,6 +202,9 @@ pub struct AppState {
     registrations: ShardedMap<String, SipRegistration>,
     sip_nonces: ShardedMap<String, DateTime<Utc>>,
     sip_dialogs: ShardedMap<String, SipDialog>,
+    /// In-flight proxied INVITEs keyed by the received top-Via branch, so a
+    /// CANCEL can be matched to its INVITE transaction and forwarded upstream.
+    pending_invites: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
     sip_messages: RwLock<Vec<SipMessage>>,
     sip_transactions: RwLock<Vec<SipTransaction>>,
     sip_subscriptions: ShardedMap<String, SipSubscription>,
@@ -334,6 +337,7 @@ impl AppState {
             registrations: ShardedMap::new(),
             sip_nonces: ShardedMap::new(),
             sip_dialogs: ShardedMap::new(),
+            pending_invites: std::sync::Mutex::new(HashMap::new()),
             sip_messages: RwLock::new(Vec::new()),
             sip_transactions: RwLock::new(Vec::new()),
             sip_subscriptions: ShardedMap::new(),
@@ -1064,6 +1068,42 @@ impl AppState {
         self.sip_nonces.remove(&nonce.to_string()).is_some()
     }
 
+    /// Register an in-flight proxied INVITE under the received top-Via
+    /// branch. Returns the Notify a matching CANCEL will trigger.
+    pub fn register_pending_invite(&self, received_branch: &str) -> Arc<tokio::sync::Notify> {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        self.pending_invites
+            .lock()
+            .expect("pending_invites lock poisoned")
+            .insert(received_branch.to_string(), notify.clone());
+        notify
+    }
+
+    pub fn remove_pending_invite(&self, received_branch: &str) {
+        self.pending_invites
+            .lock()
+            .expect("pending_invites lock poisoned")
+            .remove(received_branch);
+    }
+
+    /// Signal the in-flight INVITE matching this branch to send a CANCEL
+    /// upstream. Returns true when a pending transaction was found.
+    pub fn cancel_pending_invite(&self, received_branch: &str) -> bool {
+        let notify = self
+            .pending_invites
+            .lock()
+            .expect("pending_invites lock poisoned")
+            .get(received_branch)
+            .cloned();
+        match notify {
+            Some(notify) => {
+                notify.notify_one();
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn upsert_registration(&self, registration: SipRegistration) {
         self.registrations
             .retain(|_, registration| registration.expires_at > Utc::now());
@@ -1115,6 +1155,15 @@ impl AppState {
                 if !input.media_types.is_empty() {
                     dialog.media_types = input.media_types.clone();
                 }
+                if input.peer.from_contact.is_some() {
+                    dialog.from_contact = input.peer.from_contact.clone();
+                }
+                if input.peer.from_source.is_some() {
+                    dialog.from_source = input.peer.from_source.clone();
+                }
+                if input.peer.to_source.is_some() {
+                    dialog.to_source = input.peer.to_source.clone();
+                }
                 dialog.updated_at = Utc::now();
             })
             .or_insert_with(|| SipDialog {
@@ -1124,6 +1173,9 @@ impl AppState {
                 target_contact: input.target_contact,
                 status: input.status,
                 media_types: input.media_types,
+                from_contact: input.peer.from_contact,
+                from_source: input.peer.from_source,
+                to_source: input.peer.to_source,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             })
@@ -1162,6 +1214,10 @@ impl AppState {
 
     pub fn dialog_exists(&self, call_id: &str) -> bool {
         self.sip_dialogs.get(&call_id.to_string()).is_some()
+    }
+
+    pub fn dialog_for(&self, call_id: &str) -> Option<SipDialog> {
+        self.sip_dialogs.get(&call_id.to_string())
     }
 
     pub fn store_sip_message(&self, input: StoreSipMessage) -> SipMessage {
@@ -2966,6 +3022,15 @@ pub struct SipDialog {
     pub status: SipDialogStatus,
     #[serde(default)]
     pub media_types: Vec<MediaKind>,
+    /// Caller's Contact header (route target for requests toward the caller).
+    #[serde(default)]
+    pub from_contact: Option<String>,
+    /// Caller's transport source address as observed by the proxy.
+    #[serde(default)]
+    pub from_source: Option<String>,
+    /// Callee's transport address the INVITE was forwarded to.
+    #[serde(default)]
+    pub to_source: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -3217,6 +3282,16 @@ pub struct StoreSipMessage {
     pub body: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct DialogPeerInfo {
+    /// Caller's Contact header value.
+    pub from_contact: Option<String>,
+    /// Caller's transport source address.
+    pub from_source: Option<String>,
+    /// Callee's transport address the INVITE was forwarded to.
+    pub to_source: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct UpsertSipDialog {
     pub call_id: String,
@@ -3225,6 +3300,8 @@ pub struct UpsertSipDialog {
     pub target_contact: Option<String>,
     pub status: SipDialogStatus,
     pub media_types: Vec<MediaKind>,
+    /// Peer-leg addressing. `None` fields leave any stored value untouched.
+    pub peer: DialogPeerInfo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3233,6 +3310,7 @@ pub enum SipDialogStatus {
     Routing,
     Ringing,
     Queued,
+    Answered,
     Held,
     Cancelled,
     Ended,

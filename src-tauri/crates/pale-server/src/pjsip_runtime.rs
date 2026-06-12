@@ -413,6 +413,7 @@ unsafe fn record_call_info(
         target_contact: None,
         status,
         media_types: vec![],
+        peer: Default::default(),
     });
 }
 
