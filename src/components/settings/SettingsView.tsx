@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { User, Volume2, Globe, Info, Server, Bell, Phone } from "lucide-react";
+import { User, Volume2, Globe, Info, Server, Bell, Phone, LogOut } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useAccountStore } from "@/store/accountStore";
 import { useServerStore } from "@/store/serverStore";
@@ -7,7 +7,7 @@ import { AudioSettings } from "./AudioSettings";
 import { NetworkSettings } from "./NetworkSettings";
 import { registerAccount, storeSipPassword, getConfig, saveSettings } from "@/lib/tauri";
 import { adminLogin, adminLogout, adminBaseUrl } from "@/lib/adminApi";
-import { disconnectServer } from "@/lib/session";
+import { disconnectServer, signOut } from "@/lib/session";
 import { toast } from "@/components/ui/Toast";
 import type { SipAccount } from "@/types";
 
@@ -62,6 +62,20 @@ export function SettingsView() {
         {activeTab === "server" && <ServerSettingsPanel />}
         {activeTab === "notifications" && <NotificationSettingsPanel />}
         {activeTab === "about" && <AboutPanel />}
+      </div>
+
+      {/* Sign Out */}
+      <div className="px-4 pb-4">
+        <button
+          onClick={signOut}
+          className={cn(
+            "w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-md text-sm font-medium",
+            "bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors"
+          )}
+        >
+          <LogOut size={16} />
+          Sign Out
+        </button>
       </div>
     </div>
   );
