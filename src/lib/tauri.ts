@@ -482,6 +482,9 @@ export interface ServerRoomMessage {
   body: string;
   content_type: string;
   created_at: string;
+  reply_to?: string;
+  edited_at?: string;
+  pinned?: boolean;
 }
 
 export function paleServerGetRooms(baseUrl: string, token: string): Promise<ServerRoom[]> {
@@ -514,10 +517,70 @@ export function paleServerSendRoomMessage(
   token: string,
   roomId: string,
   body: string,
+  replyTo?: string,
 ): Promise<ServerRoomMessage> {
   return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/messages`, {
     method: "POST",
-    body: JSON.stringify({ body }),
+    body: JSON.stringify({ body, reply_to: replyTo ?? null }),
+  });
+}
+
+export function paleServerPinMessage(
+  baseUrl: string,
+  token: string,
+  messageId: string,
+  pinned: boolean,
+): Promise<void> {
+  return serverFetch(baseUrl, token, `/v1/messages/${messageId}/pin`, {
+    method: "PUT",
+    body: JSON.stringify({ pinned }),
+  });
+}
+
+export function paleServerGetPinnedMessages(
+  baseUrl: string,
+  token: string,
+  roomId: string,
+): Promise<ServerRoomMessage[]> {
+  return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/pinned`);
+}
+
+export function paleServerAddFavorite(
+  baseUrl: string,
+  token: string,
+  sipUri: string,
+): Promise<void> {
+  return serverFetch(baseUrl, token, `/v1/favorites`, {
+    method: "POST",
+    body: JSON.stringify({ sip_uri: sipUri }),
+  });
+}
+
+export function paleServerRemoveFavorite(
+  baseUrl: string,
+  token: string,
+  sipUri: string,
+): Promise<void> {
+  return serverFetch(baseUrl, token, `/v1/favorites/${encodeURIComponent(sipUri)}`, {
+    method: "DELETE",
+  });
+}
+
+export function paleServerGetFavorites(
+  baseUrl: string,
+  token: string,
+): Promise<string[]> {
+  return serverFetch(baseUrl, token, `/v1/favorites`);
+}
+
+export function paleServerUpdateProfile(
+  baseUrl: string,
+  token: string,
+  updates: { display_name?: string; title?: string; department?: string; email?: string; status_message?: string },
+): Promise<void> {
+  return serverFetch(baseUrl, token, `/v1/profile`, {
+    method: "PUT",
+    body: JSON.stringify(updates),
   });
 }
 

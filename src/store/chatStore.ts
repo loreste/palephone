@@ -28,6 +28,11 @@ export interface ChatMessage {
   timestamp: number;
   is_encrypted: boolean;
   is_own: boolean;
+  reply_to?: string;
+  reply_preview?: { sender: string; body: string };
+  edited_at?: number;
+  pinned?: boolean;
+  reactions?: Record<string, string[]>; // emoji -> [user_uri, ...]
 }
 
 interface ChatStoreState {
@@ -41,6 +46,7 @@ interface ChatStoreState {
   addMessage: (msg: ChatMessage) => void;
   setMessages: (roomId: string, msgs: ChatMessage[]) => void;
   removeMessage: (roomId: string, eventId: string) => void;
+  updateMessage: (roomId: string, eventId: string, updates: Partial<ChatMessage>) => void;
   setTypingUsers: (roomId: string, userIds: string[]) => void;
   clearServerData: () => void;
 }
@@ -88,6 +94,16 @@ export const useChatStore = create<ChatStoreState>((set) => ({
       messages: {
         ...state.messages,
         [roomId]: (state.messages[roomId] ?? []).filter((m) => m.event_id !== eventId),
+      },
+    })),
+
+  updateMessage: (roomId, eventId, updates) =>
+    set((state) => ({
+      messages: {
+        ...state.messages,
+        [roomId]: (state.messages[roomId] ?? []).map((m) =>
+          m.event_id === eventId ? { ...m, ...updates } : m
+        ),
       },
     })),
 

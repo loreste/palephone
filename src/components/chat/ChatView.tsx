@@ -1,17 +1,68 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Users } from "lucide-react";
+import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Users, Reply, Pencil, Pin, Forward, Check, CheckCheck } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useChatStore, type ChatMessage, type RoomSummary } from "@/store/chatStore";
 import { useMatrixStore } from "@/store/matrixStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
-import { matrixSendMessage, matrixSetTyping, matrixCreateDm, paleServerGetMessages, makeCall as ipcMakeCall, paleServerApi } from "@/lib/tauri";
+import { useAccountStore } from "@/store/accountStore";
+import { matrixSendMessage, matrixSetTyping, matrixCreateDm, paleServerGetMessages, makeCall as ipcMakeCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, type ServerUser } from "@/lib/tauri";
 import { toast } from "@/components/ui/Toast";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
 import { EncryptionBadge } from "@/components/encryption/EncryptionBadge";
 import { MatrixLoginView } from "@/components/auth/MatrixLoginView";
 
 const QUICK_REACTIONS = ["\u{1F44D}", "\u{2764}\u{FE0F}", "\u{1F602}", "\u{1F44F}", "\u{1F914}"];
+
+function sanitizeHtml(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/on\w+="[^"]*"/gi, "")
+    .replace(/on\w+='[^']*'/gi, "");
+}
+
+function renderMarkdown(text: string): string {
+  let html = text
+    // Escape HTML entities first
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+  // Code blocks (triple backtick)
+  html = html.replace(/```([\s\S]*?)```/g, '<pre class="bg-black/10 rounded p-2 my-1 text-xs overflow-x-auto"><code>$1</code></pre>');
+
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, '<code class="bg-black/10 rounded px-1 py-0.5 text-xs">$1</code>');
+
+  // Bold
+  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+
+  // Italic
+  html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
+
+  // Links [text](url)
+  html = html.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    '<a href="$2" target="_blank" rel="noopener noreferrer" class="underline">$1</a>'
+  );
+
+  // Auto-link bare URLs
+  html = html.replace(
+    /(?<![href="])(https?:\/\/[^\s<]+)/g,
+    '<a href="$1" target="_blank" rel="noopener noreferrer" class="underline">$1</a>'
+  );
+
+  // @Mentions
+  html = html.replace(
+    /@(\w[\w\s]{0,30}?\w)(?=\s|$|[.,!?;:])/g,
+    '<span class="text-accent font-semibold">@$1</span>'
+  );
+
+  // Newlines to <br>
+  html = html.replace(/\n/g, "<br>");
+
+  return sanitizeHtml(html);
+}
 
 export function ChatView() {
   const authState = useMatrixStore((s) => s.authState);
@@ -187,13 +238,26 @@ function ChatRoom({
   const [input, setInput] = useState("");
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [hasMore, setHasMore] = useState(true);
+  const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
+  const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  const [mentionUsers, setMentionUsers] = useState<ServerUser[]>([]);
+  const [allUsers, setAllUsers] = useState<ServerUser[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<number | null>(null);
   const typingSentRef = useRef(false);
+  const inputRef = useRef<HTMLInputElement>(null);
   const { baseUrl, token, connected } = useServerStore();
   const addMessage = useChatStore((s) => s.addMessage);
+  const updateMessage = useChatStore((s) => s.updateMessage);
   const isServerRoom = !room.room_id.startsWith("!");
+
+  // Load server users for mentions
+  useEffect(() => {
+    if (!connected || !baseUrl || !token) return;
+    paleServerGetUsers(baseUrl, token).then(setAllUsers).catch(() => {});
+  }, [connected, baseUrl, token]);
 
   // Load server room messages on mount (stable deps only — no addMessage to avoid re-render loop)
   useEffect(() => {
@@ -225,6 +289,15 @@ function ChatRoom({
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
+
+  // Send read receipt for the latest message when room opens
+  useEffect(() => {
+    if (!connected || !baseUrl || !token || messages.length === 0) return;
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg && !lastMsg.is_own) {
+      paleServerMarkRead(baseUrl, token, lastMsg.event_id).catch(() => {});
+    }
+  }, [connected, baseUrl, token, messages.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load older messages when scrolling to top (avoid messages/addMessage in deps to prevent re-creation)
   const messagesRef = useRef(messages);
@@ -298,15 +371,68 @@ function ChatRoom({
     typingTimeoutRef.current = window.setTimeout(stopTyping, 2500);
   };
 
+  // Handle @ mention detection
+  const handleInputChange = (value: string) => {
+    setInput(value);
+    notifyTyping(value);
+
+    // Detect @ mention
+    const cursorPos = inputRef.current?.selectionStart ?? value.length;
+    const textBeforeCursor = value.slice(0, cursorPos);
+    const atMatch = textBeforeCursor.match(/@(\w*)$/);
+    if (atMatch) {
+      const query = atMatch[1].toLowerCase();
+      setMentionQuery(query);
+      setMentionUsers(
+        allUsers.filter((u) =>
+          u.display_name.toLowerCase().includes(query) ||
+          u.sip_uri.toLowerCase().includes(query)
+        ).slice(0, 5)
+      );
+    } else {
+      setMentionQuery(null);
+      setMentionUsers([]);
+    }
+  };
+
+  const insertMention = (user: ServerUser) => {
+    const cursorPos = inputRef.current?.selectionStart ?? input.length;
+    const textBeforeCursor = input.slice(0, cursorPos);
+    const atIdx = textBeforeCursor.lastIndexOf("@");
+    const newInput = input.slice(0, atIdx) + `@${user.display_name} ` + input.slice(cursorPos);
+    setInput(newInput);
+    setMentionQuery(null);
+    setMentionUsers([]);
+    inputRef.current?.focus();
+  };
+
   const handleSend = async () => {
     if (!input.trim()) return;
     const body = input.trim();
     setInput("");
     stopTyping();
+
+    // Handle edit mode
+    if (editingMessage) {
+      const msgId = editingMessage.event_id;
+      setEditingMessage(null);
+      try {
+        if (connected && baseUrl && token) {
+          const { paleServerEditMessage } = await import("@/lib/tauri");
+          await paleServerEditMessage(baseUrl, token, msgId, body);
+          updateMessage(room.room_id, msgId, { body, edited_at: Math.floor(Date.now() / 1000) });
+        }
+      } catch (err) {
+        toast({ type: "error", title: "Edit failed", description: String(err) });
+      }
+      return;
+    }
+
+    // Handle reply or normal send
     try {
       if (isServerRoom && connected && baseUrl && token) {
         const { paleServerSendRoomMessage } = await import("@/lib/tauri");
-        const msg = await paleServerSendRoomMessage(baseUrl, token, room.room_id, body);
+        const msg = await paleServerSendRoomMessage(baseUrl, token, room.room_id, body, replyingTo?.event_id);
         addMessage({
           event_id: msg.id,
           room_id: room.room_id,
@@ -317,12 +443,53 @@ function ChatRoom({
           timestamp: Math.floor(new Date(msg.created_at).getTime() / 1000),
           is_encrypted: false,
           is_own: true,
+          reply_to: replyingTo?.event_id,
+          reply_preview: replyingTo ? { sender: replyingTo.sender_name ?? replyingTo.sender, body: replyingTo.body } : undefined,
         });
       } else {
         await matrixSendMessage(room.room_id, body);
       }
     } catch (err) {
       toast({ type: "error", title: "Send failed", description: String(err) });
+    }
+    setReplyingTo(null);
+  };
+
+  const handleReply = (msg: ChatMessage) => {
+    setReplyingTo(msg);
+    setEditingMessage(null);
+    inputRef.current?.focus();
+  };
+
+  const handleEdit = (msg: ChatMessage) => {
+    setEditingMessage(msg);
+    setReplyingTo(null);
+    setInput(msg.body);
+    inputRef.current?.focus();
+  };
+
+  const handleForward = async (msg: ChatMessage) => {
+    const target = window.prompt("Enter room ID or user SIP URI to forward to:");
+    if (!target || !connected || !baseUrl || !token) return;
+    const senderLabel = msg.sender_name ?? msg.sender;
+    const body = `Forwarded from ${senderLabel}:\n${msg.body}`;
+    try {
+      const { paleServerSendRoomMessage } = await import("@/lib/tauri");
+      await paleServerSendRoomMessage(baseUrl, token, target, body);
+      toast({ type: "success", title: "Message forwarded" });
+    } catch (err) {
+      toast({ type: "error", title: "Forward failed", description: String(err) });
+    }
+  };
+
+  const handlePin = async (msg: ChatMessage) => {
+    if (!connected || !baseUrl || !token) return;
+    const newPinned = !msg.pinned;
+    try {
+      await paleServerPinMessage(baseUrl, token, msg.event_id, newPinned);
+      updateMessage(room.room_id, msg.event_id, { pinned: newPinned });
+    } catch (err) {
+      toast({ type: "error", title: "Pin failed", description: String(err) });
     }
   };
 
@@ -367,12 +534,64 @@ function ChatRoom({
           </div>
         )}
         {messages.map((msg) => (
-          <MessageBubble key={msg.event_id} message={msg} />
+          <MessageBubble
+            key={msg.event_id}
+            message={msg}
+            onReply={handleReply}
+            onEdit={handleEdit}
+            onForward={handleForward}
+            onPin={handlePin}
+          />
         ))}
         <div ref={messagesEndRef} />
       </div>
 
       {typingUsers.length > 0 && <TypingIndicator users={typingUsers} />}
+
+      {/* Reply/Edit preview bar */}
+      {replyingTo && (
+        <div className="flex items-center gap-2 px-3 py-1.5 border-t border-border-subtle bg-elevated text-xs">
+          <Reply size={12} className="text-accent shrink-0" />
+          <div className="flex-1 min-w-0">
+            <span className="font-semibold text-accent">{replyingTo.sender_name ?? replyingTo.sender}</span>
+            <span className="text-tertiary ml-1 truncate">{replyingTo.body.slice(0, 60)}</span>
+          </div>
+          <button onClick={() => setReplyingTo(null)} className="p-0.5 text-tertiary hover:text-primary">
+            <X size={12} />
+          </button>
+        </div>
+      )}
+      {editingMessage && (
+        <div className="flex items-center gap-2 px-3 py-1.5 border-t border-border-subtle bg-elevated text-xs">
+          <Pencil size={12} className="text-warning shrink-0" />
+          <span className="text-warning font-semibold">Editing message</span>
+          <div className="flex-1" />
+          <button onClick={() => { setEditingMessage(null); setInput(""); }} className="p-0.5 text-tertiary hover:text-primary">
+            <X size={12} />
+          </button>
+        </div>
+      )}
+
+      {/* Mention dropdown */}
+      {mentionQuery !== null && mentionUsers.length > 0 && (
+        <div className="px-3 pb-1">
+          <div className="bg-surface border border-border-subtle rounded-lg shadow-lg max-h-32 overflow-y-auto">
+            {mentionUsers.map((u) => (
+              <button
+                key={u.id}
+                onClick={() => insertMention(u)}
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-elevated transition-colors text-sm"
+              >
+                <span className="w-5 h-5 rounded-full bg-accent-muted text-accent flex items-center justify-center text-[10px] font-bold">
+                  {u.display_name.charAt(0)}
+                </span>
+                <span className="text-primary">{u.display_name}</span>
+                <span className="text-tertiary text-xs ml-auto">{u.sip_uri}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Compose bar */}
       <div className="flex items-center gap-2 px-3 py-2 border-t border-border-subtle shrink-0">
@@ -383,19 +602,18 @@ function ChatRoom({
           <Paperclip size={18} />
         </button>
         <input
+          ref={inputRef}
           type="text"
           value={input}
-          onChange={(e) => {
-            setInput(e.target.value);
-            notifyTyping(e.target.value);
-          }}
+          onChange={(e) => handleInputChange(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
-          placeholder="Type a message..."
+          placeholder={editingMessage ? "Edit your message..." : "Type a message..."}
           className={cn(
             "flex-1 bg-surface border border-border-subtle rounded-lg",
             "px-3 py-2 text-sm text-primary",
             "placeholder:text-tertiary",
-            "focus:outline-none focus:border-border-focus"
+            "focus:outline-none focus:border-border-focus",
+            editingMessage && "border-warning/50"
           )}
         />
         <button
@@ -404,12 +622,14 @@ function ChatRoom({
           className={cn(
             "p-2 rounded-lg transition-colors",
             input.trim()
-              ? "bg-accent text-white hover:bg-accent-hover"
+              ? editingMessage
+                ? "bg-warning text-white hover:bg-warning/80"
+                : "bg-accent text-white hover:bg-accent-hover"
               : "text-tertiary cursor-not-allowed"
           )}
-          aria-label="Send"
+          aria-label={editingMessage ? "Save edit" : "Send"}
         >
-          <Send size={18} />
+          {editingMessage ? <Check size={18} /> : <Send size={18} />}
         </button>
       </div>
     </>
@@ -673,19 +893,56 @@ function msgTypeLabel(mt: ChatMessage["msg_type"]): string {
   return "text";
 }
 
-function MessageBubble({ message }: { message: ChatMessage }) {
+function MessageBubble({
+  message,
+  onReply,
+  onEdit,
+  onForward,
+  onPin,
+}: {
+  message: ChatMessage;
+  onReply?: (msg: ChatMessage) => void;
+  onEdit?: (msg: ChatMessage) => void;
+  onForward?: (msg: ChatMessage) => void;
+  onPin?: (msg: ChatMessage) => void;
+}) {
   const time = new Date(message.timestamp * 1000).toLocaleTimeString([], {
     hour: "numeric",
     minute: "2-digit",
   });
   const kind = msgTypeLabel(message.msg_type);
   const { baseUrl, token, connected } = useServerStore();
+  const updateMessage = useChatStore((s) => s.updateMessage);
+  const currentSipUri = useAccountStore((s) => s.account?.sipUri);
 
   const handleDelete = async () => {
     if (!connected || !baseUrl || !token) return;
     const { paleServerDeleteMessage } = await import("@/lib/tauri");
     paleServerDeleteMessage(baseUrl, token, message.event_id).catch(() => {});
   };
+
+  const handleReaction = async (emoji: string) => {
+    if (!baseUrl || !token) return;
+    try {
+      await paleServerApi(baseUrl, token, `/v1/messages/${message.event_id}/react`, {
+        method: "POST",
+        body: { emoji },
+      });
+      // Optimistically update reactions
+      const uri = currentSipUri ? `sip:${currentSipUri}` : "me";
+      const reactions = { ...(message.reactions ?? {}) };
+      const existing = reactions[emoji] ?? [];
+      if (existing.includes(uri)) {
+        reactions[emoji] = existing.filter((u) => u !== uri);
+        if (reactions[emoji].length === 0) delete reactions[emoji];
+      } else {
+        reactions[emoji] = [...existing, uri];
+      }
+      updateMessage(message.room_id, message.event_id, { reactions });
+    } catch { /* ignore */ }
+  };
+
+  const renderedBody = renderMarkdown(message.body);
 
   return (
     <div
@@ -694,31 +951,61 @@ function MessageBubble({ message }: { message: ChatMessage }) {
         message.is_own ? "justify-end" : "justify-start"
       )}
     >
-      {/* Message actions — visible on hover */}
-      {message.is_own && connected && (
-        <div className="flex items-center gap-0.5 mr-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
+      {/* Hover actions — own messages (left side) */}
+      {connected && (
+        <div className={cn(
+          "flex items-center gap-0.5 opacity-0 group-hover/msg:opacity-100 transition-opacity",
+          message.is_own ? "mr-1" : "order-last ml-1"
+        )}>
+          {/* Reply */}
           <button
-            onClick={handleDelete}
-            className="p-0.5 rounded text-tertiary hover:text-destructive"
-            title="Delete message"
+            onClick={() => onReply?.(message)}
+            className="p-0.5 rounded text-tertiary hover:text-accent"
+            title="Reply"
           >
-            <X size={12} />
+            <Reply size={12} />
           </button>
-        </div>
-      )}
-      {!message.is_own && connected && (
-        <div className="flex items-center gap-0.5 order-last ml-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
-          {QUICK_REACTIONS.map((emoji) => (
+          {/* Edit (own only) */}
+          {message.is_own && (
+            <button
+              onClick={() => onEdit?.(message)}
+              className="p-0.5 rounded text-tertiary hover:text-accent"
+              title="Edit"
+            >
+              <Pencil size={12} />
+            </button>
+          )}
+          {/* Pin/Unpin */}
+          <button
+            onClick={() => onPin?.(message)}
+            className={cn("p-0.5 rounded", message.pinned ? "text-accent" : "text-tertiary hover:text-accent")}
+            title={message.pinned ? "Unpin" : "Pin"}
+          >
+            <Pin size={12} />
+          </button>
+          {/* Forward */}
+          <button
+            onClick={() => onForward?.(message)}
+            className="p-0.5 rounded text-tertiary hover:text-accent"
+            title="Forward"
+          >
+            <Forward size={12} />
+          </button>
+          {/* Delete (own only) */}
+          {message.is_own && (
+            <button
+              onClick={handleDelete}
+              className="p-0.5 rounded text-tertiary hover:text-destructive"
+              title="Delete"
+            >
+              <X size={12} />
+            </button>
+          )}
+          {/* Quick reactions (others' messages) */}
+          {!message.is_own && QUICK_REACTIONS.map((emoji) => (
             <button
               key={emoji}
-              onClick={async () => {
-                if (!baseUrl || !token) return;
-                await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/messages/${message.event_id}/react`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-                  body: JSON.stringify({ emoji }),
-                });
-              }}
+              onClick={() => handleReaction(emoji)}
               className="p-0.5 rounded hover:bg-elevated text-xs"
               title={emoji}
             >
@@ -727,63 +1014,124 @@ function MessageBubble({ message }: { message: ChatMessage }) {
           ))}
         </div>
       )}
-      <div
-        className={cn(
-          "max-w-[80%] rounded-2xl px-3 py-2",
-          message.is_own
-            ? "bg-accent text-white rounded-br-md"
-            : "bg-surface border border-border-subtle text-primary rounded-bl-md"
-        )}
-      >
-        {!message.is_own && (
-          <p className="text-[10px] font-semibold text-accent mb-0.5">
-            {message.sender_name ?? message.sender.split(":")[0]?.replace("@", "")}
-          </p>
-        )}
-        {kind === "image" && typeof message.msg_type === "object" && "image" in message.msg_type && (message.msg_type as { image: { url: string } }).image.url ? (
-          <img
-            src={(message.msg_type as { image: { url: string } }).image.url}
-            alt="Shared image"
-            className="rounded-lg max-w-full max-h-[300px] object-contain mb-1 cursor-pointer"
-            onClick={() => window.open((message.msg_type as { image: { url: string } }).image.url, "_blank")}
-          />
-        ) : kind === "image" ? (
-          <div className="flex items-center gap-1 mb-1">
-            <ImageIcon size={14} className="opacity-60" />
-            <span className="text-xs opacity-60">Image</span>
-          </div>
-        ) : null}
-        {kind === "file" && typeof message.msg_type === "object" && "file" in message.msg_type && (
-          <div className="flex items-center gap-1 mb-1 px-2 py-1.5 bg-black/5 rounded-lg">
-            <FileIcon size={14} className="opacity-60" />
-            <span className="text-xs opacity-60 flex-1 truncate">{message.msg_type.file.filename}</span>
-            {message.msg_type.file.url && (
-              <a
-                href={message.msg_type.file.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-[10px] text-accent hover:underline shrink-0"
-              >
-                Download
-              </a>
-            )}
-          </div>
-        )}
-        {kind === "audio" && typeof message.msg_type === "object" && "audio" in message.msg_type && message.msg_type.audio.url && (
-          <audio controls className="max-w-full mb-1" src={message.msg_type.audio.url} />
-        )}
-        {kind === "video" && typeof message.msg_type === "object" && "video" in message.msg_type && message.msg_type.video.url && (
-          <video controls className="rounded-lg max-w-full max-h-[300px] mb-1" src={message.msg_type.video.url} />
-        )}
-        <p className="text-sm whitespace-pre-wrap break-words">{message.body}</p>
-        <p
+      <div className="max-w-[80%]">
+        <div
           className={cn(
-            "text-[9px] mt-1",
-            message.is_own ? "text-white/60" : "text-tertiary"
+            "rounded-2xl px-3 py-2 relative",
+            message.is_own
+              ? "bg-accent text-white rounded-br-md"
+              : "bg-surface border border-border-subtle text-primary rounded-bl-md"
           )}
         >
-          {time}
-        </p>
+          {/* Pin indicator */}
+          {message.pinned && (
+            <div className="flex items-center gap-1 text-[9px] text-accent mb-1">
+              <Pin size={9} /> Pinned
+            </div>
+          )}
+
+          {/* Reply preview */}
+          {message.reply_preview && (
+            <div className={cn(
+              "rounded px-2 py-1 mb-1.5 text-[10px] border-l-2",
+              message.is_own
+                ? "bg-white/10 border-white/40"
+                : "bg-elevated border-accent"
+            )}>
+              <p className="font-semibold truncate">{message.reply_preview.sender}</p>
+              <p className="truncate opacity-70">{message.reply_preview.body}</p>
+            </div>
+          )}
+
+          {!message.is_own && (
+            <p className="text-[10px] font-semibold text-accent mb-0.5">
+              {message.sender_name ?? message.sender.split(":")[0]?.replace("@", "")}
+            </p>
+          )}
+          {kind === "image" && typeof message.msg_type === "object" && "image" in message.msg_type && (message.msg_type as { image: { url: string } }).image.url ? (
+            <img
+              src={(message.msg_type as { image: { url: string } }).image.url}
+              alt="Shared image"
+              className="rounded-lg max-w-full max-h-[300px] object-contain mb-1 cursor-pointer"
+              onClick={() => window.open((message.msg_type as { image: { url: string } }).image.url, "_blank")}
+            />
+          ) : kind === "image" ? (
+            <div className="flex items-center gap-1 mb-1">
+              <ImageIcon size={14} className="opacity-60" />
+              <span className="text-xs opacity-60">Image</span>
+            </div>
+          ) : null}
+          {kind === "file" && typeof message.msg_type === "object" && "file" in message.msg_type && (
+            <div className="flex items-center gap-1 mb-1 px-2 py-1.5 bg-black/5 rounded-lg">
+              <FileIcon size={14} className="opacity-60" />
+              <span className="text-xs opacity-60 flex-1 truncate">{message.msg_type.file.filename}</span>
+              {message.msg_type.file.url && (
+                <a
+                  href={message.msg_type.file.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[10px] text-accent hover:underline shrink-0"
+                >
+                  Download
+                </a>
+              )}
+            </div>
+          )}
+          {kind === "audio" && typeof message.msg_type === "object" && "audio" in message.msg_type && message.msg_type.audio.url && (
+            <audio controls className="max-w-full mb-1" src={message.msg_type.audio.url} />
+          )}
+          {kind === "video" && typeof message.msg_type === "object" && "video" in message.msg_type && message.msg_type.video.url && (
+            <video controls className="rounded-lg max-w-full max-h-[300px] mb-1" src={message.msg_type.video.url} />
+          )}
+          <div
+            className="text-sm whitespace-pre-wrap break-words"
+            dangerouslySetInnerHTML={{ __html: renderedBody }}
+          />
+          <p
+            className={cn(
+              "text-[9px] mt-1 flex items-center gap-1",
+              message.is_own ? "text-white/60" : "text-tertiary"
+            )}
+          >
+            {time}
+            {message.edited_at && <span>(edited)</span>}
+            {/* Read receipt indicators (own messages only) */}
+            {message.is_own && (
+              <span className="inline-flex items-center ml-0.5">
+                {message.reactions && Object.keys(message.reactions).length > 0 ? (
+                  <CheckCheck size={10} className="text-blue-300" />
+                ) : (
+                  <Check size={10} />
+                )}
+              </span>
+            )}
+          </p>
+        </div>
+
+        {/* Reactions display */}
+        {message.reactions && Object.keys(message.reactions).length > 0 && (
+          <div className={cn("flex flex-wrap gap-1 mt-1", message.is_own ? "justify-end" : "justify-start")}>
+            {Object.entries(message.reactions).map(([emoji, users]) => {
+              const ownUri = currentSipUri ? `sip:${currentSipUri}` : "";
+              const isOwn = users.includes(ownUri);
+              return (
+                <button
+                  key={emoji}
+                  onClick={() => handleReaction(emoji)}
+                  className={cn(
+                    "inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-xs border transition-colors",
+                    isOwn
+                      ? "border-accent bg-accent/10 text-accent"
+                      : "border-border-subtle bg-surface text-secondary hover:border-accent"
+                  )}
+                >
+                  <span>{emoji}</span>
+                  <span className="text-[10px]">{users.length}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );

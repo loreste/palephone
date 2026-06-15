@@ -58,6 +58,7 @@ impl PgStore {
             include_str!("../migrations/009_call_center.sql"),
             include_str!("../migrations/010_extension_user_link.sql"),
             include_str!("../migrations/011_call_center_enterprise.sql"),
+            include_str!("../migrations/012_chat_enterprise.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {
@@ -111,6 +112,11 @@ impl PgStore {
             password_hash: r.get("password_hash"),
             role: r.try_get("role").unwrap_or_else(|_| "user".to_string()),
             created_at: r.get("created_at"),
+            email: r.try_get("email").ok().flatten(),
+            title: r.try_get("title").ok().flatten(),
+            department: r.try_get("department").ok().flatten(),
+            phone_number: r.try_get("phone_number").ok().flatten(),
+            status_message: r.try_get("status_message").ok().flatten(),
         }).collect())
     }
 
@@ -782,6 +788,106 @@ impl PgStore {
                 created_at: r.try_get("created_at").ok()?,
             })
         }).collect())
+    }
+
+    // ─── Room Messages (Enterprise) ───
+
+    pub async fn insert_room_message(&self, msg: &crate::RoomMessage) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO room_messages (id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+             ON CONFLICT (id) DO NOTHING",
+            &[&msg.id, &msg.room_id, &msg.sender_uri, &msg.body, &msg.content_type, &msg.created_at, &msg.reply_to, &msg.edited_at, &msg.pinned],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn update_room_message_body(&self, id: Uuid, body: &str) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "UPDATE room_messages SET body = $2, edited_at = now() WHERE id = $1",
+            &[&id, &body],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn toggle_pin(&self, id: Uuid, pinned: bool) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "UPDATE room_messages SET pinned = $2 WHERE id = $1",
+            &[&id, &pinned],
+        ).await?;
+        Ok(())
+    }
+
+    // ─── Reactions ───
+
+    pub async fn insert_reaction(&self, message_id: Uuid, user_uri: &str, emoji: &str) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO message_reactions (id, message_id, user_uri, emoji) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (message_id, user_uri, emoji) DO NOTHING",
+            &[&Uuid::new_v4(), &message_id, &user_uri, &emoji],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn delete_reaction(&self, message_id: Uuid, user_uri: &str, emoji: &str) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "DELETE FROM message_reactions WHERE message_id = $1 AND user_uri = $2 AND emoji = $3",
+            &[&message_id, &user_uri, &emoji],
+        ).await?;
+        Ok(())
+    }
+
+    // ─── Favorites ───
+
+    pub async fn insert_favorite(&self, user_uri: &str, favorite_uri: &str) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO user_favorites (id, user_uri, favorite_uri) VALUES ($1, $2, $3)
+             ON CONFLICT (user_uri, favorite_uri) DO NOTHING",
+            &[&Uuid::new_v4(), &user_uri, &favorite_uri],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn delete_favorite(&self, user_uri: &str, favorite_uri: &str) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "DELETE FROM user_favorites WHERE user_uri = $1 AND favorite_uri = $2",
+            &[&user_uri, &favorite_uri],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn load_favorites(&self, user_uri: &str) -> Result<Vec<String>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT favorite_uri FROM user_favorites WHERE user_uri = $1 ORDER BY created_at",
+            &[&user_uri],
+        ).await?;
+        Ok(rows.iter().map(|r| r.get("favorite_uri")).collect())
+    }
+
+    // ─── User Profile ───
+
+    pub async fn update_user_profile(
+        &self,
+        id: Uuid,
+        email: Option<String>,
+        title: Option<String>,
+        department: Option<String>,
+        phone_number: Option<String>,
+    ) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "UPDATE users SET email = COALESCE($2, email), title = COALESCE($3, title), department = COALESCE($4, department), phone_number = COALESCE($5, phone_number) WHERE id = $1",
+            &[&id, &email, &title, &department, &phone_number],
+        ).await?;
+        Ok(())
     }
 }
 

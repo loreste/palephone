@@ -8,6 +8,7 @@ import {
   paleServerSyncCallHistory,
   paleServerSetPresence,
 } from "@/lib/tauri";
+import { useActivityStore } from "@/store/activityStore";
 import { useAccountStore } from "@/store/accountStore";
 import { useCallStore } from "@/store/callStore";
 import { useServerStore } from "@/store/serverStore";
@@ -127,6 +128,17 @@ export function useSipEvents() {
               answered: existing.connectTime !== null,
             };
             addCallRecord({ id: 0, ...record }).catch(() => {});
+            // Track missed calls in activity feed
+            if (existing.direction === "inbound" && existing.connectTime === null) {
+              useActivityStore.getState().addItem({
+                id: `missed-${event.call_id}-${Date.now()}`,
+                type: "missed_call",
+                title: "Missed call",
+                body: `From ${existing.remoteName || existing.remoteUri}`,
+                timestamp: Math.floor(Date.now() / 1000),
+                read: false,
+              });
+            }
             // Sync to pale-server if connected
             const { baseUrl, token } = useServerStore.getState();
             if (baseUrl && token) {

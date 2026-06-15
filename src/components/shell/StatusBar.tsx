@@ -121,11 +121,21 @@ function PresenceIndicator({
     return () => document.removeEventListener("mousedown", handleClick);
   }, [open]);
 
+  const [statusMessage, setStatusMessage] = useState(ownPresence?.note ?? "");
+
   const handleSelect = async (status: PresenceStatus) => {
     setOpen(false);
     if (!baseUrl || !token) return;
     try {
-      const result = await paleServerSetPresence(baseUrl, token, status);
+      const result = await paleServerSetPresence(baseUrl, token, status, statusMessage || null);
+      setPresence(result.sip_uri, result);
+    } catch { /* ignore */ }
+  };
+
+  const handleStatusMessageSubmit = async () => {
+    if (!baseUrl || !token) return;
+    try {
+      const result = await paleServerSetPresence(baseUrl, token, currentStatus, statusMessage || null);
       setPresence(result.sip_uri, result);
     } catch { /* ignore */ }
   };
@@ -142,7 +152,7 @@ function PresenceIndicator({
       </button>
 
       {open && (
-        <div className="absolute top-full left-0 mt-1 w-40 bg-surface border border-border-subtle rounded-md shadow-lg z-50 py-1">
+        <div className="absolute top-full left-0 mt-1 w-48 bg-surface border border-border-subtle rounded-md shadow-lg z-50 py-1">
           {presenceOptions.map((opt) => (
             <button
               key={opt.status}
@@ -157,6 +167,20 @@ function PresenceIndicator({
               {opt.label}
             </button>
           ))}
+          <div className="border-t border-border-subtle mt-1 pt-1 px-2 pb-1">
+            <input
+              type="text"
+              value={statusMessage}
+              onChange={(e) => setStatusMessage(e.target.value)}
+              onBlur={handleStatusMessageSubmit}
+              onKeyDown={(e) => { if (e.key === "Enter") handleStatusMessageSubmit(); }}
+              placeholder="Set a status message..."
+              className={cn(
+                "w-full bg-elevated border border-border-subtle rounded px-2 py-1 text-[10px] text-primary",
+                "placeholder:text-tertiary focus:outline-none focus:border-border-focus"
+              )}
+            />
+          </div>
         </div>
       )}
     </div>

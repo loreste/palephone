@@ -79,6 +79,12 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/messages/{id}/read", put(mark_message_read))
         .route("/v1/messages/{id}", put(edit_message).delete(delete_message))
         .route("/v1/messages/{id}/react", post(react_to_message))
+        .route("/v1/messages/{id}/pin", put(pin_message_handler))
+        .route("/v1/messages/{id}/reads", get(list_reads_handler))
+        .route("/v1/rooms/{id}/pins", get(list_pinned_handler))
+        .route("/v1/favorites", get(list_favorites_handler).post(add_favorite_handler))
+        .route("/v1/favorites/{uri}", delete(remove_favorite_handler))
+        .route("/v1/users/{id}/profile", put(update_profile_handler))
         .route("/v1/users/{id}/avatar", put(upload_avatar))
         .route("/v1/call-settings", get(get_call_settings).put(update_call_settings))
         .route("/v1/queues", get(list_queues).post(create_queue))
@@ -840,7 +846,7 @@ async fn send_room_message(
     if state.room(id).is_none() {
         return Err(ApiError::NotFound);
     }
-    Ok(Json(state.send_room_message(id, &principal, &input.body)))
+    Ok(Json(state.send_room_message(id, &principal, &input.body, input.reply_to)))
 }
 
 async fn add_room_member(
@@ -849,7 +855,7 @@ async fn add_room_member(
     Path(id): Path<Uuid>,
     Json(input): Json<AddRoomMemberRequest>,
 ) -> Result<Json<crate::Room>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    let _principal = authenticated_principal(&headers, &state)?;
     state
         .add_room_member(id, &input.user_sip_uri)
         .map(Json)
@@ -983,18 +989,13 @@ async fn edit_message(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(input): Json<EditMessageRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
-    state.broadcast_sse(crate::SseEvent {
-        event_type: "message_edited".to_string(),
-        payload: json!({
-            "message_id": id,
-            "new_body": input.body,
-            "edited_by": principal,
-            "edited_at": Utc::now(),
-        }),
-    });
-    Ok(Json(json!({ "ok": true })))
+) -> Result<Json<crate::RoomMessage>, ApiError> {
+    let _principal = authenticated_principal(&headers, &state)?;
+    let msg = state.edit_room_message(id, &input.body).ok_or(ApiError::NotFound)?;
+    // Persist to PG
+    let body_clone = input.body.clone();
+    state.pg_spawn(move |pg| Box::pin(async move { pg.update_room_message_body(id, &body_clone).await }));
+    Ok(Json(msg))
 }
 
 async fn delete_message(
@@ -1029,16 +1030,117 @@ async fn react_to_message(
     Json(input): Json<ReactionRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let principal = authenticated_principal(&headers, &state)?;
-    state.broadcast_sse(crate::SseEvent {
-        event_type: "reaction".to_string(),
-        payload: json!({
-            "message_id": id,
-            "emoji": input.emoji,
-            "user": principal,
-            "created_at": Utc::now(),
-        }),
-    });
+    state.add_reaction(id, &principal, &input.emoji);
+    // Persist to PG (toggle: try insert, if exists delete)
+    let emoji = input.emoji.clone();
+    let user = principal.clone();
+    state.pg_spawn(move |pg| Box::pin(async move {
+        // Try insert; if conflict, delete instead
+        if pg.insert_reaction(id, &user, &emoji).await.is_err() {
+            pg.delete_reaction(id, &user, &emoji).await?;
+        }
+        Ok(())
+    }));
     Ok(Json(json!({ "ok": true })))
+}
+
+// ─── Pin, Favorites, Profile ───
+
+async fn pin_message_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::RoomMessage>, ApiError> {
+    let _principal = authenticated_principal(&headers, &state)?;
+    let msg = state.pin_room_message(id).ok_or(ApiError::NotFound)?;
+    let pinned = msg.pinned;
+    state.pg_spawn(move |pg| Box::pin(async move { pg.toggle_pin(id, pinned).await }));
+    Ok(Json(msg))
+}
+
+async fn list_pinned_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::RoomMessage>>, ApiError> {
+    require_bearer(&headers, &state)?;
+    Ok(Json(state.pinned_messages(id)))
+}
+
+async fn list_reads_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(_id): Path<Uuid>,
+) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    require_bearer(&headers, &state)?;
+    // Read receipts are currently broadcast-only via SSE; return empty for now
+    Ok(Json(vec![]))
+}
+
+async fn list_favorites_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<String>>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    Ok(Json(state.list_favorites(&principal)))
+}
+
+#[derive(serde::Deserialize)]
+struct AddFavoriteRequest {
+    favorite_uri: String,
+}
+
+async fn add_favorite_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<AddFavoriteRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    state.add_favorite(&principal, &input.favorite_uri);
+    let user = principal.clone();
+    let fav = input.favorite_uri.clone();
+    state.pg_spawn(move |pg| Box::pin(async move { pg.insert_favorite(&user, &fav).await }));
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn remove_favorite_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(uri): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    // URI path param may be percent-encoded; decode %xx sequences
+    let decoded = percent_decode(&uri);
+    state.remove_favorite(&principal, &decoded);
+    let user = principal.clone();
+    state.pg_spawn(move |pg| Box::pin(async move { pg.delete_favorite(&user, &decoded).await }));
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateProfileRequest {
+    email: Option<String>,
+    title: Option<String>,
+    department: Option<String>,
+    phone_number: Option<String>,
+}
+
+async fn update_profile_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<UpdateProfileRequest>,
+) -> Result<Json<crate::User>, ApiError> {
+    let _principal = authenticated_principal(&headers, &state)?;
+    let user = state
+        .update_user_profile(id, input.email.clone(), input.title.clone(), input.department.clone(), input.phone_number.clone())
+        .ok_or(ApiError::NotFound)?;
+    let email = input.email;
+    let title = input.title;
+    let dept = input.department;
+    let phone = input.phone_number;
+    state.pg_spawn(move |pg| Box::pin(async move { pg.update_user_profile(id, email, title, dept, phone).await }));
+    Ok(Json(user))
 }
 
 // ─── Avatar Upload ───
@@ -1716,6 +1818,28 @@ fn request_source(headers: &HeaderMap) -> String {
         .filter(|value| !value.is_empty())
         .or_else(|| header_string(headers, "x-real-ip"))
         .unwrap_or_else(|| "direct".to_string())
+}
+
+/// Simple percent-decode for URI path parameters.
+fn percent_decode(input: &str) -> String {
+    let mut out = Vec::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(
+                &input[i + 1..i + 3],
+                16,
+            ) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| input.to_string())
 }
 
 fn to_hex(bytes: &[u8]) -> String {

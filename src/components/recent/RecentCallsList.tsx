@@ -15,10 +15,13 @@ import { toast } from "@/components/ui/Toast";
 
 type RecentTab = "calls" | "voicemail" | "recordings";
 
+type CallFilter = "all" | "missed" | "incoming" | "outgoing";
+
 export function RecentCallsList() {
   const [recentTab, setRecentTab] = useState<RecentTab>("calls");
   const [records, setRecords] = useState<CallRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [callFilter, setCallFilter] = useState<CallFilter>("all");
   const { baseUrl, token, connected } = useServerStore();
 
   const loadHistory = useCallback(async () => {
@@ -90,8 +93,17 @@ export function RecentCallsList() {
     }
   }, []);
 
+  // Apply call filter
+  const filteredRecords = records.filter((r) => {
+    if (callFilter === "all") return true;
+    if (callFilter === "missed") return r.direction === "inbound" && !r.answered;
+    if (callFilter === "incoming") return r.direction === "inbound";
+    if (callFilter === "outgoing") return r.direction === "outbound";
+    return true;
+  });
+
   // Group records by date
-  const grouped = groupByDate(records);
+  const grouped = groupByDate(filteredRecords);
 
   return (
     <div className="flex flex-col h-full">
@@ -130,6 +142,23 @@ export function RecentCallsList() {
       {recentTab === "voicemail" && <div className="flex-1 overflow-y-auto"><VoicemailView /></div>}
       {recentTab === "recordings" && <div className="flex-1 overflow-y-auto"><RecordingsView /></div>}
       {recentTab === "calls" && <div className="flex-1 overflow-y-auto">
+        {/* Call filter pills */}
+        <div className="flex gap-1 px-4 pb-2">
+          {(["all", "missed", "incoming", "outgoing"] as CallFilter[]).map((f) => (
+            <button
+              key={f}
+              onClick={() => setCallFilter(f)}
+              className={cn(
+                "px-2 py-0.5 rounded-full text-[10px] font-medium transition-colors capitalize",
+                callFilter === f
+                  ? "bg-accent-muted text-accent"
+                  : "text-tertiary hover:text-secondary hover:bg-elevated"
+              )}
+            >
+              {f}
+            </button>
+          ))}
+        </div>
         {loading ? (
           <div className="flex items-center justify-center h-32">
             <p className="text-sm text-tertiary">Loading...</p>

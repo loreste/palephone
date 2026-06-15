@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from "react";
-import { User, Volume2, Globe, Info, Server, Bell, Phone, LogOut } from "lucide-react";
+import { User, Volume2, Globe, Info, Server, Bell, Phone, LogOut, Sun, Moon, Palette } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useAccountStore } from "@/store/accountStore";
 import { useServerStore } from "@/store/serverStore";
+import { useUiStore } from "@/store/uiStore";
 import { AudioSettings } from "./AudioSettings";
 import { NetworkSettings } from "./NetworkSettings";
 import { registerAccount, storeSipPassword, getConfig, saveSettings } from "@/lib/tauri";
@@ -11,7 +12,7 @@ import { disconnectServer, signOut } from "@/lib/session";
 import { toast } from "@/components/ui/Toast";
 import type { SipAccount } from "@/types";
 
-type SettingsTab = "account" | "audio" | "network" | "server" | "calls" | "notifications" | "about";
+type SettingsTab = "account" | "audio" | "network" | "server" | "calls" | "notifications" | "appearance" | "about";
 
 const settingsTabs: { id: SettingsTab; label: string; icon: typeof User }[] = [
   { id: "account", label: "Account", icon: User },
@@ -20,6 +21,7 @@ const settingsTabs: { id: SettingsTab; label: string; icon: typeof User }[] = [
   { id: "network", label: "Network", icon: Globe },
   { id: "server", label: "Server", icon: Server },
   { id: "notifications", label: "Notifications", icon: Bell },
+  { id: "appearance", label: "Appearance", icon: Palette },
   { id: "about", label: "About", icon: Info },
 ];
 
@@ -61,6 +63,7 @@ export function SettingsView() {
         {activeTab === "network" && <NetworkSettings />}
         {activeTab === "server" && <ServerSettingsPanel />}
         {activeTab === "notifications" && <NotificationSettingsPanel />}
+        {activeTab === "appearance" && <AppearancePanel />}
         {activeTab === "about" && <AboutPanel />}
       </div>
 
@@ -705,6 +708,43 @@ function CallSettingsPanel() {
         <button onClick={save} disabled={saving}
           className={cn("flex-1 px-4 py-2 rounded-md text-sm font-medium", "bg-accent text-inverse hover:bg-accent-hover transition-colors", "disabled:opacity-60")}>
           {saving ? "Saving..." : "Save Call Settings"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function AppearancePanel() {
+  const { theme, setTheme } = useUiStore();
+
+  return (
+    <div className="space-y-4">
+      <SectionHeader title="Appearance" />
+      <p className="text-sm text-secondary">Choose your preferred color theme.</p>
+      <div className="flex gap-2">
+        <button
+          onClick={() => setTheme("dark")}
+          className={cn(
+            "flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition-colors border",
+            theme === "dark"
+              ? "border-accent bg-accent-muted text-accent"
+              : "border-border-subtle bg-surface text-secondary hover:bg-elevated"
+          )}
+        >
+          <Moon size={16} />
+          Dark
+        </button>
+        <button
+          onClick={() => setTheme("light")}
+          className={cn(
+            "flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition-colors border",
+            theme === "light"
+              ? "border-accent bg-accent-muted text-accent"
+              : "border-border-subtle bg-surface text-secondary hover:bg-elevated"
+          )}
+        >
+          <Sun size={16} />
+          Light
         </button>
       </div>
     </div>

@@ -3,6 +3,7 @@ import { usePresenceStore, type UserPresence } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
 import { useChatStore } from "@/store/chatStore";
 import { useAccountStore } from "@/store/accountStore";
+import { useActivityStore } from "@/store/activityStore";
 import { paleServerGetPresence } from "@/lib/tauri";
 import { adminRefreshToken } from "@/lib/adminApi";
 import { shouldNotify, shouldPlaySound } from "@/lib/notifications";
@@ -21,6 +22,7 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
   const setPresence = usePresenceStore((s) => s.setPresence);
   const setBulkPresence = usePresenceStore((s) => s.setBulkPresence);
   const addMessage = useChatStore((s) => s.addMessage);
+  const addActivity = useActivityStore((s) => s.addItem);
   const updateToken = useServerStore((s) => s.updateToken);
   const tokenExpiresAt = useServerStore((s) => s.tokenExpiresAt);
   const disconnect = useServerStore((s) => s.disconnect);
@@ -74,10 +76,25 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
             is_own: isOwn,
           });
           if (!isOwn) {
+            const senderLabel = msg.sender_uri?.replace(/^sip:/, "") ?? "Someone";
+            const preview = msg.body?.length > 50 ? msg.body.slice(0, 50) + "..." : msg.body;
+
+            // Check for @mention of current user
+            const displayName = useAccountStore.getState().account?.displayName;
+            if (displayName && msg.body && msg.body.includes(`@${displayName}`)) {
+              addActivity({
+                id: `mention-${msg.id ?? Date.now()}`,
+                type: "mention",
+                title: `${senderLabel} mentioned you`,
+                body: preview,
+                timestamp: Math.floor(Date.now() / 1000),
+                read: false,
+                room_id: msg.room_id,
+              });
+            }
+
             shouldNotify(msg.room_id).then((ok) => {
               if (ok) {
-                const senderLabel = msg.sender_uri?.replace(/^sip:/, "") ?? "Someone";
-                const preview = msg.body?.length > 50 ? msg.body.slice(0, 50) + "..." : msg.body;
                 toast({ type: "info", title: senderLabel, description: preview });
               }
             });

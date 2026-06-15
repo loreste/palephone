@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback } from "react";
-import { Search, Phone, MessageSquare, Users } from "lucide-react";
+import { Search, Phone, MessageSquare, Users, Star, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useServerStore } from "@/store/serverStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
-import { paleServerGetUsers, makeCall, type ServerUser } from "@/lib/tauri";
+import { paleServerGetUsers, makeCall, paleServerGetFavorites, paleServerAddFavorite, paleServerRemoveFavorite, type ServerUser } from "@/lib/tauri";
 import { matrixCreateDm } from "@/lib/tauri";
 import { useUiStore } from "@/store/uiStore";
 import { useChatStore } from "@/store/chatStore";
@@ -32,8 +32,10 @@ export function PeopleView() {
   const { baseUrl, token, connected } = useServerStore();
   const presenceMap = usePresenceStore((s) => s.presenceMap);
   const [users, setUsers] = useState<ServerUser[]>([]);
+  const [favorites, setFavorites] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [loading, setLoading] = useState(false);
+  const [profileUser, setProfileUser] = useState<ServerUser | null>(null);
 
   const loadUsers = useCallback(async () => {
     if (!baseUrl || !token) return;
@@ -47,9 +49,34 @@ export function PeopleView() {
     }
   }, [baseUrl, token]);
 
+  const loadFavorites = useCallback(async () => {
+    if (!baseUrl || !token) return;
+    try {
+      setFavorites(await paleServerGetFavorites(baseUrl, token));
+    } catch { /* ignore */ }
+  }, [baseUrl, token]);
+
   useEffect(() => {
-    if (connected) loadUsers();
-  }, [connected, loadUsers]);
+    if (connected) {
+      loadUsers();
+      loadFavorites();
+    }
+  }, [connected, loadUsers, loadFavorites]);
+
+  const toggleFavorite = async (sipUri: string) => {
+    if (!baseUrl || !token) return;
+    try {
+      if (favorites.includes(sipUri)) {
+        await paleServerRemoveFavorite(baseUrl, token, sipUri);
+        setFavorites((f) => f.filter((u) => u !== sipUri));
+      } else {
+        await paleServerAddFavorite(baseUrl, token, sipUri);
+        setFavorites((f) => [...f, sipUri]);
+      }
+    } catch (err) {
+      toast({ type: "error", title: "Failed to update favorite", description: String(err) });
+    }
+  };
 
   const filtered = searchQuery
     ? users.filter(
@@ -126,16 +153,64 @@ export function PeopleView() {
             </p>
           </div>
         ) : (
-          sorted.map((user) => (
-            <PersonRow key={user.id} user={user} />
-          ))
+          <>
+            {/* Favorites section */}
+            {!searchQuery && favorites.length > 0 && (
+              <>
+                <p className="px-2 py-1.5 text-[10px] font-semibold text-tertiary uppercase tracking-wider">
+                  Favorites
+                </p>
+                {sorted
+                  .filter((u) => favorites.includes(u.sip_uri))
+                  .map((user) => (
+                    <PersonRow
+                      key={`fav-${user.id}`}
+                      user={user}
+                      isFavorite
+                      onToggleFavorite={toggleFavorite}
+                      onShowProfile={setProfileUser}
+                    />
+                  ))}
+                <p className="px-2 py-1.5 text-[10px] font-semibold text-tertiary uppercase tracking-wider mt-2">
+                  All Users
+                </p>
+              </>
+            )}
+            {sorted.map((user) => (
+              <PersonRow
+                key={user.id}
+                user={user}
+                isFavorite={favorites.includes(user.sip_uri)}
+                onToggleFavorite={toggleFavorite}
+                onShowProfile={setProfileUser}
+              />
+            ))}
+          </>
         )}
       </div>
+
+      {/* Profile card modal */}
+      {profileUser && (
+        <UserProfileCard
+          user={profileUser}
+          onClose={() => setProfileUser(null)}
+        />
+      )}
     </div>
   );
 }
 
-function PersonRow({ user }: { user: ServerUser }) {
+function PersonRow({
+  user,
+  isFavorite,
+  onToggleFavorite,
+  onShowProfile,
+}: {
+  user: ServerUser;
+  isFavorite?: boolean;
+  onToggleFavorite?: (sipUri: string) => void;
+  onShowProfile?: (user: ServerUser) => void;
+}) {
   const presenceMap = usePresenceStore((s) => s.presenceMap);
   const setActiveTab = useUiStore((s) => s.setActiveTab);
   const setActiveRoomId = useChatStore((s) => s.setActiveRoomId);
@@ -199,7 +274,7 @@ function PersonRow({ user }: { user: ServerUser }) {
         )}
       </div>
 
-      <div className="flex-1 min-w-0">
+      <div className="flex-1 min-w-0 cursor-pointer" onClick={() => onShowProfile?.(user)}>
         <p className="text-sm font-medium text-primary truncate">{user.display_name}</p>
         <p className="text-[10px] text-tertiary truncate">
           {presence?.note ?? presenceLabels[status]}
@@ -208,6 +283,16 @@ function PersonRow({ user }: { user: ServerUser }) {
       </div>
 
       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+        <button
+          onClick={() => onToggleFavorite?.(user.sip_uri)}
+          className={cn(
+            "p-1.5 rounded-md transition-colors",
+            isFavorite ? "text-yellow-500" : "text-tertiary hover:text-yellow-500 hover:bg-yellow-500/10"
+          )}
+          title={isFavorite ? "Remove from favorites" : "Add to favorites"}
+        >
+          <Star size={14} fill={isFavorite ? "currentColor" : "none"} />
+        </button>
         <button
           onClick={handleCall}
           className="p-1.5 rounded-md text-tertiary hover:text-accent hover:bg-accent/10 transition-colors"
@@ -222,6 +307,108 @@ function PersonRow({ user }: { user: ServerUser }) {
         >
           <MessageSquare size={14} />
         </button>
+      </div>
+    </div>
+  );
+}
+
+function UserProfileCard({ user, onClose }: { user: ServerUser; onClose: () => void }) {
+  const presenceMap = usePresenceStore((s) => s.presenceMap);
+  const setActiveTab = useUiStore((s) => s.setActiveTab);
+  const setActiveRoomId = useChatStore((s) => s.setActiveRoomId);
+  const rooms = useChatStore((s) => s.rooms);
+  const presence = presenceMap[user.sip_uri];
+  const status: PresenceStatus = presence?.status ?? "offline";
+
+  const handleCall = async () => {
+    onClose();
+    try {
+      await makeCall(user.sip_uri);
+    } catch (err) {
+      toast({ type: "error", title: "Call failed", description: String(err) });
+    }
+  };
+
+  const handleChat = async () => {
+    onClose();
+    const existing = rooms.find(
+      (r) => r.is_direct && r.name.toLowerCase().includes(user.display_name.toLowerCase())
+    );
+    if (existing) {
+      setActiveRoomId(existing.room_id);
+      setActiveTab("chat");
+      return;
+    }
+    if (user.matrix_user_id) {
+      try {
+        const roomId = await matrixCreateDm(user.matrix_user_id);
+        setActiveRoomId(roomId);
+        setActiveTab("chat");
+      } catch (err) {
+        toast({ type: "error", title: "Could not start chat", description: String(err) });
+      }
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center" onClick={onClose}>
+      <div
+        className="bg-surface border border-border-subtle rounded-xl shadow-xl w-72 p-5 space-y-3"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between">
+          <div className="flex items-center gap-3">
+            <CallerAvatar name={user.display_name} size="md" />
+            <div>
+              <p className="text-sm font-semibold text-primary">{user.display_name}</p>
+              <div className="flex items-center gap-1 mt-0.5">
+                <span className={cn("w-2 h-2 rounded-full", presenceColors[status])} />
+                <span className="text-[10px] text-tertiary">{presenceLabels[status]}</span>
+              </div>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-1 rounded text-tertiary hover:text-primary">
+            <X size={14} />
+          </button>
+        </div>
+
+        {presence?.note && (
+          <p className="text-xs text-secondary italic">{presence.note}</p>
+        )}
+
+        <div className="space-y-1.5 text-xs">
+          <div className="flex justify-between">
+            <span className="text-tertiary">SIP URI</span>
+            <span className="text-primary font-mono">{user.sip_uri}</span>
+          </div>
+          {user.matrix_user_id && (
+            <div className="flex justify-between">
+              <span className="text-tertiary">Matrix</span>
+              <span className="text-primary font-mono">{user.matrix_user_id}</span>
+            </div>
+          )}
+        </div>
+
+        <div className="flex gap-2 pt-1">
+          <button
+            onClick={handleCall}
+            className={cn(
+              "flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium",
+              "bg-success/10 text-success hover:bg-success/20 transition-colors"
+            )}
+          >
+            <Phone size={13} /> Call
+          </button>
+          <button
+            onClick={handleChat}
+            className={cn(
+              "flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium",
+              "bg-accent/10 text-accent hover:bg-accent/20 transition-colors"
+            )}
+          >
+            <MessageSquare size={13} /> Chat
+          </button>
+        </div>
       </div>
     </div>
   );

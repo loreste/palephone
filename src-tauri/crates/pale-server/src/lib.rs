@@ -238,6 +238,8 @@ pub struct AppState {
     queue_callers: ShardedMap<Uuid, QueueCallerEntry>,
     queue_callbacks: ShardedMap<Uuid, QueueCallback>,
     vip_callers: ShardedMap<Uuid, VipCaller>,
+    message_reactions: ShardedMap<Uuid, Vec<MessageReaction>>,
+    user_favorites: ShardedMap<String, Vec<String>>,
     agent_assignment_lock: std::sync::Mutex<()>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
     rate_limits: ShardedMap<String, RateLimitBucket>,
@@ -371,6 +373,8 @@ impl AppState {
             queue_callers: ShardedMap::new(),
             queue_callbacks: ShardedMap::new(),
             vip_callers: ShardedMap::new(),
+            message_reactions: ShardedMap::new(),
+            user_favorites: ShardedMap::new(),
             agent_assignment_lock: std::sync::Mutex::new(()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
             rate_limits: ShardedMap::new(),
@@ -827,6 +831,11 @@ impl AppState {
             password_hash,
             role: input.role.unwrap_or_else(|| "user".to_string()),
             created_at: Utc::now(),
+            email: None,
+            title: None,
+            department: None,
+            phone_number: None,
+            status_message: None,
         };
         self.users.insert(user.id, user.clone());
         self.users.trim_to_len(MAX_USERS);
@@ -1632,6 +1641,7 @@ impl AppState {
             status,
             note,
             updated_at: Utc::now(),
+            status_message: None,
         };
         self.presence
             .insert(sip_uri.to_string(), presence.clone());
@@ -2824,7 +2834,7 @@ impl AppState {
         })
     }
 
-    pub fn send_room_message(&self, room_id: Uuid, sender_uri: &str, body: &str) -> RoomMessage {
+    pub fn send_room_message(&self, room_id: Uuid, sender_uri: &str, body: &str, reply_to: Option<Uuid>) -> RoomMessage {
         let msg = RoomMessage {
             id: Uuid::new_v4(),
             room_id,
@@ -2832,6 +2842,9 @@ impl AppState {
             body: body.to_string(),
             content_type: "text/plain".to_string(),
             created_at: Utc::now(),
+            reply_to,
+            edited_at: None,
+            pinned: false,
         };
         let mut messages = self.room_messages.write().expect("room messages lock poisoned");
         messages.push(msg.clone());
@@ -2844,6 +2857,111 @@ impl AppState {
             payload: serde_json::to_value(&msg).unwrap_or_default(),
         });
         msg
+    }
+
+    pub fn edit_room_message(&self, id: Uuid, new_body: &str) -> Option<RoomMessage> {
+        let mut messages = self.room_messages.write().expect("room messages lock poisoned");
+        let msg = messages.iter_mut().find(|m| m.id == id)?;
+        msg.body = new_body.to_string();
+        msg.edited_at = Some(Utc::now());
+        let updated = msg.clone();
+        self.broadcast_sse(SseEvent {
+            event_type: "message_edited".to_string(),
+            payload: serde_json::to_value(&updated).unwrap_or_default(),
+        });
+        Some(updated)
+    }
+
+    pub fn pin_room_message(&self, id: Uuid) -> Option<RoomMessage> {
+        let mut messages = self.room_messages.write().expect("room messages lock poisoned");
+        let msg = messages.iter_mut().find(|m| m.id == id)?;
+        msg.pinned = !msg.pinned;
+        let updated = msg.clone();
+        self.broadcast_sse(SseEvent {
+            event_type: "message_pinned".to_string(),
+            payload: serde_json::to_value(&updated).unwrap_or_default(),
+        });
+        Some(updated)
+    }
+
+    pub fn pinned_messages(&self, room_id: Uuid) -> Vec<RoomMessage> {
+        self.room_messages
+            .read()
+            .expect("room messages lock poisoned")
+            .iter()
+            .filter(|m| m.room_id == room_id && m.pinned)
+            .cloned()
+            .collect()
+    }
+
+    pub fn add_reaction(&self, message_id: Uuid, user_uri: &str, emoji: &str) {
+        self.message_reactions.with_write(&message_id, |map| {
+            let reactions = map.entry(message_id).or_insert_with(Vec::new);
+            // Toggle: if same user+emoji exists, remove it
+            if let Some(pos) = reactions.iter().position(|r| r.user_uri == user_uri && r.emoji == emoji) {
+                reactions.remove(pos);
+            } else {
+                reactions.push(MessageReaction {
+                    emoji: emoji.to_string(),
+                    user_uri: user_uri.to_string(),
+                    created_at: Utc::now(),
+                });
+            }
+        });
+        self.broadcast_sse(SseEvent {
+            event_type: "reaction".to_string(),
+            payload: serde_json::json!({
+                "message_id": message_id,
+                "emoji": emoji,
+                "user": user_uri,
+                "created_at": Utc::now(),
+            }),
+        });
+    }
+
+    pub fn message_reactions(&self, message_id: Uuid) -> Vec<MessageReaction> {
+        self.message_reactions.get(&message_id).unwrap_or_default()
+    }
+
+    pub fn add_favorite(&self, user_uri: &str, favorite_uri: &str) {
+        let key = user_uri.to_string();
+        self.user_favorites.with_write(&key, |map| {
+            let favorites = map.entry(key.clone()).or_insert_with(Vec::new);
+            if !favorites.contains(&favorite_uri.to_string()) {
+                favorites.push(favorite_uri.to_string());
+            }
+        });
+    }
+
+    pub fn remove_favorite(&self, user_uri: &str, favorite_uri: &str) {
+        let key = user_uri.to_string();
+        self.user_favorites.with_write(&key, |map| {
+            if let Some(favorites) = map.get_mut(&key) {
+                favorites.retain(|f| f != favorite_uri);
+            }
+        });
+    }
+
+    pub fn list_favorites(&self, user_uri: &str) -> Vec<String> {
+        self.user_favorites.get(&user_uri.to_string()).unwrap_or_default()
+    }
+
+    pub fn update_user_profile(
+        &self,
+        id: Uuid,
+        email: Option<String>,
+        title: Option<String>,
+        department: Option<String>,
+        phone_number: Option<String>,
+    ) -> Option<User> {
+        self.users.with_write(&id, |map| {
+            let user = map.get_mut(&id)?;
+            if let Some(e) = email { user.email = Some(e); }
+            if let Some(t) = title { user.title = Some(t); }
+            if let Some(d) = department { user.department = Some(d); }
+            if let Some(p) = phone_number { user.phone_number = Some(p); }
+            Some(user.clone())
+        })
     }
 
     pub fn room_messages(&self, room_id: Uuid) -> Vec<RoomMessage> {
@@ -2869,7 +2987,7 @@ impl AppState {
 
     /// Spawn a background Postgres write with circuit breaker.
     /// After 10 consecutive failures, stops attempting writes until a success resets the counter.
-    fn pg_spawn<F>(&self, f: F)
+    pub fn pg_spawn<F>(&self, f: F)
     where
         F: FnOnce(PgStore) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), pg_store::PgError>> + Send>>
             + Send
@@ -2956,6 +3074,11 @@ pub struct User {
     pub password_hash: Option<String>,
     pub role: String, // "admin" or "user"
     pub created_at: DateTime<Utc>,
+    pub email: Option<String>,
+    pub title: Option<String>,
+    pub department: Option<String>,
+    pub phone_number: Option<String>,
+    pub status_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3176,6 +3299,7 @@ pub struct UserPresence {
     pub status: PresenceStatus,
     pub note: Option<String>,
     pub updated_at: DateTime<Utc>,
+    pub status_message: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -3285,11 +3409,22 @@ pub struct RoomMessage {
     pub body: String,
     pub content_type: String,
     pub created_at: DateTime<Utc>,
+    pub reply_to: Option<Uuid>,
+    pub edited_at: Option<DateTime<Utc>>,
+    pub pinned: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageReaction {
+    pub emoji: String,
+    pub user_uri: String,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SendRoomMessageRequest {
     pub body: String,
+    pub reply_to: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
