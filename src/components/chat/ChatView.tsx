@@ -6,13 +6,19 @@ import { useMatrixStore } from "@/store/matrixStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
-import { matrixSendMessage, matrixSetTyping, matrixCreateDm, paleServerGetMessages, makeCall as ipcMakeCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, type ServerUser } from "@/lib/tauri";
+import { matrixSendMessage, matrixSetTyping, matrixCreateDm, paleServerGetMessages, makeCall as ipcMakeCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, type ServerUser } from "@/lib/tauri";
 import { toast } from "@/components/ui/Toast";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
 import { EncryptionBadge } from "@/components/encryption/EncryptionBadge";
 import { MatrixLoginView } from "@/components/auth/MatrixLoginView";
 
 const QUICK_REACTIONS = ["\u{1F44D}", "\u{2764}\u{FE0F}", "\u{1F602}", "\u{1F44F}", "\u{1F914}"];
+
+const EMOJI_CATEGORIES: { label: string; emojis: string[] }[] = [
+  { label: "Smileys", emojis: ["\u{1F600}", "\u{1F603}", "\u{1F604}", "\u{1F601}", "\u{1F606}", "\u{1F605}", "\u{1F602}", "\u{1F923}", "\u{1F60A}", "\u{1F607}", "\u{1F970}", "\u{1F60D}", "\u{1F618}", "\u{1F617}", "\u{1F914}", "\u{1F928}"] },
+  { label: "Gestures", emojis: ["\u{1F44D}", "\u{1F44E}", "\u{1F44F}", "\u{1F64C}", "\u{1F4AA}", "\u{270C}\u{FE0F}", "\u{1F91E}", "\u{1F44B}", "\u{1F64F}", "\u{1F91D}"] },
+  { label: "Objects", emojis: ["\u{2764}\u{FE0F}", "\u{1F525}", "\u{2B50}", "\u{1F389}", "\u{1F388}", "\u{1F381}", "\u{1F4A1}", "\u{1F4AC}", "\u{1F514}", "\u{1F3B5}", "\u{1F680}", "\u{2705}", "\u{274C}"] },
+];
 
 function sanitizeHtml(html: string): string {
   return html
@@ -243,6 +249,7 @@ function ChatRoom({
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionUsers, setMentionUsers] = useState<ServerUser[]>([]);
   const [allUsers, setAllUsers] = useState<ServerUser[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<number | null>(null);
@@ -347,15 +354,27 @@ function ChatRoom({
         window.clearTimeout(typingTimeoutRef.current);
       }
       if (typingSentRef.current) {
-        matrixSetTyping(room.room_id, false).catch(() => {});
+        if (isServerRoom && connected && baseUrl && token) {
+          paleServerSetTyping(baseUrl, token, room.room_id, false).catch(() => {});
+        } else {
+          matrixSetTyping(room.room_id, false).catch(() => {});
+        }
       }
     };
-  }, [room.room_id]);
+  }, [room.room_id, isServerRoom, connected, baseUrl, token]);
+
+  const sendTypingState = (typing: boolean) => {
+    if (isServerRoom && connected && baseUrl && token) {
+      paleServerSetTyping(baseUrl, token, room.room_id, typing).catch(() => {});
+    } else {
+      matrixSetTyping(room.room_id, typing).catch(() => {});
+    }
+  };
 
   const stopTyping = () => {
     if (!typingSentRef.current) return;
     typingSentRef.current = false;
-    matrixSetTyping(room.room_id, false).catch(() => {});
+    sendTypingState(false);
   };
 
   const notifyTyping = (value: string) => {
@@ -365,7 +384,7 @@ function ChatRoom({
 
     if (value.trim() && !typingSentRef.current) {
       typingSentRef.current = true;
-      matrixSetTyping(room.room_id, true).catch(() => {});
+      sendTypingState(true);
     }
 
     typingTimeoutRef.current = window.setTimeout(stopTyping, 2500);
@@ -404,6 +423,45 @@ function ChatRoom({
     setMentionQuery(null);
     setMentionUsers([]);
     inputRef.current?.focus();
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+  };
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    if (!connected || !baseUrl || !token) return;
+    const files = Array.from(e.dataTransfer.files);
+    for (const file of files) {
+      try {
+        const uploaded = await paleServerUploadFile(baseUrl, token, file);
+        const fileUrl = `${baseUrl.replace(/\/+$/, "")}/v1/files/${uploaded.id}`;
+        const body = `[File: ${uploaded.filename}](${fileUrl})`;
+        const { paleServerSendRoomMessage } = await import("@/lib/tauri");
+        const msg = await paleServerSendRoomMessage(baseUrl, token, room.room_id, body);
+        addMessage({
+          event_id: msg.id,
+          room_id: room.room_id,
+          sender: msg.sender_uri,
+          sender_name: null,
+          body: msg.body,
+          msg_type: "text",
+          timestamp: Math.floor(new Date(msg.created_at).getTime() / 1000),
+          is_encrypted: false,
+          is_own: true,
+        });
+      } catch (err) {
+        toast({ type: "error", title: "Upload failed", description: String(err) });
+      }
+    }
   };
 
   const handleSend = async () => {
@@ -494,7 +552,17 @@ function ChatRoom({
   };
 
   return (
-    <>
+    <div
+      className="flex flex-col h-full relative"
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {isDragging && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-accent/10 border-2 border-dashed border-accent rounded-lg pointer-events-none">
+          <p className="text-accent font-semibold text-sm">Drop files to upload</p>
+        </div>
+      )}
       {/* Header */}
       <div className="flex items-center gap-3 px-4 py-3 border-b border-border-subtle shrink-0">
         <button
@@ -632,7 +700,7 @@ function ChatRoom({
           {editingMessage ? <Check size={18} /> : <Send size={18} />}
         </button>
       </div>
-    </>
+    </div>
   );
 }
 
@@ -867,6 +935,41 @@ function NewChatInput({
   );
 }
 
+function EmojiPickerButton({ onSelect }: { onSelect: (emoji: string) => void }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen(!open)}
+        className="p-0.5 rounded hover:bg-elevated text-xs text-tertiary hover:text-accent"
+        title="More reactions"
+      >
+        <Plus size={12} />
+      </button>
+      {open && (
+        <div className="absolute bottom-6 right-0 z-50 bg-surface border border-border-subtle rounded-lg shadow-lg p-2 w-56">
+          {EMOJI_CATEGORIES.map((cat) => (
+            <div key={cat.label} className="mb-1.5">
+              <p className="text-[9px] font-semibold text-tertiary uppercase tracking-wider mb-0.5 px-0.5">{cat.label}</p>
+              <div className="flex flex-wrap gap-0.5">
+                {cat.emojis.map((emoji) => (
+                  <button
+                    key={emoji}
+                    onClick={() => { onSelect(emoji); setOpen(false); }}
+                    className="w-6 h-6 flex items-center justify-center rounded hover:bg-elevated text-sm"
+                  >
+                    {emoji}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TypingIndicator({ users }: { users: string[] }) {
   const names = users.map((id) => id.split(":")[0]?.replace("@", "") || id);
   const label =
@@ -1012,6 +1115,9 @@ function MessageBubble({
               {emoji}
             </button>
           ))}
+          {!message.is_own && (
+            <EmojiPickerButton onSelect={handleReaction} />
+          )}
         </div>
       )}
       <div className="max-w-[80%]">

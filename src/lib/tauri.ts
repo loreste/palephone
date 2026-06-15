@@ -525,6 +525,18 @@ export function paleServerSendRoomMessage(
   });
 }
 
+export function paleServerSetTyping(
+  baseUrl: string,
+  token: string,
+  roomId: string,
+  typing: boolean,
+): Promise<void> {
+  return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/typing`, {
+    method: "POST",
+    body: JSON.stringify({ typing }),
+  });
+}
+
 export function paleServerPinMessage(
   baseUrl: string,
   token: string,

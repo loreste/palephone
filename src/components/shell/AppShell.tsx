@@ -20,6 +20,7 @@ import { SetupWizard } from "@/components/auth/SetupWizard";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { useServerEvents } from "@/hooks/useServerEvents";
+import { useAutoAway } from "@/hooks/useAutoAway";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
 import { getConfig, getSipPassword, paleLogin, registerAccount } from "@/lib/tauri";
@@ -64,6 +65,7 @@ export function AppShell() {
   const serverToken = useServerStore((s) => s.token);
   const setServerConnection = useServerStore((s) => s.setConnection);
   useServerEvents(serverBaseUrl, serverToken);
+  useAutoAway();
 
   const setAccount = useAccountStore((s) => s.setAccount);
 

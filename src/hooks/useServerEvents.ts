@@ -10,6 +10,17 @@ import { shouldNotify, shouldPlaySound } from "@/lib/notifications";
 import { playNotificationBeep } from "@/lib/notificationSound";
 import { toast } from "@/components/ui/Toast";
 
+function desktopNotify(title: string, body?: string) {
+  if (typeof Notification === "undefined") return;
+  if (Notification.permission === "granted") {
+    new Notification(title, { body });
+  } else if (Notification.permission !== "denied") {
+    Notification.requestPermission().then((perm) => {
+      if (perm === "granted") new Notification(title, { body });
+    });
+  }
+}
+
 const RECONNECT_DELAY_MS = 3000;
 const TOKEN_REFRESH_BUFFER_MS = 30 * 60 * 1000; // Refresh 30 min before expiry
 
@@ -22,6 +33,7 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
   const setPresence = usePresenceStore((s) => s.setPresence);
   const setBulkPresence = usePresenceStore((s) => s.setBulkPresence);
   const addMessage = useChatStore((s) => s.addMessage);
+  const setTypingUsers = useChatStore((s) => s.setTypingUsers);
   const addActivity = useActivityStore((s) => s.addItem);
   const updateToken = useServerStore((s) => s.updateToken);
   const tokenExpiresAt = useServerStore((s) => s.tokenExpiresAt);
@@ -59,6 +71,24 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
         } catch { /* ignore */ }
       });
 
+      es.addEventListener("typing", (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          const currentSipUri = useAccountStore.getState().account?.sipUri;
+          if (data.room_id && data.user !== currentSipUri) {
+            const roomId = data.room_id;
+            const existing = useChatStore.getState().typingByRoom[roomId] ?? [];
+            if (data.typing) {
+              if (!existing.includes(data.user)) {
+                setTypingUsers(roomId, [...existing, data.user]);
+              }
+            } else {
+              setTypingUsers(roomId, existing.filter((u: string) => u !== data.user));
+            }
+          }
+        } catch { /* ignore */ }
+      });
+
       es.addEventListener("room_message", (e) => {
         try {
           const msg = JSON.parse(e.data);
@@ -79,6 +109,18 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
             const senderLabel = msg.sender_uri?.replace(/^sip:/, "") ?? "Someone";
             const preview = msg.body?.length > 50 ? msg.body.slice(0, 50) + "..." : msg.body;
 
+            // Increment unread count if the message is not for the active room
+            const activeRoomId = useChatStore.getState().activeRoomId;
+            if (msg.room_id !== activeRoomId) {
+              const rooms = useChatStore.getState().rooms;
+              const updatedRooms = rooms.map((r) =>
+                r.room_id === msg.room_id
+                  ? { ...r, unread_count: r.unread_count + 1 }
+                  : r
+              );
+              useChatStore.getState().setRooms(updatedRooms);
+            }
+
             // Check for @mention of current user
             const displayName = useAccountStore.getState().account?.displayName;
             if (displayName && msg.body && msg.body.includes(`@${displayName}`)) {
@@ -96,6 +138,7 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
             shouldNotify(msg.room_id).then((ok) => {
               if (ok) {
                 toast({ type: "info", title: senderLabel, description: preview });
+                desktopNotify(senderLabel, preview);
               }
             });
             shouldPlaySound().then((ok) => {
@@ -148,7 +191,7 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
         reconnectRef.current = null;
       }
     };
-  }, [baseUrl, token, setPresence, setBulkPresence, addMessage]);
+  }, [baseUrl, token, setPresence, setBulkPresence, addMessage, setTypingUsers]);
 
   // Token auto-refresh (with stale-token guard to prevent race conditions)
   useEffect(() => {
