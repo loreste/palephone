@@ -499,6 +499,26 @@ function NewChatInput({
   const [userId, setUserId] = useState("");
   const [roomName, setRoomName] = useState("");
   const [roomMembers, setRoomMembers] = useState("");
+  const [serverUsers, setServerUsers] = useState<{ id: string; display_name: string; sip_uri: string }[]>([]);
+  const [filteredUsers, setFilteredUsers] = useState<typeof serverUsers>([]);
+  const baseUrl = useServerStore((s) => s.baseUrl);
+  const token = useServerStore((s) => s.token);
+
+  useEffect(() => {
+    if (baseUrl && token) {
+      paleServerApi<typeof serverUsers>(baseUrl, token, "/v1/users")
+        .then(setServerUsers)
+        .catch(() => {});
+    }
+  }, [baseUrl, token]);
+
+  useEffect(() => {
+    if (!userId.trim()) { setFilteredUsers([]); return; }
+    const q = userId.toLowerCase();
+    setFilteredUsers(serverUsers.filter((u) =>
+      u.display_name.toLowerCase().includes(q) || u.sip_uri.toLowerCase().includes(q)
+    ));
+  }, [userId, serverUsers]);
 
   return (
     <div className="px-4 pb-3 space-y-2">
@@ -525,37 +545,58 @@ function NewChatInput({
 
       {mode === "dm" ? (
         <>
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={userId}
-              onChange={(e) => setUserId(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && userId.trim()) onSubmit(userId.trim());
-              }}
-              placeholder="@user:homeserver.com"
-              className={cn(
-                "flex-1 bg-surface border border-border-subtle rounded-lg",
-                "px-3 py-2 text-sm text-primary",
-                "placeholder:text-tertiary",
-                "focus:outline-none focus:border-border-focus"
-              )}
-              autoFocus
-            />
-            <button
-              onClick={() => userId.trim() && onSubmit(userId.trim())}
-              disabled={!userId.trim()}
-              className={cn(
-                "px-3 py-2 rounded-lg text-sm font-medium transition-colors",
-                userId.trim()
-                  ? "bg-accent text-white hover:bg-accent-hover"
-                  : "bg-elevated text-tertiary cursor-not-allowed"
-              )}
-            >
-              Start
-            </button>
+          <div className="relative">
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={userId}
+                onChange={(e) => setUserId(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && userId.trim()) onSubmit(userId.trim());
+                }}
+                placeholder="Search by name or SIP URI..."
+                className={cn(
+                  "flex-1 bg-surface border border-border-subtle rounded-lg",
+                  "px-3 py-2 text-sm text-primary",
+                  "placeholder:text-tertiary",
+                  "focus:outline-none focus:border-border-focus"
+                )}
+                autoFocus
+              />
+              <button
+                onClick={() => userId.trim() && onSubmit(userId.trim())}
+                disabled={!userId.trim()}
+                className={cn(
+                  "px-3 py-2 rounded-lg text-sm font-medium transition-colors",
+                  userId.trim()
+                    ? "bg-accent text-white hover:bg-accent-hover"
+                    : "bg-elevated text-tertiary cursor-not-allowed"
+                )}
+              >
+                Start
+              </button>
+            </div>
+            {filteredUsers.length > 0 && (
+              <div className="absolute z-10 left-0 right-12 mt-1 bg-surface border border-border-subtle rounded-lg shadow-lg max-h-40 overflow-y-auto">
+                {filteredUsers.map((u) => (
+                  <button
+                    key={u.id}
+                    onClick={() => { setUserId(u.sip_uri); onSubmit(u.sip_uri); }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-elevated transition-colors"
+                  >
+                    <div className="w-7 h-7 rounded-full bg-accent-muted text-accent flex items-center justify-center text-xs font-bold">
+                      {u.display_name.charAt(0)}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-primary truncate">{u.display_name}</p>
+                      <p className="text-[10px] text-tertiary truncate">{u.sip_uri}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
-          <p className="text-[10px] text-tertiary">Enter a Matrix user ID to start a DM</p>
+          <p className="text-[10px] text-tertiary">Search for a user to start a conversation</p>
         </>
       ) : (
         <>
