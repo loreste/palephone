@@ -1,13 +1,31 @@
+import { useEffect, useRef } from "react";
 import { Phone, PhoneOff } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/cn";
 import { CallerAvatar } from "./CallerAvatar";
 import { useCallStore } from "@/store/callStore";
 import { useCallActions } from "@/hooks/useCallActions";
+import { playRingtone } from "@/lib/notificationSound";
 
 export function IncomingCallOverlay() {
   const incomingCall = useCallStore((s) => s.incomingCall);
   const { answerIncomingCall, rejectIncomingCall } = useCallActions();
+  const stopRingtoneRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    if (incomingCall) {
+      stopRingtoneRef.current = playRingtone();
+    } else if (stopRingtoneRef.current) {
+      stopRingtoneRef.current();
+      stopRingtoneRef.current = null;
+    }
+    return () => {
+      if (stopRingtoneRef.current) {
+        stopRingtoneRef.current();
+        stopRingtoneRef.current = null;
+      }
+    };
+  }, [incomingCall]);
 
   const handleAccept = () => answerIncomingCall();
   const handleReject = () => rejectIncomingCall();

@@ -41,6 +41,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/admin/login", post(admin_login))
         .route("/v1/admin/logout", post(admin_logout))
         .route("/v1/admin/refresh", post(admin_refresh))
+        .route("/v1/auth/password", put(change_password))
         .route("/v1/admin/audit", get(list_audit_events))
         .route("/v1/users", get(list_users).post(create_user))
         .route("/v1/users/{id}", delete(delete_user))
@@ -270,6 +271,27 @@ async fn admin_refresh(
         .map_err(|_| ApiError::Unauthorized)?;
     state.record_audit_event(&principal, "admin.token.refreshed", None);
     Ok(Json(session))
+}
+
+// ─── Password Change ───
+
+#[derive(serde::Deserialize)]
+struct ChangePasswordRequest {
+    old_password: SensitiveString,
+    new_password: SensitiveString,
+}
+
+async fn change_password(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<ChangePasswordRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    state
+        .change_user_password(&principal, input.old_password.expose(), input.new_password.expose())
+        .map_err(|e| ApiError::Conflict(e))?;
+    state.record_audit_event(&principal, "user.password_changed", None);
+    Ok(Json(json!({ "ok": true })))
 }
 
 // ─── User Authentication (unified login) ───

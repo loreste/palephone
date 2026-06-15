@@ -87,6 +87,15 @@ impl PgStore {
         Ok(())
     }
 
+    pub async fn update_user_password(&self, id: Uuid, password_hash: &str) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "UPDATE users SET password_hash = $2 WHERE id = $1",
+            &[&id, &password_hash],
+        ).await?;
+        Ok(())
+    }
+
     pub async fn load_users(&self) -> Result<Vec<User>, PgError> {
         let client = self.pool.get().await?;
         let rows = client.query(

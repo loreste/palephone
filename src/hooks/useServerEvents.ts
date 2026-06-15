@@ -2,8 +2,12 @@ import { useEffect, useRef } from "react";
 import { usePresenceStore, type UserPresence } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
 import { useChatStore } from "@/store/chatStore";
+import { useAccountStore } from "@/store/accountStore";
 import { paleServerGetPresence } from "@/lib/tauri";
 import { adminRefreshToken } from "@/lib/adminApi";
+import { shouldNotify, shouldPlaySound } from "@/lib/notifications";
+import { playNotificationBeep } from "@/lib/notificationSound";
+import { toast } from "@/components/ui/Toast";
 
 const RECONNECT_DELAY_MS = 3000;
 const TOKEN_REFRESH_BUFFER_MS = 30 * 60 * 1000; // Refresh 30 min before expiry
@@ -56,6 +60,8 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
       es.addEventListener("room_message", (e) => {
         try {
           const msg = JSON.parse(e.data);
+          const currentSipUri = useAccountStore.getState().account?.sipUri;
+          const isOwn = currentSipUri != null && msg.sender_uri === currentSipUri;
           addMessage({
             event_id: msg.id,
             room_id: msg.room_id,
@@ -65,21 +71,31 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
             msg_type: "text" as const,
             timestamp: Math.floor(new Date(msg.created_at).getTime() / 1000),
             is_encrypted: false,
-            is_own: false,
+            is_own: isOwn,
           });
+          if (!isOwn) {
+            shouldNotify(msg.room_id).then((ok) => {
+              if (ok) {
+                const senderLabel = msg.sender_uri?.replace(/^sip:/, "") ?? "Someone";
+                const preview = msg.body?.length > 50 ? msg.body.slice(0, 50) + "..." : msg.body;
+                toast({ type: "info", title: senderLabel, description: preview });
+              }
+            });
+            shouldPlaySound().then((ok) => {
+              if (ok) playNotificationBeep();
+            });
+          }
         } catch { /* ignore */ }
       });
 
       es.addEventListener("voicemail", () => {
-        // Voicemail received — could update a badge or store
-        import("@/lib/notifications").then(({ shouldNotify }) => {
-          shouldNotify().then((ok) => {
-            if (ok) {
-              import("@/components/ui/Toast").then(({ toast }) => {
-                toast({ type: "info", title: "New voicemail" });
-              });
-            }
-          });
+        shouldNotify().then((ok) => {
+          if (ok) {
+            toast({ type: "info", title: "New voicemail" });
+          }
+        });
+        shouldPlaySound().then((ok) => {
+          if (ok) playNotificationBeep();
         });
       });
 

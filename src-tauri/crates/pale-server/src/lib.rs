@@ -984,6 +984,62 @@ impl AppState {
         })
     }
 
+    /// Change a user's password. Verifies the old password, then updates to the
+    /// new argon2id hash in both the in-memory store and Postgres.
+    pub fn change_user_password(
+        &self,
+        sip_uri: &str,
+        old_password: &str,
+        new_password: &str,
+    ) -> Result<(), String> {
+        let user = self
+            .users
+            .values()
+            .into_iter()
+            .find(|u| u.sip_uri == sip_uri)
+            .ok_or_else(|| "User not found".to_string())?;
+
+        let stored = user
+            .password_hash
+            .as_deref()
+            .ok_or_else(|| "No password set for user".to_string())?;
+
+        if !verify_password(old_password, stored) {
+            return Err("Current password is incorrect".to_string());
+        }
+
+        let new_hash = hash_password(new_password);
+        let updated = self.users.with_write(&user.id, |users| {
+            let u = users.get_mut(&user.id)?;
+            u.password_hash = Some(new_hash);
+            Some(u.clone())
+        });
+
+        if let Some(ref u) = updated {
+            self.persist(u);
+            let u2 = u.clone();
+            self.pg_spawn(move |pg| Box::pin(async move { pg.update_user_password(u2.id, u2.password_hash.as_deref().unwrap_or("")).await }));
+
+            // Also update the SIP account HA1 digest if one exists
+            if let Some((username, domain)) = split_sip_aor_simple(sip_uri) {
+                let ha1 = sip_ha1(&username, &domain, new_password);
+                self.update_sip_account_ha1(&username, &domain, &ha1);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Update the HA1 digest for a SIP account (used after password change).
+    fn update_sip_account_ha1(&self, username: &str, domain: &str, ha1: &str) {
+        let aor = format!("{}@{}", username, domain);
+        self.sip_accounts.with_write(&aor, |accounts| {
+            if let Some(account) = accounts.get_mut(&aor) {
+                account.password_ha1 = ha1.to_string();
+            }
+        });
+    }
+
     pub fn delete_user(&self, id: Uuid) -> Option<User> {
         let user = self.users.remove(&id);
         if user.is_some() {

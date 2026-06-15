@@ -348,7 +348,95 @@ function ServerSettingsPanel() {
           </button>
         )}
       </div>
+
+      {connected && <ChangePasswordSection />}
     </div>
+  );
+}
+
+function ChangePasswordSection() {
+  const { baseUrl, token } = useServerStore();
+  const [currentPw, setCurrentPw] = useState("");
+  const [newPw, setNewPw] = useState("");
+  const [confirmPw, setConfirmPw] = useState("");
+  const [changing, setChanging] = useState(false);
+
+  const handleChangePassword = async () => {
+    if (!baseUrl || !token) return;
+    if (newPw !== confirmPw) {
+      toast({ type: "error", title: "New passwords do not match" });
+      return;
+    }
+    if (newPw.length < 6) {
+      toast({ type: "error", title: "New password must be at least 6 characters" });
+      return;
+    }
+    setChanging(true);
+    try {
+      const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/auth/password`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          old_password: currentPw,
+          new_password: newPw,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.error ?? "Failed to change password");
+      }
+      toast({ type: "success", title: "Password changed successfully" });
+      setCurrentPw("");
+      setNewPw("");
+      setConfirmPw("");
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Failed to change password" });
+    } finally {
+      setChanging(false);
+    }
+  };
+
+  return (
+    <>
+      <SectionHeader title="Change Password" />
+      <FormField
+        label="Current Password"
+        value={currentPw}
+        onChange={setCurrentPw}
+        placeholder="Enter current password"
+        type="password"
+      />
+      <FormField
+        label="New Password"
+        value={newPw}
+        onChange={setNewPw}
+        placeholder="Enter new password"
+        type="password"
+      />
+      <FormField
+        label="Confirm New Password"
+        value={confirmPw}
+        onChange={setConfirmPw}
+        placeholder="Confirm new password"
+        type="password"
+      />
+      <div className="flex gap-2 pt-2">
+        <button
+          onClick={handleChangePassword}
+          disabled={changing || !currentPw || !newPw || !confirmPw}
+          className={cn(
+            "flex-1 px-4 py-2 rounded-md text-sm font-medium",
+            "bg-accent text-inverse hover:bg-accent-hover transition-colors",
+            "disabled:opacity-60"
+          )}
+        >
+          {changing ? "Changing..." : "Change Password"}
+        </button>
+      </div>
+    </>
   );
 }
 
