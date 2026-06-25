@@ -835,8 +835,13 @@ export function paleServerGetRoomMessages(
   baseUrl: string,
   token: string,
   roomId: string,
+  options?: { limit?: number; before?: string },
 ): Promise<ServerRoomMessage[]> {
-  return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/messages`);
+  const params = new URLSearchParams();
+  if (options?.limit) params.set("limit", String(options.limit));
+  if (options?.before) params.set("before", options.before);
+  const qs = params.toString();
+  return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/messages${qs ? `?${qs}` : ""}`);
 }
 
 export function paleServerGetRoomMessageState(

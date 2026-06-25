@@ -6,7 +6,7 @@ import { useMatrixStore } from "@/store/matrixStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
-import { matrixSendMessage, matrixSetTyping, matrixCreateDm, paleServerGetMessages, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerGetConferences, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerStartMeeting, paleServerGetRoomMessages, paleServerGetRoomMessageState, paleServerSendRoomMessage, paleServerEditMessage, paleServerDeleteMessage, type ServerRoom, type ServerUser, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult } from "@/lib/tauri";
+import { matrixSendMessage, matrixSetTyping, matrixCreateDm, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerGetConferences, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerStartMeeting, paleServerGetRoomMessages, paleServerGetRoomMessageState, paleServerSendRoomMessage, paleServerEditMessage, paleServerDeleteMessage, type ServerRoom, type ServerUser, type ServerRoomMessage, type ServerRoomMessageState, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult } from "@/lib/tauri";
 import { toast } from "@/components/ui/Toast";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
 import { EncryptionBadge } from "@/components/encryption/EncryptionBadge";
@@ -14,6 +14,44 @@ import { MatrixLoginView } from "@/components/auth/MatrixLoginView";
 
 const QUICK_REACTIONS = ["\u{1F44D}", "\u{2764}\u{FE0F}", "\u{1F602}", "\u{1F44F}", "\u{1F914}"];
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
+const ROOM_HISTORY_PAGE_SIZE = 50;
+
+function mapServerRoomMessages(
+  msgs: ServerRoomMessage[],
+  roomId: string,
+  currentSipUri: string | undefined,
+  messageStates: ServerRoomMessageState[] = [],
+): ChatMessage[] {
+  const stateByMessage = new Map(messageStates.map((state) => [state.message_id, state]));
+  return msgs.map((msg) => {
+    const messageState = stateByMessage.get(msg.id);
+    const reactions = (messageState?.reactions ?? []).reduce<Record<string, string[]>>(
+      (acc, reaction) => {
+        acc[reaction.emoji] = [...(acc[reaction.emoji] ?? []), reaction.user_uri];
+        return acc;
+      },
+      {}
+    );
+    return {
+      event_id: msg.id,
+      room_id: roomId,
+      sender: msg.sender_uri,
+      sender_name: null,
+      body: msg.body,
+      msg_type: "text",
+      timestamp: Math.floor(new Date(msg.created_at).getTime() / 1000),
+      is_encrypted: false,
+      is_own: currentSipUri != null && msg.sender_uri === currentSipUri,
+      reply_to: msg.reply_to,
+      edited_at: msg.edited_at ? Math.floor(new Date(msg.edited_at).getTime() / 1000) : undefined,
+      pinned: msg.pinned,
+      mentions: msg.mentions ?? [],
+      mentioned_user_uris: msg.mentioned_user_uris ?? [],
+      reactions,
+      read_by: (messageState?.reads ?? []).map((read) => read.reader_uri),
+    } satisfies ChatMessage;
+  });
+}
 
 const EMOJI_CATEGORIES: { label: string; emojis: string[] }[] = [
   { label: "Smileys", emojis: ["\u{1F600}", "\u{1F603}", "\u{1F604}", "\u{1F601}", "\u{1F606}", "\u{1F605}", "\u{1F602}", "\u{1F923}", "\u{1F60A}", "\u{1F607}", "\u{1F970}", "\u{1F60D}", "\u{1F618}", "\u{1F617}", "\u{1F914}", "\u{1F928}"] },
@@ -663,48 +701,22 @@ function ChatRoom({
   useEffect(() => {
     if (isServerRoom && connected && baseUrl && token) {
       Promise.all([
-        paleServerGetRoomMessages(baseUrl, token, room.room_id),
+        paleServerGetRoomMessages(baseUrl, token, room.room_id, { limit: ROOM_HISTORY_PAGE_SIZE }),
         paleServerGetRoomMessageState(baseUrl, token, room.room_id).catch(() => []),
       ])
         .then(([msgs, messageStates]) => {
-          const stateByMessage = new Map(messageStates.map((state) => [state.message_id, state]));
-          const mappedMessages = msgs.map((msg) => {
-            const messageState = stateByMessage.get(msg.id);
-            const reactions = (messageState?.reactions ?? []).reduce<Record<string, string[]>>(
-              (acc, reaction) => {
-                acc[reaction.emoji] = [...(acc[reaction.emoji] ?? []), reaction.user_uri];
-                return acc;
-              },
-              {}
-            );
-            return {
-              event_id: msg.id,
-              room_id: room.room_id,
-              sender: msg.sender_uri,
-              sender_name: null,
-              body: msg.body,
-              msg_type: "text",
-              timestamp: Math.floor(new Date(msg.created_at).getTime() / 1000),
-              is_encrypted: false,
-              is_own: currentSipUri != null && msg.sender_uri === currentSipUri,
-              reply_to: msg.reply_to,
-              edited_at: msg.edited_at ? Math.floor(new Date(msg.edited_at).getTime() / 1000) : undefined,
-              pinned: msg.pinned,
-              mentions: msg.mentions ?? [],
-              mentioned_user_uris: msg.mentioned_user_uris ?? [],
-              reactions,
-              read_by: (messageState?.reads ?? []).map((read) => read.reader_uri),
-            } satisfies ChatMessage;
-          });
+          const mappedMessages = mapServerRoomMessages(msgs, room.room_id, currentSipUri, messageStates);
           useChatStore.getState().setMessages(room.room_id, mappedMessages);
+          setHasMore(msgs.length === ROOM_HISTORY_PAGE_SIZE);
         })
         .catch(() => {});
     }
   }, [room.room_id, isServerRoom, connected, baseUrl, token, currentSipUri]);
 
   useEffect(() => {
+    if (loadingHistory) return;
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length]);
+  }, [messages.length, loadingHistory]);
 
   // Send read receipt for the latest message when room opens
   useEffect(() => {
@@ -721,40 +733,43 @@ function ChatRoom({
 
   const handleScroll = useCallback(async () => {
     const container = messagesContainerRef.current;
-    if (!container || !connected || !baseUrl || !token || loadingHistory || !hasMore) return;
+    if (!isServerRoom || !container || !connected || !baseUrl || !token || loadingHistory || !hasMore) return;
     if (container.scrollTop > 50) return;
 
     setLoadingHistory(true);
+    const previousScrollHeight = container.scrollHeight;
     const oldest = messagesRef.current[0];
     const before = oldest ? new Date(oldest.timestamp * 1000).toISOString() : undefined;
 
     try {
-      const older = await paleServerGetMessages(baseUrl, token, {
-        limit: 50,
+      const older = await paleServerGetRoomMessages(baseUrl, token, room.room_id, {
+        limit: ROOM_HISTORY_PAGE_SIZE,
         before,
-        roomId: room.room_id,
       });
       if (older.length === 0) {
         setHasMore(false);
       } else {
-        const add = useChatStore.getState().addMessage;
-        for (const msg of older) {
-          add({
-            event_id: msg.id,
-            room_id: room.room_id,
-            sender: msg.from_uri,
-            sender_name: null,
-            body: msg.body,
-            msg_type: "text",
-            timestamp: Math.floor(new Date(msg.received_at).getTime() / 1000),
-            is_encrypted: false,
-            is_own: false,
-          });
-        }
+        const messageStates = await paleServerGetRoomMessageState(baseUrl, token, room.room_id).catch(() => []);
+        const olderMessages = mapServerRoomMessages(older, room.room_id, currentSipUri, messageStates);
+        const currentMessages = useChatStore.getState().messages[room.room_id] ?? [];
+        const existingIds = new Set(currentMessages.map((msg) => msg.event_id));
+        useChatStore
+          .getState()
+          .setMessages(room.room_id, [
+            ...olderMessages.filter((msg) => !existingIds.has(msg.event_id)),
+            ...currentMessages,
+          ]);
+        window.requestAnimationFrame(() => {
+          const updatedContainer = messagesContainerRef.current;
+          if (updatedContainer) {
+            updatedContainer.scrollTop = updatedContainer.scrollHeight - previousScrollHeight;
+          }
+        });
+        setHasMore(older.length === ROOM_HISTORY_PAGE_SIZE);
       }
     } catch { /* ignore */ }
     setLoadingHistory(false);
-  }, [connected, baseUrl, token, loadingHistory, hasMore, room.room_id]);
+  }, [isServerRoom, connected, baseUrl, token, loadingHistory, hasMore, room.room_id, currentSipUri]);
 
   useEffect(() => {
     return () => {

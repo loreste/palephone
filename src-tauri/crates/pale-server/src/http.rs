@@ -1133,10 +1133,25 @@ async fn list_room_messages(
     State(state): State<SharedState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
+    Query(query): Query<MessageQuery>,
 ) -> Result<Json<Vec<crate::RoomMessage>>, ApiError> {
     let principal = authenticated_principal(&headers, &state)?;
     require_room_member(&state, id, &principal)?;
-    Ok(Json(state.room_messages(id)))
+    let mut messages = state.room_messages(id);
+
+    if let Some(before) = &query.before {
+        if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(before) {
+            let ts = ts.with_timezone(&Utc);
+            messages.retain(|m| m.created_at < ts);
+        }
+    }
+
+    messages.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let limit = query.limit.unwrap_or(100).min(500);
+    messages.truncate(limit);
+    messages.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+    Ok(Json(messages))
 }
 
 async fn list_room_message_state(

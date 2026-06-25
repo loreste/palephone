@@ -178,6 +178,8 @@ Get room details including members.
 ### GET /v1/rooms/{id}/messages
 List messages in a room.
 
+**Query:** `limit` (default `100`, max `500`), `before` (RFC3339 timestamp)
+
 ### GET /v1/rooms/{id}/message-state
 List per-message reactions and read receipts for a room.
 
