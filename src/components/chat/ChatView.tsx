@@ -1,12 +1,12 @@
 import { useState, useRef, useEffect, useCallback, type ReactNode } from "react";
-import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Video, Users, Reply, Pencil, Pin, Forward, Check, CheckCheck, Search, Radio } from "lucide-react";
+import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Video, Users, Reply, Pencil, Pin, Forward, Check, CheckCheck, Search, Radio, Hash, CalendarClock } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useChatStore, type ChatMessage, type RoomSummary } from "@/store/chatStore";
 import { useMatrixStore } from "@/store/matrixStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
-import { matrixSendMessage, matrixSetTyping, matrixCreateDm, paleServerGetMessages, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerGetConferences, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, type ServerRoom, type ServerUser, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary } from "@/lib/tauri";
+import { matrixSendMessage, matrixSetTyping, matrixCreateDm, paleServerGetMessages, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerGetConferences, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerStartMeeting, type ServerRoom, type ServerUser, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult } from "@/lib/tauri";
 import { toast } from "@/components/ui/Toast";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
 import { EncryptionBadge } from "@/components/encryption/EncryptionBadge";
@@ -50,6 +50,23 @@ function sipUriForExtension(extension: string, currentSipUri?: string | null): s
   if (extension.startsWith("sip:")) return extension;
   const domain = currentSipUri?.split("@")[1] ?? "pale.local";
   return `sip:${extension}@${domain}`;
+}
+
+function collaborationIcon(kind: ServerCollaborationSearchResult["kind"]): ReactNode {
+  switch (kind) {
+    case "channel":
+      return <Hash size={15} />;
+    case "team":
+      return <Users size={15} />;
+    case "meeting":
+      return <CalendarClock size={15} />;
+    case "conference":
+      return <Video size={15} />;
+    case "direct":
+      return <MessageSquare size={15} />;
+    default:
+      return <MessageSquare size={15} />;
+  }
 }
 
 function groupMatches(query: string, ...values: Array<string | string[] | undefined | null>): boolean {
@@ -165,6 +182,8 @@ function ConversationList({
   const [ringGroups, setRingGroups] = useState<RingGroupSummary[]>([]);
   const [queues, setQueues] = useState<CallQueueSummary[]>([]);
   const [pagingGroups, setPagingGroups] = useState<PagingGroupSummary[]>([]);
+  const [collaborationResults, setCollaborationResults] = useState<ServerCollaborationSearchResult[]>([]);
+  const [collaborationSearchLoading, setCollaborationSearchLoading] = useState(false);
 
   const { baseUrl, token, connected } = useServerStore();
   const currentSipUri = useAccountStore((s) => s.account?.sipUri);
@@ -195,6 +214,35 @@ function ConversationList({
 
     return () => { cancelled = true; };
   }, [connected, baseUrl, token]);
+
+  useEffect(() => {
+    const searchTerm = query.trim();
+    if (!connected || !baseUrl || !token || searchTerm.length < 2) {
+      setCollaborationResults([]);
+      setCollaborationSearchLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setCollaborationSearchLoading(true);
+    const timer = window.setTimeout(() => {
+      paleServerSearchCollaboration(baseUrl, token, searchTerm, 20)
+        .then((results) => {
+          if (!cancelled) setCollaborationResults(results);
+        })
+        .catch(() => {
+          if (!cancelled) setCollaborationResults([]);
+        })
+        .finally(() => {
+          if (!cancelled) setCollaborationSearchLoading(false);
+        });
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [connected, baseUrl, token, query]);
 
   const handleNewDm = async (user: { display_name: string; sip_uri: string; matrix_user_id?: string | null }) => {
     try {
@@ -246,6 +294,9 @@ function ConversationList({
     groupMatches(normalizedQuery, group.name, group.extension, group.members)
   );
   const hasAnyGroupResults = filteredConferences.length > 0 || filteredRingGroups.length > 0 || filteredQueues.length > 0 || filteredPagingGroups.length > 0;
+  const visibleCollaborationResults = normalizedQuery
+    ? collaborationResults.filter((result) => !result.room_id || !filteredRooms.some((room) => room.room_id === result.room_id))
+    : [];
 
   const joinConference = async (conf: ConferenceSummary) => {
     if (!connected || !baseUrl || !token) return;
@@ -267,6 +318,46 @@ function ConversationList({
   const callExtension = (extension: string, label: string) => {
     ipcMakeCall(sipUriForExtension(extension, currentSipUri))
       .catch(() => toast({ type: "error", title: `Failed to call ${label}` }));
+  };
+
+  const openRoomResult = async (roomId: string) => {
+    if (rooms.some((room) => room.room_id === roomId)) {
+      onSelect(roomId);
+      return;
+    }
+    if (!connected || !baseUrl || !token) return;
+    try {
+      const serverRooms = await paleServerGetRooms(baseUrl, token);
+      for (const room of serverRooms) {
+        upsertRoom(serverRoomToSummary(room, currentSipUri));
+      }
+      if (serverRooms.some((room) => room.id === roomId)) {
+        onSelect(roomId);
+      }
+    } catch (err) {
+      toast({ type: "error", title: "Could not open chat", description: String(err) });
+    }
+  };
+
+  const openCollaborationResult = async (result: ServerCollaborationSearchResult) => {
+    if (result.room_id) {
+      await openRoomResult(result.room_id);
+      return;
+    }
+    if (result.kind === "meeting") {
+      if (!connected || !baseUrl || !token) return;
+      try {
+        const target = await paleServerStartMeeting(baseUrl, token, result.id);
+        await ipcMakeCall(target.call_uri);
+      } catch (err) {
+        toast({ type: "error", title: "Failed to start meeting", description: String(err) });
+      }
+      return;
+    }
+    if (result.call_uri) {
+      ipcMakeCall(result.call_uri)
+        .catch(() => toast({ type: "error", title: `Failed to call ${result.title}` }));
+    }
   };
 
   return (
@@ -302,7 +393,7 @@ function ConversationList({
       </div>
 
       <div className="flex-1 overflow-y-auto px-2">
-        {rooms.length === 0 && !hasAnyGroupResults && !showNewChat ? (
+        {rooms.length === 0 && !hasAnyGroupResults && visibleCollaborationResults.length === 0 && !showNewChat ? (
           <div className="flex flex-col items-center justify-center h-48 gap-2">
             <MessageSquare size={32} className="text-tertiary" />
             <p className="text-sm text-tertiary">No conversations yet</p>
@@ -347,6 +438,32 @@ function ConversationList({
                     )}
                   </button>
                 ))}
+              </div>
+            )}
+
+            {(visibleCollaborationResults.length > 0 || collaborationSearchLoading) && (
+              <div className="pb-2">
+                <p className="px-3 py-1 text-[10px] font-semibold uppercase text-tertiary">Directory Results</p>
+                {collaborationSearchLoading && (
+                  <div className="flex items-center gap-2 px-3 py-2 text-xs text-tertiary">
+                    <Loader2 size={13} className="animate-spin" />
+                    Searching
+                  </div>
+                )}
+                {visibleCollaborationResults.map((result) => {
+                  const canOpen = Boolean(result.room_id || result.call_uri || result.kind === "meeting");
+                  return (
+                    <GroupResultButton
+                      key={`${result.kind}-${result.id}`}
+                      title={result.title}
+                      subtitle={`${result.kind} · ${result.subtitle || "Business collaboration"}`}
+                      icon={collaborationIcon(result.kind)}
+                      actionLabel={result.kind === "meeting" || result.kind === "conference" ? "Join" : "Open"}
+                      disabled={!canOpen}
+                      onAction={() => openCollaborationResult(result)}
+                    />
+                  );
+                })}
               </div>
             )}
 
@@ -404,7 +521,7 @@ function ConversationList({
               </div>
             )}
 
-            {normalizedQuery && filteredRooms.length === 0 && !hasAnyGroupResults && (
+            {normalizedQuery && filteredRooms.length === 0 && !hasAnyGroupResults && visibleCollaborationResults.length === 0 && !collaborationSearchLoading && (
               <div className="flex flex-col items-center justify-center h-32 gap-2">
                 <Search size={24} className="text-tertiary" />
                 <p className="text-sm text-tertiary">No groups or chats found</p>
