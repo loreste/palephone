@@ -515,14 +515,19 @@ function ChatRoom({
                 msg_type: "text",
                 timestamp: Math.floor(new Date(msg.created_at).getTime() / 1000),
                 is_encrypted: false,
-                is_own: false,
+                is_own: currentSipUri != null && msg.sender_uri === currentSipUri,
+                reply_to: msg.reply_to,
+                edited_at: msg.edited_at ? Math.floor(new Date(msg.edited_at).getTime() / 1000) : undefined,
+                pinned: msg.pinned,
+                mentions: msg.mentions ?? [],
+                mentioned_user_uris: msg.mentioned_user_uris ?? [],
               });
             }
           })
           .catch(() => {});
       });
     }
-  }, [room.room_id, isServerRoom, connected, baseUrl, token]);
+  }, [room.room_id, isServerRoom, connected, baseUrl, token, currentSipUri]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -687,6 +692,8 @@ function ChatRoom({
           timestamp: Math.floor(new Date(msg.created_at).getTime() / 1000),
           is_encrypted: false,
           is_own: true,
+          mentions: msg.mentions ?? [],
+          mentioned_user_uris: msg.mentioned_user_uris ?? [],
         });
       } catch (err) {
         toast({ type: "error", title: "Upload failed", description: String(err) });
@@ -707,8 +714,13 @@ function ChatRoom({
       try {
         if (connected && baseUrl && token) {
           const { paleServerEditMessage } = await import("@/lib/tauri");
-          await paleServerEditMessage(baseUrl, token, msgId, body);
-          updateMessage(room.room_id, msgId, { body, edited_at: Math.floor(Date.now() / 1000) });
+          const updated = await paleServerEditMessage(baseUrl, token, msgId, body);
+          updateMessage(room.room_id, msgId, {
+            body: updated.body,
+            edited_at: updated.edited_at ? Math.floor(new Date(updated.edited_at).getTime() / 1000) : Math.floor(Date.now() / 1000),
+            mentions: updated.mentions ?? [],
+            mentioned_user_uris: updated.mentioned_user_uris ?? [],
+          });
         }
       } catch (err) {
         toast({ type: "error", title: "Edit failed", description: String(err) });
@@ -733,6 +745,8 @@ function ChatRoom({
           is_own: true,
           reply_to: replyingTo?.event_id,
           reply_preview: replyingTo ? { sender: replyingTo.sender_name ?? replyingTo.sender, body: replyingTo.body } : undefined,
+          mentions: msg.mentions ?? [],
+          mentioned_user_uris: msg.mentioned_user_uris ?? [],
         });
       } else {
         await matrixSendMessage(room.room_id, body);

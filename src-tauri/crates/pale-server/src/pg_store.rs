@@ -67,6 +67,7 @@ impl PgStore {
             include_str!("../migrations/013_user_uniqueness.sql"),
             include_str!("../migrations/014_room_call_metadata.sql"),
             include_str!("../migrations/015_business_collaboration.sql"),
+            include_str!("../migrations/016_room_message_mentions.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {
@@ -928,11 +929,13 @@ impl PgStore {
 
     pub async fn insert_room_message(&self, msg: &RoomMessage) -> Result<(), PgError> {
         let client = self.pool.get().await?;
+        let mentions = serde_json::to_value(&msg.mentions)?;
+        let mentioned_user_uris = serde_json::to_value(&msg.mentioned_user_uris)?;
         client.execute(
-            "INSERT INTO room_messages (id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-             ON CONFLICT (id) DO UPDATE SET body = $4, edited_at = $8, pinned = $9",
-            &[&msg.id, &msg.room_id, &msg.sender_uri, &msg.body, &msg.content_type, &msg.created_at, &msg.reply_to, &msg.edited_at, &msg.pinned],
+            "INSERT INTO room_messages (id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned, mentions, mentioned_user_uris)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+             ON CONFLICT (id) DO UPDATE SET body = $4, edited_at = $8, pinned = $9, mentions = $10, mentioned_user_uris = $11",
+            &[&msg.id, &msg.room_id, &msg.sender_uri, &msg.body, &msg.content_type, &msg.created_at, &msg.reply_to, &msg.edited_at, &msg.pinned, &Json(mentions), &Json(mentioned_user_uris)],
         ).await?;
         Ok(())
     }
@@ -940,7 +943,7 @@ impl PgStore {
     pub async fn load_room_messages(&self) -> Result<Vec<RoomMessage>, PgError> {
         let client = self.pool.get().await?;
         let rows = client.query(
-            "SELECT id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned FROM room_messages ORDER BY created_at",
+            "SELECT id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned, mentions, mentioned_user_uris FROM room_messages ORDER BY created_at",
             &[],
         ).await?;
         Ok(rows.iter().map(|r| RoomMessage {
@@ -953,6 +956,14 @@ impl PgStore {
             reply_to: r.try_get("reply_to").ok().flatten(),
             edited_at: r.try_get("edited_at").ok().flatten(),
             pinned: r.try_get("pinned").unwrap_or(false),
+            mentions: r
+                .try_get::<_, Json<Vec<crate::MessageMention>>>("mentions")
+                .map(|Json(mentions)| mentions)
+                .unwrap_or_default(),
+            mentioned_user_uris: r
+                .try_get::<_, Json<Vec<String>>>("mentioned_user_uris")
+                .map(|Json(uris)| uris)
+                .unwrap_or_default(),
         }).collect())
     }
 

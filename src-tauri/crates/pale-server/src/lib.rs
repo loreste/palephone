@@ -3340,6 +3340,11 @@ impl AppState {
     }
 
     pub fn send_room_message(&self, room_id: Uuid, sender_uri: &str, body: &str, reply_to: Option<Uuid>) -> RoomMessage {
+        let room = self.room(room_id);
+        let (mentions, mentioned_user_uris) = room
+            .as_ref()
+            .map(|room| self.resolve_message_mentions(room, body))
+            .unwrap_or_default();
         let msg = RoomMessage {
             id: Uuid::new_v4(),
             room_id,
@@ -3350,6 +3355,8 @@ impl AppState {
             reply_to,
             edited_at: None,
             pinned: false,
+            mentions,
+            mentioned_user_uris,
         };
         let mut messages = self.room_messages.write().expect("room messages lock poisoned");
         messages.push(msg.clone());
@@ -3372,15 +3379,74 @@ impl AppState {
         let msg = messages.iter_mut().find(|m| m.id == id)?;
         msg.body = new_body.to_string();
         msg.edited_at = Some(Utc::now());
+        if let Some(room) = self.room(msg.room_id) {
+            let (mentions, mentioned_user_uris) = self.resolve_message_mentions(&room, new_body);
+            msg.mentions = mentions;
+            msg.mentioned_user_uris = mentioned_user_uris;
+        }
         let updated = msg.clone();
         self.broadcast_sse(SseEvent {
             event_type: "message_edited".to_string(),
             payload: serde_json::to_value(&updated).unwrap_or_default(),
         });
         self.persist(&updated);
-        let body = updated.body.clone();
-        self.pg_spawn(move |pg| Box::pin(async move { pg.update_room_message_body(id, &body).await }));
+        let updated_for_pg = updated.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.insert_room_message(&updated_for_pg).await }));
         Some(updated)
+    }
+
+    fn resolve_message_mentions(&self, room: &Room, body: &str) -> (Vec<MessageMention>, Vec<String>) {
+        let normalized_body = body.to_lowercase();
+        let mut mentions = Vec::new();
+        let mut mentioned_user_uris = Vec::new();
+
+        if normalized_body.contains("@channel") {
+            mentions.push(MessageMention {
+                kind: "channel".to_string(),
+                token: "channel".to_string(),
+                user_sip_uri: None,
+            });
+            mentioned_user_uris.extend(room.members.iter().map(|member| member.user_sip_uri.clone()));
+        }
+
+        if normalized_body.contains("@team") {
+            mentions.push(MessageMention {
+                kind: "team".to_string(),
+                token: "team".to_string(),
+                user_sip_uri: None,
+            });
+            mentioned_user_uris.extend(room.members.iter().map(|member| member.user_sip_uri.clone()));
+        }
+
+        for member in &room.members {
+            let Some(user) = self
+                .users
+                .values()
+                .into_iter()
+                .find(|user| user.sip_uri == member.user_sip_uri)
+            else {
+                continue;
+            };
+            let display_token = format!("@{}", user.display_name.to_lowercase());
+            let sip_user_token = format!("@{}", sip_user_part(&user.sip_uri).to_lowercase());
+            if normalized_body.contains(&display_token) || normalized_body.contains(&sip_user_token) {
+                mentions.push(MessageMention {
+                    kind: "user".to_string(),
+                    token: user.display_name.clone(),
+                    user_sip_uri: Some(user.sip_uri.clone()),
+                });
+                mentioned_user_uris.push(user.sip_uri);
+            }
+        }
+
+        mentioned_user_uris.sort();
+        mentioned_user_uris.dedup();
+        mentions.sort_by(|left, right| {
+            (left.kind.as_str(), left.token.as_str(), left.user_sip_uri.as_deref().unwrap_or(""))
+                .cmp(&(right.kind.as_str(), right.token.as_str(), right.user_sip_uri.as_deref().unwrap_or("")))
+        });
+        mentions.dedup();
+        (mentions, mentioned_user_uris)
     }
 
     pub fn pin_room_message(&self, id: Uuid) -> Option<RoomMessage> {
@@ -4119,6 +4185,17 @@ pub struct RoomMessage {
     pub reply_to: Option<Uuid>,
     pub edited_at: Option<DateTime<Utc>>,
     pub pinned: bool,
+    #[serde(default)]
+    pub mentions: Vec<MessageMention>,
+    #[serde(default)]
+    pub mentioned_user_uris: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageMention {
+    pub kind: String,
+    pub token: String,
+    pub user_sip_uri: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5724,6 +5801,65 @@ mod tests {
         );
         assert!(policy.legal_hold);
         assert_eq!(state.retention_policies().len(), 1);
+    }
+
+    #[test]
+    fn room_messages_resolve_structured_user_and_channel_mentions() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-mention-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        state
+            .create_user(CreateUserRequest {
+                display_name: "Alice Smith".to_string(),
+                sip_uri: "sip:alice@example.com".to_string(),
+                matrix_user_id: None,
+                password: Some("alice-password".to_string()),
+                role: None,
+            })
+            .unwrap();
+        state
+            .create_user(CreateUserRequest {
+                display_name: "Bob Jones".to_string(),
+                sip_uri: "sip:bob@example.com".to_string(),
+                matrix_user_id: None,
+                password: Some("bob-password".to_string()),
+                role: None,
+            })
+            .unwrap();
+        let room = state.create_room(
+            "sip:alice@example.com",
+            CreateRoomRequest {
+                name: "Project".to_string(),
+                description: None,
+                members: vec!["sip:bob@example.com".to_string()],
+                is_direct: Some(false),
+                team_id: None,
+                channel_name: None,
+            },
+        );
+
+        let msg = state.send_room_message(
+            room.id,
+            "sip:alice@example.com",
+            "Can @Bob Jones check this? @channel",
+            None,
+        );
+        assert!(msg
+            .mentions
+            .iter()
+            .any(|mention| mention.kind == "user" && mention.user_sip_uri.as_deref() == Some("sip:bob@example.com")));
+        assert!(msg.mentions.iter().any(|mention| mention.kind == "channel"));
+        assert_eq!(
+            msg.mentioned_user_uris,
+            vec!["sip:alice@example.com".to_string(), "sip:bob@example.com".to_string()]
+        );
+
+        let edited = state
+            .edit_room_message(msg.id, "@alice can own this")
+            .expect("edited message");
+        assert_eq!(edited.mentioned_user_uris, vec!["sip:alice@example.com".to_string()]);
     }
 
     #[test]

@@ -33,6 +33,8 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
   const setPresence = usePresenceStore((s) => s.setPresence);
   const setBulkPresence = usePresenceStore((s) => s.setBulkPresence);
   const addMessage = useChatStore((s) => s.addMessage);
+  const updateMessage = useChatStore((s) => s.updateMessage);
+  const removeMessage = useChatStore((s) => s.removeMessage);
   const upsertRoom = useChatStore((s) => s.upsertRoom);
   const setTypingUsers = useChatStore((s) => s.setTypingUsers);
   const addActivity = useActivityStore((s) => s.addItem);
@@ -132,6 +134,8 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
             timestamp: Math.floor(new Date(msg.created_at).getTime() / 1000),
             is_encrypted: false,
             is_own: isOwn,
+            mentions: msg.mentions ?? [],
+            mentioned_user_uris: msg.mentioned_user_uris ?? [],
           });
           if (!isOwn) {
             const senderLabel = msg.sender_uri?.replace(/^sip:/, "") ?? "Someone";
@@ -149,9 +153,8 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
               useChatStore.getState().setRooms(updatedRooms);
             }
 
-            // Check for @mention of current user
-            const displayName = useAccountStore.getState().account?.displayName;
-            if (displayName && msg.body && msg.body.includes(`@${displayName}`)) {
+            // Check structured mention targets instead of substring matching.
+            if (currentSipUri && Array.isArray(msg.mentioned_user_uris) && msg.mentioned_user_uris.includes(currentSipUri)) {
               addActivity({
                 id: `mention-${msg.id ?? Date.now()}`,
                 type: "mention",
@@ -172,6 +175,35 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
             shouldPlaySound().then((ok) => {
               if (ok) playNotificationBeep();
             });
+          }
+        } catch { /* ignore */ }
+      });
+
+      es.addEventListener("message_edited", (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          updateMessage(msg.room_id, msg.id, {
+            body: msg.body,
+            edited_at: msg.edited_at ? Math.floor(new Date(msg.edited_at).getTime() / 1000) : undefined,
+            mentions: msg.mentions ?? [],
+            mentioned_user_uris: msg.mentioned_user_uris ?? [],
+          });
+        } catch { /* ignore */ }
+      });
+
+      es.addEventListener("message_pinned", (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          updateMessage(msg.room_id, msg.id, { pinned: msg.pinned });
+        } catch { /* ignore */ }
+      });
+
+      es.addEventListener("message_deleted", (e) => {
+        try {
+          const payload = JSON.parse(e.data);
+          const roomId = payload.room_id;
+          if (roomId && payload.message_id) {
+            removeMessage(roomId, payload.message_id);
           }
         } catch { /* ignore */ }
       });
@@ -219,7 +251,18 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
         reconnectRef.current = null;
       }
     };
-  }, [baseUrl, token, setPresence, setBulkPresence, addMessage, upsertRoom, setTypingUsers]);
+  }, [
+    baseUrl,
+    token,
+    setPresence,
+    setBulkPresence,
+    addMessage,
+    updateMessage,
+    removeMessage,
+    upsertRoom,
+    setTypingUsers,
+    addActivity,
+  ]);
 
   // Token auto-refresh (with stale-token guard to prevent race conditions)
   useEffect(() => {

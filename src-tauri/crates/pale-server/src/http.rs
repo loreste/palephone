@@ -1291,6 +1291,7 @@ async fn delete_message(
         event_type: "message_deleted".to_string(),
         payload: json!({
             "message_id": id,
+            "room_id": msg.room_id,
             "deleted_by": principal,
             "deleted_at": Utc::now(),
         }),

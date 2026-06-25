@@ -38,6 +38,8 @@ export interface ChatMessage {
   reply_preview?: { sender: string; body: string };
   edited_at?: number;
   pinned?: boolean;
+  mentions?: { kind: string; token: string; user_sip_uri?: string | null }[];
+  mentioned_user_uris?: string[];
   reactions?: Record<string, string[]>; // emoji -> [user_uri, ...]
 }
 

@@ -597,6 +597,8 @@ export interface ServerRoomMessage {
   reply_to?: string;
   edited_at?: string;
   pinned?: boolean;
+  mentions?: { kind: string; token: string; user_sip_uri?: string | null }[];
+  mentioned_user_uris?: string[];
 }
 
 export function paleServerGetRooms(baseUrl: string, token: string): Promise<ServerRoom[]> {
@@ -875,7 +877,7 @@ export function paleServerEditMessage(
   token: string,
   messageId: string,
   body: string,
-): Promise<void> {
+): Promise<ServerRoomMessage> {
   return serverFetch(baseUrl, token, `/v1/messages/${messageId}`, {
     method: "PUT",
     body: JSON.stringify({ body }),
