@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    AdminAuditEvent, CallSession, CollaborationPolicy, Conference, FileRecord, RetentionPolicy,
-    Room, RoomMessage, RoutingRule, ScheduledMeeting, SipAccount, SipDialog, SipMessage,
+    AdminAuditEvent, CallSession, CollaborationPolicy, Conference, FileRecord, MessageRead,
+    RetentionPolicy, Room, RoomMessage, RoutingRule, ScheduledMeeting, SipAccount, SipDialog, SipMessage,
     SipRegistration, SipTransaction, Team, User,
 };
 
@@ -370,6 +370,16 @@ impl StoredObject for RoomMessage {
 
     fn key(&self) -> String {
         self.id.to_string()
+    }
+}
+
+impl StoredObject for MessageRead {
+    fn collection() -> &'static str {
+        "message_reads"
+    }
+
+    fn key(&self) -> String {
+        format!("{}:{}", self.message_id, self.reader_uri)
     }
 }
 

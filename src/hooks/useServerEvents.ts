@@ -44,10 +44,12 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
   const sourceRef = useRef<EventSource | null>(null);
   const reconnectRef = useRef<number | null>(null);
   const refreshRef = useRef<number | null>(null);
+  const typingTimeoutsRef = useRef<Map<string, number>>(new Map());
 
   // SSE connection
   useEffect(() => {
     if (!baseUrl || !token) return;
+    const typingTimeouts = typingTimeoutsRef.current;
 
     paleServerGetPresence(baseUrl, token)
       .then(setBulkPresence)
@@ -80,11 +82,23 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
           const currentSipUri = useAccountStore.getState().account?.sipUri;
           if (data.room_id && data.user !== currentSipUri) {
             const roomId = data.room_id;
+            const key = `${roomId}:${data.user}`;
             const existing = useChatStore.getState().typingByRoom[roomId] ?? [];
+            const existingTimeout = typingTimeouts.get(key);
+            if (existingTimeout) {
+              window.clearTimeout(existingTimeout);
+              typingTimeouts.delete(key);
+            }
             if (data.typing) {
               if (!existing.includes(data.user)) {
                 setTypingUsers(roomId, [...existing, data.user]);
               }
+              const timeout = window.setTimeout(() => {
+                const latest = useChatStore.getState().typingByRoom[roomId] ?? [];
+                setTypingUsers(roomId, latest.filter((u: string) => u !== data.user));
+                typingTimeouts.delete(key);
+              }, 3500);
+              typingTimeouts.set(key, timeout);
             } else {
               setTypingUsers(roomId, existing.filter((u: string) => u !== data.user));
             }
@@ -250,6 +264,10 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
         window.clearTimeout(reconnectRef.current);
         reconnectRef.current = null;
       }
+      for (const timeout of typingTimeouts.values()) {
+        window.clearTimeout(timeout);
+      }
+      typingTimeouts.clear();
     };
   }, [
     baseUrl,

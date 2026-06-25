@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     AdminAuditEvent, AdminSession, BusinessHours, CallDetailRecord, CallHistoryEntry, CallRecording,
-    CallSession, Conference, FileRecord, Holiday, QueueCallback, QueueCallerEntry, RoutingRule,
+    CallSession, Conference, FileRecord, Holiday, MessageRead, QueueCallback, QueueCallerEntry, RoutingRule,
     Room, RoomMember, RoomMessage, SipAccount, SipDialog, SipMessage, SipNotification,
     SipRegistration, SipSubscription, SipTransaction, User, UserCallSettings, UserPresence,
     VipCaller, Voicemail,
@@ -987,8 +987,41 @@ impl PgStore {
 
     pub async fn delete_room_message(&self, id: Uuid) -> Result<(), PgError> {
         let client = self.pool.get().await?;
+        client.execute("DELETE FROM message_reads WHERE message_id = $1", &[&id]).await?;
         client.execute("DELETE FROM room_messages WHERE id = $1", &[&id]).await?;
         Ok(())
+    }
+
+    pub async fn upsert_message_read(&self, read: &MessageRead) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "INSERT INTO message_reads (id, message_id, message_source, reader_uri, read_at)
+                 VALUES ($1, $2, 'room', $3, $4)
+                 ON CONFLICT (message_id, reader_uri) DO UPDATE
+                 SET message_source = 'room', read_at = EXCLUDED.read_at",
+                &[&Uuid::new_v4(), &read.message_id, &read.reader_uri, &read.read_at],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn load_message_reads(&self) -> Result<Vec<MessageRead>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT message_id, reader_uri, read_at FROM message_reads WHERE message_source = 'room' ORDER BY read_at",
+                &[],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| MessageRead {
+                message_id: row.get("message_id"),
+                reader_uri: row.get("reader_uri"),
+                read_at: row.get("read_at"),
+            })
+            .collect())
     }
 
     pub async fn upsert_business_object<T>(

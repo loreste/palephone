@@ -1425,7 +1425,7 @@ function EmojiPickerButton({ onSelect }: { onSelect: (emoji: string) => void }) 
 }
 
 function TypingIndicator({ users }: { users: string[] }) {
-  const names = users.map((id) => id.split(":")[0]?.replace("@", "") || id);
+  const names = users.map((id) => id.replace(/^sips?:/i, "").split("@")[0] || id);
   const label =
     names.length === 1
       ? `${names[0]} is typing`

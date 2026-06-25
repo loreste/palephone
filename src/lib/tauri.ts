@@ -639,6 +639,12 @@ export interface ServerRoomMessage {
   mentioned_user_uris?: string[];
 }
 
+export interface ServerMessageRead {
+  message_id: string;
+  reader_uri: string;
+  read_at: string;
+}
+
 export function paleServerGetRooms(baseUrl: string, token: string): Promise<ServerRoom[]> {
   return serverFetch(baseUrl, token, "/v1/rooms");
 }
@@ -952,10 +958,18 @@ export function paleServerMarkRead(
   baseUrl: string,
   token: string,
   messageId: string,
-): Promise<void> {
+): Promise<ServerMessageRead> {
   return serverFetch(baseUrl, token, `/v1/messages/${messageId}/read`, {
     method: "PUT",
   });
+}
+
+export function paleServerGetMessageReads(
+  baseUrl: string,
+  token: string,
+  messageId: string,
+): Promise<ServerMessageRead[]> {
+  return serverFetch(baseUrl, token, `/v1/messages/${messageId}/reads`);
 }
 
 // ─── Message Edit & Delete ───

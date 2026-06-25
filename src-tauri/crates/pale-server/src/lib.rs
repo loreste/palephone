@@ -224,6 +224,7 @@ pub struct AppState {
     mention_rate_limits: ShardedMap<String, RateLimitBucket>,
     rooms: ShardedMap<Uuid, Room>,
     room_messages: RwLock<Vec<RoomMessage>>,
+    message_reads: RwLock<Vec<MessageRead>>,
     voicemails: ShardedMap<Uuid, Voicemail>,
     recordings: ShardedMap<Uuid, CallRecording>,
     ring_groups: ShardedMap<Uuid, RingGroup>,
@@ -366,6 +367,7 @@ impl AppState {
             mention_rate_limits: ShardedMap::new(),
             rooms: ShardedMap::new(),
             room_messages: RwLock::new(Vec::new()),
+            message_reads: RwLock::new(Vec::new()),
             voicemails: ShardedMap::new(),
             recordings: ShardedMap::new(),
             ring_groups: ShardedMap::new(),
@@ -559,6 +561,12 @@ impl AppState {
                 *self.room_messages.write().expect("room messages lock poisoned") = messages;
             }
             Err(e) => log::warn!("Failed to load room messages from Postgres: {}", e),
+        }
+        match pg.load_message_reads().await {
+            Ok(reads) => {
+                *self.message_reads.write().expect("message reads lock poisoned") = reads;
+            }
+            Err(e) => log::warn!("Failed to load message reads from Postgres: {}", e),
         }
         match pg.load_business_objects::<Team>(Team::collection()).await {
             Ok(teams) => {
@@ -828,6 +836,7 @@ impl AppState {
         self.load_singleton::<CollaborationPolicy>(&self.collaboration_policy);
         self.load_collection::<Room>(&self.rooms);
         self.load_vec_collection::<RoomMessage>(&self.room_messages);
+        self.load_vec_collection::<MessageRead>(&self.message_reads);
         self.load_vec_collection::<AdminAuditEvent>(&self.audit_events);
     }
 
@@ -3713,6 +3722,7 @@ impl AppState {
         let index = messages.iter().position(|m| m.id == id)?;
         let deleted = messages.remove(index);
         self.delete_persisted(RoomMessage::collection(), deleted.key());
+        self.delete_message_reads_for_message(id);
         self.pg_spawn(move |pg| Box::pin(async move { pg.delete_room_message(id).await }));
         Some(deleted)
     }
@@ -3944,6 +3954,66 @@ impl AppState {
 
     pub fn message_reactions(&self, message_id: Uuid) -> Vec<MessageReaction> {
         self.message_reactions.get(&message_id).unwrap_or_default()
+    }
+
+    pub fn mark_room_message_read(&self, message_id: Uuid, reader_uri: &str) -> Option<MessageRead> {
+        self.room_message(message_id)?;
+        let read = MessageRead {
+            message_id,
+            reader_uri: reader_uri.to_string(),
+            read_at: Utc::now(),
+        };
+        {
+            let mut reads = self.message_reads.write().expect("message reads lock poisoned");
+            if let Some(existing) = reads
+                .iter_mut()
+                .find(|existing| existing.message_id == message_id && existing.reader_uri == reader_uri)
+            {
+                *existing = read.clone();
+            } else {
+                reads.push(read.clone());
+            }
+        }
+        self.persist(&read);
+        let read_for_pg = read.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.upsert_message_read(&read_for_pg).await }));
+        self.broadcast_sse(SseEvent {
+            event_type: "read_receipt".to_string(),
+            payload: serde_json::to_value(&read).unwrap_or_default(),
+        });
+        Some(read)
+    }
+
+    pub fn message_reads(&self, message_id: Uuid) -> Vec<MessageRead> {
+        let mut reads: Vec<_> = self
+            .message_reads
+            .read()
+            .expect("message reads lock poisoned")
+            .iter()
+            .filter(|read| read.message_id == message_id)
+            .cloned()
+            .collect();
+        reads.sort_by(|left, right| left.read_at.cmp(&right.read_at));
+        reads
+    }
+
+    fn delete_message_reads_for_message(&self, message_id: Uuid) {
+        let deleted_keys = {
+            let mut reads = self.message_reads.write().expect("message reads lock poisoned");
+            let mut deleted_keys = Vec::new();
+            reads.retain(|read| {
+                if read.message_id == message_id {
+                    deleted_keys.push(read.key());
+                    false
+                } else {
+                    true
+                }
+            });
+            deleted_keys
+        };
+        for key in deleted_keys {
+            self.delete_persisted(MessageRead::collection(), key);
+        }
     }
 
     pub fn add_favorite(&self, user_uri: &str, favorite_uri: &str) {
@@ -6278,6 +6348,81 @@ mod tests {
         )
         .unwrap();
         assert!(reloaded_after_delete.room_messages(room.id).is_empty());
+        drop(reloaded_after_delete);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn room_message_reads_are_idempotent_and_persistent() {
+        let data_dir = std::env::temp_dir().join(format!("pale-read-receipts-{}", Uuid::new_v4()));
+        let storage_key = "01234567890123456789012345678901".to_string();
+
+        let state = AppState::persistent(
+            data_dir.clone(),
+            "012345678901234567890123".to_string(),
+            "admin".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+            storage_key.clone(),
+            DEFAULT_MAX_UPLOAD_BYTES,
+            MediaConfig::default(),
+        )
+        .unwrap();
+        let room = state.create_room(
+            "sip:alice@example.com",
+            CreateRoomRequest {
+                name: "Receipts".to_string(),
+                description: None,
+                members: vec!["sip:bob@example.com".to_string()],
+                is_direct: Some(false),
+                team_id: None,
+                channel_name: None,
+            },
+        );
+        let message = state
+            .send_room_message(room.id, "sip:alice@example.com", "please read", None)
+            .unwrap();
+        let first = state
+            .mark_room_message_read(message.id, "sip:bob@example.com")
+            .expect("read receipt");
+        let second = state
+            .mark_room_message_read(message.id, "sip:bob@example.com")
+            .expect("read receipt update");
+
+        assert_eq!(first.message_id, message.id);
+        assert_eq!(second.reader_uri, "sip:bob@example.com");
+        assert_eq!(state.message_reads(message.id).len(), 1);
+        assert!(state.mark_room_message_read(Uuid::new_v4(), "sip:bob@example.com").is_none());
+        drop(state);
+
+        let reloaded = AppState::persistent(
+            data_dir.clone(),
+            "012345678901234567890123".to_string(),
+            "admin".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+            storage_key.clone(),
+            DEFAULT_MAX_UPLOAD_BYTES,
+            MediaConfig::default(),
+        )
+        .unwrap();
+        let reads = reloaded.message_reads(message.id);
+        assert_eq!(reads.len(), 1);
+        assert_eq!(reads[0].reader_uri, "sip:bob@example.com");
+
+        reloaded.delete_room_message(message.id).unwrap();
+        assert!(reloaded.message_reads(message.id).is_empty());
+        drop(reloaded);
+
+        let reloaded_after_delete = AppState::persistent(
+            data_dir.clone(),
+            "012345678901234567890123".to_string(),
+            "admin".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+            storage_key,
+            DEFAULT_MAX_UPLOAD_BYTES,
+            MediaConfig::default(),
+        )
+        .unwrap();
+        assert!(reloaded_after_delete.message_reads(message.id).is_empty());
         drop(reloaded_after_delete);
         let _ = std::fs::remove_dir_all(data_dir);
     }

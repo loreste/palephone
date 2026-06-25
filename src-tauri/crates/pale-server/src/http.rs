@@ -1300,20 +1300,14 @@ async fn mark_message_read(
     State(state): State<SharedState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<crate::MessageRead>, ApiError> {
     let principal = authenticated_principal(&headers, &state)?;
     let msg = state.room_message(id).ok_or(ApiError::NotFound)?;
     require_room_member(&state, msg.room_id, &principal)?;
-    // For now, broadcast the read event via SSE (full persistence via PG)
-    state.broadcast_sse(crate::SseEvent {
-        event_type: "read_receipt".to_string(),
-        payload: json!({
-            "message_id": id,
-            "reader": principal,
-            "read_at": Utc::now(),
-        }),
-    });
-    Ok(Json(json!({ "ok": true })))
+    state
+        .mark_room_message_read(id, &principal)
+        .map(Json)
+        .ok_or(ApiError::NotFound)
 }
 
 // ─── Message Edit & Delete ───
@@ -1418,12 +1412,11 @@ async fn list_reads_handler(
     State(state): State<SharedState>,
     headers: HeaderMap,
     Path(_id): Path<Uuid>,
-) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+) -> Result<Json<Vec<crate::MessageRead>>, ApiError> {
     let principal = authenticated_principal(&headers, &state)?;
     let msg = state.room_message(_id).ok_or(ApiError::NotFound)?;
     require_room_member(&state, msg.room_id, &principal)?;
-    // Read receipts are currently broadcast-only via SSE; return empty for now
-    Ok(Json(vec![]))
+    Ok(Json(state.message_reads(_id)))
 }
 
 async fn list_favorites_handler(
