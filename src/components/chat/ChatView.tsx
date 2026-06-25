@@ -6,7 +6,7 @@ import { useMatrixStore } from "@/store/matrixStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
-import { matrixSendMessage, matrixSetTyping, matrixCreateDm, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerEndRoomCall, paleServerGetConferences, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerStartMeeting, paleServerGetRoomMessages, paleServerGetRoomMessageState, paleServerSendRoomMessage, paleServerEditMessage, paleServerDeleteMessage, type ServerRoom, type ServerUser, type ServerRoomMessage, type ServerRoomMessageState, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult } from "@/lib/tauri";
+import { matrixSendMessage, matrixSetTyping, matrixCreateDm, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerEndRoomCall, paleServerGetConferences, paleServerGetMeetings, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerStartMeeting, paleServerGetRoomMessages, paleServerGetRoomMessageState, paleServerSendRoomMessage, paleServerEditMessage, paleServerDeleteMessage, type ServerRoom, type ServerUser, type ServerRoomMessage, type ServerRoomMessageState, type ServerMeeting, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult } from "@/lib/tauri";
 import { toast } from "@/components/ui/Toast";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
 import { EncryptionBadge } from "@/components/encryption/EncryptionBadge";
@@ -116,6 +116,12 @@ function groupMatches(query: string, ...values: Array<string | string[] | undefi
   });
 }
 
+function meetingTimeLabel(meeting: ServerMeeting): string {
+  const starts = new Date(meeting.starts_at);
+  const ends = new Date(meeting.ends_at);
+  return `${starts.toLocaleDateString([], { month: "short", day: "numeric" })} ${starts.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}-${ends.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+}
+
 function sanitizeHtml(html: string): string {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, "")
@@ -216,6 +222,7 @@ function ConversationList({
 }) {
   const [showNewChat, setShowNewChat] = useState(false);
   const [query, setQuery] = useState("");
+  const [meetings, setMeetings] = useState<ServerMeeting[]>([]);
   const [conferences, setConferences] = useState<ConferenceSummary[]>([]);
   const [ringGroups, setRingGroups] = useState<RingGroupSummary[]>([]);
   const [queues, setQueues] = useState<CallQueueSummary[]>([]);
@@ -230,6 +237,7 @@ function ConversationList({
 
   useEffect(() => {
     if (!connected || !baseUrl || !token) {
+      setMeetings([]);
       setConferences([]);
       setRingGroups([]);
       setQueues([]);
@@ -239,12 +247,14 @@ function ConversationList({
 
     let cancelled = false;
     Promise.allSettled([
+      paleServerGetMeetings(baseUrl, token),
       paleServerGetConferences(baseUrl, token),
       paleServerGetRingGroups(baseUrl, token),
       paleServerGetQueues(baseUrl, token),
       paleServerGetPagingGroups(baseUrl, token),
-    ]).then(([conferenceResult, ringResult, queueResult, pagingResult]) => {
+    ]).then(([meetingResult, conferenceResult, ringResult, queueResult, pagingResult]) => {
       if (cancelled) return;
+      setMeetings(meetingResult.status === "fulfilled" ? meetingResult.value : []);
       setConferences(conferenceResult.status === "fulfilled" ? conferenceResult.value : []);
       setRingGroups(ringResult.status === "fulfilled" ? ringResult.value : []);
       setQueues(queueResult.status === "fulfilled" ? queueResult.value : []);
@@ -321,6 +331,11 @@ function ConversationList({
   const filteredRooms = scopedRooms.filter((room) =>
     groupMatches(normalizedQuery, room.name, room.channel_name, room.last_message ?? undefined)
   );
+  const filteredMeetings = meetings
+    .filter((meeting) =>
+      groupMatches(normalizedQuery, meeting.title, meeting.description, meeting.participants)
+    )
+    .sort((left, right) => new Date(left.starts_at).getTime() - new Date(right.starts_at).getTime());
   const filteredConferences = conferences.filter((conf) =>
     groupMatches(normalizedQuery, conf.title, conf.mode, conf.participants.map((p) => p.sip_uri))
   );
@@ -333,7 +348,7 @@ function ConversationList({
   const filteredPagingGroups = pagingGroups.filter((group) =>
     groupMatches(normalizedQuery, group.name, group.extension, group.members)
   );
-  const hasAnyGroupResults = filteredConferences.length > 0 || filteredRingGroups.length > 0 || filteredQueues.length > 0 || filteredPagingGroups.length > 0;
+  const hasAnyGroupResults = filteredMeetings.length > 0 || filteredConferences.length > 0 || filteredRingGroups.length > 0 || filteredQueues.length > 0 || filteredPagingGroups.length > 0;
   const visibleCollaborationResults = normalizedQuery
     ? collaborationResults.filter((result) => !result.room_id || !filteredRooms.some((room) => room.room_id === result.room_id))
     : [];
@@ -352,6 +367,16 @@ function ConversationList({
       await ipcMakeCall(`sip:conf-${conf.id}@pale.local`);
     } catch (err) {
       toast({ type: "error", title: "Failed to join conference", description: String(err) });
+    }
+  };
+
+  const joinMeeting = async (meeting: ServerMeeting) => {
+    if (!connected || !baseUrl || !token) return;
+    try {
+      const target = await paleServerStartMeeting(baseUrl, token, meeting.id);
+      await ipcMakeCall(target.call_uri);
+    } catch (err) {
+      toast({ type: "error", title: "Failed to join meeting", description: String(err) });
     }
   };
 
@@ -546,6 +571,22 @@ function ConversationList({
                     />
                   );
                 })}
+              </div>
+            )}
+
+            {filteredMeetings.length > 0 && (
+              <div className="pb-2">
+                <p className="px-3 py-1 text-[10px] font-semibold uppercase text-tertiary">Upcoming Meetings</p>
+                {filteredMeetings.map((meeting) => (
+                  <GroupResultButton
+                    key={meeting.id}
+                    title={meeting.title}
+                    subtitle={`${meetingTimeLabel(meeting)} · ${meeting.participants.length} participant${meeting.participants.length === 1 ? "" : "s"}`}
+                    icon={<CalendarClock size={15} />}
+                    actionLabel="Join"
+                    onAction={() => joinMeeting(meeting)}
+                  />
+                ))}
               </div>
             )}
 
