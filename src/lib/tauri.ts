@@ -546,6 +546,8 @@ export interface ServerRoom {
   is_direct: boolean;
   created_by: string;
   members: { user_sip_uri: string; role: string; joined_at: string }[];
+  conference_id?: string | null;
+  call_uri?: string | null;
   created_at: string;
 }
 
@@ -612,6 +614,25 @@ export function paleServerSendRoomMessage(
   return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/messages`, {
     method: "POST",
     body: JSON.stringify({ body, reply_to: replyTo ?? null }),
+  });
+}
+
+export interface ServerRoomCallTarget {
+  room_id: string;
+  conference_id: string;
+  call_uri: string;
+  mode: "audio" | "video";
+}
+
+export function paleServerStartRoomCall(
+  baseUrl: string,
+  token: string,
+  roomId: string,
+  mode: "audio" | "video",
+): Promise<ServerRoomCallTarget> {
+  return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/call`, {
+    method: "POST",
+    body: JSON.stringify({ mode }),
   });
 }
 

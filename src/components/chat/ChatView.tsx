@@ -1,12 +1,12 @@
 import { useState, useRef, useEffect, useCallback, type ReactNode } from "react";
-import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Users, Reply, Pencil, Pin, Forward, Check, CheckCheck, Search, Radio } from "lucide-react";
+import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Video, Users, Reply, Pencil, Pin, Forward, Check, CheckCheck, Search, Radio } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useChatStore, type ChatMessage, type RoomSummary } from "@/store/chatStore";
 import { useMatrixStore } from "@/store/matrixStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
-import { matrixSendMessage, matrixSetTyping, matrixCreateDm, paleServerGetMessages, makeCall as ipcMakeCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerGetConferences, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, type ServerRoom, type ServerUser, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary } from "@/lib/tauri";
+import { matrixSendMessage, matrixSetTyping, matrixCreateDm, paleServerGetMessages, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerGetConferences, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, type ServerRoom, type ServerUser, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary } from "@/lib/tauri";
 import { toast } from "@/components/ui/Toast";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
 import { EncryptionBadge } from "@/components/encryption/EncryptionBadge";
@@ -33,10 +33,14 @@ function serverRoomToSummary(room: ServerRoom, currentSipUri?: string | null, na
     name: nameOverride ?? directRoomName(room, currentSipUri),
     is_direct: room.is_direct,
     is_encrypted: false,
+    created_by: room.created_by,
     last_message: null,
     last_message_sender: null,
     last_message_ts: null,
     unread_count: 0,
+    members: room.members.map((member) => member.user_sip_uri),
+    call_uri: room.call_uri ?? null,
+    conference_id: room.conference_id ?? null,
   };
 }
 
@@ -478,9 +482,13 @@ function ChatRoom({
   const typingSentRef = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const { baseUrl, token, connected } = useServerStore();
+  const currentSipUri = useAccountStore((s) => s.account?.sipUri);
   const addMessage = useChatStore((s) => s.addMessage);
   const updateMessage = useChatStore((s) => s.updateMessage);
   const isServerRoom = !room.room_id.startsWith("!");
+  const localMemberUri = currentSipUri ?? room.created_by;
+  const otherDirectMember = room.members?.find((member) => member !== localMemberUri);
+  const canStartRoomCall = isServerRoom && (!room.is_direct || Boolean(otherDirectMember));
 
   // Load server users for mentions
   useEffect(() => {
@@ -771,6 +779,33 @@ function ChatRoom({
     }
   };
 
+  const startRoomCall = async (mode: "audio" | "video") => {
+    try {
+      if (room.is_direct) {
+        const target = otherDirectMember ?? room.name;
+        if (mode === "video") {
+          await ipcMakeVideoCall(target);
+        } else {
+          await ipcMakeCall(target);
+        }
+        return;
+      }
+
+      if (!connected || !baseUrl || !token || !isServerRoom) {
+        toast({ type: "error", title: "Server connection required" });
+        return;
+      }
+      const target = await paleServerStartRoomCall(baseUrl, token, room.room_id, mode);
+      if (mode === "video") {
+        await ipcMakeVideoCall(target.call_uri);
+      } else {
+        await ipcMakeCall(target.call_uri);
+      }
+    } catch (err) {
+      toast({ type: "error", title: `Failed to start ${mode} call`, description: String(err) });
+    }
+  };
+
   return (
     <div
       className="flex flex-col h-full relative"
@@ -802,6 +837,34 @@ function ChatRoom({
           </div>
           <PresenceLabel name={room.name} isDirect={room.is_direct} isEncrypted={room.is_encrypted} />
         </div>
+        <button
+          onClick={() => startRoomCall("audio")}
+          disabled={!canStartRoomCall}
+          className={cn(
+            "p-2 rounded-md transition-colors",
+            canStartRoomCall
+              ? "text-tertiary hover:text-success hover:bg-elevated"
+              : "text-tertiary/50 cursor-not-allowed"
+          )}
+          title={room.is_direct ? "Start voice call" : "Start group voice call"}
+          aria-label={room.is_direct ? "Start voice call" : "Start group voice call"}
+        >
+          <Phone size={17} />
+        </button>
+        <button
+          onClick={() => startRoomCall("video")}
+          disabled={!canStartRoomCall}
+          className={cn(
+            "p-2 rounded-md transition-colors",
+            canStartRoomCall
+              ? "text-tertiary hover:text-accent hover:bg-elevated"
+              : "text-tertiary/50 cursor-not-allowed"
+          )}
+          title={room.is_direct ? "Start video call" : "Start group video call"}
+          aria-label={room.is_direct ? "Start video call" : "Start group video call"}
+        >
+          <Video size={17} />
+        </button>
       </div>
 
       {/* Messages */}

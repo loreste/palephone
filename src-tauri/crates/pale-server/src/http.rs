@@ -25,7 +25,7 @@ use crate::{
     CreateRoomRequest, CreateScorecardRequest, CreateSpeedDialRequest, SetAgentStateRequest,
     StartMonitorRequest, ProvisionUserRequest, AssignExtensionRequest,
     FileRecord, JoinConferenceRequest,
-    SendRoomMessageRequest, SetPresenceRequest, SyncCallHistoryRequest,
+    RoomCallMode, SendRoomMessageRequest, SetPresenceRequest, SyncCallHistoryRequest,
     UpdateCallStatusRequest, UpdateSipAccountStatusRequest,
     AgentTransitionRequest, CreateVipCallerRequest, RequestCallbackInput,
 };
@@ -74,6 +74,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/rooms/{id}", get(get_room))
         .route("/v1/rooms/{id}/messages", get(list_room_messages).post(send_room_message))
         .route("/v1/rooms/{id}/members", post(add_room_member).delete(leave_room))
+        .route("/v1/rooms/{id}/call", post(start_room_call))
         .route("/v1/rooms/{id}/typing", post(room_typing))
         .route("/v1/search/messages", get(search_messages))
         .route("/v1/messages/{id}/read", put(mark_message_read))
@@ -876,6 +877,27 @@ async fn leave_room(
         .remove_room_member(id, &principal)
         .map(Json)
         .ok_or(ApiError::NotFound)
+}
+
+#[derive(serde::Deserialize)]
+struct StartRoomCallRequest {
+    mode: Option<RoomCallMode>,
+}
+
+async fn start_room_call(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<StartRoomCallRequest>,
+) -> Result<Json<crate::RoomCallTarget>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    require_room_member(&state, id, &principal)?;
+    let mode = input.mode.unwrap_or(RoomCallMode::Audio);
+    let target = state
+        .join_room_call(id, &principal, mode)
+        .ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "room.call_started", Some(id.to_string()));
+    Ok(Json(target))
 }
 
 // ─── Typing Indicators ───

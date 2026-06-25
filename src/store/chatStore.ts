@@ -5,10 +5,14 @@ export interface RoomSummary {
   name: string;
   is_direct: boolean;
   is_encrypted: boolean;
+  created_by?: string;
   last_message: string | null;
   last_message_sender: string | null;
   last_message_ts: number | null;
   unread_count: number;
+  members?: string[];
+  call_uri?: string | null;
+  conference_id?: string | null;
 }
 
 export interface ChatMessage {

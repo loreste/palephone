@@ -2901,11 +2901,11 @@ impl AppState {
 
     pub fn create_room(&self, creator: &str, input: CreateRoomRequest) -> Room {
         let is_direct = input.is_direct.unwrap_or(false);
+        let mut members = input.members.clone();
+        members.push(creator.to_string());
+        let members = normalized_room_members(members);
+
         if is_direct {
-            let mut members = input.members.clone();
-            members.push(creator.to_string());
-            members.sort();
-            members.dedup();
             if let Some(existing) = self.rooms.values().into_iter().find(|room| {
                 if !room.is_direct || room.members.len() != members.len() {
                     return false;
@@ -2928,17 +2928,19 @@ impl AppState {
             description: input.description.unwrap_or_default(),
             is_direct,
             created_by: creator.to_string(),
-            members: std::iter::once(RoomMember {
-                user_sip_uri: creator.to_string(),
-                role: "admin".to_string(),
-                joined_at: Utc::now(),
-            })
-            .chain(input.members.into_iter().map(|uri| RoomMember {
-                user_sip_uri: uri,
-                role: "member".to_string(),
-                joined_at: Utc::now(),
-            }))
-            .collect(),
+            members: members
+                .into_iter()
+                .map(|uri| {
+                    let role = if uri == creator { "admin" } else { "member" };
+                    RoomMember {
+                        user_sip_uri: uri,
+                        role: role.to_string(),
+                        joined_at: Utc::now(),
+                    }
+                })
+                .collect(),
+            conference_id: None,
+            call_uri: None,
             created_at: Utc::now(),
         };
         self.rooms.insert(room.id, room.clone());
@@ -2948,6 +2950,67 @@ impl AppState {
             payload: serde_json::to_value(&room).unwrap_or_default(),
         });
         room
+    }
+
+    pub fn start_room_call(&self, room_id: Uuid, mode: RoomCallMode) -> Option<RoomCallTarget> {
+        let target = self.rooms.with_write(&room_id, |rooms| {
+            let room = rooms.get_mut(&room_id)?;
+            if room.is_direct {
+                return None;
+            }
+
+            let conference_id = match room.conference_id.and_then(|id| self.conferences.get(&id)) {
+                Some(conference) if matches_room_call_mode(&conference.mode, &mode) => conference.id,
+                _ => {
+                    let conference = self.create_conference(CreateConferenceRequest {
+                        title: room.name.clone(),
+                        mode: mode.clone().into(),
+                    });
+                    room.conference_id = Some(conference.id);
+                    conference.id
+                }
+            };
+            let call_uri = format!("sip:conf-{}@pale.local", conference_id);
+            room.call_uri = Some(call_uri.clone());
+            Some(RoomCallTarget {
+                room_id,
+                conference_id,
+                call_uri,
+                mode,
+            })
+        })?;
+
+        let _ = self.activate_conference(target.conference_id);
+        self.broadcast_sse(SseEvent {
+            event_type: "room_call_started".to_string(),
+            payload: serde_json::to_value(&target).unwrap_or_default(),
+        });
+        Some(target)
+    }
+
+    pub fn join_room_call(
+        &self,
+        room_id: Uuid,
+        user_sip_uri: &str,
+        mode: RoomCallMode,
+    ) -> Option<RoomCallTarget> {
+        let target = self.start_room_call(room_id, mode)?;
+        let user_id = self
+            .users
+            .values()
+            .into_iter()
+            .find(|user| user.sip_uri == user_sip_uri)
+            .map(|user| user.id)
+            .unwrap_or_else(Uuid::nil);
+        let _ = self.join_conference(
+            target.conference_id,
+            JoinConferenceRequest {
+                user_id,
+                sip_uri: user_sip_uri.to_string(),
+                role: Some(ParticipantRole::Member),
+            },
+        );
+        Some(target)
     }
 
     pub fn list_rooms_for_user(&self, sip_uri: &str) -> Vec<Room> {
@@ -3543,6 +3606,10 @@ pub struct Room {
     pub is_direct: bool,
     pub created_by: String,
     pub members: Vec<RoomMember>,
+    #[serde(default)]
+    pub conference_id: Option<Uuid>,
+    #[serde(default)]
+    pub call_uri: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -3559,6 +3626,30 @@ pub struct CreateRoomRequest {
     pub description: Option<String>,
     pub members: Vec<String>, // SIP URIs to invite
     pub is_direct: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomCallMode {
+    Audio,
+    Video,
+}
+
+impl From<RoomCallMode> for ConferenceMode {
+    fn from(mode: RoomCallMode) -> Self {
+        match mode {
+            RoomCallMode::Audio => ConferenceMode::Audio,
+            RoomCallMode::Video => ConferenceMode::Video,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomCallTarget {
+    pub room_id: Uuid,
+    pub conference_id: Uuid,
+    pub call_uri: String,
+    pub mode: RoomCallMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3668,7 +3759,7 @@ pub enum SipDialogStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConferenceMode {
     Audio,
@@ -4470,6 +4561,23 @@ fn normalize_sip_uri(aor: &str) -> Option<String> {
     ))
 }
 
+fn normalized_room_members(members: Vec<String>) -> Vec<String> {
+    let mut members: Vec<String> = members
+        .into_iter()
+        .filter_map(|member| normalize_sip_uri(&member))
+        .collect();
+    members.sort();
+    members.dedup();
+    members
+}
+
+fn matches_room_call_mode(conference_mode: &ConferenceMode, room_mode: &RoomCallMode) -> bool {
+    matches!(
+        (conference_mode, room_mode),
+        (ConferenceMode::Audio, RoomCallMode::Audio) | (ConferenceMode::Video, RoomCallMode::Video)
+    )
+}
+
 pub fn safe_filename(name: &str) -> String {
     Path::new(name)
         .file_name()
@@ -4901,6 +5009,42 @@ mod tests {
         assert!(first.is_direct);
         assert_eq!(state.list_rooms_for_user("sip:alice@example.com").len(), 1);
         assert_eq!(state.list_rooms_for_user("sip:bob@example.com").len(), 1);
+    }
+
+    #[test]
+    fn group_rooms_deduplicate_members_and_start_calls() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-room-call-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let room = state.create_room(
+            "sip:alice@example.com",
+            CreateRoomRequest {
+                name: "Project".to_string(),
+                description: None,
+                members: vec![
+                    "sip:bob@example.com".to_string(),
+                    "SIP:Bob@Example.com;transport=tcp".to_string(),
+                    "sip:alice@example.com".to_string(),
+                ],
+                is_direct: Some(false),
+            },
+        );
+
+        assert!(!room.is_direct);
+        assert_eq!(room.members.len(), 2);
+        assert!(room.members.iter().any(|member| member.user_sip_uri == "sip:alice@example.com"));
+        assert!(room.members.iter().any(|member| member.user_sip_uri == "sip:bob@example.com"));
+
+        let target = state
+            .join_room_call(room.id, "sip:alice@example.com", RoomCallMode::Video)
+            .expect("room call target");
+        let conference = state.conference_by_uri(&target.call_uri).unwrap();
+        assert!(target.call_uri.starts_with("sip:conf-"));
+        assert_eq!(conference.mode, ConferenceMode::Video);
+        assert!(conference.active);
+        assert_eq!(conference.participants[0].sip_uri, "sip:alice@example.com");
     }
 
     #[test]
