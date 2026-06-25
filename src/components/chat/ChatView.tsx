@@ -6,7 +6,7 @@ import { useMatrixStore } from "@/store/matrixStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
-import { matrixSendMessage, matrixSetTyping, matrixCreateDm, paleServerGetMessages, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerGetConferences, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerStartMeeting, paleServerGetRoomMessages, paleServerSendRoomMessage, paleServerEditMessage, paleServerDeleteMessage, type ServerRoom, type ServerUser, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult } from "@/lib/tauri";
+import { matrixSendMessage, matrixSetTyping, matrixCreateDm, paleServerGetMessages, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerGetConferences, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerStartMeeting, paleServerGetRoomMessages, paleServerGetRoomMessageState, paleServerSendRoomMessage, paleServerEditMessage, paleServerDeleteMessage, type ServerRoom, type ServerUser, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult } from "@/lib/tauri";
 import { toast } from "@/components/ui/Toast";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
 import { EncryptionBadge } from "@/components/encryption/EncryptionBadge";
@@ -662,11 +662,22 @@ function ChatRoom({
   // Load server room messages on mount (stable deps only — no addMessage to avoid re-render loop)
   useEffect(() => {
     if (isServerRoom && connected && baseUrl && token) {
-      paleServerGetRoomMessages(baseUrl, token, room.room_id)
-        .then((msgs) => {
-          const add = useChatStore.getState().addMessage;
-          for (const msg of msgs) {
-            add({
+      Promise.all([
+        paleServerGetRoomMessages(baseUrl, token, room.room_id),
+        paleServerGetRoomMessageState(baseUrl, token, room.room_id).catch(() => []),
+      ])
+        .then(([msgs, messageStates]) => {
+          const stateByMessage = new Map(messageStates.map((state) => [state.message_id, state]));
+          const mappedMessages = msgs.map((msg) => {
+            const messageState = stateByMessage.get(msg.id);
+            const reactions = (messageState?.reactions ?? []).reduce<Record<string, string[]>>(
+              (acc, reaction) => {
+                acc[reaction.emoji] = [...(acc[reaction.emoji] ?? []), reaction.user_uri];
+                return acc;
+              },
+              {}
+            );
+            return {
               event_id: msg.id,
               room_id: room.room_id,
               sender: msg.sender_uri,
@@ -681,8 +692,11 @@ function ChatRoom({
               pinned: msg.pinned,
               mentions: msg.mentions ?? [],
               mentioned_user_uris: msg.mentioned_user_uris ?? [],
-            });
-          }
+              reactions,
+              read_by: (messageState?.reads ?? []).map((read) => read.reader_uri),
+            } satisfies ChatMessage;
+          });
+          useChatStore.getState().setMessages(room.room_id, mappedMessages);
         })
         .catch(() => {});
     }
@@ -1471,6 +1485,12 @@ function MessageBubble({
   const { baseUrl, token, connected } = useServerStore();
   const updateMessage = useChatStore((s) => s.updateMessage);
   const currentSipUri = useAccountStore((s) => s.account?.sipUri);
+  const currentUserUri = currentSipUri
+    ? currentSipUri.startsWith("sip:")
+      ? currentSipUri
+      : `sip:${currentSipUri}`
+    : "";
+  const readCount = (message.read_by ?? []).filter((uri) => uri !== currentUserUri).length;
 
   const handleDelete = async () => {
     if (!connected || !baseUrl || !token) return;
@@ -1485,7 +1505,7 @@ function MessageBubble({
         body: { emoji },
       });
       // Optimistically update reactions
-      const uri = currentSipUri ? `sip:${currentSipUri}` : "me";
+      const uri = currentUserUri || "me";
       const reactions = { ...(message.reactions ?? {}) };
       const existing = reactions[emoji] ?? [];
       if (existing.includes(uri)) {
@@ -1657,7 +1677,7 @@ function MessageBubble({
             {/* Read receipt indicators (own messages only) */}
             {message.is_own && (
               <span className="inline-flex items-center ml-0.5">
-                {message.reactions && Object.keys(message.reactions).length > 0 ? (
+                {readCount > 0 ? (
                   <CheckCheck size={10} className="text-blue-300" />
                 ) : (
                   <Check size={10} />
@@ -1665,14 +1685,18 @@ function MessageBubble({
               </span>
             )}
           </p>
+          {message.is_own && readCount > 0 && (
+            <p className="text-[9px] mt-0.5 text-white/60">
+              Seen by {readCount}
+            </p>
+          )}
         </div>
 
         {/* Reactions display */}
         {message.reactions && Object.keys(message.reactions).length > 0 && (
           <div className={cn("flex flex-wrap gap-1 mt-1", message.is_own ? "justify-end" : "justify-start")}>
             {Object.entries(message.reactions).map(([emoji, users]) => {
-              const ownUri = currentSipUri ? `sip:${currentSipUri}` : "";
-              const isOwn = users.includes(ownUri);
+              const isOwn = currentUserUri !== "" && users.includes(currentUserUri);
               return (
                 <button
                   key={emoji}

@@ -41,6 +41,7 @@ export interface ChatMessage {
   mentions?: { kind: string; token: string; user_sip_uri?: string | null }[];
   mentioned_user_uris?: string[];
   reactions?: Record<string, string[]>; // emoji -> [user_uri, ...]
+  read_by?: string[];
 }
 
 interface ChatStoreState {

@@ -568,6 +568,18 @@ impl AppState {
             }
             Err(e) => log::warn!("Failed to load message reads from Postgres: {}", e),
         }
+        match pg.load_message_reactions().await {
+            Ok(records) => {
+                for record in records {
+                    self.message_reactions.with_write(&record.message_id, |map| {
+                        map.entry(record.message_id)
+                            .or_insert_with(Vec::new)
+                            .push(record.reaction);
+                    });
+                }
+            }
+            Err(e) => log::warn!("Failed to load message reactions from Postgres: {}", e),
+        }
         match pg.load_business_objects::<Team>(Team::collection()).await {
             Ok(teams) => {
                 for team in teams {
@@ -837,6 +849,7 @@ impl AppState {
         self.load_collection::<Room>(&self.rooms);
         self.load_vec_collection::<RoomMessage>(&self.room_messages);
         self.load_vec_collection::<MessageRead>(&self.message_reads);
+        self.load_message_reactions();
         self.load_vec_collection::<AdminAuditEvent>(&self.audit_events);
     }
 
@@ -869,6 +882,24 @@ impl AppState {
                 *list.write().expect("persisted list lock poisoned") = values;
             }
             Err(err) => log::warn!("failed to load {} from storage: {}", T::collection(), err),
+        }
+    }
+
+    fn load_message_reactions(&self) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        match store.load::<MessageReactionRecord>(MessageReactionRecord::collection()) {
+            Ok(records) => {
+                for record in records {
+                    self.message_reactions.with_write(&record.message_id, |map| {
+                        map.entry(record.message_id)
+                            .or_insert_with(Vec::new)
+                            .push(record.reaction);
+                    });
+                }
+            }
+            Err(err) => log::warn!("failed to load {} from storage: {}", MessageReactionRecord::collection(), err),
         }
     }
 
@@ -3723,6 +3754,7 @@ impl AppState {
         let deleted = messages.remove(index);
         self.delete_persisted(RoomMessage::collection(), deleted.key());
         self.delete_message_reads_for_message(id);
+        self.delete_message_reactions_for_message(id);
         self.pg_spawn(move |pg| Box::pin(async move { pg.delete_room_message(id).await }));
         Some(deleted)
     }
@@ -3927,37 +3959,86 @@ impl AppState {
             .collect()
     }
 
-    pub fn add_reaction(&self, message_id: Uuid, user_uri: &str, emoji: &str) {
-        self.message_reactions.with_write(&message_id, |map| {
+    pub fn toggle_message_reaction(&self, message_id: Uuid, user_uri: &str, emoji: &str) -> Option<MessageReactionToggle> {
+        let room_id = self.room_message(message_id)?.room_id;
+        let created_at = Utc::now();
+        let added = self.message_reactions.with_write(&message_id, |map| {
             let reactions = map.entry(message_id).or_insert_with(Vec::new);
-            // Toggle: if same user+emoji exists, remove it
             if let Some(pos) = reactions.iter().position(|r| r.user_uri == user_uri && r.emoji == emoji) {
                 reactions.remove(pos);
+                false
             } else {
                 reactions.push(MessageReaction {
                     emoji: emoji.to_string(),
                     user_uri: user_uri.to_string(),
-                    created_at: Utc::now(),
+                    created_at,
                 });
+                true
             }
         });
+        let record = MessageReactionRecord {
+            message_id,
+            reaction: MessageReaction {
+                emoji: emoji.to_string(),
+                user_uri: user_uri.to_string(),
+                created_at,
+            },
+        };
+        if added {
+            self.persist(&record);
+        } else {
+            self.delete_persisted(MessageReactionRecord::collection(), record.key());
+        }
         self.broadcast_sse(SseEvent {
             event_type: "reaction".to_string(),
             payload: serde_json::json!({
                 "message_id": message_id,
+                "room_id": room_id,
                 "emoji": emoji,
                 "user": user_uri,
-                "created_at": Utc::now(),
+                "added": added,
+                "created_at": created_at,
             }),
         });
+        let toggle = MessageReactionToggle {
+            message_id,
+            room_id,
+            emoji: emoji.to_string(),
+            user_uri: user_uri.to_string(),
+            added,
+            created_at,
+        };
+        let pg_emoji = toggle.emoji.clone();
+        let pg_user_uri = toggle.user_uri.clone();
+        self.pg_spawn(move |pg| {
+            Box::pin(async move {
+                if added {
+                    pg.insert_reaction(message_id, &pg_user_uri, &pg_emoji).await
+                } else {
+                    pg.delete_reaction(message_id, &pg_user_uri, &pg_emoji).await
+                }
+            })
+        });
+        Some(toggle)
     }
 
     pub fn message_reactions(&self, message_id: Uuid) -> Vec<MessageReaction> {
         self.message_reactions.get(&message_id).unwrap_or_default()
     }
 
+    pub fn room_message_state(&self, room_id: Uuid) -> Vec<RoomMessageState> {
+        self.room_messages(room_id)
+            .into_iter()
+            .map(|message| RoomMessageState {
+                message_id: message.id,
+                reactions: self.message_reactions(message.id),
+                reads: self.message_reads(message.id),
+            })
+            .collect()
+    }
+
     pub fn mark_room_message_read(&self, message_id: Uuid, reader_uri: &str) -> Option<MessageRead> {
-        self.room_message(message_id)?;
+        let room_id = self.room_message(message_id)?.room_id;
         let read = MessageRead {
             message_id,
             reader_uri: reader_uri.to_string(),
@@ -3979,7 +4060,12 @@ impl AppState {
         self.pg_spawn(move |pg| Box::pin(async move { pg.upsert_message_read(&read_for_pg).await }));
         self.broadcast_sse(SseEvent {
             event_type: "read_receipt".to_string(),
-            payload: serde_json::to_value(&read).unwrap_or_default(),
+            payload: serde_json::json!({
+                "message_id": read.message_id,
+                "room_id": room_id,
+                "reader_uri": read.reader_uri,
+                "read_at": read.read_at,
+            }),
         });
         Some(read)
     }
@@ -4013,6 +4099,22 @@ impl AppState {
         };
         for key in deleted_keys {
             self.delete_persisted(MessageRead::collection(), key);
+        }
+    }
+
+    fn delete_message_reactions_for_message(&self, message_id: Uuid) {
+        let deleted = self
+            .message_reactions
+            .with_write(&message_id, |map| map.remove(&message_id).unwrap_or_default());
+        for reaction in deleted {
+            self.delete_persisted(
+                MessageReactionRecord::collection(),
+                MessageReactionRecord {
+                    message_id,
+                    reaction,
+                }
+                .key(),
+            );
         }
     }
 
@@ -4731,6 +4833,28 @@ pub struct MessageReaction {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageReactionRecord {
+    pub message_id: Uuid,
+    pub reaction: MessageReaction,
+}
+
+impl MessageReactionRecord {
+    pub fn key(&self) -> String {
+        format!("{}:{}:{}", self.message_id, self.reaction.user_uri, self.reaction.emoji)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageReactionToggle {
+    pub message_id: Uuid,
+    pub room_id: Uuid,
+    pub emoji: String,
+    pub user_uri: String,
+    pub added: bool,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SendRoomMessageRequest {
     pub body: String,
@@ -4749,6 +4873,13 @@ pub struct MessageRead {
     pub message_id: Uuid,
     pub reader_uri: String,
     pub read_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomMessageState {
+    pub message_id: Uuid,
+    pub reactions: Vec<MessageReaction>,
+    pub reads: Vec<MessageRead>,
 }
 
 // ─── Search ───
@@ -6424,6 +6555,78 @@ mod tests {
         .unwrap();
         assert!(reloaded_after_delete.message_reads(message.id).is_empty());
         drop(reloaded_after_delete);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn room_message_reactions_toggle_and_persist() {
+        let data_dir = std::env::temp_dir().join(format!("pale-message-reactions-{}", Uuid::new_v4()));
+        let storage_key = "01234567890123456789012345678901".to_string();
+
+        let state = AppState::persistent(
+            data_dir.clone(),
+            "012345678901234567890123".to_string(),
+            "admin".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+            storage_key.clone(),
+            DEFAULT_MAX_UPLOAD_BYTES,
+            MediaConfig::default(),
+        )
+        .unwrap();
+        let room = state.create_room(
+            "sip:alice@example.com",
+            CreateRoomRequest {
+                name: "Reactions".to_string(),
+                description: None,
+                members: vec!["sip:bob@example.com".to_string()],
+                is_direct: Some(false),
+                team_id: None,
+                channel_name: None,
+            },
+        );
+        let message = state
+            .send_room_message(room.id, "sip:alice@example.com", "react here", None)
+            .unwrap();
+        let added = state
+            .toggle_message_reaction(message.id, "sip:bob@example.com", "👍")
+            .expect("reaction added");
+        assert!(added.added);
+        assert_eq!(state.message_reactions(message.id).len(), 1);
+        drop(state);
+
+        let reloaded = AppState::persistent(
+            data_dir.clone(),
+            "012345678901234567890123".to_string(),
+            "admin".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+            storage_key.clone(),
+            DEFAULT_MAX_UPLOAD_BYTES,
+            MediaConfig::default(),
+        )
+        .unwrap();
+        let reactions = reloaded.message_reactions(message.id);
+        assert_eq!(reactions.len(), 1);
+        assert_eq!(reactions[0].emoji, "👍");
+        assert_eq!(reactions[0].user_uri, "sip:bob@example.com");
+        let removed = reloaded
+            .toggle_message_reaction(message.id, "sip:bob@example.com", "👍")
+            .expect("reaction removed");
+        assert!(!removed.added);
+        assert!(reloaded.message_reactions(message.id).is_empty());
+        drop(reloaded);
+
+        let reloaded_after_remove = AppState::persistent(
+            data_dir.clone(),
+            "012345678901234567890123".to_string(),
+            "admin".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+            storage_key,
+            DEFAULT_MAX_UPLOAD_BYTES,
+            MediaConfig::default(),
+        )
+        .unwrap();
+        assert!(reloaded_after_remove.message_reactions(message.id).is_empty());
+        drop(reloaded_after_remove);
         let _ = std::fs::remove_dir_all(data_dir);
     }
 

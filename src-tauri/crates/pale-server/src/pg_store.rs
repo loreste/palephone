@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     AdminAuditEvent, AdminSession, BusinessHours, CallDetailRecord, CallHistoryEntry, CallRecording,
-    CallSession, Conference, FileRecord, Holiday, MessageRead, QueueCallback, QueueCallerEntry, RoutingRule,
+    CallSession, Conference, FileRecord, Holiday, MessageRead, MessageReaction, MessageReactionRecord, QueueCallback, QueueCallerEntry, RoutingRule,
     Room, RoomMember, RoomMessage, SipAccount, SipDialog, SipMessage, SipNotification,
     SipRegistration, SipSubscription, SipTransaction, User, UserCallSettings, UserPresence,
     VipCaller, Voicemail,
@@ -1075,6 +1075,27 @@ impl PgStore {
             &[&Uuid::new_v4(), &message_id, &user_uri, &emoji],
         ).await?;
         Ok(())
+    }
+
+    pub async fn load_message_reactions(&self) -> Result<Vec<MessageReactionRecord>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT message_id, user_uri, emoji, created_at FROM message_reactions ORDER BY created_at",
+                &[],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| MessageReactionRecord {
+                message_id: row.get("message_id"),
+                reaction: MessageReaction {
+                    user_uri: row.get("user_uri"),
+                    emoji: row.get("emoji"),
+                    created_at: row.get("created_at"),
+                },
+            })
+            .collect())
     }
 
     pub async fn delete_reaction(&self, message_id: Uuid, user_uri: &str, emoji: &str) -> Result<(), PgError> {

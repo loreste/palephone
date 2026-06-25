@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    AdminAuditEvent, CallSession, CollaborationPolicy, Conference, FileRecord, MessageRead,
+    AdminAuditEvent, CallSession, CollaborationPolicy, Conference, FileRecord, MessageRead, MessageReactionRecord,
     RetentionPolicy, Room, RoomMessage, RoutingRule, ScheduledMeeting, SipAccount, SipDialog, SipMessage,
     SipRegistration, SipTransaction, Team, User,
 };
@@ -380,6 +380,16 @@ impl StoredObject for MessageRead {
 
     fn key(&self) -> String {
         format!("{}:{}", self.message_id, self.reader_uri)
+    }
+}
+
+impl StoredObject for MessageReactionRecord {
+    fn collection() -> &'static str {
+        "message_reactions"
+    }
+
+    fn key(&self) -> String {
+        MessageReactionRecord::key(self)
     }
 }
 

@@ -87,6 +87,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/rooms", get(list_rooms).post(create_room))
         .route("/v1/rooms/{id}", get(get_room))
         .route("/v1/rooms/{id}/messages", get(list_room_messages).post(send_room_message))
+        .route("/v1/rooms/{id}/message-state", get(list_room_message_state))
         .route("/v1/rooms/{id}/members", post(add_room_member).delete(leave_room))
         .route("/v1/rooms/{id}/call", post(start_room_call))
         .route("/v1/rooms/{id}/typing", post(room_typing))
@@ -1138,6 +1139,16 @@ async fn list_room_messages(
     Ok(Json(state.room_messages(id)))
 }
 
+async fn list_room_message_state(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::RoomMessageState>>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    require_room_member(&state, id, &principal)?;
+    Ok(Json(state.room_message_state(id)))
+}
+
 async fn send_room_message(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -1370,18 +1381,10 @@ async fn react_to_message(
     let principal = authenticated_principal(&headers, &state)?;
     let msg = state.room_message(id).ok_or(ApiError::NotFound)?;
     require_room_member(&state, msg.room_id, &principal)?;
-    state.add_reaction(id, &principal, &input.emoji);
-    // Persist to PG (toggle: try insert, if exists delete)
-    let emoji = input.emoji.clone();
-    let user = principal.clone();
-    state.pg_spawn(move |pg| Box::pin(async move {
-        // Try insert; if conflict, delete instead
-        if pg.insert_reaction(id, &user, &emoji).await.is_err() {
-            pg.delete_reaction(id, &user, &emoji).await?;
-        }
-        Ok(())
-    }));
-    Ok(Json(json!({ "ok": true })))
+    let toggle = state
+        .toggle_message_reaction(id, &principal, &input.emoji)
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(serde_json::to_value(toggle).unwrap_or_else(|_| json!({ "ok": true }))))
 }
 
 // ─── Pin, Favorites, Profile ───

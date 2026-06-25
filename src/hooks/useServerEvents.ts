@@ -222,6 +222,30 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
         } catch { /* ignore */ }
       });
 
+      es.addEventListener("reaction", (e) => {
+        try {
+          const payload = JSON.parse(e.data);
+          if (!payload.room_id || !payload.message_id || !payload.emoji || !payload.user) return;
+          const existing = useChatStore
+            .getState()
+            .messages[payload.room_id]
+            ?.find((message) => message.event_id === payload.message_id);
+          const reactions = { ...(existing?.reactions ?? {}) };
+          const users = reactions[payload.emoji] ?? [];
+          if (payload.added) {
+            reactions[payload.emoji] = users.includes(payload.user) ? users : [...users, payload.user];
+          } else {
+            const remaining = users.filter((user) => user !== payload.user);
+            if (remaining.length > 0) {
+              reactions[payload.emoji] = remaining;
+            } else {
+              delete reactions[payload.emoji];
+            }
+          }
+          updateMessage(payload.room_id, payload.message_id, { reactions });
+        } catch { /* ignore */ }
+      });
+
       es.addEventListener("voicemail", () => {
         shouldNotify().then((ok) => {
           if (ok) {
@@ -237,8 +261,19 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
         // Recording completed notification
       });
 
-      es.addEventListener("read_receipt", () => {
-        // Read receipt received — could update message badges
+      es.addEventListener("read_receipt", (e) => {
+        try {
+          const payload = JSON.parse(e.data);
+          if (!payload.room_id || !payload.message_id || !payload.reader_uri) return;
+          const existing = useChatStore
+            .getState()
+            .messages[payload.room_id]
+            ?.find((message) => message.event_id === payload.message_id);
+          const readBy = existing?.read_by ?? [];
+          if (!readBy.includes(payload.reader_uri)) {
+            updateMessage(payload.room_id, payload.message_id, { read_by: [...readBy, payload.reader_uri] });
+          }
+        } catch { /* ignore */ }
       });
 
       es.addEventListener("user_created", () => {

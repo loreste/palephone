@@ -178,6 +178,9 @@ Get room details including members.
 ### GET /v1/rooms/{id}/messages
 List messages in a room.
 
+### GET /v1/rooms/{id}/message-state
+List per-message reactions and read receipts for a room.
+
 ### POST /v1/rooms/{id}/messages
 Send a message to a room.
 
@@ -207,9 +210,11 @@ Delete a message.
 Mark a message as read. Broadcasts a `read_receipt` SSE event.
 
 ### POST /v1/messages/{id}/react
-Add an emoji reaction to a message.
+Toggle an emoji reaction for the authenticated user.
 
 **Request:** `{ "emoji": "\ud83d\udc4d" }`
+
+**Response:** `{ "message_id": "...", "room_id": "...", "emoji": "\ud83d\udc4d", "user_uri": "sip:bob@example.com", "added": true, "created_at": "..." }`
 
 ---
 
@@ -404,10 +409,10 @@ SSE stream for real-time updates.
 | `notification` | `SipNotification` | SIP NOTIFY received |
 | `voicemail` | `Voicemail` | New voicemail deposited |
 | `recording` | `CallRecording` | Call recording completed |
-| `read_receipt` | `{ message_id, reader, read_at }` | Message marked as read |
+| `read_receipt` | `{ message_id, room_id, reader_uri, read_at }` | Message marked as read |
 | `message_edited` | `{ message_id, new_body, edited_by, edited_at }` | Message edited |
 | `message_deleted` | `{ message_id, deleted_by, deleted_at }` | Message deleted |
-| `reaction` | `{ message_id, emoji, user, created_at }` | Reaction added |
+| `reaction` | `{ message_id, room_id, emoji, user, added, created_at }` | Reaction toggled |
 
 **Keep-alive:** Default interval. Buffer: 256 messages (older dropped if client lags).
 

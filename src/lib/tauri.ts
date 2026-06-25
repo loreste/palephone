@@ -645,6 +645,18 @@ export interface ServerMessageRead {
   read_at: string;
 }
 
+export interface ServerMessageReaction {
+  emoji: string;
+  user_uri: string;
+  created_at: string;
+}
+
+export interface ServerRoomMessageState {
+  message_id: string;
+  reactions: ServerMessageReaction[];
+  reads: ServerMessageRead[];
+}
+
 export function paleServerGetRooms(baseUrl: string, token: string): Promise<ServerRoom[]> {
   return serverFetch(baseUrl, token, "/v1/rooms");
 }
@@ -825,6 +837,14 @@ export function paleServerGetRoomMessages(
   roomId: string,
 ): Promise<ServerRoomMessage[]> {
   return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/messages`);
+}
+
+export function paleServerGetRoomMessageState(
+  baseUrl: string,
+  token: string,
+  roomId: string,
+): Promise<ServerRoomMessageState[]> {
+  return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/message-state`);
 }
 
 export function paleServerSendRoomMessage(
