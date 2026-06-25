@@ -6,7 +6,7 @@ import { useMatrixStore } from "@/store/matrixStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
-import { matrixSendMessage, matrixSetTyping, matrixCreateDm, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerGetConferences, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerStartMeeting, paleServerGetRoomMessages, paleServerGetRoomMessageState, paleServerSendRoomMessage, paleServerEditMessage, paleServerDeleteMessage, type ServerRoom, type ServerUser, type ServerRoomMessage, type ServerRoomMessageState, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult } from "@/lib/tauri";
+import { matrixSendMessage, matrixSetTyping, matrixCreateDm, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerEndRoomCall, paleServerGetConferences, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerStartMeeting, paleServerGetRoomMessages, paleServerGetRoomMessageState, paleServerSendRoomMessage, paleServerEditMessage, paleServerDeleteMessage, type ServerRoom, type ServerUser, type ServerRoomMessage, type ServerRoomMessageState, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult } from "@/lib/tauri";
 import { toast } from "@/components/ui/Toast";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
 import { EncryptionBadge } from "@/components/encryption/EncryptionBadge";
@@ -1022,6 +1022,20 @@ function ChatRoom({
     }
   };
 
+  const endActiveRoomCall = async () => {
+    if (!connected || !baseUrl || !token || !isServerRoom) return;
+    try {
+      await paleServerEndRoomCall(baseUrl, token, room.room_id);
+      upsertRoom({
+        ...room,
+        call_uri: null,
+        conference_id: null,
+      });
+    } catch (err) {
+      toast({ type: "error", title: "Failed to end call", description: String(err) });
+    }
+  };
+
   return (
     <div
       className="flex flex-col h-full relative"
@@ -1089,12 +1103,20 @@ function ChatRoom({
             <Phone size={14} />
             <span className="font-medium truncate">Group call in progress</span>
           </div>
-          <button
-            onClick={joinActiveRoomCall}
-            className="h-8 px-3 rounded-md bg-success text-white hover:opacity-90 transition-opacity text-xs font-medium"
-          >
-            Join
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={joinActiveRoomCall}
+              className="h-8 px-3 rounded-md bg-success text-white hover:opacity-90 transition-opacity text-xs font-medium"
+            >
+              Join
+            </button>
+            <button
+              onClick={endActiveRoomCall}
+              className="h-8 px-3 rounded-md border border-success/30 text-success hover:bg-success/10 transition-colors text-xs font-medium"
+            >
+              End
+            </button>
+          </div>
         </div>
       )}
 

@@ -1658,6 +1658,18 @@ impl AppState {
         conference
     }
 
+    pub fn deactivate_conference(&self, id: Uuid) -> Option<Conference> {
+        let conference = self.conferences.with_write(&id, |conferences| {
+            let conference = conferences.get_mut(&id)?;
+            conference.active = false;
+            Some(conference.clone())
+        });
+        if let Some(conference) = &conference {
+            self.persist(conference);
+        }
+        conference
+    }
+
     pub fn conference_by_uri(&self, uri: &str) -> Option<Conference> {
         let stripped = uri
             .strip_prefix("sip:")
@@ -3270,6 +3282,33 @@ impl AppState {
         Some(target)
     }
 
+    pub fn end_room_call(&self, room_id: Uuid) -> Option<RoomCallEnded> {
+        let (ended, updated_room) = self.rooms.with_write(&room_id, |rooms| {
+            let room = rooms.get_mut(&room_id)?;
+            let conference_id = room.conference_id?;
+            let call_uri = room.call_uri.take()?;
+            room.conference_id = None;
+            Some((
+                RoomCallEnded {
+                    room_id,
+                    conference_id,
+                    call_uri,
+                },
+                room.clone(),
+            ))
+        })?;
+
+        self.persist(&updated_room);
+        let room_for_pg = updated_room.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.upsert_room(&room_for_pg).await }));
+        let _ = self.deactivate_conference(ended.conference_id);
+        self.broadcast_sse(SseEvent {
+            event_type: "room_call_ended".to_string(),
+            payload: serde_json::to_value(&ended).unwrap_or_default(),
+        });
+        Some(ended)
+    }
+
     pub fn create_scheduled_meeting(
         &self,
         organizer_uri: &str,
@@ -4787,6 +4826,13 @@ pub struct RoomCallTarget {
     pub conference_id: Uuid,
     pub call_uri: String,
     pub mode: RoomCallMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomCallEnded {
+    pub room_id: Uuid,
+    pub conference_id: Uuid,
+    pub call_uri: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6322,6 +6368,15 @@ mod tests {
         assert_eq!(conference.mode, ConferenceMode::Video);
         assert!(conference.active);
         assert_eq!(conference.participants[0].sip_uri, "sip:alice@example.com");
+
+        let ended = state.end_room_call(room.id).expect("room call ended");
+        assert_eq!(ended.conference_id, target.conference_id);
+        assert_eq!(ended.call_uri, target.call_uri);
+        let ended_conference = state.conference_by_uri(&target.call_uri).unwrap();
+        assert!(!ended_conference.active);
+        let updated_room = state.room(room.id).unwrap();
+        assert!(updated_room.call_uri.is_none());
+        assert!(updated_room.conference_id.is_none());
     }
 
     #[test]

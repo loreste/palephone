@@ -188,6 +188,14 @@ Send a message to a room.
 
 **Request:** `{ "body": "Hello team!" }`
 
+### POST /v1/rooms/{id}/call
+Start or join a room group call.
+
+**Request:** `{ "mode": "audio" }`
+
+### DELETE /v1/rooms/{id}/call
+End the active room group call.
+
 ### POST /v1/rooms/{id}/members
 Add a member to a room.
 
@@ -416,6 +424,7 @@ SSE stream for real-time updates.
 | `message_deleted` | `{ message_id, deleted_by, deleted_at }` | Message deleted |
 | `reaction` | `{ message_id, room_id, emoji, user, added, created_at }` | Reaction toggled |
 | `room_call_started` | `{ room_id, conference_id, call_uri, mode }` | Room group call started |
+| `room_call_ended` | `{ room_id, conference_id, call_uri }` | Room group call ended |
 
 **Keep-alive:** Default interval. Buffer: 256 messages (older dropped if client lags).
 

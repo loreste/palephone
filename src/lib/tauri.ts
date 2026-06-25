@@ -872,6 +872,12 @@ export interface ServerRoomCallTarget {
   mode: "audio" | "video";
 }
 
+export interface ServerRoomCallEnded {
+  room_id: string;
+  conference_id: string;
+  call_uri: string;
+}
+
 export function paleServerStartRoomCall(
   baseUrl: string,
   token: string,
@@ -881,6 +887,16 @@ export function paleServerStartRoomCall(
   return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/call`, {
     method: "POST",
     body: JSON.stringify({ mode }),
+  });
+}
+
+export function paleServerEndRoomCall(
+  baseUrl: string,
+  token: string,
+  roomId: string,
+): Promise<ServerRoomCallEnded> {
+  return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/call`, {
+    method: "DELETE",
   });
 }
 

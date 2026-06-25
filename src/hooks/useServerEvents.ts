@@ -236,6 +236,20 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
         } catch { /* ignore */ }
       });
 
+      es.addEventListener("room_call_ended", (e) => {
+        try {
+          const ended = JSON.parse(e.data);
+          if (!ended.room_id) return;
+          const existing = useChatStore.getState().rooms.find((room) => room.room_id === ended.room_id);
+          if (!existing) return;
+          upsertRoom({
+            ...existing,
+            call_uri: null,
+            conference_id: null,
+          });
+        } catch { /* ignore */ }
+      });
+
       es.addEventListener("reaction", (e) => {
         try {
           const payload = JSON.parse(e.data);

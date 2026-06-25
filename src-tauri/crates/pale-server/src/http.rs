@@ -89,7 +89,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/rooms/{id}/messages", get(list_room_messages).post(send_room_message))
         .route("/v1/rooms/{id}/message-state", get(list_room_message_state))
         .route("/v1/rooms/{id}/members", post(add_room_member).delete(leave_room))
-        .route("/v1/rooms/{id}/call", post(start_room_call))
+        .route("/v1/rooms/{id}/call", post(start_room_call).delete(end_room_call))
         .route("/v1/rooms/{id}/typing", post(room_typing))
         .route("/v1/search/messages", get(search_messages))
         .route("/v1/search/collaboration", get(search_collaboration))
@@ -1225,6 +1225,18 @@ async fn start_room_call(
     Ok(Json(target))
 }
 
+async fn end_room_call(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::RoomCallEnded>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    require_room_member(&state, id, &principal)?;
+    let ended = state.end_room_call(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "room.call_ended", Some(id.to_string()));
+    Ok(Json(ended))
+}
+
 // ─── Typing Indicators ───
 
 #[derive(serde::Deserialize)]
@@ -2240,7 +2252,7 @@ fn event_visible_to(state: &AppState, event: &crate::SseEvent, principal: &str) 
                         == Some(principal)
                 })
             }),
-        "room_message" | "typing" | "room_call_started" => event
+        "room_message" | "typing" | "room_call_started" | "room_call_ended" => event
             .payload
             .get("room_id")
             .and_then(|id| id.as_str())
@@ -2612,6 +2624,13 @@ mod auth_tests {
         };
         assert!(event_visible_to(&state, &call_event, "sip:bob@example.com"));
         assert!(!event_visible_to(&state, &call_event, "sip:mallory@example.com"));
+
+        let call_ended_event = crate::SseEvent {
+            event_type: "room_call_ended".to_string(),
+            payload: serde_json::json!({ "room_id": room.id }),
+        };
+        assert!(event_visible_to(&state, &call_ended_event, "sip:bob@example.com"));
+        assert!(!event_visible_to(&state, &call_ended_event, "sip:mallory@example.com"));
     }
 
     #[test]
