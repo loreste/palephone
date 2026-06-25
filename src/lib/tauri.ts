@@ -541,6 +541,8 @@ export function paleServerGetMessages(
 
 export interface ServerRoom {
   id: string;
+  team_id?: string | null;
+  channel_name?: string | null;
   name: string;
   description: string;
   is_direct: boolean;
@@ -549,6 +551,40 @@ export interface ServerRoom {
   conference_id?: string | null;
   call_uri?: string | null;
   created_at: string;
+}
+
+export interface ServerTeam {
+  id: string;
+  name: string;
+  description: string;
+  owner_uri: string;
+  members: { user_sip_uri: string; role: string; joined_at: string }[];
+  created_at: string;
+}
+
+export interface ServerMeeting {
+  id: string;
+  title: string;
+  description: string;
+  organizer_uri: string;
+  room_id?: string | null;
+  conference_id?: string | null;
+  participants: string[];
+  starts_at: string;
+  ends_at: string;
+  created_at: string;
+}
+
+export interface ServerRetentionPolicy {
+  id: string;
+  name: string;
+  scope: string;
+  room_id?: string | null;
+  retain_days?: number | null;
+  legal_hold: boolean;
+  export_enabled: boolean;
+  created_by: string;
+  updated_at: string;
 }
 
 export interface ServerRoomMessage {
@@ -573,11 +609,102 @@ export function paleServerCreateRoom(
   name: string,
   description: string,
   members: string[],
+  teamId?: string | null,
+  channelName?: string | null,
 ): Promise<ServerRoom> {
   return serverFetch(baseUrl, token, "/v1/rooms", {
     method: "POST",
+    body: JSON.stringify({ name, description, members, team_id: teamId ?? null, channel_name: channelName ?? null }),
+  });
+}
+
+export function paleServerGetTeams(baseUrl: string, token: string): Promise<ServerTeam[]> {
+  return serverFetch(baseUrl, token, "/v1/teams");
+}
+
+export function paleServerCreateTeam(
+  baseUrl: string,
+  token: string,
+  name: string,
+  description: string,
+  members: string[],
+): Promise<ServerTeam> {
+  return serverFetch(baseUrl, token, "/v1/teams", {
+    method: "POST",
     body: JSON.stringify({ name, description, members }),
   });
+}
+
+export function paleServerCreateTeamChannel(
+  baseUrl: string,
+  token: string,
+  teamId: string,
+  name: string,
+  description: string,
+  members: string[],
+): Promise<ServerRoom> {
+  return serverFetch(baseUrl, token, `/v1/teams/${teamId}/channels`, {
+    method: "POST",
+    body: JSON.stringify({ name, description, members, channel_name: name }),
+  });
+}
+
+export function paleServerGetMeetings(baseUrl: string, token: string): Promise<ServerMeeting[]> {
+  return serverFetch(baseUrl, token, "/v1/meetings");
+}
+
+export function paleServerCreateMeeting(
+  baseUrl: string,
+  token: string,
+  input: {
+    title: string;
+    description?: string;
+    room_id?: string | null;
+    participants: string[];
+    starts_at: string;
+    ends_at: string;
+    mode?: "audio" | "video";
+  },
+): Promise<ServerMeeting> {
+  return serverFetch(baseUrl, token, "/v1/meetings", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function paleServerStartMeeting(
+  baseUrl: string,
+  token: string,
+  meetingId: string,
+): Promise<ServerRoomCallTarget> {
+  return serverFetch(baseUrl, token, `/v1/meetings/${meetingId}/start`, { method: "POST" });
+}
+
+export function paleServerGetRetentionPolicies(
+  baseUrl: string,
+  token: string,
+): Promise<ServerRetentionPolicy[]> {
+  return serverFetch(baseUrl, token, "/v1/admin/governance/retention");
+}
+
+export function paleServerUpsertRetentionPolicy(
+  baseUrl: string,
+  token: string,
+  policy: Partial<ServerRetentionPolicy> & { name: string; scope: string },
+): Promise<ServerRetentionPolicy> {
+  return serverFetch(baseUrl, token, "/v1/admin/governance/retention", {
+    method: "PUT",
+    body: JSON.stringify(policy),
+  });
+}
+
+export function paleServerDiscoveryExport(
+  baseUrl: string,
+  token: string,
+  roomId?: string,
+): Promise<{ exported_at: string; room_id?: string | null; messages: ServerRoomMessage[] }> {
+  const query = roomId ? `?room_id=${encodeURIComponent(roomId)}` : "";
+  return serverFetch(baseUrl, token, `/v1/admin/ediscovery/export${query}`);
 }
 
 export function paleServerCreateDirectRoom(

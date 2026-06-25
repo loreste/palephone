@@ -1,6 +1,8 @@
 use std::str::FromStr;
 
 use deadpool_postgres::{Config, Pool, Runtime};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use tokio_postgres::types::Json;
 use tokio_postgres::NoTls;
 use uuid::Uuid;
@@ -64,6 +66,7 @@ impl PgStore {
             include_str!("../migrations/013_comprehensive_routing.sql"),
             include_str!("../migrations/013_user_uniqueness.sql"),
             include_str!("../migrations/014_room_call_metadata.sql"),
+            include_str!("../migrations/015_business_collaboration.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {
@@ -848,15 +851,17 @@ impl PgStore {
         let mut client = self.pool.get().await?;
         let transaction = client.transaction().await?;
         transaction.execute(
-            "INSERT INTO rooms (id, name, description, is_direct, created_by, conference_id, call_uri, created_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+            "INSERT INTO rooms (id, name, description, is_direct, created_by, conference_id, call_uri, team_id, channel_name, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
              ON CONFLICT (id) DO UPDATE SET
                 name = $2,
                 description = $3,
                 is_direct = $4,
                 created_by = $5,
                 conference_id = $6,
-                call_uri = $7",
+                call_uri = $7,
+                team_id = $8,
+                channel_name = $9",
             &[
                 &room.id,
                 &room.name,
@@ -865,6 +870,8 @@ impl PgStore {
                 &room.created_by,
                 &room.conference_id,
                 &room.call_uri,
+                &room.team_id,
+                &room.channel_name,
                 &room.created_at,
             ],
         ).await?;
@@ -884,7 +891,7 @@ impl PgStore {
     pub async fn load_rooms(&self) -> Result<Vec<Room>, PgError> {
         let client = self.pool.get().await?;
         let room_rows = client.query(
-            "SELECT id, name, description, is_direct, created_by, conference_id, call_uri, created_at FROM rooms ORDER BY created_at",
+            "SELECT id, name, description, is_direct, created_by, conference_id, call_uri, team_id, channel_name, created_at FROM rooms ORDER BY created_at",
             &[],
         ).await?;
         let mut rooms = Vec::with_capacity(room_rows.len());
@@ -904,6 +911,8 @@ impl PgStore {
                 .collect();
             rooms.push(Room {
                 id: room_id,
+                team_id: row.try_get("team_id").ok().flatten(),
+                channel_name: row.try_get("channel_name").ok().flatten(),
                 name: row.get("name"),
                 description: row.get("description"),
                 is_direct: row.get("is_direct"),
@@ -969,6 +978,47 @@ impl PgStore {
         let client = self.pool.get().await?;
         client.execute("DELETE FROM room_messages WHERE id = $1", &[&id]).await?;
         Ok(())
+    }
+
+    pub async fn upsert_business_object<T>(
+        &self,
+        collection: &'static str,
+        object_key: String,
+        value: &T,
+    ) -> Result<(), PgError>
+    where
+        T: Serialize,
+    {
+        let client = self.pool.get().await?;
+        let json = serde_json::to_value(value)?;
+        client
+            .execute(
+                "INSERT INTO business_objects (collection, object_key, json)
+                 VALUES ($1,$2,$3)
+                 ON CONFLICT (collection, object_key) DO UPDATE SET json = $3, updated_at = now()",
+                &[&collection, &object_key, &Json(json)],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn load_business_objects<T>(&self, collection: &'static str) -> Result<Vec<T>, PgError>
+    where
+        T: DeserializeOwned,
+    {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT json FROM business_objects WHERE collection = $1 ORDER BY updated_at",
+                &[&collection],
+            )
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                let Json(value): Json<serde_json::Value> = row.get("json");
+                Ok(serde_json::from_value(value)?)
+            })
+            .collect()
     }
 
     // ─── Reactions ───

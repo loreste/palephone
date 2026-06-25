@@ -30,6 +30,8 @@ function directRoomName(room: ServerRoom, currentSipUri?: string | null): string
 function serverRoomToSummary(room: ServerRoom, currentSipUri?: string | null, nameOverride?: string): RoomSummary {
   return {
     room_id: room.id,
+    team_id: room.team_id ?? null,
+    channel_name: room.channel_name ?? null,
     name: nameOverride ?? directRoomName(room, currentSipUri),
     is_direct: room.is_direct,
     is_encrypted: false,

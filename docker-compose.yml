@@ -1,4 +1,4 @@
-# Pale Server — Docker Compose with PostgreSQL + TURN
+# Pale Server — Docker Compose with PostgreSQL + TURN + NATS
 #
 # Quick start:
 #   ./scripts/generate-secrets.sh   # writes .env with all required secrets
@@ -41,6 +41,20 @@ services:
       timeout: 5s
       retries: 3
 
+  nats:
+    image: nats:2-alpine
+    container_name: pale-nats
+    restart: unless-stopped
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   pale-server:
     build:
       context: .
@@ -49,6 +63,8 @@ services:
     restart: unless-stopped
     depends_on:
       postgres:
+        condition: service_healthy
+      nats:
         condition: service_healthy
     ports:
       - "8090:8080"       # HTTP API
@@ -76,6 +92,7 @@ services:
       PALE_SIP_TLS: "${PALE_SIP_TLS:-false}"
       PALE_SIP_SRTP: "${PALE_SIP_SRTP:-false}"
       PALE_MAX_UPLOAD_BYTES: "${PALE_MAX_UPLOAD_BYTES:-104857600}"
+      NATS_URL: "${NATS_URL:-nats://nats:4222}"
       RUST_LOG: "${RUST_LOG:-info}"
     volumes:
       - pale-data:/data

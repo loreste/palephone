@@ -3,6 +3,8 @@ import { create } from "zustand";
 export interface RoomSummary {
   room_id: string;
   name: string;
+  team_id?: string | null;
+  channel_name?: string | null;
   is_direct: boolean;
   is_encrypted: boolean;
   created_by?: string;

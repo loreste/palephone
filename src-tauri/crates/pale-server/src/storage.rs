@@ -12,8 +12,9 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    AdminAuditEvent, CallSession, Conference, FileRecord, Room, RoomMessage, RoutingRule, SipAccount,
-    SipDialog, SipMessage, SipRegistration, SipTransaction, User,
+    AdminAuditEvent, CallSession, Conference, FileRecord, RetentionPolicy, Room, RoomMessage,
+    RoutingRule, ScheduledMeeting, SipAccount, SipDialog, SipMessage, SipRegistration,
+    SipTransaction, Team, User,
 };
 
 const SCHEMA: &str = r#"
@@ -315,6 +316,36 @@ impl StoredObject for RoutingRule {
 impl StoredObject for Room {
     fn collection() -> &'static str {
         "rooms"
+    }
+
+    fn key(&self) -> String {
+        self.id.to_string()
+    }
+}
+
+impl StoredObject for Team {
+    fn collection() -> &'static str {
+        "teams"
+    }
+
+    fn key(&self) -> String {
+        self.id.to_string()
+    }
+}
+
+impl StoredObject for ScheduledMeeting {
+    fn collection() -> &'static str {
+        "scheduled_meetings"
+    }
+
+    fn key(&self) -> String {
+        self.id.to_string()
+    }
+}
+
+impl StoredObject for RetentionPolicy {
+    fn collection() -> &'static str {
+        "retention_policies"
     }
 
     fn key(&self) -> String {

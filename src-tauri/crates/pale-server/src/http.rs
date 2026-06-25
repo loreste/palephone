@@ -18,15 +18,16 @@ use uuid::Uuid;
 
 use crate::{
     safe_filename, sip_ha1, AppState, AuthError, CallStatus, CreateCallRequest,
-    CreateConferenceRequest, CreateRoutingRuleRequest, CreateSipAccountRequest, CreateUserRequest,
-    AddRoomMemberRequest, CreateAgentProfileRequest, CreateBusinessHoursRequest,
+    CreateConferenceRequest, CreateRoutingRuleRequest, CreateScheduledMeetingRequest,
+    CreateSipAccountRequest, CreateTeamRequest, CreateUserRequest, AddRoomMemberRequest,
+    AddTeamMemberRequest, CreateAgentProfileRequest, CreateBusinessHoursRequest,
     CreateCannedResponseRequest, CreateExtensionRequest, CreateHolidayRequest,
     CreateIvrRequest, CreatePagingGroupRequest, CreateQueueRequest, CreateRingGroupRequest,
     CreateRoomRequest, CreateScorecardRequest, CreateSpeedDialRequest, SetAgentStateRequest,
     StartMonitorRequest, ProvisionUserRequest, AssignExtensionRequest,
     FileRecord, JoinConferenceRequest,
     RoomCallMode, SendRoomMessageRequest, SetPresenceRequest, SyncCallHistoryRequest,
-    UpdateCallStatusRequest, UpdateSipAccountStatusRequest,
+    UpdateCallStatusRequest, UpdateSipAccountStatusRequest, UpsertRetentionPolicyRequest,
     AgentTransitionRequest, CreateVipCallerRequest, RequestCallbackInput,
 };
 
@@ -70,6 +71,16 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/presence", get(list_presence).put(set_presence))
         .route("/v1/presence/{sip_uri}", get(get_presence))
         .route("/v1/call-history", get(get_call_history).post(sync_call_history))
+        .route("/v1/teams", get(list_teams).post(create_team))
+        .route("/v1/teams/{id}", get(get_team))
+        .route("/v1/teams/{id}/members", post(add_team_member))
+        .route("/v1/teams/{id}/channels", post(create_team_channel))
+        .route("/v1/meetings", get(list_meetings).post(create_meeting))
+        .route("/v1/meetings/{id}/start", post(start_meeting))
+        .route("/v1/admin/governance/retention", get(list_retention_policies).put(upsert_retention_policy))
+        .route("/v1/admin/ediscovery/export", get(discovery_export))
+        .route("/v1/scim/v2/Users", get(scim_list_users).post(scim_create_user))
+        .route("/v1/scim/v2/Users/{id}", put(scim_update_user).delete(scim_delete_user))
         .route("/v1/rooms", get(list_rooms).post(create_room))
         .route("/v1/rooms/{id}", get(get_room))
         .route("/v1/rooms/{id}/messages", get(list_room_messages).post(send_room_message))
@@ -799,6 +810,246 @@ async fn sync_call_history(
     let principal = authenticated_principal(&headers, &state)?;
     let merged = state.merge_call_history(&principal, input.entries);
     Ok(Json(json!({ "merged": merged })))
+}
+
+// ─── Teams, Channels, Meetings ───
+
+async fn list_teams(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::Team>>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    Ok(Json(state.list_teams_for_user(&principal)))
+}
+
+async fn create_team(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateTeamRequest>,
+) -> Result<Json<crate::Team>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let team = state.create_team(&principal, input);
+    state.record_audit_event(&principal, "team.created", Some(team.id.to_string()));
+    Ok(Json(team))
+}
+
+async fn get_team(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::Team>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let team = state.team(id).ok_or(ApiError::NotFound)?;
+    if !team.members.iter().any(|member| member.user_sip_uri == principal) {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(Json(team))
+}
+
+async fn add_team_member(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<AddTeamMemberRequest>,
+) -> Result<Json<crate::Team>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let team = state.team(id).ok_or(ApiError::NotFound)?;
+    if !team.members.iter().any(|member| {
+        member.user_sip_uri == principal && (member.role == "owner" || member.role == "admin")
+    }) {
+        return Err(ApiError::Forbidden);
+    }
+    let team = state
+        .add_team_member(id, &input.user_sip_uri, input.role)
+        .ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "team.member_added", Some(id.to_string()));
+    Ok(Json(team))
+}
+
+async fn create_team_channel(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<CreateRoomRequest>,
+) -> Result<Json<crate::Room>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let room = state
+        .create_team_channel(&principal, id, input)
+        .ok_or(ApiError::Forbidden)?;
+    state.record_audit_event(&principal, "team.channel_created", Some(room.id.to_string()));
+    Ok(Json(room))
+}
+
+async fn list_meetings(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::ScheduledMeeting>>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    Ok(Json(state.list_meetings_for_user(&principal)))
+}
+
+async fn create_meeting(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateScheduledMeetingRequest>,
+) -> Result<Json<crate::ScheduledMeeting>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let meeting = state
+        .create_scheduled_meeting(&principal, input)
+        .map_err(ApiError::Conflict)?;
+    state.record_audit_event(&principal, "meeting.scheduled", Some(meeting.id.to_string()));
+    Ok(Json(meeting))
+}
+
+async fn start_meeting(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::RoomCallTarget>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let target = state
+        .start_scheduled_meeting(id, &principal)
+        .ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "meeting.started", Some(id.to_string()));
+    Ok(Json(target))
+}
+
+async fn list_retention_policies(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::RetentionPolicy>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.retention_policies()))
+}
+
+async fn upsert_retention_policy(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<UpsertRetentionPolicyRequest>,
+) -> Result<Json<crate::RetentionPolicy>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let policy = state.upsert_retention_policy(&principal, input);
+    state.record_audit_event(&principal, "retention_policy.upserted", Some(policy.id.to_string()));
+    Ok(Json(policy))
+}
+
+#[derive(serde::Deserialize)]
+struct DiscoveryExportQuery {
+    room_id: Option<Uuid>,
+}
+
+async fn discovery_export(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<DiscoveryExportQuery>,
+) -> Result<Json<crate::DiscoveryExport>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    state.record_audit_event(
+        &principal,
+        "ediscovery.exported",
+        query.room_id.map(|id| id.to_string()),
+    );
+    Ok(Json(state.discovery_export(query.room_id)))
+}
+
+// ─── SCIM Provisioning ───
+
+#[derive(serde::Deserialize)]
+struct ScimUserInput {
+    #[serde(rename = "userName")]
+    user_name: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    active: Option<bool>,
+    #[serde(default)]
+    roles: Vec<ScimRole>,
+}
+
+#[derive(serde::Deserialize)]
+struct ScimRole {
+    value: String,
+}
+
+fn scim_user(user: crate::User) -> serde_json::Value {
+    json!({
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        "id": user.id,
+        "userName": user.sip_uri,
+        "displayName": user.display_name,
+        "active": true,
+        "roles": [{"value": user.role}],
+    })
+}
+
+async fn scim_list_users(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    let resources: Vec<_> = state.users().into_iter().map(scim_user).collect();
+    Ok(Json(json!({
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
+        "totalResults": resources.len(),
+        "Resources": resources,
+        "startIndex": 1,
+        "itemsPerPage": resources.len(),
+    })))
+}
+
+async fn scim_create_user(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<ScimUserInput>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let role = input.roles.first().map(|role| role.value.clone());
+    let user = state
+        .create_user(CreateUserRequest {
+            display_name: input.display_name.unwrap_or_else(|| input.user_name.clone()),
+            sip_uri: input.user_name,
+            matrix_user_id: None,
+            password: None,
+            role,
+        })
+        .map_err(ApiError::Conflict)?;
+    state.record_audit_event(&principal, "scim.user_created", Some(user.id.to_string()));
+    Ok(Json(scim_user(user)))
+}
+
+async fn scim_update_user(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<ScimUserInput>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if input.active == Some(false) {
+        let user = state.delete_user(id).ok_or(ApiError::NotFound)?;
+        state.record_audit_event(&principal, "scim.user_deactivated", Some(id.to_string()));
+        return Ok(Json(scim_user(user)));
+    }
+    if let Some(role) = input.roles.first() {
+        state.update_user_role(id, &role.value).ok_or(ApiError::NotFound)?;
+    }
+    let user = state
+        .users()
+        .into_iter()
+        .find(|user| user.id == id)
+        .ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "scim.user_updated", Some(id.to_string()));
+    Ok(Json(scim_user(user)))
+}
+
+async fn scim_delete_user(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    state.delete_user(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "scim.user_deleted", Some(id.to_string()));
+    Ok(Json(json!({ "ok": true })))
 }
 
 // ─── Group Chat Rooms ───
@@ -2252,6 +2503,8 @@ mod auth_tests {
                 description: None,
                 members: vec!["sip:bob@example.com".to_string()],
                 is_direct: Some(true),
+                team_id: None,
+                channel_name: None,
             },
         );
         let message = state.send_room_message(room.id, "sip:alice@example.com", "hello", None);

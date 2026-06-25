@@ -45,6 +45,8 @@ A self-hosted unified communications platform — voice, video, messaging, and f
 
 - End-to-end encrypted chat via Matrix protocol (Olm for 1:1, Megolm for groups)
 - 1:1 direct messages and group rooms
+- Teams-style team spaces with channel rooms
+- Scheduled meetings that create/join conference-backed calls
 - Typing indicators and read receipts
 - Message edit and delete
 - Encrypted file sharing (AES-256-CTR per-file keys)
@@ -78,6 +80,8 @@ A self-hosted unified communications platform — voice, video, messaging, and f
 
 - **Role-based access** — admin tab only visible to admin users
 - **LDAP/Active Directory integration** — auto-provision users from AD, map groups to roles
+- **SCIM-style user provisioning** — `/v1/scim/v2/Users` endpoints for business lifecycle automation
+- **Governance controls** — retention policy records and admin eDiscovery export for server-native room messages
 - **Audit logging** — every admin action logged with principal, action, target, timestamp
 - **Real-time refresh** — SSE events + 30-second polling for live data
 
@@ -136,7 +140,7 @@ A self-hosted unified communications platform — voice, video, messaging, and f
 | `pjsip-sys` | Downloads PJSIP source, compiles per-platform, generates FFI bindings via bindgen |
 | `pale-core` | SIP engine with dedicated worker thread, call management, audio devices, call recording, call history (SQLite), config persistence, OS keychain |
 | `pale-matrix` | Matrix client lifecycle, E2E encrypted messaging, file upload/download, room management, sync loop |
-| `pale-server` | Full SIP registrar/proxy, HTTP API (79 routes), PBX call router, PostgreSQL persistence, SSE events, rate limiting, Prometheus metrics |
+| `pale-server` | Full SIP registrar/proxy, HTTP API, PBX call router, PostgreSQL persistence, SSE/NATS events, rate limiting, Prometheus metrics |
 
 ### SIP Call Routing Decision Tree
 
@@ -208,6 +212,9 @@ for the full annotated list. Two you will almost certainly want in production:
   clients can register.
 - `PALE_SIP_TLS_CERT` / `PALE_SIP_TLS_KEY` — providing both enables SIP over
   TLS automatically (and disables plain UDP by default).
+- `NATS_URL` — optional NATS server URL, for example `nats://nats:4222`.
+  When set, pale-server publishes SSE events to `pale.events.<event_type>` as
+  JSON for server-side automations and integrations.
 
 ### Build & Run Desktop Client
 

@@ -9,6 +9,7 @@ use chrono::{DateTime, Datelike, Duration, Utc, Weekday};
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as ShaDigest, Sha256};
+use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 pub mod http;
@@ -216,6 +217,9 @@ pub struct AppState {
     audit_events: RwLock<Vec<AdminAuditEvent>>,
     presence: ShardedMap<String, UserPresence>,
     call_history: ShardedMap<Uuid, CallHistoryEntry>,
+    teams: ShardedMap<Uuid, Team>,
+    scheduled_meetings: ShardedMap<Uuid, ScheduledMeeting>,
+    retention_policies: ShardedMap<Uuid, RetentionPolicy>,
     rooms: ShardedMap<Uuid, Room>,
     room_messages: RwLock<Vec<RoomMessage>>,
     voicemails: ShardedMap<Uuid, Voicemail>,
@@ -243,6 +247,7 @@ pub struct AppState {
     user_create_lock: std::sync::Mutex<()>,
     agent_assignment_lock: std::sync::Mutex<()>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
+    nats_url: Option<String>,
     rate_limits: ShardedMap<String, RateLimitBucket>,
     rate_limit_rps: u32,
     /// Address advertised to clients as their SIP registrar. `None` when the
@@ -352,6 +357,9 @@ impl AppState {
             audit_events: RwLock::new(Vec::new()),
             presence: ShardedMap::new(),
             call_history: ShardedMap::new(),
+            teams: ShardedMap::new(),
+            scheduled_meetings: ShardedMap::new(),
+            retention_policies: ShardedMap::new(),
             rooms: ShardedMap::new(),
             room_messages: RwLock::new(Vec::new()),
             voicemails: ShardedMap::new(),
@@ -379,6 +387,7 @@ impl AppState {
             user_create_lock: std::sync::Mutex::new(()),
             agent_assignment_lock: std::sync::Mutex::new(()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
+            nats_url: std::env::var("NATS_URL").ok().filter(|value| !value.trim().is_empty()),
             rate_limits: ShardedMap::new(),
             rate_limit_rps: 100,
             sip_registrar: None,
@@ -546,6 +555,36 @@ impl AppState {
                 *self.room_messages.write().expect("room messages lock poisoned") = messages;
             }
             Err(e) => log::warn!("Failed to load room messages from Postgres: {}", e),
+        }
+        match pg.load_business_objects::<Team>(Team::collection()).await {
+            Ok(teams) => {
+                for team in teams {
+                    self.teams.insert(team.id, team);
+                }
+            }
+            Err(e) => log::warn!("Failed to load teams from Postgres: {}", e),
+        }
+        match pg
+            .load_business_objects::<ScheduledMeeting>(ScheduledMeeting::collection())
+            .await
+        {
+            Ok(meetings) => {
+                for meeting in meetings {
+                    self.scheduled_meetings.insert(meeting.id, meeting);
+                }
+            }
+            Err(e) => log::warn!("Failed to load scheduled meetings from Postgres: {}", e),
+        }
+        match pg
+            .load_business_objects::<RetentionPolicy>(RetentionPolicy::collection())
+            .await
+        {
+            Ok(policies) => {
+                for policy in policies {
+                    self.retention_policies.insert(policy.id, policy);
+                }
+            }
+            Err(e) => log::warn!("Failed to load retention policies from Postgres: {}", e),
         }
         log::info!("Loaded data from PostgreSQL into memory cache");
     }
@@ -765,6 +804,9 @@ impl AppState {
         self.load_collection::<CallSession>(&self.calls);
         self.load_collection::<FileRecord>(&self.files);
         self.load_collection::<RoutingRule>(&self.routing_rules);
+        self.load_collection::<Team>(&self.teams);
+        self.load_collection::<ScheduledMeeting>(&self.scheduled_meetings);
+        self.load_collection::<RetentionPolicy>(&self.retention_policies);
         self.load_collection::<Room>(&self.rooms);
         self.load_vec_collection::<RoomMessage>(&self.room_messages);
         self.load_vec_collection::<AdminAuditEvent>(&self.audit_events);
@@ -1738,7 +1780,25 @@ impl AppState {
     }
 
     pub fn broadcast_sse(&self, event: SseEvent) {
-        let _ = self.sse_tx.send(event);
+        let _ = self.sse_tx.send(event.clone());
+        self.publish_nats_event(event);
+    }
+
+    fn publish_nats_event(&self, event: SseEvent) {
+        let Some(url) = self.nats_url.clone() else {
+            return;
+        };
+        let Ok(payload) = serde_json::to_vec(&event) else {
+            return;
+        };
+        let subject = format!("pale.events.{}", nats_subject_token(&event.event_type));
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Err(err) = publish_nats_message(&url, &subject, &payload).await {
+                    log::warn!("failed to publish NATS event {}: {}", subject, err);
+                }
+            });
+        }
     }
 
     // ─── Call Center: Agent Management ───
@@ -2940,6 +3000,8 @@ impl AppState {
 
         let room = Room {
             id: Uuid::new_v4(),
+            team_id: input.team_id,
+            channel_name: input.channel_name,
             name: input.name,
             description: input.description.unwrap_or_default(),
             is_direct,
@@ -2969,6 +3031,102 @@ impl AppState {
             payload: serde_json::to_value(&room).unwrap_or_default(),
         });
         room
+    }
+
+    pub fn create_team(&self, creator: &str, input: CreateTeamRequest) -> Team {
+        let mut members = input.members;
+        members.push(creator.to_string());
+        let members = normalized_room_members(members);
+        let team = Team {
+            id: Uuid::new_v4(),
+            name: input.name,
+            description: input.description.unwrap_or_default(),
+            owner_uri: creator.to_string(),
+            members: members
+                .into_iter()
+                .map(|uri| TeamMember {
+                    role: if uri == creator { "owner" } else { "member" }.to_string(),
+                    user_sip_uri: uri,
+                    joined_at: Utc::now(),
+                })
+                .collect(),
+            created_at: Utc::now(),
+        };
+        self.teams.insert(team.id, team.clone());
+        self.persist(&team);
+        let team_for_pg = team.clone();
+        self.pg_spawn(move |pg| {
+            Box::pin(async move {
+                pg.upsert_business_object(Team::collection(), team_for_pg.key(), &team_for_pg)
+                    .await
+            })
+        });
+        self.broadcast_sse(SseEvent {
+            event_type: "team_created".to_string(),
+            payload: serde_json::to_value(&team).unwrap_or_default(),
+        });
+        team
+    }
+
+    pub fn list_teams_for_user(&self, sip_uri: &str) -> Vec<Team> {
+        self.teams
+            .values()
+            .into_iter()
+            .filter(|team| team.members.iter().any(|member| member.user_sip_uri == sip_uri))
+            .collect()
+    }
+
+    pub fn team(&self, id: Uuid) -> Option<Team> {
+        self.teams.get(&id)
+    }
+
+    pub fn add_team_member(&self, team_id: Uuid, user_sip_uri: &str, role: Option<String>) -> Option<Team> {
+        let updated = self.teams.with_write(&team_id, |teams| {
+            let team = teams.get_mut(&team_id)?;
+            if !team.members.iter().any(|member| member.user_sip_uri == user_sip_uri) {
+                team.members.push(TeamMember {
+                    user_sip_uri: user_sip_uri.to_string(),
+                    role: role.unwrap_or_else(|| "member".to_string()),
+                    joined_at: Utc::now(),
+                });
+            }
+            Some(team.clone())
+        })?;
+        self.persist(&updated);
+        let team_for_pg = updated.clone();
+        self.pg_spawn(move |pg| {
+            Box::pin(async move {
+                pg.upsert_business_object(Team::collection(), team_for_pg.key(), &team_for_pg)
+                    .await
+            })
+        });
+        Some(updated)
+    }
+
+    pub fn create_team_channel(&self, creator: &str, team_id: Uuid, input: CreateRoomRequest) -> Option<Room> {
+        let team = self.team(team_id)?;
+        if !team.members.iter().any(|member| member.user_sip_uri == creator) {
+            return None;
+        }
+        let mut channel_members: Vec<String> = team
+            .members
+            .iter()
+            .map(|member| member.user_sip_uri.clone())
+            .chain(input.members)
+            .collect();
+        channel_members.sort();
+        channel_members.dedup();
+        Some(self.create_room(
+            creator,
+            CreateRoomRequest {
+                name: input.name,
+                description: input.description,
+                members: channel_members,
+                is_direct: Some(false),
+                team_id: Some(team_id),
+                channel_name: input.channel_name,
+            },
+        ))
     }
 
     pub fn start_room_call(&self, room_id: Uuid, mode: RoomCallMode) -> Option<RoomCallTarget> {
@@ -3034,6 +3192,109 @@ impl AppState {
             },
         );
         Some(target)
+    }
+
+    pub fn create_scheduled_meeting(
+        &self,
+        organizer_uri: &str,
+        input: CreateScheduledMeetingRequest,
+    ) -> Result<ScheduledMeeting, String> {
+        if input.ends_at <= input.starts_at {
+            return Err("meeting end time must be after start time".to_string());
+        }
+        if let Some(room_id) = input.room_id {
+            let room = self.room(room_id).ok_or_else(|| "room not found".to_string())?;
+            if !room.members.iter().any(|member| member.user_sip_uri == organizer_uri) {
+                return Err("organizer is not a room member".to_string());
+            }
+        }
+        let conference = self.create_conference(CreateConferenceRequest {
+            title: input.title.clone(),
+            mode: input.mode.unwrap_or(RoomCallMode::Video).into(),
+        });
+        let mut participants = input.participants;
+        participants.push(organizer_uri.to_string());
+        let meeting = ScheduledMeeting {
+            id: Uuid::new_v4(),
+            title: input.title,
+            description: input.description.unwrap_or_default(),
+            organizer_uri: organizer_uri.to_string(),
+            room_id: input.room_id,
+            conference_id: Some(conference.id),
+            participants: normalized_room_members(participants),
+            starts_at: input.starts_at,
+            ends_at: input.ends_at,
+            created_at: Utc::now(),
+        };
+        self.scheduled_meetings.insert(meeting.id, meeting.clone());
+        self.persist(&meeting);
+        let meeting_for_pg = meeting.clone();
+        self.pg_spawn(move |pg| {
+            Box::pin(async move {
+                pg.upsert_business_object(
+                    ScheduledMeeting::collection(),
+                    meeting_for_pg.key(),
+                    &meeting_for_pg,
+                )
+                .await
+            })
+        });
+        self.broadcast_sse(SseEvent {
+            event_type: "meeting_scheduled".to_string(),
+            payload: serde_json::to_value(&meeting).unwrap_or_default(),
+        });
+        Ok(meeting)
+    }
+
+    pub fn list_meetings_for_user(&self, sip_uri: &str) -> Vec<ScheduledMeeting> {
+        self.scheduled_meetings
+            .values()
+            .into_iter()
+            .filter(|meeting| {
+                meeting.organizer_uri == sip_uri
+                    || meeting.participants.iter().any(|participant| participant == sip_uri)
+                    || meeting
+                        .room_id
+                        .and_then(|room_id| self.room(room_id))
+                        .is_some_and(|room| room.members.iter().any(|member| member.user_sip_uri == sip_uri))
+            })
+            .collect()
+    }
+
+    pub fn start_scheduled_meeting(&self, id: Uuid, user_sip_uri: &str) -> Option<RoomCallTarget> {
+        let meeting = self.scheduled_meetings.get(&id)?;
+        if !meeting.participants.iter().any(|participant| participant == user_sip_uri)
+            && meeting.organizer_uri != user_sip_uri
+        {
+            return None;
+        }
+        if let Some(room_id) = meeting.room_id {
+            self.join_room_call(room_id, user_sip_uri, RoomCallMode::Video)
+        } else {
+            let conference_id = meeting.conference_id?;
+            let _ = self.activate_conference(conference_id);
+            let user_id = self
+                .users
+                .values()
+                .into_iter()
+                .find(|user| user.sip_uri == user_sip_uri)
+                .map(|user| user.id)
+                .unwrap_or_else(Uuid::nil);
+            let _ = self.join_conference(
+                conference_id,
+                JoinConferenceRequest {
+                    user_id,
+                    sip_uri: user_sip_uri.to_string(),
+                    role: Some(ParticipantRole::Member),
+                },
+            );
+            Some(RoomCallTarget {
+                room_id: Uuid::nil(),
+                conference_id,
+                call_uri: format!("sip:conf-{}@pale.local", conference_id),
+                mode: RoomCallMode::Video,
+            })
+        }
     }
 
     pub fn list_rooms_for_user(&self, sip_uri: &str) -> Vec<Room> {
@@ -3144,6 +3405,58 @@ impl AppState {
         self.delete_persisted(RoomMessage::collection(), deleted.key());
         self.pg_spawn(move |pg| Box::pin(async move { pg.delete_room_message(id).await }));
         Some(deleted)
+    }
+
+    pub fn upsert_retention_policy(
+        &self,
+        principal: &str,
+        input: UpsertRetentionPolicyRequest,
+    ) -> RetentionPolicy {
+        let policy = RetentionPolicy {
+            id: input.id.unwrap_or_else(Uuid::new_v4),
+            name: input.name,
+            scope: input.scope,
+            room_id: input.room_id,
+            retain_days: input.retain_days,
+            legal_hold: input.legal_hold.unwrap_or(false),
+            export_enabled: input.export_enabled.unwrap_or(true),
+            created_by: principal.to_string(),
+            updated_at: Utc::now(),
+        };
+        self.retention_policies.insert(policy.id, policy.clone());
+        self.persist(&policy);
+        let policy_for_pg = policy.clone();
+        self.pg_spawn(move |pg| {
+            Box::pin(async move {
+                pg.upsert_business_object(
+                    RetentionPolicy::collection(),
+                    policy_for_pg.key(),
+                    &policy_for_pg,
+                )
+                .await
+            })
+        });
+        policy
+    }
+
+    pub fn retention_policies(&self) -> Vec<RetentionPolicy> {
+        self.retention_policies.values()
+    }
+
+    pub fn discovery_export(&self, room_id: Option<Uuid>) -> DiscoveryExport {
+        let messages = self
+            .room_messages
+            .read()
+            .expect("room messages lock poisoned")
+            .iter()
+            .filter(|message| room_id.is_none_or(|id| message.room_id == id))
+            .cloned()
+            .collect();
+        DiscoveryExport {
+            exported_at: Utc::now(),
+            room_id,
+            messages,
+        }
     }
 
     pub fn pinned_messages(&self, room_id: Uuid) -> Vec<RoomMessage> {
@@ -3648,8 +3961,42 @@ pub struct CallRecording {
 // ─── Group Chat Rooms ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Team {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub owner_uri: String,
+    pub members: Vec<TeamMember>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamMember {
+    pub user_sip_uri: String,
+    pub role: String,
+    pub joined_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateTeamRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub members: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AddTeamMemberRequest {
+    pub user_sip_uri: String,
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Room {
     pub id: Uuid,
+    #[serde(default)]
+    pub team_id: Option<Uuid>,
+    #[serde(default)]
+    pub channel_name: Option<String>,
     pub name: String,
     pub description: String,
     pub is_direct: bool,
@@ -3675,6 +4022,66 @@ pub struct CreateRoomRequest {
     pub description: Option<String>,
     pub members: Vec<String>, // SIP URIs to invite
     pub is_direct: Option<bool>,
+    #[serde(default)]
+    pub team_id: Option<Uuid>,
+    #[serde(default)]
+    pub channel_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledMeeting {
+    pub id: Uuid,
+    pub title: String,
+    pub description: String,
+    pub organizer_uri: String,
+    pub room_id: Option<Uuid>,
+    pub conference_id: Option<Uuid>,
+    pub participants: Vec<String>,
+    pub starts_at: DateTime<Utc>,
+    pub ends_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateScheduledMeetingRequest {
+    pub title: String,
+    pub description: Option<String>,
+    pub room_id: Option<Uuid>,
+    pub participants: Vec<String>,
+    pub starts_at: DateTime<Utc>,
+    pub ends_at: DateTime<Utc>,
+    pub mode: Option<RoomCallMode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetentionPolicy {
+    pub id: Uuid,
+    pub name: String,
+    pub scope: String,
+    pub room_id: Option<Uuid>,
+    pub retain_days: Option<i64>,
+    pub legal_hold: bool,
+    pub export_enabled: bool,
+    pub created_by: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpsertRetentionPolicyRequest {
+    pub id: Option<Uuid>,
+    pub name: String,
+    pub scope: String,
+    pub room_id: Option<Uuid>,
+    pub retain_days: Option<i64>,
+    pub legal_hold: Option<bool>,
+    pub export_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveryExport {
+    pub exported_at: DateTime<Utc>,
+    pub room_id: Option<Uuid>,
+    pub messages: Vec<RoomMessage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4627,6 +5034,49 @@ fn matches_room_call_mode(conference_mode: &ConferenceMode, room_mode: &RoomCall
     )
 }
 
+fn nats_subject_token(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+async fn publish_nats_message(
+    url: &str,
+    subject: &str,
+    payload: &[u8],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let address = nats_tcp_address(url)?;
+    let mut stream = tokio::net::TcpStream::connect(address).await?;
+    stream.write_all(b"CONNECT {\"verbose\":false}\r\n").await?;
+    stream
+        .write_all(format!("PUB {} {}\r\n", subject, payload.len()).as_bytes())
+        .await?;
+    stream.write_all(payload).await?;
+    stream.write_all(b"\r\n").await?;
+    stream.write_all(b"PING\r\n").await?;
+    stream.shutdown().await?;
+    Ok(())
+}
+
+fn nats_tcp_address(url: &str) -> Result<String, String> {
+    let address = url.strip_prefix("nats://").unwrap_or(url);
+    if address.is_empty() {
+        return Err("empty NATS URL".to_string());
+    }
+    Ok(if address.contains(':') {
+        address.to_string()
+    } else {
+        format!("{}:4222", address)
+    })
+}
+
 pub fn safe_filename(name: &str) -> String {
     Path::new(name)
         .file_name()
@@ -4805,6 +5255,30 @@ impl PersistedMapObject for RoutingRule {
 }
 
 impl PersistedMapObject for Room {
+    type Key = Uuid;
+
+    fn map_key(&self) -> Self::Key {
+        self.id
+    }
+}
+
+impl PersistedMapObject for Team {
+    type Key = Uuid;
+
+    fn map_key(&self) -> Self::Key {
+        self.id
+    }
+}
+
+impl PersistedMapObject for ScheduledMeeting {
+    type Key = Uuid;
+
+    fn map_key(&self) -> Self::Key {
+        self.id
+    }
+}
+
+impl PersistedMapObject for RetentionPolicy {
     type Key = Uuid;
 
     fn map_key(&self) -> Self::Key {
@@ -5050,6 +5524,8 @@ mod tests {
                 description: None,
                 members: vec!["sip:bob@example.com".to_string()],
                 is_direct: Some(true),
+                team_id: None,
+                channel_name: None,
             },
         );
         let second = state.create_room(
@@ -5059,6 +5535,8 @@ mod tests {
                 description: None,
                 members: vec!["sip:alice@example.com".to_string()],
                 is_direct: Some(true),
+                team_id: None,
+                channel_name: None,
             },
         );
 
@@ -5086,6 +5564,8 @@ mod tests {
                     "sip:alice@example.com".to_string(),
                 ],
                 is_direct: Some(false),
+                team_id: None,
+                channel_name: None,
             },
         );
 
@@ -5126,6 +5606,8 @@ mod tests {
                 description: Some("Persistent room".to_string()),
                 members: vec!["sip:bob@example.com".to_string()],
                 is_direct: Some(false),
+                team_id: None,
+                channel_name: None,
             },
         );
         let target = state
@@ -5172,6 +5654,83 @@ mod tests {
         assert!(reloaded_after_delete.room_messages(room.id).is_empty());
         drop(reloaded_after_delete);
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn teams_channels_meetings_and_governance_are_persistent_business_objects() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-business-collab-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let team = state.create_team(
+            "sip:alice@example.com",
+            CreateTeamRequest {
+                name: "Engineering".to_string(),
+                description: Some("Product engineering".to_string()),
+                members: vec!["sip:bob@example.com".to_string()],
+            },
+        );
+        assert_eq!(state.list_teams_for_user("sip:bob@example.com").len(), 1);
+
+        let channel = state
+            .create_team_channel(
+                "sip:alice@example.com",
+                team.id,
+                CreateRoomRequest {
+                    name: "General".to_string(),
+                    description: None,
+                    members: Vec::new(),
+                    is_direct: Some(false),
+                    team_id: Some(team.id),
+                    channel_name: Some("General".to_string()),
+                },
+            )
+            .expect("team channel");
+        assert_eq!(channel.team_id, Some(team.id));
+        assert!(channel.members.iter().any(|member| member.user_sip_uri == "sip:bob@example.com"));
+
+        let meeting = state
+            .create_scheduled_meeting(
+                "sip:alice@example.com",
+                CreateScheduledMeetingRequest {
+                    title: "Planning".to_string(),
+                    description: None,
+                    room_id: Some(channel.id),
+                    participants: vec!["sip:bob@example.com".to_string()],
+                    starts_at: Utc::now(),
+                    ends_at: Utc::now() + Duration::minutes(30),
+                    mode: Some(RoomCallMode::Video),
+                },
+            )
+            .expect("scheduled meeting");
+        assert_eq!(state.list_meetings_for_user("sip:bob@example.com").len(), 1);
+        let target = state
+            .start_scheduled_meeting(meeting.id, "sip:bob@example.com")
+            .expect("meeting call");
+        assert_eq!(target.room_id, channel.id);
+
+        let policy = state.upsert_retention_policy(
+            "admin",
+            UpsertRetentionPolicyRequest {
+                id: None,
+                name: "Legal hold".to_string(),
+                scope: "room".to_string(),
+                room_id: Some(channel.id),
+                retain_days: None,
+                legal_hold: Some(true),
+                export_enabled: Some(true),
+            },
+        );
+        assert!(policy.legal_hold);
+        assert_eq!(state.retention_policies().len(), 1);
+    }
+
+    #[test]
+    fn nats_helpers_normalize_subjects_and_addresses() {
+        assert_eq!(nats_subject_token("room.message/created"), "room_message_created");
+        assert_eq!(nats_tcp_address("nats://localhost").unwrap(), "localhost:4222");
+        assert_eq!(nats_tcp_address("nats://localhost:4223").unwrap(), "localhost:4223");
     }
 
     #[test]
