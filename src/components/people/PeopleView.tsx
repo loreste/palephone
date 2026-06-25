@@ -3,8 +3,7 @@ import { Search, Phone, MessageSquare, Users, Star, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useServerStore } from "@/store/serverStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
-import { paleServerGetUsers, makeCall, paleServerGetFavorites, paleServerAddFavorite, paleServerRemoveFavorite, type ServerUser } from "@/lib/tauri";
-import { matrixCreateDm } from "@/lib/tauri";
+import { paleServerCreateDirectRoom, paleServerGetUsers, makeCall, paleServerGetFavorites, paleServerAddFavorite, paleServerRemoveFavorite, type ServerRoom, type ServerUser } from "@/lib/tauri";
 import { useUiStore } from "@/store/uiStore";
 import { useChatStore } from "@/store/chatStore";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
@@ -27,6 +26,19 @@ const presenceLabels: Record<PresenceStatus, string> = {
   dnd: "Do Not Disturb",
   offline: "Offline",
 };
+
+function serverRoomToSummary(room: ServerRoom) {
+  return {
+    room_id: room.id,
+    name: room.name,
+    is_direct: room.is_direct,
+    is_encrypted: false,
+    last_message: null,
+    last_message_sender: null,
+    last_message_ts: null,
+    unread_count: 0,
+  };
+}
 
 export function PeopleView() {
   const { baseUrl, token, connected } = useServerStore();
@@ -214,7 +226,9 @@ function PersonRow({
   const presenceMap = usePresenceStore((s) => s.presenceMap);
   const setActiveTab = useUiStore((s) => s.setActiveTab);
   const setActiveRoomId = useChatStore((s) => s.setActiveRoomId);
+  const upsertRoom = useChatStore((s) => s.upsertRoom);
   const rooms = useChatStore((s) => s.rooms);
+  const { baseUrl, token } = useServerStore();
   const presence = presenceMap[user.sip_uri];
   const status: PresenceStatus = presence?.status ?? "offline";
 
@@ -227,7 +241,6 @@ function PersonRow({
   };
 
   const handleChat = async () => {
-    // Check if DM room already exists
     const existing = rooms.find(
       (r) => r.is_direct && r.name.toLowerCase().includes(user.display_name.toLowerCase())
     );
@@ -237,17 +250,18 @@ function PersonRow({
       return;
     }
 
-    // Create new DM if user has a Matrix ID
-    if (user.matrix_user_id) {
-      try {
-        const roomId = await matrixCreateDm(user.matrix_user_id);
-        setActiveRoomId(roomId);
-        setActiveTab("chat");
-      } catch (err) {
-        toast({ type: "error", title: "Could not start chat", description: String(err) });
-      }
-    } else {
-      toast({ type: "info", title: "No Matrix ID", description: "This user doesn't have a chat account configured" });
+    if (!baseUrl || !token) {
+      toast({ type: "error", title: "Not connected to server" });
+      return;
+    }
+
+    try {
+      const room = await paleServerCreateDirectRoom(baseUrl, token, user);
+      upsertRoom(serverRoomToSummary(room));
+      setActiveRoomId(room.id);
+      setActiveTab("chat");
+    } catch (err) {
+      toast({ type: "error", title: "Could not start chat", description: String(err) });
     }
   };
 
@@ -316,7 +330,9 @@ function UserProfileCard({ user, onClose }: { user: ServerUser; onClose: () => v
   const presenceMap = usePresenceStore((s) => s.presenceMap);
   const setActiveTab = useUiStore((s) => s.setActiveTab);
   const setActiveRoomId = useChatStore((s) => s.setActiveRoomId);
+  const upsertRoom = useChatStore((s) => s.upsertRoom);
   const rooms = useChatStore((s) => s.rooms);
+  const { baseUrl, token } = useServerStore();
   const presence = presenceMap[user.sip_uri];
   const status: PresenceStatus = presence?.status ?? "offline";
 
@@ -339,14 +355,18 @@ function UserProfileCard({ user, onClose }: { user: ServerUser; onClose: () => v
       setActiveTab("chat");
       return;
     }
-    if (user.matrix_user_id) {
-      try {
-        const roomId = await matrixCreateDm(user.matrix_user_id);
-        setActiveRoomId(roomId);
-        setActiveTab("chat");
-      } catch (err) {
-        toast({ type: "error", title: "Could not start chat", description: String(err) });
-      }
+    if (!baseUrl || !token) {
+      toast({ type: "error", title: "Not connected to server" });
+      return;
+    }
+
+    try {
+      const room = await paleServerCreateDirectRoom(baseUrl, token, user);
+      upsertRoom(serverRoomToSummary(room));
+      setActiveRoomId(room.id);
+      setActiveTab("chat");
+    } catch (err) {
+      toast({ type: "error", title: "Could not start chat", description: String(err) });
     }
   };
 

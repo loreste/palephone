@@ -504,6 +504,22 @@ export function paleServerCreateRoom(
   });
 }
 
+export function paleServerCreateDirectRoom(
+  baseUrl: string,
+  token: string,
+  user: Pick<ServerUser, "display_name" | "sip_uri">,
+): Promise<ServerRoom> {
+  return serverFetch(baseUrl, token, "/v1/rooms", {
+    method: "POST",
+    body: JSON.stringify({
+      name: user.display_name,
+      description: "",
+      members: [user.sip_uri],
+      is_direct: true,
+    }),
+  });
+}
+
 export function paleServerGetRoomMessages(
   baseUrl: string,
   token: string,

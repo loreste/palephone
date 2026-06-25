@@ -33,6 +33,7 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
   const setPresence = usePresenceStore((s) => s.setPresence);
   const setBulkPresence = usePresenceStore((s) => s.setBulkPresence);
   const addMessage = useChatStore((s) => s.addMessage);
+  const upsertRoom = useChatStore((s) => s.upsertRoom);
   const setTypingUsers = useChatStore((s) => s.setTypingUsers);
   const addActivity = useActivityStore((s) => s.addItem);
   const updateToken = useServerStore((s) => s.updateToken);
@@ -86,6 +87,33 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
               setTypingUsers(roomId, existing.filter((u: string) => u !== data.user));
             }
           }
+        } catch { /* ignore */ }
+      });
+
+      es.addEventListener("room_created", (e) => {
+        try {
+          const room = JSON.parse(e.data);
+          const currentSipUri = useAccountStore.getState().account?.sipUri;
+          if (!currentSipUri || !Array.isArray(room.members)) return;
+          const isMember = room.members.some(
+            (member: { user_sip_uri?: string }) => member.user_sip_uri === currentSipUri
+          );
+          if (!isMember) return;
+          const otherMember = room.is_direct
+            ? room.members.find(
+                (member: { user_sip_uri?: string }) => member.user_sip_uri !== currentSipUri
+              )
+            : null;
+          upsertRoom({
+            room_id: room.id,
+            name: otherMember?.user_sip_uri?.replace(/^sip:/, "") ?? room.name,
+            is_direct: Boolean(room.is_direct),
+            is_encrypted: false,
+            last_message: null,
+            last_message_sender: null,
+            last_message_ts: null,
+            unread_count: 0,
+          });
         } catch { /* ignore */ }
       });
 
@@ -191,7 +219,7 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
         reconnectRef.current = null;
       }
     };
-  }, [baseUrl, token, setPresence, setBulkPresence, addMessage, setTypingUsers]);
+  }, [baseUrl, token, setPresence, setBulkPresence, addMessage, upsertRoom, setTypingUsers]);
 
   // Token auto-refresh (with stale-token guard to prevent race conditions)
   useEffect(() => {

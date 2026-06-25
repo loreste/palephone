@@ -42,6 +42,7 @@ interface ChatStoreState {
   typingByRoom: Record<string, string[]>;
 
   setRooms: (rooms: RoomSummary[]) => void;
+  upsertRoom: (room: RoomSummary) => void;
   setActiveRoomId: (id: string | null) => void;
   addMessage: (msg: ChatMessage) => void;
   setMessages: (roomId: string, msgs: ChatMessage[]) => void;
@@ -62,7 +63,31 @@ export const useChatStore = create<ChatStoreState>((set) => ({
   messages: {},
   typingByRoom: {},
 
-  setRooms: (rooms) => set({ rooms }),
+  setRooms: (rooms) =>
+    set((state) => {
+      const incomingServerRooms = rooms.filter((room) => isServerRoomId(room.room_id));
+      const incomingMatrixRooms = rooms.filter((room) => !isServerRoomId(room.room_id));
+      const existingServerRooms = state.rooms.filter((room) => isServerRoomId(room.room_id));
+      const existingMatrixRooms = state.rooms.filter((room) => !isServerRoomId(room.room_id));
+
+      return {
+        rooms: [
+          ...(incomingMatrixRooms.length > 0 ? incomingMatrixRooms : existingMatrixRooms),
+          ...(incomingServerRooms.length > 0 ? incomingServerRooms : existingServerRooms),
+        ],
+      };
+    }),
+  upsertRoom: (room) =>
+    set((state) => {
+      const exists = state.rooms.some((existing) => existing.room_id === room.room_id);
+      return {
+        rooms: exists
+          ? state.rooms.map((existing) =>
+              existing.room_id === room.room_id ? { ...existing, ...room } : existing
+            )
+          : [...state.rooms, room],
+      };
+    }),
   setActiveRoomId: (id) => set({ activeRoomId: id }),
 
   addMessage: (msg) =>

@@ -2776,11 +2776,33 @@ impl AppState {
     // ─── Group Chat Rooms ───
 
     pub fn create_room(&self, creator: &str, input: CreateRoomRequest) -> Room {
+        let is_direct = input.is_direct.unwrap_or(false);
+        if is_direct {
+            let mut members = input.members.clone();
+            members.push(creator.to_string());
+            members.sort();
+            members.dedup();
+            if let Some(existing) = self.rooms.values().into_iter().find(|room| {
+                if !room.is_direct || room.members.len() != members.len() {
+                    return false;
+                }
+                let mut room_members: Vec<_> = room
+                    .members
+                    .iter()
+                    .map(|member| member.user_sip_uri.clone())
+                    .collect();
+                room_members.sort();
+                room_members == members
+            }) {
+                return existing;
+            }
+        }
+
         let room = Room {
             id: Uuid::new_v4(),
             name: input.name,
             description: input.description.unwrap_or_default(),
-            is_direct: false,
+            is_direct,
             created_by: creator.to_string(),
             members: std::iter::once(RoomMember {
                 user_sip_uri: creator.to_string(),
@@ -2797,6 +2819,10 @@ impl AppState {
         };
         self.rooms.insert(room.id, room.clone());
         self.rooms.trim_to_len(MAX_ROOMS);
+        self.broadcast_sse(SseEvent {
+            event_type: "room_created".to_string(),
+            payload: serde_json::to_value(&room).unwrap_or_default(),
+        });
         room
     }
 
@@ -3399,6 +3425,7 @@ pub struct CreateRoomRequest {
     pub name: String,
     pub description: Option<String>,
     pub members: Vec<String>, // SIP URIs to invite
+    pub is_direct: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4551,6 +4578,39 @@ mod tests {
             "alice"
         );
         assert!(state.sip_accounts().is_empty());
+    }
+
+    #[test]
+    fn direct_rooms_are_reused_for_same_users() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+
+        let first = state.create_room(
+            "sip:alice@example.com",
+            CreateRoomRequest {
+                name: "Bob".to_string(),
+                description: None,
+                members: vec!["sip:bob@example.com".to_string()],
+                is_direct: Some(true),
+            },
+        );
+        let second = state.create_room(
+            "sip:bob@example.com",
+            CreateRoomRequest {
+                name: "Alice".to_string(),
+                description: None,
+                members: vec!["sip:alice@example.com".to_string()],
+                is_direct: Some(true),
+            },
+        );
+
+        assert_eq!(first.id, second.id);
+        assert!(first.is_direct);
+        assert_eq!(state.list_rooms_for_user("sip:alice@example.com").len(), 1);
+        assert_eq!(state.list_rooms_for_user("sip:bob@example.com").len(), 1);
     }
 
     #[test]

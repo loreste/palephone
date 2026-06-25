@@ -6,7 +6,7 @@ import { useMatrixStore } from "@/store/matrixStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
-import { matrixSendMessage, matrixSetTyping, matrixCreateDm, paleServerGetMessages, makeCall as ipcMakeCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, type ServerUser } from "@/lib/tauri";
+import { matrixSendMessage, matrixSetTyping, matrixCreateDm, paleServerGetMessages, makeCall as ipcMakeCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, type ServerRoom, type ServerUser } from "@/lib/tauri";
 import { toast } from "@/components/ui/Toast";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
 import { EncryptionBadge } from "@/components/encryption/EncryptionBadge";
@@ -19,6 +19,25 @@ const EMOJI_CATEGORIES: { label: string; emojis: string[] }[] = [
   { label: "Gestures", emojis: ["\u{1F44D}", "\u{1F44E}", "\u{1F44F}", "\u{1F64C}", "\u{1F4AA}", "\u{270C}\u{FE0F}", "\u{1F91E}", "\u{1F44B}", "\u{1F64F}", "\u{1F91D}"] },
   { label: "Objects", emojis: ["\u{2764}\u{FE0F}", "\u{1F525}", "\u{2B50}", "\u{1F389}", "\u{1F388}", "\u{1F381}", "\u{1F4A1}", "\u{1F4AC}", "\u{1F514}", "\u{1F3B5}", "\u{1F680}", "\u{2705}", "\u{274C}"] },
 ];
+
+function directRoomName(room: ServerRoom, currentSipUri?: string | null): string {
+  if (!room.is_direct || !currentSipUri) return room.name;
+  const other = room.members.find((member) => member.user_sip_uri !== currentSipUri);
+  return other?.user_sip_uri.replace(/^sip:/, "") ?? room.name;
+}
+
+function serverRoomToSummary(room: ServerRoom, currentSipUri?: string | null, nameOverride?: string): RoomSummary {
+  return {
+    room_id: room.id,
+    name: nameOverride ?? directRoomName(room, currentSipUri),
+    is_direct: room.is_direct,
+    is_encrypted: false,
+    last_message: null,
+    last_message_sender: null,
+    last_message_ts: null,
+    unread_count: 0,
+  };
+}
 
 function sanitizeHtml(html: string): string {
   return html
@@ -72,41 +91,23 @@ function renderMarkdown(text: string): string {
 
 export function ChatView() {
   const authState = useMatrixStore((s) => s.authState);
-  const { rooms, activeRoomId, setActiveRoomId, messages, typingByRoom } = useChatStore();
+  const { rooms, activeRoomId, setActiveRoomId, setRooms, messages, typingByRoom } = useChatStore();
   const { baseUrl, token, connected } = useServerStore();
-  const [serverRooms, setServerRooms] = useState<RoomSummary[]>([]);
+  const currentSipUri = useAccountStore((s) => s.account?.sipUri);
 
   // Load server rooms
   useEffect(() => {
     if (!connected || !baseUrl || !token) return;
-    import("@/lib/tauri").then(({ paleServerGetRooms }) => {
-      paleServerGetRooms(baseUrl, token)
-        .then((rooms) => {
-          setServerRooms(
-            rooms.map((r) => ({
-              room_id: r.id,
-              name: r.name,
-              is_direct: r.is_direct,
-              is_encrypted: false,
-              last_message: null,
-              last_message_sender: null,
-              last_message_ts: null,
-              unread_count: 0,
-            }))
-          );
-        })
-        .catch(() => {});
-    });
-  }, [connected, baseUrl, token]);
-
-  // Merge Matrix rooms with server rooms
-  const allRooms = [...rooms, ...serverRooms.filter((sr) => !rooms.some((r) => r.room_id === sr.room_id))];
+    paleServerGetRooms(baseUrl, token)
+      .then((serverRooms) => setRooms(serverRooms.map((room) => serverRoomToSummary(room, currentSipUri))))
+      .catch(() => {});
+  }, [connected, baseUrl, token, currentSipUri, setRooms]);
 
   if (authState !== "logged_in" && !connected) {
     return <MatrixLoginView />;
   }
 
-  const activeRoom = allRooms.find((r) => r.room_id === activeRoomId);
+  const activeRoom = rooms.find((r) => r.room_id === activeRoomId);
   const roomMessages = activeRoomId ? (messages[activeRoomId] ?? []) : [];
   const typingUsers = activeRoomId ? (typingByRoom[activeRoomId] ?? []) : [];
 
@@ -121,7 +122,7 @@ export function ChatView() {
         />
       ) : (
         <ConversationList
-          rooms={allRooms}
+          rooms={rooms}
           onSelect={(id) => setActiveRoomId(id)}
         />
       )}
@@ -139,10 +140,19 @@ function ConversationList({
   const [showNewChat, setShowNewChat] = useState(false);
 
   const { baseUrl, token, connected } = useServerStore();
+  const upsertRoom = useChatStore((s) => s.upsertRoom);
 
-  const handleNewDm = async (userId: string) => {
+  const handleNewDm = async (user: { display_name: string; sip_uri: string; matrix_user_id?: string | null }) => {
     try {
-      const roomId = await matrixCreateDm(userId);
+      if (connected && baseUrl && token) {
+        const room = await paleServerCreateDirectRoom(baseUrl, token, user);
+        upsertRoom(serverRoomToSummary(room, undefined, user.display_name));
+        setShowNewChat(false);
+        onSelect(room.id);
+        return;
+      }
+
+      const roomId = await matrixCreateDm(user.matrix_user_id ?? user.sip_uri);
       setShowNewChat(false);
       onSelect(roomId);
     } catch (err) {
@@ -156,8 +166,8 @@ function ConversationList({
       return;
     }
     try {
-      const { paleServerCreateRoom } = await import("@/lib/tauri");
       const room = await paleServerCreateRoom(baseUrl, token, name, "", members);
+      upsertRoom(serverRoomToSummary(room));
       setShowNewChat(false);
       onSelect(room.id);
     } catch (err) {
@@ -778,14 +788,14 @@ function NewChatInput({
   onSubmit,
   onCreateRoom,
 }: {
-  onSubmit: (userId: string) => void;
+  onSubmit: (user: { display_name: string; sip_uri: string; matrix_user_id?: string | null }) => void;
   onCreateRoom: (name: string, members: string[]) => void;
 }) {
   const [mode, setMode] = useState<"dm" | "room">("dm");
   const [userId, setUserId] = useState("");
   const [roomName, setRoomName] = useState("");
   const [roomMembers, setRoomMembers] = useState("");
-  const [serverUsers, setServerUsers] = useState<{ id: string; display_name: string; sip_uri: string }[]>([]);
+  const [serverUsers, setServerUsers] = useState<ServerUser[]>([]);
   const [filteredUsers, setFilteredUsers] = useState<typeof serverUsers>([]);
   const baseUrl = useServerStore((s) => s.baseUrl);
   const token = useServerStore((s) => s.token);
@@ -838,7 +848,9 @@ function NewChatInput({
                 value={userId}
                 onChange={(e) => setUserId(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && userId.trim()) onSubmit(userId.trim());
+                  if (e.key === "Enter" && userId.trim()) {
+                    onSubmit({ display_name: userId.trim(), sip_uri: userId.trim() });
+                  }
                 }}
                 placeholder="Search by name or SIP URI..."
                 className={cn(
@@ -850,7 +862,9 @@ function NewChatInput({
                 autoFocus
               />
               <button
-                onClick={() => userId.trim() && onSubmit(userId.trim())}
+                onClick={() =>
+                  userId.trim() && onSubmit({ display_name: userId.trim(), sip_uri: userId.trim() })
+                }
                 disabled={!userId.trim()}
                 className={cn(
                   "px-3 py-2 rounded-lg text-sm font-medium transition-colors",
@@ -867,7 +881,7 @@ function NewChatInput({
                 {filteredUsers.map((u) => (
                   <button
                     key={u.id}
-                    onClick={() => { setUserId(u.sip_uri); onSubmit(u.sip_uri); }}
+                    onClick={() => { setUserId(u.sip_uri); onSubmit(u); }}
                     className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-elevated transition-colors"
                   >
                     <div className="w-7 h-7 rounded-full bg-accent-muted text-accent flex items-center justify-center text-xs font-bold">
