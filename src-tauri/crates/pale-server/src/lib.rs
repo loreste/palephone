@@ -220,6 +220,8 @@ pub struct AppState {
     teams: ShardedMap<Uuid, Team>,
     scheduled_meetings: ShardedMap<Uuid, ScheduledMeeting>,
     retention_policies: ShardedMap<Uuid, RetentionPolicy>,
+    collaboration_policy: RwLock<CollaborationPolicy>,
+    mention_rate_limits: ShardedMap<String, RateLimitBucket>,
     rooms: ShardedMap<Uuid, Room>,
     room_messages: RwLock<Vec<RoomMessage>>,
     voicemails: ShardedMap<Uuid, Voicemail>,
@@ -360,6 +362,8 @@ impl AppState {
             teams: ShardedMap::new(),
             scheduled_meetings: ShardedMap::new(),
             retention_policies: ShardedMap::new(),
+            collaboration_policy: RwLock::new(CollaborationPolicy::default()),
+            mention_rate_limits: ShardedMap::new(),
             rooms: ShardedMap::new(),
             room_messages: RwLock::new(Vec::new()),
             voicemails: ShardedMap::new(),
@@ -586,6 +590,20 @@ impl AppState {
             }
             Err(e) => log::warn!("Failed to load retention policies from Postgres: {}", e),
         }
+        match pg
+            .load_business_objects::<CollaborationPolicy>(CollaborationPolicy::collection())
+            .await
+        {
+            Ok(mut policies) => {
+                if let Some(policy) = policies.pop() {
+                    *self
+                        .collaboration_policy
+                        .write()
+                        .expect("collaboration policy lock poisoned") = policy;
+                }
+            }
+            Err(e) => log::warn!("Failed to load collaboration policy from Postgres: {}", e),
+        }
         log::info!("Loaded data from PostgreSQL into memory cache");
     }
 
@@ -807,6 +825,7 @@ impl AppState {
         self.load_collection::<Team>(&self.teams);
         self.load_collection::<ScheduledMeeting>(&self.scheduled_meetings);
         self.load_collection::<RetentionPolicy>(&self.retention_policies);
+        self.load_singleton::<CollaborationPolicy>(&self.collaboration_policy);
         self.load_collection::<Room>(&self.rooms);
         self.load_vec_collection::<RoomMessage>(&self.room_messages);
         self.load_vec_collection::<AdminAuditEvent>(&self.audit_events);
@@ -839,6 +858,23 @@ impl AppState {
         match store.load::<T>(T::collection()) {
             Ok(values) => {
                 *list.write().expect("persisted list lock poisoned") = values;
+            }
+            Err(err) => log::warn!("failed to load {} from storage: {}", T::collection(), err),
+        }
+    }
+
+    fn load_singleton<T>(&self, value: &RwLock<T>)
+    where
+        T: StoredObject + for<'de> Deserialize<'de> + Clone,
+    {
+        let Some(store) = &self.store else {
+            return;
+        };
+        match store.load::<T>(T::collection()) {
+            Ok(values) => {
+                if let Some(stored) = values.into_iter().next() {
+                    *value.write().expect("persisted singleton lock poisoned") = stored;
+                }
             }
             Err(err) => log::warn!("failed to load {} from storage: {}", T::collection(), err),
         }
@@ -3339,12 +3375,21 @@ impl AppState {
         Some(updated)
     }
 
-    pub fn send_room_message(&self, room_id: Uuid, sender_uri: &str, body: &str, reply_to: Option<Uuid>) -> RoomMessage {
+    pub fn send_room_message(
+        &self,
+        room_id: Uuid,
+        sender_uri: &str,
+        body: &str,
+        reply_to: Option<Uuid>,
+    ) -> Result<RoomMessage, String> {
         let room = self.room(room_id);
         let (mentions, mentioned_user_uris) = room
             .as_ref()
             .map(|room| self.resolve_message_mentions(room, body))
             .unwrap_or_default();
+        if let Some(room) = room.as_ref() {
+            self.authorize_message_mentions(room, sender_uri, &mentions)?;
+        }
         let msg = RoomMessage {
             id: Uuid::new_v4(),
             room_id,
@@ -3371,16 +3416,20 @@ impl AppState {
             event_type: "room_message".to_string(),
             payload: serde_json::to_value(&msg).unwrap_or_default(),
         });
-        msg
+        Ok(msg)
     }
 
-    pub fn edit_room_message(&self, id: Uuid, new_body: &str) -> Option<RoomMessage> {
+    pub fn edit_room_message(&self, id: Uuid, editor_uri: &str, new_body: &str) -> Result<RoomMessage, String> {
         let mut messages = self.room_messages.write().expect("room messages lock poisoned");
-        let msg = messages.iter_mut().find(|m| m.id == id)?;
+        let msg = messages
+            .iter_mut()
+            .find(|m| m.id == id)
+            .ok_or_else(|| "message not found".to_string())?;
         msg.body = new_body.to_string();
         msg.edited_at = Some(Utc::now());
         if let Some(room) = self.room(msg.room_id) {
             let (mentions, mentioned_user_uris) = self.resolve_message_mentions(&room, new_body);
+            self.authorize_message_mentions(&room, editor_uri, &mentions)?;
             msg.mentions = mentions;
             msg.mentioned_user_uris = mentioned_user_uris;
         }
@@ -3392,10 +3441,14 @@ impl AppState {
         self.persist(&updated);
         let updated_for_pg = updated.clone();
         self.pg_spawn(move |pg| Box::pin(async move { pg.insert_room_message(&updated_for_pg).await }));
-        Some(updated)
+        Ok(updated)
     }
 
     fn resolve_message_mentions(&self, room: &Room, body: &str) -> (Vec<MessageMention>, Vec<String>) {
+        let policy = self.collaboration_policy();
+        if !policy.structured_mentions_enabled {
+            return (Vec::new(), Vec::new());
+        }
         let normalized_body = body.to_lowercase();
         let mut mentions = Vec::new();
         let mut mentioned_user_uris = Vec::new();
@@ -3447,6 +3500,65 @@ impl AppState {
         });
         mentions.dedup();
         (mentions, mentioned_user_uris)
+    }
+
+    fn authorize_message_mentions(
+        &self,
+        room: &Room,
+        sender_uri: &str,
+        mentions: &[MessageMention],
+    ) -> Result<(), String> {
+        let has_broad_mention = mentions
+            .iter()
+            .any(|mention| mention.kind == "channel" || mention.kind == "team");
+        if !has_broad_mention {
+            return Ok(());
+        }
+        let policy = self.collaboration_policy();
+        if !policy.broad_mentions_enabled {
+            return Err("broad mentions are disabled".to_string());
+        }
+        let member_role = room
+            .members
+            .iter()
+            .find(|member| member.user_sip_uri == sender_uri)
+            .map(|member| member.role.as_str())
+            .unwrap_or("member");
+        let allowed = policy
+            .broad_mentions_allowed_roles
+            .iter()
+            .any(|role| role.eq_ignore_ascii_case(member_role));
+        if !allowed {
+            return Err("sender is not allowed to use broad mentions".to_string());
+        }
+        if !self.check_broad_mention_rate_limit(sender_uri, policy.broad_mentions_per_minute) {
+            return Err("broad mention rate limit exceeded".to_string());
+        }
+        Ok(())
+    }
+
+    fn check_broad_mention_rate_limit(&self, principal: &str, max_per_minute: u32) -> bool {
+        if max_per_minute == 0 {
+            return false;
+        }
+        let key = principal.to_string();
+        let max_tokens = max_per_minute as f64;
+        let now = Utc::now();
+        self.mention_rate_limits.with_write(&key, |buckets| {
+            let bucket = buckets.entry(key.clone()).or_insert_with(|| RateLimitBucket {
+                tokens: max_tokens,
+                last_refill: now,
+            });
+            let elapsed_minutes = (now - bucket.last_refill).num_milliseconds().max(0) as f64 / 60_000.0;
+            bucket.tokens = (bucket.tokens + elapsed_minutes * max_tokens).min(max_tokens);
+            bucket.last_refill = now;
+            if bucket.tokens >= 1.0 {
+                bucket.tokens -= 1.0;
+                true
+            } else {
+                false
+            }
+        })
     }
 
     pub fn pin_room_message(&self, id: Uuid) -> Option<RoomMessage> {
@@ -3507,6 +3619,62 @@ impl AppState {
 
     pub fn retention_policies(&self) -> Vec<RetentionPolicy> {
         self.retention_policies.values()
+    }
+
+    pub fn collaboration_policy(&self) -> CollaborationPolicy {
+        self.collaboration_policy
+            .read()
+            .expect("collaboration policy lock poisoned")
+            .clone()
+    }
+
+    pub fn update_collaboration_policy(
+        &self,
+        principal: &str,
+        input: UpdateCollaborationPolicyRequest,
+    ) -> CollaborationPolicy {
+        let mut policy = self
+            .collaboration_policy
+            .write()
+            .expect("collaboration policy lock poisoned");
+        if let Some(enabled) = input.structured_mentions_enabled {
+            policy.structured_mentions_enabled = enabled;
+        }
+        if let Some(enabled) = input.broad_mentions_enabled {
+            policy.broad_mentions_enabled = enabled;
+        }
+        if let Some(roles) = input.broad_mentions_allowed_roles {
+            policy.broad_mentions_allowed_roles = roles
+                .into_iter()
+                .map(|role| role.trim().to_ascii_lowercase())
+                .filter(|role| !role.is_empty())
+                .collect();
+        }
+        if let Some(limit) = input.broad_mentions_per_minute {
+            policy.broad_mentions_per_minute = limit.min(60);
+        }
+        policy.updated_by = Some(principal.to_string());
+        policy.updated_at = Utc::now();
+        let updated = policy.clone();
+        drop(policy);
+
+        self.persist(&updated);
+        let policy_for_pg = updated.clone();
+        self.pg_spawn(move |pg| {
+            Box::pin(async move {
+                pg.upsert_business_object(
+                    CollaborationPolicy::collection(),
+                    policy_for_pg.key(),
+                    &policy_for_pg,
+                )
+                .await
+            })
+        });
+        self.broadcast_sse(SseEvent {
+            event_type: "collaboration_policy_updated".to_string(),
+            payload: serde_json::to_value(&updated).unwrap_or_default(),
+        });
+        updated
     }
 
     pub fn discovery_export(&self, room_id: Option<Uuid>) -> DiscoveryExport {
@@ -4141,6 +4309,39 @@ pub struct UpsertRetentionPolicyRequest {
     pub retain_days: Option<i64>,
     pub legal_hold: Option<bool>,
     pub export_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollaborationPolicy {
+    pub id: String,
+    pub structured_mentions_enabled: bool,
+    pub broad_mentions_enabled: bool,
+    pub broad_mentions_allowed_roles: Vec<String>,
+    pub broad_mentions_per_minute: u32,
+    pub updated_by: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Default for CollaborationPolicy {
+    fn default() -> Self {
+        Self {
+            id: "default".to_string(),
+            structured_mentions_enabled: true,
+            broad_mentions_enabled: true,
+            broad_mentions_allowed_roles: vec!["owner".to_string(), "admin".to_string()],
+            broad_mentions_per_minute: 3,
+            updated_by: None,
+            updated_at: Utc::now(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateCollaborationPolicyRequest {
+    pub structured_mentions_enabled: Option<bool>,
+    pub broad_mentions_enabled: Option<bool>,
+    pub broad_mentions_allowed_roles: Option<Vec<String>>,
+    pub broad_mentions_per_minute: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5690,8 +5891,12 @@ mod tests {
         let target = state
             .start_room_call(room.id, RoomCallMode::Audio)
             .expect("room call target");
-        let message = state.send_room_message(room.id, "sip:alice@example.com", "hello", None);
-        let edited = state.edit_room_message(message.id, "hello team").unwrap();
+        let message = state
+            .send_room_message(room.id, "sip:alice@example.com", "hello", None)
+            .unwrap();
+        let edited = state
+            .edit_room_message(message.id, "sip:alice@example.com", "hello team")
+            .unwrap();
         assert_eq!(edited.body, "hello team");
         let pinned = state.pin_room_message(message.id).unwrap();
         assert!(pinned.pinned);
@@ -5845,7 +6050,7 @@ mod tests {
             "sip:alice@example.com",
             "Can @Bob Jones check this? @channel",
             None,
-        );
+        ).unwrap();
         assert!(msg
             .mentions
             .iter()
@@ -5857,9 +6062,59 @@ mod tests {
         );
 
         let edited = state
-            .edit_room_message(msg.id, "@alice can own this")
+            .edit_room_message(msg.id, "sip:alice@example.com", "@alice can own this")
             .expect("edited message");
         assert_eq!(edited.mentioned_user_uris, vec!["sip:alice@example.com".to_string()]);
+    }
+
+    #[test]
+    fn collaboration_policy_controls_broad_mentions() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-mention-policy-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let room = state.create_room(
+            "sip:owner@example.com",
+            CreateRoomRequest {
+                name: "Ops".to_string(),
+                description: None,
+                members: vec!["sip:member@example.com".to_string()],
+                is_direct: Some(false),
+                team_id: None,
+                channel_name: None,
+            },
+        );
+
+        let blocked = state.send_room_message(
+            room.id,
+            "sip:member@example.com",
+            "@channel please review",
+            None,
+        );
+        assert!(blocked.is_err());
+
+        let updated = state.update_collaboration_policy(
+            "admin",
+            UpdateCollaborationPolicyRequest {
+                structured_mentions_enabled: None,
+                broad_mentions_enabled: None,
+                broad_mentions_allowed_roles: Some(vec!["admin".to_string(), "member".to_string()]),
+                broad_mentions_per_minute: Some(1),
+            },
+        );
+        assert_eq!(updated.broad_mentions_per_minute, 1);
+
+        assert!(state
+            .send_room_message(room.id, "sip:member@example.com", "@channel first", None)
+            .is_ok());
+        let rate_limited = state.send_room_message(
+            room.id,
+            "sip:member@example.com",
+            "@channel second",
+            None,
+        );
+        assert!(rate_limited.is_err());
     }
 
     #[test]

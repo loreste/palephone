@@ -587,6 +587,16 @@ export interface ServerRetentionPolicy {
   updated_at: string;
 }
 
+export interface ServerCollaborationPolicy {
+  id: string;
+  structured_mentions_enabled: boolean;
+  broad_mentions_enabled: boolean;
+  broad_mentions_allowed_roles: string[];
+  broad_mentions_per_minute: number;
+  updated_by?: string | null;
+  updated_at: string;
+}
+
 export interface ServerRoomMessage {
   id: string;
   room_id: string;
@@ -707,6 +717,30 @@ export function paleServerDiscoveryExport(
 ): Promise<{ exported_at: string; room_id?: string | null; messages: ServerRoomMessage[] }> {
   const query = roomId ? `?room_id=${encodeURIComponent(roomId)}` : "";
   return serverFetch(baseUrl, token, `/v1/admin/ediscovery/export${query}`);
+}
+
+export function paleServerGetCollaborationPolicy(
+  baseUrl: string,
+  token: string,
+): Promise<ServerCollaborationPolicy> {
+  return serverFetch(baseUrl, token, "/v1/admin/collaboration/policy");
+}
+
+export function paleServerUpdateCollaborationPolicy(
+  baseUrl: string,
+  token: string,
+  policy: Partial<Pick<
+    ServerCollaborationPolicy,
+    | "structured_mentions_enabled"
+    | "broad_mentions_enabled"
+    | "broad_mentions_allowed_roles"
+    | "broad_mentions_per_minute"
+  >>,
+): Promise<ServerCollaborationPolicy> {
+  return serverFetch(baseUrl, token, "/v1/admin/collaboration/policy", {
+    method: "PUT",
+    body: JSON.stringify(policy),
+  });
 }
 
 export function paleServerCreateDirectRoom(

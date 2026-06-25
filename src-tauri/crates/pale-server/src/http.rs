@@ -28,7 +28,8 @@ use crate::{
     FileRecord, JoinConferenceRequest,
     RoomCallMode, SendRoomMessageRequest, SetPresenceRequest, SyncCallHistoryRequest,
     UpdateCallStatusRequest, UpdateSipAccountStatusRequest, UpsertRetentionPolicyRequest,
-    AgentTransitionRequest, CreateVipCallerRequest, RequestCallbackInput,
+    UpdateCollaborationPolicyRequest, AgentTransitionRequest, CreateVipCallerRequest,
+    RequestCallbackInput,
 };
 
 type SharedState = Arc<AppState>;
@@ -78,6 +79,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/meetings", get(list_meetings).post(create_meeting))
         .route("/v1/meetings/{id}/start", post(start_meeting))
         .route("/v1/admin/governance/retention", get(list_retention_policies).put(upsert_retention_policy))
+        .route("/v1/admin/collaboration/policy", get(get_collaboration_policy).put(update_collaboration_policy))
         .route("/v1/admin/ediscovery/export", get(discovery_export))
         .route("/v1/scim/v2/Users", get(scim_list_users).post(scim_create_user))
         .route("/v1/scim/v2/Users/{id}", put(scim_update_user).delete(scim_delete_user))
@@ -933,6 +935,25 @@ async fn upsert_retention_policy(
     Ok(Json(policy))
 }
 
+async fn get_collaboration_policy(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::CollaborationPolicy>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.collaboration_policy()))
+}
+
+async fn update_collaboration_policy(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateCollaborationPolicyRequest>,
+) -> Result<Json<crate::CollaborationPolicy>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let policy = state.update_collaboration_policy(&principal, input);
+    state.record_audit_event(&principal, "collaboration_policy.updated", Some(policy.id.clone()));
+    Ok(Json(policy))
+}
+
 #[derive(serde::Deserialize)]
 struct DiscoveryExportQuery {
     room_id: Option<Uuid>,
@@ -1101,7 +1122,10 @@ async fn send_room_message(
 ) -> Result<Json<crate::RoomMessage>, ApiError> {
     let principal = authenticated_principal(&headers, &state)?;
     require_room_member(&state, id, &principal)?;
-    Ok(Json(state.send_room_message(id, &principal, &input.body, input.reply_to)))
+    state
+        .send_room_message(id, &principal, &input.body, input.reply_to)
+        .map(Json)
+        .map_err(ApiError::Conflict)
 }
 
 async fn add_room_member(
@@ -1274,7 +1298,9 @@ async fn edit_message(
     let principal = authenticated_principal(&headers, &state)?;
     let existing = state.room_message(id).ok_or(ApiError::NotFound)?;
     require_room_member(&state, existing.room_id, &principal)?;
-    let msg = state.edit_room_message(id, &input.body).ok_or(ApiError::NotFound)?;
+    let msg = state
+        .edit_room_message(id, &principal, &input.body)
+        .map_err(ApiError::Conflict)?;
     Ok(Json(msg))
 }
 
@@ -2508,7 +2534,9 @@ mod auth_tests {
                 channel_name: None,
             },
         );
-        let message = state.send_room_message(room.id, "sip:alice@example.com", "hello", None);
+        let message = state
+            .send_room_message(room.id, "sip:alice@example.com", "hello", None)
+            .unwrap();
 
         assert!(room_member(&state, room.id, "sip:alice@example.com"));
         assert!(room_member(&state, room.id, "sip:bob@example.com"));
