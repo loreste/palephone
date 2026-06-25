@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   Activity,
   ClipboardList,
@@ -91,11 +91,11 @@ export function AdminView() {
       setToken(serverToken);
       sessionStorage.setItem("pale.admin.token", serverToken);
     }
-  }, [serverToken]);
+  }, [serverToken, token]);
 
   const authenticated = token.length > 0;
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     if (!token) return;
     setLoading(true);
     setError(null);
@@ -108,15 +108,14 @@ export function AdminView() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [baseUrl, token]);
 
   useEffect(() => {
     if (authenticated) {
       refresh();
       setServerConnection(baseUrl, token);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authenticated]);
+  }, [authenticated, baseUrl, refresh, setServerConnection, token]);
 
   // Auto-refresh via SSE events + polling fallback
   useEffect(() => {
@@ -130,8 +129,7 @@ export function AdminView() {
       window.removeEventListener("pale:admin-refresh", handler);
       window.clearInterval(interval);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authenticated, token]);
+  }, [authenticated, refresh, token]);
 
   const onLogin = async (event: FormEvent) => {
     event.preventDefault();
@@ -1059,14 +1057,14 @@ function RingGroupsPanel({ baseUrl, token }: { baseUrl: string; token: string })
   const [members, setMembers] = useState("");
   const [fallback, setFallback] = useState("");
 
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
       const data = await api<any[]>(baseUrl, token, "/v1/ring-groups");
       setGroups(data);
     } catch { /* ignore */ }
-  };
+  }, [baseUrl, token]);
 
-  useEffect(() => { load(); }, [baseUrl, token]);
+  useEffect(() => { load(); }, [load]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -1181,14 +1179,14 @@ function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
     setUploading(false);
   };
 
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
       const data = await api<any[]>(baseUrl, token, "/v1/ivrs");
       setIvrs(data);
     } catch { /* ignore */ }
-  };
+  }, [baseUrl, token]);
 
-  useEffect(() => { load(); }, [baseUrl, token]);
+  useEffect(() => { load(); }, [load]);
 
   const addOption = () => {
     setOptions([...options, { digit: String(options.length + 1), label: "", destination: "", destination_type: "user" }]);
@@ -1400,14 +1398,14 @@ function CrudPanel({ baseUrl, token, endpoint, title, icon: Icon, columns, rowFn
   const [items, setItems] = useState<any[]>([]);
   const [form, setForm] = useState<Record<string, string>>({});
 
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
       const data = await api<any[]>(baseUrl, token, `/v1/${endpoint}`);
       setItems(data);
     } catch { /* ignore */ }
-  };
+  }, [baseUrl, endpoint, token]);
 
-  useEffect(() => { load(); }, [baseUrl, token]);
+  useEffect(() => { load(); }, [load]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -1483,7 +1481,7 @@ function ExtensionsPanel({ baseUrl, token }: { baseUrl: string; token: string })
   const [newUserId, setNewUserId] = useState("");
   const [newDest, setNewDest] = useState("");
 
-  const load = async () => {
+  const load = useCallback(async () => {
     const qs = showUnassignedOnly ? "?unassigned=true" : "";
     const [exts, userList] = await Promise.all([
       api<any[]>(baseUrl, token, `/v1/extensions${qs}`),
@@ -1491,8 +1489,8 @@ function ExtensionsPanel({ baseUrl, token }: { baseUrl: string; token: string })
     ]);
     setExtensions(exts);
     setUsers(userList);
-  };
-  useEffect(() => { load(); }, [baseUrl, token, showUnassignedOnly]);
+  }, [baseUrl, showUnassignedOnly, token]);
+  useEffect(() => { load(); }, [load]);
 
   const suggestNext = () => {
     const used = new Set(extensions.map(e => parseInt(e.extension)).filter(n => !isNaN(n)));
@@ -1668,15 +1666,15 @@ function DidsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
   const [userId, setUserId] = useState("");
   const [label, setLabel] = useState("");
 
-  const load = async () => {
+  const load = useCallback(async () => {
     const [didList, userList] = await Promise.all([
       api<any[]>(baseUrl, token, "/v1/dids"),
       api<any[]>(baseUrl, token, "/v1/users"),
     ]);
     setDids(didList);
     setUsers(userList);
-  };
-  useEffect(() => { load(); }, [baseUrl, token]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [baseUrl, token]);
+  useEffect(() => { load(); }, [load]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -1792,14 +1790,14 @@ function QueuesPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
   const [callbackThreshold, setCallbackThreshold] = useState("120");
   const [slaTarget, setSlaTarget] = useState("20");
 
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
       const data = await api<any[]>(baseUrl, token, "/v1/queues");
       setQueues(data);
     } catch { /* ignore */ }
-  };
+  }, [baseUrl, token]);
 
-  useEffect(() => { load(); }, [baseUrl, token]);
+  useEffect(() => { load(); }, [load]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -1956,13 +1954,13 @@ function AgentsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [agentHistory, setAgentHistory] = useState<any[]>([]);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
       const data = await api<any[]>(baseUrl, token, "/v1/agents");
       setAgents(data);
     } catch { /* ignore */ }
-  };
-  useEffect(() => { load(); }, [baseUrl, token]);
+  }, [baseUrl, token]);
+  useEffect(() => { load(); }, [load]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -2257,13 +2255,13 @@ function VipCallersPanel({ baseUrl, token }: { baseUrl: string; token: string })
   const [queueOverride, setQueueOverride] = useState("");
   const [agentOverride, setAgentOverride] = useState("");
 
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
       const data = await api<any[]>(baseUrl, token, "/v1/vip-callers");
       setVipCallers(data);
     } catch { /* ignore */ }
-  };
-  useEffect(() => { load(); }, [baseUrl, token]);
+  }, [baseUrl, token]);
+  useEffect(() => { load(); }, [load]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();

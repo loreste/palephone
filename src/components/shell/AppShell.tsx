@@ -129,7 +129,7 @@ export function AppShell() {
         }
         setWizardChecked(true);
       });
-  }, []);
+  }, [setAccount, setServerConnection]);
 
   if (!wizardChecked) return null;
 
