@@ -10,6 +10,7 @@ interface NetworkConfig {
   turnUsername: string;
   turnPassword: string;
   enableIce: boolean;
+  srtpMode: "disabled" | "optional" | "required";
   sipPort: number;
   rtpPortMin: number;
   rtpPortMax: number;
@@ -21,6 +22,7 @@ const defaultConfig: NetworkConfig = {
   turnUsername: "",
   turnPassword: "",
   enableIce: true,
+  srtpMode: "optional",
   sipPort: 5060,
   rtpPortMin: 10000,
   rtpPortMax: 20000,
@@ -37,8 +39,9 @@ export function NetworkSettings() {
           stunServer: appConfig.network.stun_server || defaultConfig.stunServer,
           turnServer: appConfig.network.turn_server || defaultConfig.turnServer,
           turnUsername: appConfig.network.turn_username || defaultConfig.turnUsername,
-          turnPassword: "",
+          turnPassword: appConfig.network.turn_password || defaultConfig.turnPassword,
           enableIce: appConfig.network.enable_ice,
+          srtpMode: appConfig.network.srtp_mode || defaultConfig.srtpMode,
           sipPort: appConfig.network.sip_port || defaultConfig.sipPort,
           rtpPortMin: appConfig.network.rtp_port_min || defaultConfig.rtpPortMin,
           rtpPortMax: appConfig.network.rtp_port_max || defaultConfig.rtpPortMax,
@@ -49,12 +52,22 @@ export function NetworkSettings() {
 
   const handleSave = async () => {
     try {
+      if (config.sipPort < 1 || config.sipPort > 65534) {
+        toast({ type: "error", title: "Invalid SIP port" });
+        return;
+      }
+      if (config.rtpPortMin < 1024 || config.rtpPortMax <= config.rtpPortMin || config.rtpPortMax > 65535) {
+        toast({ type: "error", title: "Invalid RTP port range" });
+        return;
+      }
       const appConfig = await getConfig();
       appConfig.network = {
         stun_server: config.stunServer,
         turn_server: config.turnServer,
         turn_username: config.turnUsername,
+        turn_password: config.turnPassword,
         enable_ice: config.enableIce,
+        srtp_mode: config.srtpMode,
         sip_port: config.sipPort,
         rtp_port_min: config.rtpPortMin,
         rtp_port_max: config.rtpPortMax,
@@ -104,6 +117,31 @@ export function NetworkSettings() {
         placeholder="password"
         type="password"
       />
+
+      <SectionHeader title="Media Security" />
+
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium text-secondary">SRTP Mode</label>
+        <select
+          value={config.srtpMode}
+          onChange={(e) =>
+            setConfig({
+              ...config,
+              srtpMode: e.target.value as NetworkConfig["srtpMode"],
+            })
+          }
+          className={cn(
+            "w-full bg-surface border border-border-subtle rounded-md",
+            "px-3 py-2 text-sm text-primary",
+            "focus:outline-none focus:border-border-focus focus:ring-1 focus:ring-accent/30",
+            "transition-colors"
+          )}
+        >
+          <option value="optional">Optional</option>
+          <option value="required">Required</option>
+          <option value="disabled">Disabled</option>
+        </select>
+      </div>
 
       <SectionHeader title="Ports" />
 

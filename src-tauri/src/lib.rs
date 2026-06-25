@@ -9,11 +9,11 @@ use pale_core::{
 };
 use pale_matrix::{MatrixClient, MatrixEvent, RoomSummary};
 use serde::Deserialize;
-use tauri::{AppHandle, Emitter, Manager, State};
 #[cfg(desktop)]
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 #[cfg(desktop)]
 use tauri::tray::TrayIconBuilder;
+use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Shared engine state accessible from Tauri commands
 struct EngineState {
@@ -319,7 +319,10 @@ async fn pale_server_request(input: PaleServerRequest) -> Result<serde_json::Val
         req = req.body(body.to_string());
     }
 
-    let response = req.send().await.map_err(|e| format!("Network error: {}", e))?;
+    let response = req
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {}", e))?;
     let status = response.status();
 
     if status.as_u16() == 204 {
@@ -469,7 +472,11 @@ fn toggle_video(state: State<EngineState>, call_id: i32, enabled: bool) -> Resul
 }
 
 #[tauri::command]
-fn start_screen_share(state: State<EngineState>, call_id: i32, enabled: bool) -> Result<(), String> {
+fn start_screen_share(
+    state: State<EngineState>,
+    call_id: i32,
+    enabled: bool,
+) -> Result<(), String> {
     // Screen sharing uses the same video toggle mechanism in PJSIP
     // When enabled=true, PJSIP switches the video capture device to desktop capture
     // When enabled=false, switches back to camera
@@ -828,18 +835,6 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    // Initialize PJSIP engine. A failure (e.g. no audio device, missing OS
-    // permissions) must not crash the app — chat, history, and settings still
-    // work, and SIP commands return the init error to the UI instead.
-    let (engine, engine_init_error) = match PjsipEngine::new() {
-        Ok(engine) => (Some(Arc::new(engine)), String::new()),
-        Err(e) => {
-            log::error!("Failed to initialize PJSIP engine: {e}");
-            (None, e.to_string())
-        }
-    };
-
-    let engine_for_bridge = engine.clone();
     let runtime = Arc::new(SipRuntimeState {
         default_account_id: Mutex::new(None),
     });
@@ -848,10 +843,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
-        .manage(EngineState {
-            engine,
-            init_error: engine_init_error,
-        })
         .manage(runtime)
         .invoke_handler(tauri::generate_handler![
             // SIP commands
@@ -909,16 +900,35 @@ pub fn run() {
             let config_path = app_data.join("config.json");
             let config = load_config(&config_path);
             log::info!("Config loaded from {:?}", config_path);
+            let network_config = config.network.clone();
             app.manage(ConfigState {
                 config: Mutex::new(config),
                 path: config_path,
             });
 
+            // Initialize PJSIP after loading persisted media settings. A failure
+            // must not crash the app; SIP commands report the init error to the UI.
+            let (engine, engine_init_error) = match PjsipEngine::new(network_config) {
+                Ok(engine) => (Some(Arc::new(engine)), String::new()),
+                Err(e) => {
+                    log::error!("Failed to initialize PJSIP engine: {e}");
+                    (None, e.to_string())
+                }
+            };
+            let engine_for_bridge = engine.clone();
+            app.manage(EngineState {
+                engine,
+                init_error: engine_init_error,
+            });
+
             // Initialize call history database
             let db_path = app_data.join("call_history.db");
-            let history_db = Arc::new(Mutex::new(CallHistoryDb::open(&db_path).map_err(
-                |e| format!("failed to open call history database at {}: {e}", db_path.display()),
-            )?));
+            let history_db = Arc::new(Mutex::new(CallHistoryDb::open(&db_path).map_err(|e| {
+                format!(
+                    "failed to open call history database at {}: {e}",
+                    db_path.display()
+                )
+            })?));
             app.manage(HistoryState(history_db.clone()));
             log::info!("Call history DB opened at {:?}", db_path);
             let call_tracker = Arc::new(Mutex::new(HashMap::new()));

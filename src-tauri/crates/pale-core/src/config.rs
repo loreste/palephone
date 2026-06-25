@@ -101,10 +101,28 @@ pub struct NetworkPersist {
     pub stun_server: String,
     pub turn_server: String,
     pub turn_username: String,
+    #[serde(default)]
+    pub turn_password: String,
     pub enable_ice: bool,
+    #[serde(default)]
+    pub srtp_mode: SrtpMode,
     pub sip_port: u16,
     pub rtp_port_min: u16,
     pub rtp_port_max: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SrtpMode {
+    Disabled,
+    Optional,
+    Required,
+}
+
+impl Default for SrtpMode {
+    fn default() -> Self {
+        Self::Optional
+    }
 }
 
 impl Default for NetworkPersist {
@@ -113,7 +131,9 @@ impl Default for NetworkPersist {
             stun_server: "stun:stun.l.google.com:19302".into(),
             turn_server: String::new(),
             turn_username: String::new(),
+            turn_password: String::new(),
             enable_ice: true,
+            srtp_mode: SrtpMode::Optional,
             sip_port: 5060,
             rtp_port_min: 10000,
             rtp_port_max: 20000,

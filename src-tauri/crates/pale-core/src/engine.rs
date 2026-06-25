@@ -5,6 +5,7 @@ use std::thread;
 
 use tokio::sync::broadcast;
 
+use crate::config::{NetworkPersist, SrtpMode};
 use crate::error::{PaleError, PaleResult};
 use crate::events::PaleEvent;
 use crate::types::*;
@@ -86,7 +87,7 @@ pub struct PjsipEngine {
 
 impl PjsipEngine {
     /// Create and start the PJSIP engine.
-    pub fn new() -> PaleResult<Self> {
+    pub fn new(network: NetworkPersist) -> PaleResult<Self> {
         let (event_tx, _) = broadcast::channel(256);
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
         let running = Arc::new(AtomicBool::new(true));
@@ -101,7 +102,7 @@ impl PjsipEngine {
         let handle = thread::Builder::new()
             .name("pjsip-worker".into())
             .spawn(move || {
-                Self::worker_thread(cmd_rx, running_clone);
+                Self::worker_thread(cmd_rx, running_clone, network);
             })
             .map_err(|e| PaleError::Thread(e.to_string()))?;
 
@@ -146,6 +147,7 @@ impl PjsipEngine {
     fn worker_thread(
         cmd_rx: std::sync::mpsc::Receiver<EngineCommand>,
         running: Arc<AtomicBool>,
+        network: NetworkPersist,
     ) {
         log::info!("PJSIP worker thread starting...");
 
@@ -162,10 +164,21 @@ impl PjsipEngine {
             // Configure pjsua with our callbacks
             let mut cfg: pjsip_sys::pjsua_config = std::mem::zeroed();
             pjsip_sys::pjsua_config_default(&mut cfg);
+            let stun_strings = match apply_stun_config(&mut cfg, &network) {
+                Ok(strings) => strings,
+                Err(message) => {
+                    emit_event(PaleEvent::Error { message });
+                    pjsip_sys::pjsua_destroy();
+                    return;
+                }
+            };
             cfg.cb.on_reg_state2 = Some(on_reg_state2);
             cfg.cb.on_incoming_call = Some(on_incoming_call);
             cfg.cb.on_call_state = Some(on_call_state);
             cfg.cb.on_call_media_state = Some(on_call_media_state);
+            let (use_srtp, secure_signaling) = srtp_policy(network.srtp_mode, false);
+            cfg.use_srtp = use_srtp;
+            cfg.srtp_secure_signaling = secure_signaling;
 
             // Logging config — reduce verbosity
             let mut log_cfg: pjsip_sys::pjsua_logging_config = std::mem::zeroed();
@@ -178,8 +191,18 @@ impl PjsipEngine {
             pjsip_sys::pjsua_media_config_default(&mut media_cfg);
             media_cfg.ec_tail_len = 256;
             media_cfg.no_vad = 1;
+            let turn_strings = match apply_media_config(&mut media_cfg, &network) {
+                Ok(strings) => strings,
+                Err(message) => {
+                    emit_event(PaleEvent::Error { message });
+                    pjsip_sys::pjsua_destroy();
+                    return;
+                }
+            };
 
             let status = pjsip_sys::pjsua_init(&cfg, &log_cfg, &media_cfg);
+            drop(stun_strings);
+            drop(turn_strings);
             if status != 0 {
                 emit_event(PaleEvent::Error {
                     message: format!("pjsua_init failed with status {}", status),
@@ -191,31 +214,31 @@ impl PjsipEngine {
             // Add UDP transport (port 5060)
             let mut tp_cfg: pjsip_sys::pjsua_transport_config = std::mem::zeroed();
             pjsip_sys::pjsua_transport_config_default(&mut tp_cfg);
-            tp_cfg.port = 5060;
+            tp_cfg.port = network.sip_port as u32;
             let status = pjsip_sys::pjsua_transport_create(
                 pjsip_sys::pjsip_transport_type_e_PJSIP_TRANSPORT_UDP,
                 &tp_cfg,
                 std::ptr::null_mut(),
             );
             if status == 0 {
-                log::info!("UDP transport created on port 5060");
+                log::info!("UDP transport created on port {}", network.sip_port);
             }
 
-            // Add TCP transport (port 5060)
+            // Add TCP transport
             pjsip_sys::pjsua_transport_config_default(&mut tp_cfg);
-            tp_cfg.port = 5060;
+            tp_cfg.port = network.sip_port as u32;
             let status = pjsip_sys::pjsua_transport_create(
                 pjsip_sys::pjsip_transport_type_e_PJSIP_TRANSPORT_TCP,
                 &tp_cfg,
                 std::ptr::null_mut(),
             );
             if status == 0 {
-                log::info!("TCP transport created on port 5060");
+                log::info!("TCP transport created on port {}", network.sip_port);
             }
 
             // Add TLS transport (port 5061) for encrypted signaling
             pjsip_sys::pjsua_transport_config_default(&mut tp_cfg);
-            tp_cfg.port = 5061;
+            tp_cfg.port = network.sip_port.saturating_add(1) as u32;
             let status = pjsip_sys::pjsua_transport_create(
                 pjsip_sys::pjsip_transport_type_e_PJSIP_TRANSPORT_TLS,
                 &tp_cfg,
@@ -247,7 +270,7 @@ impl PjsipEngine {
                     match cmd {
                         EngineCommand::Shutdown => break,
                         EngineCommand::AddAccount(config) => {
-                            Self::handle_add_account(config);
+                            Self::handle_add_account(config, &network);
                         }
                         EngineCommand::RemoveAccount(id) => {
                             Self::handle_remove_account(id);
@@ -313,7 +336,7 @@ impl PjsipEngine {
 
     // ─── Command Handlers ───
 
-    fn handle_add_account(config: SipAccountConfig) {
+    fn handle_add_account(config: SipAccountConfig, network: &NetworkPersist) {
         unsafe {
             let mut acc_cfg: pjsip_sys::pjsua_acc_config = std::mem::zeroed();
             pjsip_sys::pjsua_acc_config_default(&mut acc_cfg);
@@ -376,14 +399,16 @@ impl PjsipEngine {
                 }
             }
 
-            // Enable SRTP for media encryption
-            // PJSUA_DEFAULT_SRTP_SECURE_SIGNALING = 0 means SRTP is optional
-            // Set to 1 to require secure signaling (TLS) for SRTP
-            acc_cfg.use_srtp = pjsip_sys::pjmedia_srtp_use_PJMEDIA_SRTP_OPTIONAL;
-            acc_cfg.srtp_secure_signaling = match config.transport {
-                Transport::Tls => 1, // Require TLS for SRTP when using TLS
-                _ => 0,              // SRTP optional without TLS signaling
-            };
+            let (rtp_port, rtp_port_range) =
+                normalize_rtp_port_range(network.rtp_port_min, network.rtp_port_max);
+            acc_cfg.rtp_cfg.port = rtp_port as u32;
+            acc_cfg.rtp_cfg.port_range = rtp_port_range as u32;
+            acc_cfg.rtp_cfg.randomize_port = 1;
+
+            let (use_srtp, secure_signaling) =
+                srtp_policy(network.srtp_mode, matches!(config.transport, Transport::Tls));
+            acc_cfg.use_srtp = use_srtp;
+            acc_cfg.srtp_secure_signaling = secure_signaling;
 
             let mut acc_id: pjsip_sys::pjsua_acc_id = -1;
             let status = pjsip_sys::pjsua_acc_add(&acc_cfg, 1, &mut acc_id);
@@ -711,6 +736,96 @@ impl Drop for PjsipEngine {
     }
 }
 
+fn srtp_policy(
+    mode: SrtpMode,
+    using_tls: bool,
+) -> (pjsip_sys::pjmedia_srtp_use, i32) {
+    match mode {
+        SrtpMode::Disabled => (pjsip_sys::pjmedia_srtp_use_PJMEDIA_SRTP_DISABLED, 0),
+        SrtpMode::Optional => (
+            pjsip_sys::pjmedia_srtp_use_PJMEDIA_SRTP_OPTIONAL,
+            if using_tls { 1 } else { 0 },
+        ),
+        SrtpMode::Required => (pjsip_sys::pjmedia_srtp_use_PJMEDIA_SRTP_MANDATORY, 1),
+    }
+}
+
+fn normalize_rtp_port_range(min: u16, max: u16) -> (u16, u16) {
+    if min >= 1024 && max > min {
+        (min, max - min)
+    } else {
+        (10000, 10000)
+    }
+}
+
+unsafe fn apply_stun_config(
+    cfg: &mut pjsip_sys::pjsua_config,
+    network: &NetworkPersist,
+) -> Result<Vec<CString>, String> {
+    let mut stun_servers = Vec::new();
+    let stun_server = network.stun_server.trim();
+    if !stun_server.is_empty() {
+        let value = CString::new(stun_server)
+            .map_err(|_| "STUN server contains an interior NUL byte".to_string())?;
+        cfg.stun_srv[0] = pj_str_from_cstring(&value);
+        stun_servers.push(value);
+    }
+    cfg.stun_srv_cnt = stun_servers.len() as u32;
+    cfg.stun_ignore_failure = 1;
+    Ok(stun_servers)
+}
+
+unsafe fn apply_media_config(
+    media_cfg: &mut pjsip_sys::pjsua_media_config,
+    network: &NetworkPersist,
+) -> Result<Vec<CString>, String> {
+    media_cfg.enable_ice = network.enable_ice as pjsip_sys::pj_bool_t;
+    let mut strings = Vec::new();
+    let turn_server = network.turn_server.trim();
+    if turn_server.is_empty() {
+        return Ok(strings);
+    }
+
+    media_cfg.enable_turn = 1;
+    media_cfg.turn_server = push_pj_string(&mut strings, turn_server, "TURN server")?;
+    media_cfg.turn_conn_type = pjsip_sys::pj_turn_tp_type_PJ_TURN_TP_UDP;
+
+    let username = network.turn_username.trim();
+    if !username.is_empty() && !network.turn_password.is_empty() {
+        let username = push_pj_string(&mut strings, username, "TURN username")?;
+        let password = push_pj_string(&mut strings, &network.turn_password, "TURN password")?;
+        media_cfg.turn_auth_cred.type_ =
+            pjsip_sys::pj_stun_auth_cred_type_PJ_STUN_AUTH_CRED_STATIC;
+        media_cfg.turn_auth_cred.data.static_cred =
+            pjsip_sys::pj_stun_auth_cred__bindgen_ty_1__bindgen_ty_1 {
+                realm: pjsip_sys::pj_str_t {
+                    ptr: std::ptr::null_mut(),
+                    slen: 0,
+                },
+                username,
+                data_type: pjsip_sys::pj_stun_passwd_type_PJ_STUN_PASSWD_PLAIN,
+                data: password,
+                nonce: pjsip_sys::pj_str_t {
+                    ptr: std::ptr::null_mut(),
+                    slen: 0,
+                },
+            };
+    }
+
+    Ok(strings)
+}
+
+fn push_pj_string(
+    strings: &mut Vec<CString>,
+    value: &str,
+    field_name: &str,
+) -> Result<pjsip_sys::pj_str_t, String> {
+    let value =
+        CString::new(value).map_err(|_| format!("{field_name} contains an interior NUL byte"))?;
+    strings.push(value);
+    Ok(unsafe { pj_str_from_cstring(strings.last().expect("just pushed")) })
+}
+
 // ─── PJSIP C Callbacks ───
 
 /// Helper: create a pj_str_t from a CString (borrows the CString's data)
@@ -883,6 +998,33 @@ fn parse_sip_identity(identity: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalizes_valid_rtp_range() {
+        assert_eq!(normalize_rtp_port_range(12000, 14000), (12000, 2000));
+    }
+
+    #[test]
+    fn falls_back_for_invalid_rtp_range() {
+        assert_eq!(normalize_rtp_port_range(20000, 10000), (10000, 10000));
+        assert_eq!(normalize_rtp_port_range(80, 10000), (10000, 10000));
+    }
+
+    #[test]
+    fn maps_srtp_modes() {
+        assert_eq!(
+            srtp_policy(SrtpMode::Disabled, false),
+            (pjsip_sys::pjmedia_srtp_use_PJMEDIA_SRTP_DISABLED, 0)
+        );
+        assert_eq!(
+            srtp_policy(SrtpMode::Optional, true),
+            (pjsip_sys::pjmedia_srtp_use_PJMEDIA_SRTP_OPTIONAL, 1)
+        );
+        assert_eq!(
+            srtp_policy(SrtpMode::Required, false),
+            (pjsip_sys::pjmedia_srtp_use_PJMEDIA_SRTP_MANDATORY, 1)
+        );
+    }
 
     #[test]
     fn test_parse_sip_identity() {

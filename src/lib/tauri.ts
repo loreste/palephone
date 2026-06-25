@@ -109,7 +109,9 @@ export interface AppConfig {
     stun_server: string;
     turn_server: string;
     turn_username: string;
+    turn_password: string;
     enable_ice: boolean;
+    srtp_mode: "disabled" | "optional" | "required";
     sip_port: number;
     rtp_port_min: number;
     rtp_port_max: number;

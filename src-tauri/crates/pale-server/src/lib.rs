@@ -240,6 +240,7 @@ pub struct AppState {
     vip_callers: ShardedMap<Uuid, VipCaller>,
     message_reactions: ShardedMap<Uuid, Vec<MessageReaction>>,
     user_favorites: ShardedMap<String, Vec<String>>,
+    user_create_lock: std::sync::Mutex<()>,
     agent_assignment_lock: std::sync::Mutex<()>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
     rate_limits: ShardedMap<String, RateLimitBucket>,
@@ -375,6 +376,7 @@ impl AppState {
             vip_callers: ShardedMap::new(),
             message_reactions: ShardedMap::new(),
             user_favorites: ShardedMap::new(),
+            user_create_lock: std::sync::Mutex::new(()),
             agent_assignment_lock: std::sync::Mutex::new(()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
             rate_limits: ShardedMap::new(),
@@ -812,13 +814,31 @@ impl AppState {
     }
 
     pub fn user_exists(&self, sip_uri: &str) -> bool {
-        self.users.values().iter().any(|u| u.sip_uri == sip_uri)
+        let Some(normalized) = normalize_sip_uri(sip_uri) else {
+            return false;
+        };
+        self.users
+            .values()
+            .iter()
+            .any(|u| normalize_sip_uri(&u.sip_uri).as_deref() == Some(normalized.as_str()))
     }
 
     pub fn create_user(&self, input: CreateUserRequest) -> Result<User, String> {
-        // Enforce unique SIP URI
-        if self.user_exists(&input.sip_uri) {
-            return Err(format!("User with SIP URI {} already exists", input.sip_uri));
+        let normalized_sip_uri = normalize_sip_uri(&input.sip_uri)
+            .ok_or_else(|| format!("Invalid SIP URI {}", input.sip_uri))?;
+
+        let _create_guard = self
+            .user_create_lock
+            .lock()
+            .map_err(|_| "user creation lock poisoned".to_string())?;
+
+        if self.users.values().iter().any(|u| {
+            normalize_sip_uri(&u.sip_uri).as_deref() == Some(normalized_sip_uri.as_str())
+        }) {
+            return Err(format!(
+                "User with SIP URI {} already exists",
+                normalized_sip_uri
+            ));
         }
 
         let password_hash = input.password.as_deref().map(hash_password);
@@ -826,7 +846,7 @@ impl AppState {
         let user = User {
             id: Uuid::new_v4(),
             display_name: input.display_name.clone(),
-            sip_uri: input.sip_uri.clone(),
+            sip_uri: normalized_sip_uri.clone(),
             matrix_user_id: input.matrix_user_id,
             password_hash,
             role: input.role.unwrap_or_else(|| "user".to_string()),
@@ -849,7 +869,7 @@ impl AppState {
 
         // Auto-provision SIP account when creating a user with a password
         if let Some(password) = &input.password {
-            if let Some((username, domain)) = split_sip_aor_simple(&input.sip_uri) {
+            if let Some((username, domain)) = split_sip_aor_simple(&user.sip_uri) {
                 self.upsert_sip_account(CreateSipAccountRequest {
                     username: username.clone(),
                     domain: domain.clone(),
@@ -903,7 +923,10 @@ impl AppState {
                         log::info!("Auto-provisioned AD user: {} (admin={})", ldap_user.sip_uri, ldap_user.is_admin);
                     }
                     // Update role from AD group membership
-                    if let Some(existing) = self.users.values().into_iter().find(|u| u.sip_uri == ldap_user.sip_uri) {
+                    let normalized_ldap_uri = normalize_sip_uri(&ldap_user.sip_uri);
+                    if let Some(existing) = self.users.values().into_iter().find(|u| {
+                        normalize_sip_uri(&u.sip_uri) == normalized_ldap_uri
+                    }) {
                         let new_role = if ldap_user.is_admin { "admin" } else { "user" };
                         if existing.role != new_role {
                             self.update_user_role(existing.id, new_role);
@@ -915,11 +938,18 @@ impl AppState {
         }
 
         // Local auth
+        let normalized_login_uri = normalize_sip_uri(sip_uri);
         let user = self
             .users
             .values()
             .into_iter()
-            .find(|u| u.sip_uri == sip_uri || split_sip_aor_simple(&u.sip_uri).map(|(u, _)| u).as_deref() == Some(&username))
+            .find(|u| {
+                normalize_sip_uri(&u.sip_uri) == normalized_login_uri
+                    || split_sip_aor_simple(&u.sip_uri)
+                        .map(|(u, _)| u)
+                        .as_deref()
+                        == Some(&username)
+            })
             .ok_or(AuthError::Unauthorized)?;
 
         // Verify password locally unless LDAP itself verified it. LDAP being
@@ -2203,10 +2233,12 @@ impl AppState {
         let sip_username = input.extension_number.as_deref()
             .unwrap_or(&default_username);
         let sip_uri = format!("sip:{}@{}", sip_username, input.sip_domain);
+        let normalized_sip_uri = normalize_sip_uri(&sip_uri)
+            .ok_or_else(|| format!("Invalid SIP URI {}", sip_uri))?;
 
         // Check uniqueness
-        if self.users.values().iter().any(|u| u.sip_uri == sip_uri) {
-            return Err(format!("SIP URI {} already taken", sip_uri));
+        if self.user_exists(&normalized_sip_uri) {
+            return Err(format!("SIP URI {} already taken", normalized_sip_uri));
         }
         if let Some(ref ext) = input.extension_number {
             if self.extensions.get(&ext.to_string()).is_some() {
@@ -2217,7 +2249,7 @@ impl AppState {
         // Create user (auto-provisions SIP account)
         let user = self.create_user(CreateUserRequest {
             display_name: input.display_name.clone(),
-            sip_uri: sip_uri.clone(),
+            sip_uri: normalized_sip_uri.clone(),
             matrix_user_id: None,
             password: Some(input.password.clone()),
             role: input.role,
@@ -2227,7 +2259,7 @@ impl AppState {
         let extension = if let Some(ext_num) = input.extension_number {
             Some(self.create_extension(CreateExtensionRequest {
                 extension: ext_num,
-                destination: sip_uri.clone(),
+                destination: normalized_sip_uri.clone(),
                 destination_type: Some("user".to_string()),
                 label: Some(input.display_name.clone()),
                 user_id: Some(user.id),
@@ -4410,10 +4442,32 @@ pub struct CreateCannedResponseRequest {
 
 /// Parse "sip:user@domain" into (user, domain)
 fn split_sip_aor_simple(aor: &str) -> Option<(String, String)> {
-    let aor = aor.strip_prefix("sip:").or_else(|| aor.strip_prefix("sips:"))?;
+    let trimmed = aor.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let aor = if lower.starts_with("sip:") {
+        &trimmed[4..]
+    } else if lower.starts_with("sips:") {
+        &trimmed[5..]
+    } else {
+        return None;
+    };
     let bare = aor.split(';').next()?.split('?').next()?;
     let (username, domain) = bare.split_once('@')?;
     Some((username.to_string(), domain.to_string()))
+}
+
+fn normalize_sip_uri(aor: &str) -> Option<String> {
+    let (username, domain) = split_sip_aor_simple(aor.trim())?;
+    let username = username.trim();
+    let domain = domain.trim();
+    if username.is_empty() || domain.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "sip:{}@{}",
+        username.to_ascii_lowercase(),
+        domain.to_ascii_lowercase()
+    ))
 }
 
 pub fn safe_filename(name: &str) -> String {
@@ -4784,6 +4838,36 @@ mod tests {
             "alice"
         );
         assert!(state.sip_accounts().is_empty());
+    }
+
+    #[test]
+    fn users_are_unique_by_normalized_sip_uri() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-test-unique-users"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+
+        let user = state
+            .create_user(CreateUserRequest {
+                display_name: "Alice".to_string(),
+                sip_uri: "SIP:Alice@Example.COM;transport=tcp".to_string(),
+                matrix_user_id: None,
+                password: Some("test123".to_string()),
+                role: None,
+            })
+            .unwrap();
+        assert_eq!(user.sip_uri, "sip:alice@example.com");
+
+        let duplicate = state.create_user(CreateUserRequest {
+            display_name: "Alice Duplicate".to_string(),
+            sip_uri: "sip:alice@example.com".to_string(),
+            matrix_user_id: None,
+            password: Some("test123".to_string()),
+            role: None,
+        });
+        assert!(duplicate.is_err());
+        assert_eq!(state.users().len(), 1);
     }
 
     #[test]
