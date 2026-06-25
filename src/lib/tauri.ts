@@ -406,6 +406,78 @@ export function paleServerGetUsers(
   return serverFetch(baseUrl, token, "/v1/users");
 }
 
+export interface ConferenceParticipant {
+  user_id: string;
+  sip_uri: string;
+  role: "host" | "moderator" | "member";
+  bridge_slot: number | null;
+  joined_at: string;
+}
+
+export interface ConferenceSummary {
+  id: string;
+  title: string;
+  mode: "audio" | "video" | "webinar";
+  participants: ConferenceParticipant[];
+  active: boolean;
+  created_at: string;
+}
+
+export interface RingGroupSummary {
+  id: string;
+  name: string;
+  extension: string;
+  strategy: "simultaneous" | "sequential" | "random";
+  ring_timeout: number;
+  members: string[];
+  fallback_uri: string | null;
+  enabled: boolean;
+  created_at: string;
+}
+
+export interface CallQueueSummary {
+  id: string;
+  name: string;
+  extension: string;
+  strategy: string;
+  max_wait_time: number;
+  max_queue_size: number;
+  wrap_up_time: number;
+  announce_position: boolean;
+  announce_interval: number;
+  hold_music_file_id: string | null;
+  overflow_destination: string | null;
+  agents: { agent_uri: string; priority: number; skills: string[]; state: string; calls_handled: number; penalty: number }[];
+  enabled: boolean;
+  created_at: string;
+  callback_enabled: boolean;
+  callback_threshold_secs: number;
+  sla_target_secs: number;
+}
+
+export interface PagingGroupSummary {
+  id: string;
+  name: string;
+  extension: string;
+  members: string[];
+}
+
+export function paleServerGetConferences(baseUrl: string, token: string): Promise<ConferenceSummary[]> {
+  return serverFetch(baseUrl, token, "/v1/conferences");
+}
+
+export function paleServerGetRingGroups(baseUrl: string, token: string): Promise<RingGroupSummary[]> {
+  return serverFetch(baseUrl, token, "/v1/ring-groups");
+}
+
+export function paleServerGetQueues(baseUrl: string, token: string): Promise<CallQueueSummary[]> {
+  return serverFetch(baseUrl, token, "/v1/queues");
+}
+
+export function paleServerGetPagingGroups(baseUrl: string, token: string): Promise<PagingGroupSummary[]> {
+  return serverFetch(baseUrl, token, "/v1/paging-groups");
+}
+
 // ─── Call History Sync ───
 
 export interface ServerCallHistoryEntry {

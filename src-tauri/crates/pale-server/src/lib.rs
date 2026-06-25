@@ -3000,6 +3000,15 @@ impl AppState {
             .collect()
     }
 
+    pub fn room_message(&self, id: Uuid) -> Option<RoomMessage> {
+        self.room_messages
+            .read()
+            .expect("room messages lock poisoned")
+            .iter()
+            .find(|m| m.id == id)
+            .cloned()
+    }
+
     /// Returns true if Postgres is connected and healthy.
     pub fn pg_healthy(&self) -> bool {
         if self.pg.is_none() {

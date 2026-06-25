@@ -1,18 +1,19 @@
-import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Users, Reply, Pencil, Pin, Forward, Check, CheckCheck } from "lucide-react";
+import { useState, useRef, useEffect, useCallback, type ReactNode } from "react";
+import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Users, Reply, Pencil, Pin, Forward, Check, CheckCheck, Search, Radio } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useChatStore, type ChatMessage, type RoomSummary } from "@/store/chatStore";
 import { useMatrixStore } from "@/store/matrixStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
-import { matrixSendMessage, matrixSetTyping, matrixCreateDm, paleServerGetMessages, makeCall as ipcMakeCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, type ServerRoom, type ServerUser } from "@/lib/tauri";
+import { matrixSendMessage, matrixSetTyping, matrixCreateDm, paleServerGetMessages, makeCall as ipcMakeCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerGetConferences, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, type ServerRoom, type ServerUser, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary } from "@/lib/tauri";
 import { toast } from "@/components/ui/Toast";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
 import { EncryptionBadge } from "@/components/encryption/EncryptionBadge";
 import { MatrixLoginView } from "@/components/auth/MatrixLoginView";
 
 const QUICK_REACTIONS = ["\u{1F44D}", "\u{2764}\u{FE0F}", "\u{1F602}", "\u{1F44F}", "\u{1F914}"];
+const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
 const EMOJI_CATEGORIES: { label: string; emojis: string[] }[] = [
   { label: "Smileys", emojis: ["\u{1F600}", "\u{1F603}", "\u{1F604}", "\u{1F601}", "\u{1F606}", "\u{1F605}", "\u{1F602}", "\u{1F923}", "\u{1F60A}", "\u{1F607}", "\u{1F970}", "\u{1F60D}", "\u{1F618}", "\u{1F617}", "\u{1F914}", "\u{1F928}"] },
@@ -37,6 +38,21 @@ function serverRoomToSummary(room: ServerRoom, currentSipUri?: string | null, na
     last_message_ts: null,
     unread_count: 0,
   };
+}
+
+function sipUriForExtension(extension: string, currentSipUri?: string | null): string {
+  if (extension.startsWith("sip:")) return extension;
+  const domain = currentSipUri?.split("@")[1] ?? "pale.local";
+  return `sip:${extension}@${domain}`;
+}
+
+function groupMatches(query: string, ...values: Array<string | string[] | undefined | null>): boolean {
+  if (!query) return true;
+  return values.some((value) => {
+    if (!value) return false;
+    const text = Array.isArray(value) ? value.join(" ") : value;
+    return text.toLowerCase().includes(query);
+  });
 }
 
 function sanitizeHtml(html: string): string {
@@ -138,9 +154,41 @@ function ConversationList({
   onSelect: (id: string) => void;
 }) {
   const [showNewChat, setShowNewChat] = useState(false);
+  const [query, setQuery] = useState("");
+  const [conferences, setConferences] = useState<ConferenceSummary[]>([]);
+  const [ringGroups, setRingGroups] = useState<RingGroupSummary[]>([]);
+  const [queues, setQueues] = useState<CallQueueSummary[]>([]);
+  const [pagingGroups, setPagingGroups] = useState<PagingGroupSummary[]>([]);
 
   const { baseUrl, token, connected } = useServerStore();
+  const currentSipUri = useAccountStore((s) => s.account?.sipUri);
   const upsertRoom = useChatStore((s) => s.upsertRoom);
+
+  useEffect(() => {
+    if (!connected || !baseUrl || !token) {
+      setConferences([]);
+      setRingGroups([]);
+      setQueues([]);
+      setPagingGroups([]);
+      return;
+    }
+
+    let cancelled = false;
+    Promise.allSettled([
+      paleServerGetConferences(baseUrl, token),
+      paleServerGetRingGroups(baseUrl, token),
+      paleServerGetQueues(baseUrl, token),
+      paleServerGetPagingGroups(baseUrl, token),
+    ]).then(([conferenceResult, ringResult, queueResult, pagingResult]) => {
+      if (cancelled) return;
+      setConferences(conferenceResult.status === "fulfilled" ? conferenceResult.value : []);
+      setRingGroups(ringResult.status === "fulfilled" ? ringResult.value : []);
+      setQueues(queueResult.status === "fulfilled" ? queueResult.value : []);
+      setPagingGroups(pagingResult.status === "fulfilled" ? pagingResult.value : []);
+    });
+
+    return () => { cancelled = true; };
+  }, [connected, baseUrl, token]);
 
   const handleNewDm = async (user: { display_name: string; sip_uri: string; matrix_user_id?: string | null }) => {
     try {
@@ -175,6 +223,46 @@ function ConversationList({
     }
   };
 
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredRooms = rooms.filter((room) =>
+    groupMatches(normalizedQuery, room.name, room.last_message ?? undefined)
+  );
+  const filteredConferences = conferences.filter((conf) =>
+    groupMatches(normalizedQuery, conf.title, conf.mode, conf.participants.map((p) => p.sip_uri))
+  );
+  const filteredRingGroups = ringGroups.filter((group) =>
+    groupMatches(normalizedQuery, group.name, group.extension, group.members)
+  );
+  const filteredQueues = queues.filter((queue) =>
+    groupMatches(normalizedQuery, queue.name, queue.extension, queue.agents.map((agent) => agent.agent_uri))
+  );
+  const filteredPagingGroups = pagingGroups.filter((group) =>
+    groupMatches(normalizedQuery, group.name, group.extension, group.members)
+  );
+  const hasAnyGroupResults = filteredConferences.length > 0 || filteredRingGroups.length > 0 || filteredQueues.length > 0 || filteredPagingGroups.length > 0;
+
+  const joinConference = async (conf: ConferenceSummary) => {
+    if (!connected || !baseUrl || !token) return;
+    try {
+      await paleServerApi(baseUrl, token, `/v1/conferences/${conf.id}/participants`, {
+        method: "POST",
+        body: {
+          user_id: NIL_UUID,
+          sip_uri: currentSipUri ?? "sip:unknown@local",
+          role: "member",
+        },
+      });
+      await ipcMakeCall(`sip:conf-${conf.id}@pale.local`);
+    } catch (err) {
+      toast({ type: "error", title: "Failed to join conference", description: String(err) });
+    }
+  };
+
+  const callExtension = (extension: string, label: string) => {
+    ipcMakeCall(sipUriForExtension(extension, currentSipUri))
+      .catch(() => toast({ type: "error", title: `Failed to call ${label}` }));
+  };
+
   return (
     <>
       <div className="px-4 pt-4 pb-2 flex items-center justify-between">
@@ -190,10 +278,25 @@ function ConversationList({
 
       {showNewChat && <NewChatInput onSubmit={handleNewDm} onCreateRoom={handleCreateRoom} />}
 
-      <ActiveConferences />
+      <div className="px-4 pb-2">
+        <div className="relative">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-tertiary" />
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search chats, call groups, conferences..."
+            className={cn(
+              "w-full bg-surface border border-border-subtle rounded-lg",
+              "pl-9 pr-3 py-2 text-sm text-primary placeholder:text-tertiary",
+              "focus:outline-none focus:border-border-focus"
+            )}
+          />
+        </div>
+      </div>
 
       <div className="flex-1 overflow-y-auto px-2">
-        {rooms.length === 0 && !showNewChat ? (
+        {rooms.length === 0 && !hasAnyGroupResults && !showNewChat ? (
           <div className="flex flex-col items-center justify-center h-48 gap-2">
             <MessageSquare size={32} className="text-tertiary" />
             <p className="text-sm text-tertiary">No conversations yet</p>
@@ -205,38 +308,147 @@ function ConversationList({
             </button>
           </div>
         ) : (
-          rooms.map((room) => (
-            <button
-              key={room.room_id}
-              onClick={() => onSelect(room.room_id)}
-              className={cn(
-                "w-full flex items-center gap-3 px-3 py-3 rounded-lg",
-                "hover:bg-elevated transition-colors text-left"
-              )}
-            >
-              <div className="relative">
-                <CallerAvatar name={room.name} size="sm" />
-                {room.is_direct && <PresenceDot name={room.name} />}
+          <>
+            {filteredRooms.length > 0 && (
+              <div className="pb-2">
+                <p className="px-3 py-1 text-[10px] font-semibold uppercase text-tertiary">Conversations</p>
+                {filteredRooms.map((room) => (
+                  <button
+                    key={room.room_id}
+                    onClick={() => onSelect(room.room_id)}
+                    className={cn(
+                      "w-full flex items-center gap-3 px-3 py-3 rounded-lg",
+                      "hover:bg-elevated transition-colors text-left"
+                    )}
+                  >
+                    <div className="relative">
+                      <CallerAvatar name={room.name} size="sm" />
+                      {room.is_direct && <PresenceDot name={room.name} />}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1">
+                        {room.is_encrypted && <EncryptionBadge level="encrypted" />}
+                        <span className="text-sm font-medium text-primary truncate">{room.name}</span>
+                      </div>
+                      {room.last_message && (
+                        <p className="text-xs text-tertiary truncate">{room.last_message}</p>
+                      )}
+                    </div>
+                    {room.unread_count > 0 && (
+                      <span className="shrink-0 w-5 h-5 rounded-full bg-accent text-white text-[10px] font-bold flex items-center justify-center">
+                        {room.unread_count > 99 ? "99+" : room.unread_count}
+                      </span>
+                    )}
+                  </button>
+                ))}
               </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-1">
-                  {room.is_encrypted && <EncryptionBadge level="encrypted" />}
-                  <span className="text-sm font-medium text-primary truncate">{room.name}</span>
-                </div>
-                {room.last_message && (
-                  <p className="text-xs text-tertiary truncate">{room.last_message}</p>
-                )}
+            )}
+
+            {filteredConferences.length > 0 && (
+              <div className="pb-2">
+                <p className="px-3 py-1 text-[10px] font-semibold uppercase text-tertiary">Conferences</p>
+                {filteredConferences.map((conf) => (
+                  <GroupResultButton
+                    key={conf.id}
+                    title={conf.title}
+                    subtitle={`${conf.active ? "Active" : "Available"} ${conf.mode} conference · ${conf.participants.length} participant${conf.participants.length === 1 ? "" : "s"}`}
+                    icon={<Users size={15} />}
+                    actionLabel="Join"
+                    onAction={() => joinConference(conf)}
+                  />
+                ))}
               </div>
-              {room.unread_count > 0 && (
-                <span className="shrink-0 w-5 h-5 rounded-full bg-accent text-white text-[10px] font-bold flex items-center justify-center">
-                  {room.unread_count > 99 ? "99+" : room.unread_count}
-                </span>
-              )}
-            </button>
-          ))
+            )}
+
+            {(filteredRingGroups.length > 0 || filteredQueues.length > 0 || filteredPagingGroups.length > 0) && (
+              <div className="pb-2">
+                <p className="px-3 py-1 text-[10px] font-semibold uppercase text-tertiary">Call Groups</p>
+                {filteredRingGroups.map((group) => (
+                  <GroupResultButton
+                    key={group.id}
+                    title={group.name}
+                    subtitle={`Ring group ${group.extension} · ${group.members.length} member${group.members.length === 1 ? "" : "s"}`}
+                    icon={<Phone size={15} />}
+                    actionLabel="Call"
+                    disabled={!group.enabled}
+                    onAction={() => callExtension(group.extension, group.name)}
+                  />
+                ))}
+                {filteredQueues.map((queue) => (
+                  <GroupResultButton
+                    key={queue.id}
+                    title={queue.name}
+                    subtitle={`Queue ${queue.extension} · ${queue.agents.length} agent${queue.agents.length === 1 ? "" : "s"}`}
+                    icon={<Users size={15} />}
+                    actionLabel="Call"
+                    disabled={!queue.enabled}
+                    onAction={() => callExtension(queue.extension, queue.name)}
+                  />
+                ))}
+                {filteredPagingGroups.map((group) => (
+                  <GroupResultButton
+                    key={group.id}
+                    title={group.name}
+                    subtitle={`Paging group ${group.extension} · ${group.members.length} member${group.members.length === 1 ? "" : "s"}`}
+                    icon={<Radio size={15} />}
+                    actionLabel="Page"
+                    onAction={() => callExtension(group.extension, group.name)}
+                  />
+                ))}
+              </div>
+            )}
+
+            {normalizedQuery && filteredRooms.length === 0 && !hasAnyGroupResults && (
+              <div className="flex flex-col items-center justify-center h-32 gap-2">
+                <Search size={24} className="text-tertiary" />
+                <p className="text-sm text-tertiary">No groups or chats found</p>
+              </div>
+            )}
+          </>
         )}
       </div>
     </>
+  );
+}
+
+function GroupResultButton({
+  title,
+  subtitle,
+  icon,
+  actionLabel,
+  disabled,
+  onAction,
+}: {
+  title: string;
+  subtitle: string;
+  icon: ReactNode;
+  actionLabel: string;
+  disabled?: boolean;
+  onAction: () => void;
+}) {
+  return (
+    <div className="w-full flex items-center gap-3 px-3 py-3 rounded-lg hover:bg-elevated transition-colors">
+      <div className="w-8 h-8 rounded-full bg-accent-muted text-accent flex items-center justify-center shrink-0">
+        {icon}
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-medium text-primary truncate">{title}</p>
+        <p className="text-xs text-tertiary truncate">{subtitle}</p>
+      </div>
+      <button
+        onClick={onAction}
+        disabled={disabled}
+        className={cn(
+          "shrink-0 flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition-colors",
+          disabled
+            ? "bg-elevated text-tertiary cursor-not-allowed"
+            : "bg-success/10 text-success hover:bg-success/20"
+        )}
+      >
+        <Phone size={12} />
+        {actionLabel}
+      </button>
+    </div>
   );
 }
 
@@ -712,78 +924,6 @@ function ChatRoom({
   );
 }
 
-interface ConferenceSummary {
-  id: string;
-  title: string;
-  mode: "audio" | "video" | "webinar";
-  active: boolean;
-  participants: Array<{ user_id: string; sip_uri: string; role: string; joined_at: string }>;
-  created_at: string;
-}
-
-function ActiveConferences() {
-  const { baseUrl, token, connected } = useServerStore();
-  const [conferences, setConferences] = useState<ConferenceSummary[]>([]);
-  const [expanded, setExpanded] = useState(false);
-
-  useEffect(() => {
-    if (!connected || !baseUrl || !token) return;
-    paleServerApi<ConferenceSummary[]>(baseUrl, token, "/v1/conferences")
-      .then((all) => setConferences(all.filter((c) => c.active)))
-      .catch(() => {});
-  }, [connected, baseUrl, token]);
-
-  if (!connected || conferences.length === 0) return null;
-
-  return (
-    <div className="px-3 pb-2">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-1.5 text-xs font-semibold text-tertiary hover:text-secondary w-full py-1"
-      >
-        <Users size={13} />
-        <span>Active Conferences ({conferences.length})</span>
-      </button>
-      {expanded && (
-        <div className="space-y-1 mt-1">
-          {conferences.map((conf) => (
-            <div
-              key={conf.id}
-              className={cn(
-                "flex items-center justify-between px-3 py-2 rounded-lg",
-                "bg-surface border border-border-subtle"
-              )}
-            >
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-primary truncate">{conf.title}</p>
-                <p className="text-[10px] text-tertiary">
-                  {conf.mode} &middot; {conf.participants.length} participant{conf.participants.length !== 1 ? "s" : ""}
-                </p>
-              </div>
-              <button
-                onClick={() => {
-                  const uri = `sip:conf-${conf.id}@pale.local`;
-                  toast({ type: "info", title: `Joining ${conf.title}...` });
-                  ipcMakeCall(uri).catch(() =>
-                    toast({ type: "error", title: "Failed to join conference" })
-                  );
-                }}
-                className={cn(
-                  "shrink-0 flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium",
-                  "bg-success/10 text-success hover:bg-success/20 transition-colors"
-                )}
-              >
-                <Phone size={12} />
-                Join
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function NewChatInput({
   onSubmit,
   onCreateRoom,
@@ -794,7 +934,8 @@ function NewChatInput({
   const [mode, setMode] = useState<"dm" | "room">("dm");
   const [userId, setUserId] = useState("");
   const [roomName, setRoomName] = useState("");
-  const [roomMembers, setRoomMembers] = useState("");
+  const [memberQuery, setMemberQuery] = useState("");
+  const [selectedMembers, setSelectedMembers] = useState<ServerUser[]>([]);
   const [serverUsers, setServerUsers] = useState<ServerUser[]>([]);
   const [filteredUsers, setFilteredUsers] = useState<typeof serverUsers>([]);
   const baseUrl = useServerStore((s) => s.baseUrl);
@@ -815,6 +956,32 @@ function NewChatInput({
       u.display_name.toLowerCase().includes(q) || u.sip_uri.toLowerCase().includes(q)
     ));
   }, [userId, serverUsers]);
+
+  const memberSuggestions = memberQuery.trim()
+    ? serverUsers
+        .filter((u) =>
+          !selectedMembers.some((member) => member.id === u.id) &&
+          (u.display_name.toLowerCase().includes(memberQuery.toLowerCase()) ||
+            u.sip_uri.toLowerCase().includes(memberQuery.toLowerCase()))
+        )
+        .slice(0, 6)
+    : [];
+
+  const addRoomMember = (user: ServerUser) => {
+    setSelectedMembers((members) =>
+      members.some((member) => member.id === user.id) ? members : [...members, user]
+    );
+    setMemberQuery("");
+  };
+
+  const removeRoomMember = (userIdToRemove: string) => {
+    setSelectedMembers((members) => members.filter((member) => member.id !== userIdToRemove));
+  };
+
+  const createRoom = () => {
+    if (!roomName.trim()) return;
+    onCreateRoom(roomName.trim(), selectedMembers.map((member) => member.sip_uri));
+  };
 
   return (
     <div className="px-4 pb-3 space-y-2">
@@ -912,24 +1079,65 @@ function NewChatInput({
             )}
             autoFocus
           />
-          <input
-            type="text"
-            value={roomMembers}
-            onChange={(e) => setRoomMembers(e.target.value)}
-            placeholder="Members (comma-separated SIP URIs)"
-            className={cn(
-              "w-full bg-surface border border-border-subtle rounded-lg",
-              "px-3 py-2 text-sm text-primary placeholder:text-tertiary",
-              "focus:outline-none focus:border-border-focus"
+          {selectedMembers.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {selectedMembers.map((member) => (
+                <span
+                  key={member.id}
+                  className="inline-flex items-center gap-1 rounded-md bg-accent-muted px-2 py-1 text-xs text-accent"
+                >
+                  {member.display_name}
+                  <button
+                    onClick={() => removeRoomMember(member.id)}
+                    className="rounded text-accent hover:text-primary"
+                    title={`Remove ${member.display_name}`}
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="relative">
+            <input
+              type="text"
+              value={memberQuery}
+              onChange={(e) => setMemberQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && memberSuggestions[0]) {
+                  e.preventDefault();
+                  addRoomMember(memberSuggestions[0]);
+                }
+              }}
+              placeholder="Search users to add..."
+              className={cn(
+                "w-full bg-surface border border-border-subtle rounded-lg",
+                "px-3 py-2 text-sm text-primary placeholder:text-tertiary",
+                "focus:outline-none focus:border-border-focus"
+              )}
+            />
+            {memberSuggestions.length > 0 && (
+              <div className="absolute z-10 left-0 right-0 mt-1 bg-surface border border-border-subtle rounded-lg shadow-lg max-h-44 overflow-y-auto">
+                {memberSuggestions.map((u) => (
+                  <button
+                    key={u.id}
+                    onClick={() => addRoomMember(u)}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-elevated transition-colors"
+                  >
+                    <div className="w-7 h-7 rounded-full bg-accent-muted text-accent flex items-center justify-center text-xs font-bold">
+                      {u.display_name.charAt(0)}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-primary truncate">{u.display_name}</p>
+                      <p className="text-[10px] text-tertiary truncate">{u.sip_uri}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
             )}
-          />
+          </div>
           <button
-            onClick={() => {
-              if (roomName.trim()) {
-                const members = roomMembers.split(",").map((m) => m.trim()).filter(Boolean);
-                onCreateRoom(roomName.trim(), members);
-              }
-            }}
+            onClick={createRoom}
             disabled={!roomName.trim()}
             className={cn(
               "w-full px-3 py-2 rounded-lg text-sm font-medium transition-colors",

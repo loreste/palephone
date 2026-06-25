@@ -823,7 +823,8 @@ async fn get_room(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<crate::Room>, ApiError> {
-    require_bearer(&headers, &state)?;
+    let principal = authenticated_principal(&headers, &state)?;
+    require_room_member(&state, id, &principal)?;
     state.room(id).map(Json).ok_or(ApiError::NotFound)
 }
 
@@ -832,7 +833,8 @@ async fn list_room_messages(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<crate::RoomMessage>>, ApiError> {
-    require_bearer(&headers, &state)?;
+    let principal = authenticated_principal(&headers, &state)?;
+    require_room_member(&state, id, &principal)?;
     Ok(Json(state.room_messages(id)))
 }
 
@@ -843,9 +845,7 @@ async fn send_room_message(
     Json(input): Json<SendRoomMessageRequest>,
 ) -> Result<Json<crate::RoomMessage>, ApiError> {
     let principal = authenticated_principal(&headers, &state)?;
-    if state.room(id).is_none() {
-        return Err(ApiError::NotFound);
-    }
+    require_room_member(&state, id, &principal)?;
     Ok(Json(state.send_room_message(id, &principal, &input.body, input.reply_to)))
 }
 
@@ -855,7 +855,8 @@ async fn add_room_member(
     Path(id): Path<Uuid>,
     Json(input): Json<AddRoomMemberRequest>,
 ) -> Result<Json<crate::Room>, ApiError> {
-    let _principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_principal(&headers, &state)?;
+    require_room_member(&state, id, &principal)?;
     state
         .add_room_member(id, &input.user_sip_uri)
         .map(Json)
@@ -888,6 +889,7 @@ async fn room_typing(
     Json(input): Json<TypingRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let principal = authenticated_principal(&headers, &state)?;
+    require_room_member(&state, id, &principal)?;
     state.broadcast_sse(crate::SseEvent {
         event_type: "typing".to_string(),
         payload: json!({
@@ -912,7 +914,7 @@ async fn search_messages(
     headers: HeaderMap,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<Vec<crate::SearchResult>>, ApiError> {
-    require_bearer(&headers, &state)?;
+    let principal = authenticated_principal(&headers, &state)?;
     let term = query.q.to_lowercase();
     let limit = query.limit.unwrap_or(50).min(200);
 
@@ -938,6 +940,7 @@ async fn search_messages(
         .read()
         .expect("room messages lock poisoned")
         .iter()
+        .filter(|m| room_member(&state, m.room_id, &principal))
         .filter(|m| m.body.to_lowercase().contains(&term))
         .take(limit)
         .map(|m| crate::SearchResult {
@@ -965,6 +968,8 @@ async fn mark_message_read(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let principal = authenticated_principal(&headers, &state)?;
+    let msg = state.room_message(id).ok_or(ApiError::NotFound)?;
+    require_room_member(&state, msg.room_id, &principal)?;
     // For now, broadcast the read event via SSE (full persistence via PG)
     state.broadcast_sse(crate::SseEvent {
         event_type: "read_receipt".to_string(),
@@ -990,7 +995,9 @@ async fn edit_message(
     Path(id): Path<Uuid>,
     Json(input): Json<EditMessageRequest>,
 ) -> Result<Json<crate::RoomMessage>, ApiError> {
-    let _principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_principal(&headers, &state)?;
+    let existing = state.room_message(id).ok_or(ApiError::NotFound)?;
+    require_room_member(&state, existing.room_id, &principal)?;
     let msg = state.edit_room_message(id, &input.body).ok_or(ApiError::NotFound)?;
     // Persist to PG
     let body_clone = input.body.clone();
@@ -1004,6 +1011,8 @@ async fn delete_message(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let principal = authenticated_principal(&headers, &state)?;
+    let msg = state.room_message(id).ok_or(ApiError::NotFound)?;
+    require_room_member(&state, msg.room_id, &principal)?;
     state.broadcast_sse(crate::SseEvent {
         event_type: "message_deleted".to_string(),
         payload: json!({
@@ -1030,6 +1039,8 @@ async fn react_to_message(
     Json(input): Json<ReactionRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let principal = authenticated_principal(&headers, &state)?;
+    let msg = state.room_message(id).ok_or(ApiError::NotFound)?;
+    require_room_member(&state, msg.room_id, &principal)?;
     state.add_reaction(id, &principal, &input.emoji);
     // Persist to PG (toggle: try insert, if exists delete)
     let emoji = input.emoji.clone();
@@ -1051,7 +1062,9 @@ async fn pin_message_handler(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<crate::RoomMessage>, ApiError> {
-    let _principal = authenticated_principal(&headers, &state)?;
+    let principal = authenticated_principal(&headers, &state)?;
+    let existing = state.room_message(id).ok_or(ApiError::NotFound)?;
+    require_room_member(&state, existing.room_id, &principal)?;
     let msg = state.pin_room_message(id).ok_or(ApiError::NotFound)?;
     let pinned = msg.pinned;
     state.pg_spawn(move |pg| Box::pin(async move { pg.toggle_pin(id, pinned).await }));
@@ -1063,7 +1076,8 @@ async fn list_pinned_handler(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<crate::RoomMessage>>, ApiError> {
-    require_bearer(&headers, &state)?;
+    let principal = authenticated_principal(&headers, &state)?;
+    require_room_member(&state, id, &principal)?;
     Ok(Json(state.pinned_messages(id)))
 }
 
@@ -1072,7 +1086,9 @@ async fn list_reads_handler(
     headers: HeaderMap,
     Path(_id): Path<Uuid>,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
-    require_bearer(&headers, &state)?;
+    let principal = authenticated_principal(&headers, &state)?;
+    let msg = state.room_message(_id).ok_or(ApiError::NotFound)?;
+    require_room_member(&state, msg.room_id, &principal)?;
     // Read receipts are currently broadcast-only via SSE; return empty for now
     Ok(Json(vec![]))
 }
@@ -1476,7 +1492,7 @@ async fn list_cdrs(State(state): State<SharedState>, headers: HeaderMap, Query(q
 }
 
 async fn list_paging_groups(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::PagingGroup>>, ApiError> {
-    authenticated_admin(&headers, &state)?; Ok(Json(state.list_paging_groups()))
+    require_bearer(&headers, &state)?; Ok(Json(state.list_paging_groups()))
 }
 async fn create_paging_group(State(state): State<SharedState>, headers: HeaderMap, Json(input): Json<CreatePagingGroupRequest>) -> Result<Json<crate::PagingGroup>, ApiError> {
     let p = authenticated_admin(&headers, &state)?;
@@ -1582,7 +1598,7 @@ async fn list_ring_groups(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<crate::RingGroup>>, ApiError> {
-    authenticated_admin(&headers, &state)?;
+    require_bearer(&headers, &state)?;
     Ok(Json(state.list_ring_groups()))
 }
 
@@ -1735,19 +1751,24 @@ async fn sse_stream(
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<SseResponseEvent, Infallible>>>, ApiError>
 {
     // EventSource can't set Authorization headers, so accept token from query param too
-    if let Some(token) = &query.token {
+    let principal = if let Some(token) = &query.token {
         let principal = state
             .principal_for_bearer(token)
             .ok_or(ApiError::Unauthorized)?;
         if !state.check_rate_limit(&principal) {
             return Err(ApiError::TooManyRequests);
         }
+        principal
     } else {
-        authenticated_principal(&headers, &state)?;
-    }
+        authenticated_principal(&headers, &state)?
+    };
     let rx = state.sse_subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
+    let visible_state = state.clone();
+    let stream = BroadcastStream::new(rx).filter_map(move |result| match result {
         Ok(event) => {
+            if !event_visible_to(&visible_state, &event, &principal) {
+                return None;
+            }
             let data = serde_json::to_string(&event.payload).unwrap_or_default();
             Some(Ok(SseResponseEvent::default()
                 .event(event.event_type)
@@ -1769,6 +1790,68 @@ fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
 
 fn require_bearer(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError> {
     authenticated_principal(headers, state).map(|_| ())
+}
+
+fn room_member(state: &AppState, room_id: Uuid, principal: &str) -> bool {
+    state.room(room_id).is_some_and(|room| {
+        room.members
+            .iter()
+            .any(|member| member.user_sip_uri == principal)
+    })
+}
+
+fn require_room_member(
+    state: &AppState,
+    room_id: Uuid,
+    principal: &str,
+) -> Result<(), ApiError> {
+    let room = state.room(room_id).ok_or(ApiError::NotFound)?;
+    if room
+        .members
+        .iter()
+        .any(|member| member.user_sip_uri == principal)
+    {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
+fn event_visible_to(state: &AppState, event: &crate::SseEvent, principal: &str) -> bool {
+    match event.event_type.as_str() {
+        "room_created" => event
+            .payload
+            .get("members")
+            .and_then(|members| members.as_array())
+            .is_some_and(|members| {
+                members.iter().any(|member| {
+                    member
+                        .get("user_sip_uri")
+                        .and_then(|uri| uri.as_str())
+                        == Some(principal)
+                })
+            }),
+        "room_message" | "typing" => event
+            .payload
+            .get("room_id")
+            .and_then(|id| id.as_str())
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .is_some_and(|room_id| room_member(state, room_id, principal)),
+        "message_edited" | "message_pinned" => event
+            .payload
+            .get("room_id")
+            .and_then(|id| id.as_str())
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .is_some_and(|room_id| room_member(state, room_id, principal)),
+        "message_deleted" | "read_receipt" | "reaction" => event
+            .payload
+            .get("message_id")
+            .and_then(|id| id.as_str())
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .and_then(|message_id| state.room_message(message_id))
+            .is_some_and(|message| room_member(state, message.room_id, principal)),
+        _ => true,
+    }
 }
 
 fn bearer_token(headers: &HeaderMap) -> &str {
@@ -1962,6 +2045,153 @@ mod auth_tests {
         // The static server token retains full admin access.
         let admin_headers = bearer_headers("012345678901234567890123");
         assert!(authenticated_admin(&admin_headers, &state).is_ok());
+    }
+
+    #[test]
+    fn authenticated_users_can_discover_directory() {
+        let state = crate::AppState::new(
+            PathBuf::from("/tmp/pale-test-http-users"),
+            "012345678901234567890125".to_string(),
+            crate::hash_password("admin-password-equally-long"),
+        );
+        state
+            .create_user(crate::CreateUserRequest {
+                display_name: "Alice".to_string(),
+                sip_uri: "sip:alice@example.com".to_string(),
+                matrix_user_id: None,
+                password: Some("alice-password".to_string()),
+                role: None,
+            })
+            .expect("create alice");
+        state
+            .create_user(crate::CreateUserRequest {
+                display_name: "Bob".to_string(),
+                sip_uri: "sip:bob@example.com".to_string(),
+                matrix_user_id: None,
+                password: Some("bob-password".to_string()),
+                role: None,
+            })
+            .expect("create bob");
+
+        let login = state
+            .authenticate_user("sip:alice@example.com", "alice-password")
+            .expect("alice login");
+        let headers = bearer_headers(&login.token);
+
+        assert!(require_bearer(&headers, &state).is_ok());
+        let users = state.users();
+        assert_eq!(users.len(), 2);
+        assert!(users.iter().any(|u| u.sip_uri == "sip:bob@example.com"));
+    }
+
+    #[test]
+    fn authenticated_users_can_discover_call_groups() {
+        let state = crate::AppState::new(
+            PathBuf::from("/tmp/pale-test-http-groups"),
+            "012345678901234567890127".to_string(),
+            crate::hash_password("admin-password-equally-long"),
+        );
+        state
+            .create_user(crate::CreateUserRequest {
+                display_name: "Alice".to_string(),
+                sip_uri: "sip:alice@example.com".to_string(),
+                matrix_user_id: None,
+                password: Some("alice-password".to_string()),
+                role: None,
+            })
+            .expect("create alice");
+        let login = state
+            .authenticate_user("sip:alice@example.com", "alice-password")
+            .expect("alice login");
+        let headers = bearer_headers(&login.token);
+
+        state
+            .create_ring_group(crate::CreateRingGroupRequest {
+                name: "Support Ring".to_string(),
+                extension: "700".to_string(),
+                strategy: None,
+                ring_timeout: None,
+                members: vec!["sip:alice@example.com".to_string()],
+                fallback_uri: None,
+            })
+            .expect("create ring group");
+        state
+            .create_queue(crate::CreateQueueRequest {
+                name: "Support Queue".to_string(),
+                extension: "710".to_string(),
+                strategy: None,
+                max_wait_time: None,
+                max_queue_size: None,
+                wrap_up_time: None,
+                hold_music_file_id: None,
+                overflow_destination: None,
+                agents: vec![crate::QueueAgentInput {
+                    agent_uri: "sip:alice@example.com".to_string(),
+                    priority: None,
+                    skills: None,
+                }],
+                callback_enabled: None,
+                callback_threshold_secs: None,
+                sla_target_secs: None,
+            })
+            .expect("create queue");
+        state.create_paging_group(crate::CreatePagingGroupRequest {
+            name: "Operations Page".to_string(),
+            extension: "720".to_string(),
+            members: vec!["sip:alice@example.com".to_string()],
+        });
+        state.create_conference(crate::CreateConferenceRequest {
+            title: "Daily Standup".to_string(),
+            mode: crate::ConferenceMode::Audio,
+        });
+
+        assert!(require_bearer(&headers, &state).is_ok());
+        assert!(state.list_ring_groups().iter().any(|group| group.extension == "700"));
+        assert!(state.list_queues().iter().any(|queue| queue.extension == "710"));
+        assert!(state.list_paging_groups().iter().any(|group| group.extension == "720"));
+        assert!(state.list_conferences().iter().any(|conference| conference.title == "Daily Standup"));
+    }
+
+    #[test]
+    fn room_membership_controls_visibility() {
+        let state = crate::AppState::new(
+            PathBuf::from("/tmp/pale-test-http-room-visibility"),
+            "012345678901234567890126".to_string(),
+            crate::hash_password("admin-password-equally-long"),
+        );
+        let room = state.create_room(
+            "sip:alice@example.com",
+            crate::CreateRoomRequest {
+                name: "Bob".to_string(),
+                description: None,
+                members: vec!["sip:bob@example.com".to_string()],
+                is_direct: Some(true),
+            },
+        );
+        let message = state.send_room_message(room.id, "sip:alice@example.com", "hello", None);
+
+        assert!(room_member(&state, room.id, "sip:alice@example.com"));
+        assert!(room_member(&state, room.id, "sip:bob@example.com"));
+        assert!(!room_member(&state, room.id, "sip:mallory@example.com"));
+        assert!(require_room_member(&state, room.id, "sip:bob@example.com").is_ok());
+        assert!(matches!(
+            require_room_member(&state, room.id, "sip:mallory@example.com"),
+            Err(ApiError::Forbidden)
+        ));
+
+        let room_event = crate::SseEvent {
+            event_type: "room_message".to_string(),
+            payload: serde_json::to_value(&message).unwrap(),
+        };
+        assert!(event_visible_to(&state, &room_event, "sip:bob@example.com"));
+        assert!(!event_visible_to(&state, &room_event, "sip:mallory@example.com"));
+
+        let reaction_event = crate::SseEvent {
+            event_type: "reaction".to_string(),
+            payload: serde_json::json!({ "message_id": message.id }),
+        };
+        assert!(event_visible_to(&state, &reaction_event, "sip:alice@example.com"));
+        assert!(!event_visible_to(&state, &reaction_event, "sip:mallory@example.com"));
     }
 
     #[test]
