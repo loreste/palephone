@@ -93,6 +93,11 @@ export interface RoutingRule {
   source_pattern: string;
   destination_pattern: string;
   target: string;
+  destination_type: string;
+  method_pattern: string;
+  header_conditions: Array<{ name: string; pattern: string; negate?: boolean }>;
+  header_actions: Array<{ kind: "add" | "set" | "remove"; name: string; value?: string }>;
+  stop_processing: boolean;
   priority: number;
   enabled: boolean;
   created_at: string;
@@ -165,6 +170,11 @@ export interface CreateRoutingRuleInput {
   source_pattern: string;
   destination_pattern: string;
   target: string;
+  destination_type?: string;
+  method_pattern?: string;
+  header_conditions?: Array<{ name: string; pattern: string; negate?: boolean }>;
+  header_actions?: Array<{ kind: "add" | "set" | "remove"; name: string; value?: string }>;
+  stop_processing?: boolean;
   priority: number;
   enabled: boolean;
 }

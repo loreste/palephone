@@ -44,13 +44,14 @@ async function api<T = any>(baseUrl: string, token: string, path: string, opts?:
   return paleServerApi<T>(baseUrl, token, path, opts);
 }
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
   { id: "users", label: "Users", icon: Users },
   { id: "sip", label: "SIP", icon: Server },
   { id: "extensions", label: "Extensions", icon: Server },
+  { id: "dids", label: "DIDs", icon: Router },
   { id: "routing", label: "Routing", icon: GitBranch },
   { id: "ring_groups", label: "Ring Groups", icon: Users },
   { id: "queues", label: "Queues", icon: Users },
@@ -264,6 +265,7 @@ export function AdminView() {
         {activeTab === "sip" && <SipPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
         {activeTab === "routing" && <RoutingPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
         {activeTab === "extensions" && <ExtensionsPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "dids" && <DidsPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "ring_groups" && <RingGroupsPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "queues" && <QueuesPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "ivr" && <IvrPanel baseUrl={baseUrl} token={token} />}
@@ -689,7 +691,23 @@ function RoutingPanel({
   const [sourcePattern, setSourcePattern] = useState("*");
   const [destinationPattern, setDestinationPattern] = useState("sip:*");
   const [target, setTarget] = useState("");
+  const [destinationType, setDestinationType] = useState("user");
+  const [methodPattern, setMethodPattern] = useState("INVITE");
+  const [headerConditions, setHeaderConditions] = useState("[]");
+  const [headerActions, setHeaderActions] = useState("[]");
+  const [stopProcessing, setStopProcessing] = useState(true);
   const [priority, setPriority] = useState("100");
+  const [previewDirection, setPreviewDirection] = useState("inbound");
+  const [previewSource, setPreviewSource] = useState("*");
+  const [previewDestination, setPreviewDestination] = useState("");
+  const [previewMethod, setPreviewMethod] = useState("INVITE");
+  const [preview, setPreview] = useState<any | null>(null);
+
+  const parseArray = (value: string, label: string) => {
+    const parsed = JSON.parse(value || "[]");
+    if (!Array.isArray(parsed)) throw new Error(`${label} must be a JSON array`);
+    return parsed;
+  };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -699,11 +717,18 @@ function RoutingPanel({
         source_pattern: sourcePattern,
         destination_pattern: destinationPattern,
         target,
+        destination_type: destinationType,
+        method_pattern: methodPattern,
+        header_conditions: parseArray(headerConditions, "Header conditions"),
+        header_actions: parseArray(headerActions, "Header actions"),
+        stop_processing: stopProcessing,
         priority: Number(priority),
         enabled: true,
       });
       setName("");
       setTarget("");
+      setHeaderConditions("[]");
+      setHeaderActions("[]");
       toast({ type: "success", title: "Routing rule created" });
       onChange();
     } catch (err) {
@@ -728,6 +753,11 @@ function RoutingPanel({
         source_pattern: rule.source_pattern,
         destination_pattern: rule.destination_pattern,
         target: rule.target,
+        destination_type: rule.destination_type,
+        method_pattern: rule.method_pattern,
+        header_conditions: rule.header_conditions,
+        header_actions: rule.header_actions,
+        stop_processing: rule.stop_processing,
         priority: rule.priority,
         enabled: !rule.enabled,
       });
@@ -738,25 +768,93 @@ function RoutingPanel({
     }
   };
 
+  const runPreview = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      const params = new URLSearchParams({
+        direction: previewDirection,
+        source: previewSource,
+        destination: previewDestination,
+        method: previewMethod,
+      });
+      setPreview(await api(baseUrl, token, `/v1/routes/preview?${params}`));
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Route preview failed" });
+    }
+  };
+
   return (
-    <PanelWithForm
-      title="Routing rules"
-      icon={GitBranch}
-      onSubmit={submit}
-      fields={[
-        ["Name", name, setName],
-        ["Source pattern", sourcePattern, setSourcePattern],
-        ["Destination pattern", destinationPattern, setDestinationPattern],
-        ["Target", target, setTarget],
-        ["Priority", priority, setPriority, "number"],
-      ]}
-      action="Add route"
-    >
-      <div className="overflow-x-auto">
+    <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+      <div className="p-3 border-b border-border-subtle flex items-center gap-2">
+        <GitBranch size={17} className="text-accent" />
+        <h2 className="font-medium">Routing rules</h2>
+      </div>
+
+      <form onSubmit={submit} className="p-3 border-b border-border-subtle space-y-3">
+        <div className="grid md:grid-cols-5 gap-2">
+          <Field label="Name" value={name} onChange={setName} />
+          <Field label="Source pattern" value={sourcePattern} onChange={setSourcePattern} />
+          <Field label="Destination pattern" value={destinationPattern} onChange={setDestinationPattern} />
+          <Field label="Method pattern" value={methodPattern} onChange={setMethodPattern} />
+          <Field label="Priority" value={priority} onChange={setPriority} type="number" />
+        </div>
+        <div className="grid md:grid-cols-5 gap-2">
+          <label className="block">
+            <span className="block text-xs text-tertiary mb-1">Destination type</span>
+            <select value={destinationType} onChange={(event) => setDestinationType(event.target.value)}
+              className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus">
+              {["user", "ring_group", "queue", "ivr", "voicemail", "conference", "external"].map((value) => (
+                <option key={value} value={value}>{value}</option>
+              ))}
+            </select>
+          </label>
+          <div className="md:col-span-3">
+            <Field label="Target" value={target} onChange={setTarget} />
+          </div>
+          <label className="flex items-end gap-2 h-10 mt-5 text-sm text-secondary">
+            <input type="checkbox" checked={stopProcessing} onChange={(event) => setStopProcessing(event.target.checked)} className="accent-accent" />
+            Stop
+          </label>
+        </div>
+        <div className="grid md:grid-cols-2 gap-2">
+          <JsonField label="Header conditions" value={headerConditions} onChange={setHeaderConditions} />
+          <JsonField label="Header actions" value={headerActions} onChange={setHeaderActions} />
+        </div>
+        <button className="h-10 px-3 rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium inline-flex items-center justify-center gap-2">
+          <Plus size={16} /> Add route
+        </button>
+      </form>
+
+      <form onSubmit={runPreview} className="p-3 border-b border-border-subtle grid md:grid-cols-6 gap-2">
+        <label className="block">
+          <span className="block text-xs text-tertiary mb-1">Direction</span>
+          <select value={previewDirection} onChange={(event) => setPreviewDirection(event.target.value)}
+            className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus">
+            <option value="inbound">inbound</option>
+            <option value="outbound">outbound</option>
+          </select>
+        </label>
+        <Field label="Source" value={previewSource} onChange={setPreviewSource} />
+        <Field label="Destination" value={previewDestination} onChange={setPreviewDestination} />
+        <Field label="Method" value={previewMethod} onChange={setPreviewMethod} />
+        <button className="h-10 self-end rounded-md border border-border-default hover:bg-elevated text-sm font-medium">
+          Preview
+        </button>
+        {preview && (
+          <div className="md:col-span-6 rounded-md bg-base border border-border-subtle p-2 text-xs text-secondary">
+            <span className="text-primary font-medium">{preview.resolved?.destination_type}</span>
+            <span> to </span>
+            <span className="font-mono">{preview.resolved?.destination}</span>
+            {preview.matched_rule && <span> via {preview.matched_rule.name}</span>}
+          </div>
+        )}
+      </form>
+
+      <div className="p-3 overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="text-tertiary">
             <tr className="border-b border-border-subtle">
-              {["Priority", "Name", "Source", "Destination", "Target", "Status", ""].map((header) => (
+              {["Priority", "Name", "Method", "Source", "Destination", "Target", "Headers", "Status", ""].map((header) => (
                 <th key={header} className="text-left py-2 px-2 font-medium">{header}</th>
               ))}
             </tr>
@@ -766,9 +864,13 @@ function RoutingPanel({
               <tr key={rule.id} className="border-b border-border-subtle">
                 <td className="py-2 px-2">{rule.priority}</td>
                 <td className="py-2 px-2">{rule.name}</td>
+                <td className="py-2 px-2 text-secondary">{rule.method_pattern ?? "*"}</td>
                 <td className="py-2 px-2 text-secondary">{rule.source_pattern}</td>
                 <td className="py-2 px-2 text-secondary">{rule.destination_pattern}</td>
-                <td className="py-2 px-2">{rule.target}</td>
+                <td className="py-2 px-2">{rule.destination_type ?? "user"}:{rule.target}</td>
+                <td className="py-2 px-2 text-secondary">
+                  {(rule.header_conditions?.length ?? 0) + (rule.header_actions?.length ?? 0)}
+                </td>
                 <td className="py-2 px-2">{rule.enabled ? "enabled" : "disabled"}</td>
                 <td className="py-2 px-2 text-right">
                   <div className="inline-flex items-center gap-1">
@@ -788,7 +890,7 @@ function RoutingPanel({
           </tbody>
         </table>
       </div>
-    </PanelWithForm>
+    </section>
   );
 }
 
@@ -1542,6 +1644,128 @@ function ExtensionsPanel({ baseUrl, token }: { baseUrl: string; token: string })
                       <Trash2 size={16} />
                     </IconButton>
                   </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function DidsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [dids, setDids] = useState<any[]>([]);
+  const [users, setUsers] = useState<any[]>([]);
+  const [did, setDid] = useState("");
+  const [destinationType, setDestinationType] = useState("user");
+  const [destination, setDestination] = useState("");
+  const [userId, setUserId] = useState("");
+  const [label, setLabel] = useState("");
+
+  const load = async () => {
+    const [didList, userList] = await Promise.all([
+      api<any[]>(baseUrl, token, "/v1/dids"),
+      api<any[]>(baseUrl, token, "/v1/users"),
+    ]);
+    setDids(didList);
+    setUsers(userList);
+  };
+  useEffect(() => { load(); }, [baseUrl, token]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    const selectedUser = users.find((user) => user.id === userId);
+    try {
+      await api(baseUrl, token, "/v1/dids", {
+        method: "POST",
+        body: {
+          did,
+          destination_type: destinationType,
+          destination: destinationType === "user" ? selectedUser?.sip_uri ?? destination : destination,
+          user_id: destinationType === "user" && userId ? userId : undefined,
+          label,
+        },
+      });
+      setDid("");
+      setDestination("");
+      setUserId("");
+      setLabel("");
+      toast({ type: "success", title: "DID created" });
+      load();
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Failed to create DID" });
+    }
+  };
+
+  const remove = async (number: string) => {
+    try {
+      await api(baseUrl, token, `/v1/dids/${encodeURIComponent(number)}`, { method: "DELETE" });
+      toast({ type: "success", title: "DID deleted" });
+      load();
+    } catch (_err) {
+      toast({ type: "error", title: "Failed to delete DID" });
+    }
+  };
+
+  return (
+    <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+      <div className="p-3 border-b border-border-subtle flex items-center gap-2">
+        <Router size={17} className="text-accent" />
+        <h2 className="font-medium">DIDs</h2>
+      </div>
+      <form onSubmit={submit} className="p-3 grid md:grid-cols-5 gap-2 border-b border-border-subtle">
+        <Field label="DID" value={did} onChange={setDid} />
+        <label className="block">
+          <span className="block text-xs text-tertiary mb-1">Route to</span>
+          <select value={destinationType} onChange={(event) => setDestinationType(event.target.value)}
+            className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus">
+            {["user", "ring_group", "queue", "ivr", "voicemail", "conference", "external"].map((value) => (
+              <option key={value} value={value}>{value}</option>
+            ))}
+          </select>
+        </label>
+        {destinationType === "user" ? (
+          <label className="block">
+            <span className="block text-xs text-tertiary mb-1">User</span>
+            <select value={userId} onChange={(event) => setUserId(event.target.value)}
+              className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus">
+              <option value="">Select user...</option>
+              {users.map((user) => (
+                <option key={user.id} value={user.id}>{user.display_name} ({user.sip_uri})</option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <Field label="Destination" value={destination} onChange={setDestination} />
+        )}
+        <Field label="Label" value={label} onChange={setLabel} />
+        <button className="h-10 self-end rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium flex items-center justify-center gap-2">
+          <Plus size={16} /> Add DID
+        </button>
+      </form>
+      <div className="p-3 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="text-tertiary">
+            <tr className="border-b border-border-subtle">
+              {["DID", "Destination", "Type", "Label", ""].map((header) => (
+                <th key={header} className="text-left py-2 px-2 font-medium">{header}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {dids.length === 0 ? (
+              <tr><td colSpan={5} className="py-4 px-2 text-secondary">No DIDs</td></tr>
+            ) : dids.map((entry) => (
+              <tr key={entry.extension} className="border-b border-border-subtle">
+                <td className="py-2 px-2 font-mono">{entry.extension}</td>
+                <td className="py-2 px-2">{entry.user_display_name ?? entry.destination}</td>
+                <td className="py-2 px-2 text-secondary">{entry.destination_type}</td>
+                <td className="py-2 px-2 text-secondary">{entry.label || "-"}</td>
+                <td className="py-2 px-2 text-right">
+                  <IconButton label="Delete DID" tone="danger" onClick={() => remove(entry.extension)}>
+                    <Trash2 size={16} />
+                  </IconButton>
                 </td>
               </tr>
             ))}
@@ -2507,6 +2731,28 @@ function Field({
         onChange={(event) => onChange(event.target.value)}
         className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
         required={!["Matrix user ID", "Display name", "Queue Override", "Agent Override", "Overflow", "Callback threshold (s)", "SLA target (s)"].includes(label)}
+      />
+    </label>
+  );
+}
+
+function JsonField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="block">
+      <span className="block text-xs text-tertiary mb-1">{label}</span>
+      <textarea
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        rows={4}
+        className="w-full rounded-md bg-base border border-border-default px-3 py-2 text-sm font-mono outline-none focus:border-border-focus"
       />
     </label>
   );

@@ -1568,6 +1568,11 @@ impl AppState {
             source_pattern: input.source_pattern,
             destination_pattern: input.destination_pattern,
             target: input.target,
+            destination_type: input.destination_type.unwrap_or_else(default_route_destination_type),
+            method_pattern: input.method_pattern.unwrap_or_else(default_route_method_pattern),
+            header_conditions: input.header_conditions.unwrap_or_default(),
+            header_actions: input.header_actions.unwrap_or_default(),
+            stop_processing: input.stop_processing.unwrap_or(true),
             priority: input.priority,
             enabled: input.enabled,
             created_at: Utc::now(),
@@ -1588,14 +1593,26 @@ impl AppState {
     }
 
     pub fn resolve_routing_target(&self, source: &str, destination: &str) -> Option<String> {
+        self.resolve_routing_rule(source, destination, "INVITE", &[])
+            .map(|rule| rule.target)
+    }
+
+    pub fn resolve_routing_rule(
+        &self,
+        source: &str,
+        destination: &str,
+        method: &str,
+        headers: &[(String, String)],
+    ) -> Option<RoutingRule> {
         self.routing_rules()
             .into_iter()
             .filter(|rule| rule.enabled)
             .find(|rule| {
                 pattern_matches(&rule.source_pattern, source)
                     && pattern_matches(&rule.destination_pattern, destination)
+                    && route_method_matches(&rule.method_pattern, method)
+                    && route_headers_match(&rule.header_conditions, headers)
             })
-            .map(|rule| rule.target)
     }
 
     pub fn delete_routing_rule(&self, id: Uuid) -> Option<RoutingRule> {
@@ -1617,6 +1634,11 @@ impl AppState {
             rule.source_pattern = input.source_pattern;
             rule.destination_pattern = input.destination_pattern;
             rule.target = input.target;
+            rule.destination_type = input.destination_type.unwrap_or_else(default_route_destination_type);
+            rule.method_pattern = input.method_pattern.unwrap_or_else(default_route_method_pattern);
+            rule.header_conditions = input.header_conditions.unwrap_or_default();
+            rule.header_actions = input.header_actions.unwrap_or_default();
+            rule.stop_processing = input.stop_processing.unwrap_or(true);
             rule.priority = input.priority;
             rule.enabled = input.enabled;
             rule.updated_at = Utc::now();
@@ -2132,6 +2154,7 @@ impl AppState {
             label: input.label.unwrap_or_default(),
             user_id: input.user_id,
             user_display_name,
+            is_did: input.is_did.unwrap_or(false),
         };
         self.extensions.insert(input.extension, ext.clone());
         let e = ext.clone();
@@ -2139,7 +2162,28 @@ impl AppState {
         Ok(ext)
     }
 
+    pub fn create_did(&self, input: CreateDidRequest) -> Result<Extension, String> {
+        self.create_extension(CreateExtensionRequest {
+            extension: normalize_did(&input.did),
+            destination: input.destination,
+            destination_type: Some(input.destination_type.unwrap_or_else(|| "user".to_string())),
+            label: Some(input.label.unwrap_or_else(|| "DID".to_string())),
+            user_id: input.user_id,
+            is_did: Some(true),
+        })
+    }
+
     pub fn list_extensions(&self) -> Vec<Extension> { self.extensions.values() }
+    pub fn list_dids(&self) -> Vec<Extension> {
+        let mut dids: Vec<_> = self.extensions
+            .values()
+            .into_iter()
+            .filter(|ext| ext.is_did)
+            .collect();
+        dids.sort_by(|a, b| a.extension.cmp(&b.extension));
+        dids
+    }
+
     pub fn resolve_extension(&self, uri: &str) -> Option<Extension> {
         let user = sip_user_part(uri);
         self.extensions.get(&uri.to_string())
@@ -2187,6 +2231,7 @@ impl AppState {
                 destination_type: Some("user".to_string()),
                 label: Some(input.display_name.clone()),
                 user_id: Some(user.id),
+                is_did: Some(false),
             })?)
         } else {
             None
@@ -2716,6 +2761,53 @@ impl AppState {
             destination: destination_uri.to_string(),
             ring_group: None,
             ivr: None,
+        }
+    }
+
+    pub fn preview_route(
+        &self,
+        direction: &str,
+        source: &str,
+        destination: &str,
+        method: &str,
+        headers: &[(String, String)],
+    ) -> RoutePreview {
+        let destination_uri = if destination.starts_with("sip:") {
+            destination.to_string()
+        } else {
+            format!("sip:{destination}")
+        };
+        let matched_rule = self.resolve_routing_rule(source, &destination_uri, method, headers);
+        let resolved = if direction.eq_ignore_ascii_case("outbound") {
+            let target = matched_rule
+                .as_ref()
+                .map(|rule| rule.target.clone())
+                .unwrap_or_else(|| destination_uri.clone());
+            ResolvedRoute {
+                destination_type: matched_rule
+                    .as_ref()
+                    .map(|rule| rule.destination_type.clone())
+                    .unwrap_or_else(|| "external".to_string()),
+                destination: target,
+                ring_group: None,
+                ivr: None,
+            }
+        } else {
+            self.resolve_inbound_route(&destination_uri)
+        };
+        let header_actions = matched_rule
+            .as_ref()
+            .map(|rule| rule.header_actions.clone())
+            .unwrap_or_default();
+
+        RoutePreview {
+            direction: direction.to_string(),
+            source: source.to_string(),
+            destination: destination_uri,
+            method: method.to_string(),
+            matched_rule,
+            resolved,
+            header_actions,
         }
     }
 
@@ -3697,6 +3789,16 @@ pub struct RoutingRule {
     pub source_pattern: String,
     pub destination_pattern: String,
     pub target: String,
+    #[serde(default = "default_route_destination_type")]
+    pub destination_type: String,
+    #[serde(default = "default_route_method_pattern")]
+    pub method_pattern: String,
+    #[serde(default)]
+    pub header_conditions: Vec<RouteHeaderCondition>,
+    #[serde(default)]
+    pub header_actions: Vec<SipHeaderAction>,
+    #[serde(default = "default_route_stop_processing")]
+    pub stop_processing: bool,
     pub priority: i32,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
@@ -3709,8 +3811,53 @@ pub struct CreateRoutingRuleRequest {
     pub source_pattern: String,
     pub destination_pattern: String,
     pub target: String,
+    pub destination_type: Option<String>,
+    pub method_pattern: Option<String>,
+    pub header_conditions: Option<Vec<RouteHeaderCondition>>,
+    pub header_actions: Option<Vec<SipHeaderAction>>,
+    pub stop_processing: Option<bool>,
     pub priority: i32,
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RouteHeaderCondition {
+    pub name: String,
+    pub pattern: String,
+    #[serde(default)]
+    pub negate: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SipHeaderActionKind {
+    Add,
+    Set,
+    Remove,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SipHeaderAction {
+    pub kind: SipHeaderActionKind,
+    pub name: String,
+    #[serde(default)]
+    pub value: String,
+}
+
+fn default_route_destination_type() -> String {
+    "user".to_string()
+}
+
+fn default_route_method_pattern() -> String {
+    "*".to_string()
+}
+
+fn default_route_stop_processing() -> bool {
+    true
+}
+
+fn normalize_did(did: &str) -> String {
+    did.trim().replace([' ', '-', '(', ')'], "")
 }
 
 // ─── User Call Settings (Voicemail + Follow-Me) ───
@@ -3849,6 +3996,17 @@ pub struct ResolvedRoute {
     pub ivr: Option<Ivr>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RoutePreview {
+    pub direction: String,
+    pub source: String,
+    pub destination: String,
+    pub method: String,
+    pub matched_rule: Option<RoutingRule>,
+    pub resolved: ResolvedRoute,
+    pub header_actions: Vec<SipHeaderAction>,
+}
+
 // ─── Call Queues (ACD) ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3956,11 +4114,23 @@ pub struct Extension {
     pub label: String,
     pub user_id: Option<Uuid>,
     pub user_display_name: Option<String>,
+    #[serde(default)]
+    pub is_did: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateExtensionRequest {
     pub extension: String,
+    pub destination: String,
+    pub destination_type: Option<String>,
+    pub label: Option<String>,
+    pub user_id: Option<Uuid>,
+    pub is_did: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateDidRequest {
+    pub did: String,
     pub destination: String,
     pub destination_type: Option<String>,
     pub label: Option<String>,
@@ -4350,6 +4520,23 @@ fn pattern_matches(pattern: &str, value: &str) -> bool {
     pattern.ends_with('*') || remaining.is_empty()
 }
 
+fn route_method_matches(pattern: &str, method: &str) -> bool {
+    pattern
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .any(|part| pattern_matches(&part.to_ascii_uppercase(), &method.to_ascii_uppercase()))
+}
+
+fn route_headers_match(conditions: &[RouteHeaderCondition], headers: &[(String, String)]) -> bool {
+    conditions.iter().all(|condition| {
+        let matched = headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case(&condition.name) && pattern_matches(&condition.pattern, value)
+        });
+        if condition.negate { !matched } else { matched }
+    })
+}
+
 impl PersistedMapObject for User {
     type Key = Uuid;
 
@@ -4531,6 +4718,11 @@ mod tests {
             source_pattern: "*".to_string(),
             destination_pattern: "sip:*".to_string(),
             target: "sip:operator@example.com".to_string(),
+            destination_type: None,
+            method_pattern: None,
+            header_conditions: None,
+            header_actions: None,
+            stop_processing: None,
             priority: 200,
             enabled: true,
         });
@@ -4539,6 +4731,11 @@ mod tests {
             source_pattern: "sip:vip@example.com".to_string(),
             destination_pattern: "sip:support@example.com".to_string(),
             target: "sip:vip-desk@example.com".to_string(),
+            destination_type: None,
+            method_pattern: None,
+            header_conditions: None,
+            header_actions: None,
+            stop_processing: None,
             priority: 10,
             enabled: true,
         });
@@ -4634,6 +4831,11 @@ mod tests {
             source_pattern: "*".to_string(),
             destination_pattern: "sip:*".to_string(),
             target: "sip:desk@example.com".to_string(),
+            destination_type: None,
+            method_pattern: None,
+            header_conditions: None,
+            header_actions: None,
+            stop_processing: None,
             priority: 100,
             enabled: true,
         });
@@ -4646,6 +4848,11 @@ mod tests {
                     source_pattern: "sip:alice@example.com".to_string(),
                     destination_pattern: "sip:support@example.com".to_string(),
                     target: "sip:queue@example.com".to_string(),
+                    destination_type: None,
+                    method_pattern: None,
+                    header_conditions: None,
+                    header_actions: None,
+                    stop_processing: None,
                     priority: 50,
                     enabled: false,
                 },

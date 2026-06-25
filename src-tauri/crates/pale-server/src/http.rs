@@ -94,6 +94,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/extensions/{ext}", delete(delete_extension))
         .route("/v1/extensions/{ext}/assign", put(assign_extension_handler))
         .route("/v1/extensions/{ext}/unassign", put(unassign_extension_handler))
+        .route("/v1/dids", get(list_dids).post(create_did))
+        .route("/v1/dids/{did}", delete(delete_did))
         .route("/v1/business-hours", get(list_business_hours).post(create_business_hours))
         .route("/v1/business-hours/{id}", delete(delete_business_hours_entry))
         .route("/v1/holidays", get(list_holidays).post(create_holiday))
@@ -128,6 +130,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/ivrs", get(list_ivrs).post(create_ivr))
         .route("/v1/ivrs/{id}", get(get_ivr).delete(delete_ivr))
         .route("/v1/routes/resolve/{uri}", get(resolve_route))
+        .route("/v1/routes/preview", get(preview_route))
         .route("/v1/voicemail", get(list_voicemails))
         .route("/v1/voicemail/{id}/listen", put(mark_voicemail_listened))
         .route("/v1/voicemail/{id}", delete(delete_voicemail))
@@ -1400,6 +1403,33 @@ async fn delete_extension(State(state): State<SharedState>, headers: HeaderMap, 
     state.record_audit_event(&p, "extension.deleted", Some(ext)); Ok(Json(json!({"ok":true})))
 }
 
+async fn list_dids(State(state): State<SharedState>, headers: HeaderMap) -> Result<Json<Vec<crate::Extension>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_dids()))
+}
+
+async fn create_did(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::CreateDidRequest>,
+) -> Result<Json<crate::Extension>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let did = state.create_did(input).map_err(ApiError::Conflict)?;
+    state.record_audit_event(&principal, "did.created", Some(did.extension.clone()));
+    Ok(Json(did))
+}
+
+async fn delete_did(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(did): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let extension = state.delete_extension(&did).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "did.deleted", Some(extension.extension));
+    Ok(Json(json!({"ok": true})))
+}
+
 async fn provision_user_handler(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -1684,6 +1714,29 @@ async fn resolve_route(
     authenticated_admin(&headers, &state)?;
     let full_uri = if uri.starts_with("sip:") { uri } else { format!("sip:{}", uri) };
     Ok(Json(state.resolve_inbound_route(&full_uri)))
+}
+
+#[derive(serde::Deserialize)]
+struct RoutePreviewQuery {
+    direction: Option<String>,
+    source: Option<String>,
+    destination: String,
+    method: Option<String>,
+}
+
+async fn preview_route(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<RoutePreviewQuery>,
+) -> Result<Json<crate::RoutePreview>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.preview_route(
+        query.direction.as_deref().unwrap_or("inbound"),
+        query.source.as_deref().unwrap_or("*"),
+        &query.destination,
+        query.method.as_deref().unwrap_or("INVITE"),
+        &[],
+    )))
 }
 
 // ─── Voicemail ───

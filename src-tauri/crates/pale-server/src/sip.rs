@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     md5_hex, AppState, MediaKind, PresenceStatus, SipDialogStatus, SipRegistration,
-    StoreSipMessage, StoreSipNotification, StoreSipTransaction, UpsertSipDialog,
+    SipHeaderAction, SipHeaderActionKind, StoreSipMessage, StoreSipNotification, StoreSipTransaction, UpsertSipDialog,
     UpsertSipSubscription,
 };
 
@@ -499,7 +499,8 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
 
     // ── Routing rules ──
     let routed_uri = state
-        .resolve_routing_target(&from_aor, &requested_uri)
+        .resolve_routing_rule(&from_aor, &requested_uri, "INVITE", &request.headers_for_routing())
+        .map(|rule| rule.target)
         .unwrap_or_else(|| requested_uri.clone());
 
     // ── Direct registration lookup ──
@@ -1000,8 +1001,15 @@ async fn proxy_invite_inner(
         return Some(request.response(483, "Too Many Hops", &[]));
     }
     let requested_uri = request.uri();
-    let routed_uri = state
-        .resolve_routing_target(&from_aor, &requested_uri)
+    let routing_rule = state.resolve_routing_rule(
+        &from_aor,
+        &requested_uri,
+        &request.method(),
+        &request.headers_for_routing(),
+    );
+    let routed_uri = routing_rule
+        .as_ref()
+        .map(|rule| rule.target.clone())
         .unwrap_or_else(|| requested_uri.clone());
     let (target_contact, target_addr) = invite_target(state, &routed_uri)?;
     if !request.is_authorized(state, &realm) {
@@ -1020,7 +1028,11 @@ async fn proxy_invite_inner(
         Ok(addr) => addr,
         Err(_) => return Some(request.response(502, "Bad Gateway", &[])),
     };
-    let Some(forwarded) = rewrite_request_for_proxy(packet, &target_contact, local_addr, &branch)
+    let header_actions = routing_rule
+        .as_ref()
+        .map(|rule| rule.header_actions.as_slice())
+        .unwrap_or(&[]);
+    let Some(forwarded) = rewrite_request_for_proxy(packet, &target_contact, local_addr, &branch, header_actions)
     else {
         return Some(request.response(400, "Bad Request", &[]));
     };
@@ -1171,7 +1183,7 @@ async fn relay_in_dialog_request(
     let proxy_bind = server_socket.local_addr().ok().map(proxy_bind_addr)?;
     let proxy_socket = UdpSocket::bind(proxy_bind).await.ok()?;
     let local_addr = proxy_socket.local_addr().ok()?;
-    let forwarded = rewrite_request_for_proxy(packet, &target_uri, local_addr, &branch)?;
+    let forwarded = rewrite_request_for_proxy(packet, &target_uri, local_addr, &branch, &[])?;
     proxy_socket
         .send_to(forwarded.as_bytes(), target_addr)
         .await
@@ -1440,6 +1452,7 @@ fn rewrite_request_for_proxy(
     target_uri: &str,
     proxy_addr: SocketAddr,
     branch: &str,
+    header_actions: &[SipHeaderAction],
 ) -> Option<String> {
     let mut lines = packet.split_inclusive("\r\n");
     let first_line = lines.next()?;
@@ -1462,6 +1475,14 @@ fn rewrite_request_for_proxy(
                 if !wrote_max_forwards {
                     out.push_str("Max-Forwards: 69\r\n");
                 }
+                for action in header_actions {
+                    match action.kind {
+                        SipHeaderActionKind::Add | SipHeaderActionKind::Set if !action.value.is_empty() => {
+                            out.push_str(&format!("{}: {}\r\n", action.name, action.value));
+                        }
+                        SipHeaderActionKind::Add | SipHeaderActionKind::Set | SipHeaderActionKind::Remove => {}
+                    }
+                }
                 in_headers = false;
                 out.push_str(line);
                 continue;
@@ -1476,6 +1497,14 @@ fn rewrite_request_for_proxy(
                 out.push_str(&format!("Max-Forwards: {}\r\n", value.saturating_sub(1)));
                 wrote_max_forwards = true;
                 continue;
+            }
+            if let Some((name, _)) = line.split_once(':') {
+                if header_actions.iter().any(|action| {
+                    matches!(action.kind, SipHeaderActionKind::Remove | SipHeaderActionKind::Set)
+                        && name.trim().eq_ignore_ascii_case(&action.name)
+                }) {
+                    continue;
+                }
             }
         }
         out.push_str(line);
@@ -1562,6 +1591,18 @@ impl SipRequest {
             .headers
             .iter()
             .find_map(|header| header_value(header, &expected))
+    }
+
+    fn headers_for_routing(&self) -> Vec<(String, String)> {
+        self.inner
+            .headers
+            .iter()
+            .filter_map(|header| {
+                let line = header.to_string();
+                let (name, value) = line.split_once(':')?;
+                Some((canonical_header_name(name), value.trim().to_string()))
+            })
+            .collect()
     }
 
     fn call_id(&self) -> Option<&str> {
@@ -2701,7 +2742,7 @@ Call-ID: info-1\r\n\
 CSeq: 2 INFO\r\n\
 Content-Length: 0\r\n\r\n";
         let rewritten =
-            rewrite_request_for_proxy(packet, "sip:bob@10.0.0.9:5080", addr, "z9hG4bK-pale-x")
+            rewrite_request_for_proxy(packet, "sip:bob@10.0.0.9:5080", addr, "z9hG4bK-pale-x", &[])
                 .unwrap();
         assert!(rewritten.starts_with("INFO sip:bob@10.0.0.9:5080 SIP/2.0"));
         assert!(rewritten.contains("Max-Forwards: 69\r\n"));
@@ -2710,6 +2751,52 @@ Content-Length: 0\r\n\r\n";
         let ours = rewritten.find("z9hG4bK-pale-x").unwrap();
         let theirs = rewritten.find("z9hG4bKcaller").unwrap();
         assert!(ours < theirs);
+    }
+
+    #[test]
+    fn rewrite_applies_route_header_actions() {
+        let addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
+        let packet = "INVITE sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:5062;branch=z9hG4bKcaller\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: invite-1\r\n\
+CSeq: 1 INVITE\r\n\
+P-Asserted-Identity: <sip:old@example.com>\r\n\
+X-Legacy: remove-me\r\n\
+Content-Length: 0\r\n\r\n";
+        let actions = vec![
+            SipHeaderAction {
+                kind: SipHeaderActionKind::Set,
+                name: "P-Asserted-Identity".to_string(),
+                value: "<sip:main@example.com>".to_string(),
+            },
+            SipHeaderAction {
+                kind: SipHeaderActionKind::Remove,
+                name: "X-Legacy".to_string(),
+                value: String::new(),
+            },
+            SipHeaderAction {
+                kind: SipHeaderActionKind::Add,
+                name: "X-Pale-Route".to_string(),
+                value: "did-main".to_string(),
+            },
+        ];
+
+        let rewritten = rewrite_request_for_proxy(
+            packet,
+            "sip:bob@10.0.0.9:5080",
+            addr,
+            "z9hG4bK-pale-x",
+            &actions,
+        )
+        .unwrap();
+
+        assert!(!rewritten.contains("sip:old@example.com"));
+        assert!(!rewritten.contains("X-Legacy"));
+        assert!(rewritten.contains("P-Asserted-Identity: <sip:main@example.com>\r\n"));
+        assert!(rewritten.contains("X-Pale-Route: did-main\r\n"));
     }
 
     #[test]

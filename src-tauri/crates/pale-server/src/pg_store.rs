@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use deadpool_postgres::{Config, Pool, Runtime};
+use tokio_postgres::types::Json;
 use tokio_postgres::NoTls;
 use uuid::Uuid;
 
@@ -59,6 +60,7 @@ impl PgStore {
             include_str!("../migrations/010_extension_user_link.sql"),
             include_str!("../migrations/011_call_center_enterprise.sql"),
             include_str!("../migrations/012_chat_enterprise.sql"),
+            include_str!("../migrations/013_comprehensive_routing.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {
@@ -334,10 +336,41 @@ impl PgStore {
     pub async fn upsert_routing_rule(&self, rule: &RoutingRule) -> Result<(), PgError> {
         let client = self.pool.get().await?;
         client.execute(
-            "INSERT INTO routing_rules (id, name, source_pattern, destination_pattern, target, priority, enabled, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-             ON CONFLICT (id) DO UPDATE SET name = $2, source_pattern = $3, destination_pattern = $4, target = $5, priority = $6, enabled = $7, updated_at = $9",
-            &[&rule.id, &rule.name, &rule.source_pattern, &rule.destination_pattern, &rule.target, &rule.priority, &rule.enabled, &rule.created_at, &rule.updated_at],
+            "INSERT INTO routing_rules (
+                id, name, source_pattern, destination_pattern, target, destination_type,
+                method_pattern, header_conditions, header_actions, stop_processing,
+                priority, enabled, created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+             ON CONFLICT (id) DO UPDATE SET
+                name = $2,
+                source_pattern = $3,
+                destination_pattern = $4,
+                target = $5,
+                destination_type = $6,
+                method_pattern = $7,
+                header_conditions = $8,
+                header_actions = $9,
+                stop_processing = $10,
+                priority = $11,
+                enabled = $12,
+                updated_at = $14",
+            &[
+                &rule.id,
+                &rule.name,
+                &rule.source_pattern,
+                &rule.destination_pattern,
+                &rule.target,
+                &rule.destination_type,
+                &rule.method_pattern,
+                &Json(&rule.header_conditions),
+                &Json(&rule.header_actions),
+                &rule.stop_processing,
+                &rule.priority,
+                &rule.enabled,
+                &rule.created_at,
+                &rule.updated_at,
+            ],
         ).await?;
         Ok(())
     }
@@ -351,7 +384,15 @@ impl PgStore {
     pub async fn load_routing_rules(&self) -> Result<Vec<RoutingRule>, PgError> {
         let client = self.pool.get().await?;
         let rows = client.query(
-            "SELECT id, name, source_pattern, destination_pattern, target, priority, enabled, created_at, updated_at FROM routing_rules ORDER BY priority ASC",
+            "SELECT id, name, source_pattern, destination_pattern, target,
+                    COALESCE(destination_type, 'user') AS destination_type,
+                    COALESCE(method_pattern, '*') AS method_pattern,
+                    COALESCE(header_conditions, '[]'::jsonb) AS header_conditions,
+                    COALESCE(header_actions, '[]'::jsonb) AS header_actions,
+                    COALESCE(stop_processing, true) AS stop_processing,
+                    priority, enabled, created_at, updated_at
+             FROM routing_rules
+             ORDER BY priority ASC",
             &[],
         ).await?;
 
@@ -361,6 +402,11 @@ impl PgStore {
             source_pattern: r.get("source_pattern"),
             destination_pattern: r.get("destination_pattern"),
             target: r.get("target"),
+            destination_type: r.get("destination_type"),
+            method_pattern: r.get("method_pattern"),
+            header_conditions: r.get::<_, Json<_>>("header_conditions").0,
+            header_actions: r.get::<_, Json<_>>("header_actions").0,
+            stop_processing: r.get("stop_processing"),
             priority: r.get("priority"),
             enabled: r.get("enabled"),
             created_at: r.get("created_at"),
@@ -629,8 +675,10 @@ impl PgStore {
     pub async fn insert_extension(&self, ext: &crate::Extension) -> Result<(), PgError> {
         let client = self.pool.get().await?;
         client.execute(
-            "INSERT INTO extensions (extension, destination, destination_type, label, user_id) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (extension) DO UPDATE SET destination=$2, destination_type=$3, label=$4, user_id=$5",
-            &[&ext.extension, &ext.destination, &ext.destination_type, &ext.label, &ext.user_id],
+            "INSERT INTO extensions (extension, destination, destination_type, label, user_id, is_did)
+             VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (extension) DO UPDATE SET destination=$2, destination_type=$3, label=$4, user_id=$5, is_did=$6",
+            &[&ext.extension, &ext.destination, &ext.destination_type, &ext.label, &ext.user_id, &ext.is_did],
         ).await?;
         Ok(())
     }
@@ -644,7 +692,7 @@ impl PgStore {
     pub async fn load_extensions(&self) -> Result<Vec<crate::Extension>, PgError> {
         let client = self.pool.get().await?;
         let rows = client.query(
-            "SELECT e.extension, e.destination, e.destination_type, e.label, e.user_id, u.display_name as user_display_name FROM extensions e LEFT JOIN users u ON e.user_id = u.id ORDER BY e.extension",
+            "SELECT e.extension, e.destination, e.destination_type, e.label, e.user_id, COALESCE(e.is_did, false) AS is_did, u.display_name as user_display_name FROM extensions e LEFT JOIN users u ON e.user_id = u.id ORDER BY e.extension",
             &[],
         ).await?;
         Ok(rows.iter().filter_map(|r| {
@@ -655,6 +703,7 @@ impl PgStore {
                 label: r.try_get("label").unwrap_or_default(),
                 user_id: r.try_get("user_id").ok().flatten(),
                 user_display_name: r.try_get("user_display_name").ok().flatten(),
+                is_did: r.try_get("is_did").unwrap_or(false),
             })
         }).collect())
     }
@@ -890,4 +939,3 @@ impl PgStore {
         Ok(())
     }
 }
-
