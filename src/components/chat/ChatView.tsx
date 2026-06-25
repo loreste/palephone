@@ -6,7 +6,7 @@ import { useMatrixStore } from "@/store/matrixStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
-import { matrixSendMessage, matrixSetTyping, matrixCreateDm, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerEndRoomCall, paleServerGetConferences, paleServerGetMeetings, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerStartMeeting, paleServerGetRoomMessages, paleServerGetRoomMessageState, paleServerSendRoomMessage, paleServerEditMessage, paleServerDeleteMessage, type ServerRoom, type ServerUser, type ServerRoomMessage, type ServerRoomMessageState, type ServerMeeting, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult } from "@/lib/tauri";
+import { matrixSendMessage, matrixSetTyping, matrixCreateDm, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerEndRoomCall, paleServerGetConferences, paleServerGetMeetings, paleServerCreateMeeting, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerStartMeeting, paleServerGetRoomMessages, paleServerGetRoomMessageState, paleServerSendRoomMessage, paleServerEditMessage, paleServerDeleteMessage, type ServerRoom, type ServerUser, type ServerRoomMessage, type ServerRoomMessageState, type ServerMeeting, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult } from "@/lib/tauri";
 import { toast } from "@/components/ui/Toast";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
 import { EncryptionBadge } from "@/components/encryption/EncryptionBadge";
@@ -120,6 +120,11 @@ function meetingTimeLabel(meeting: ServerMeeting): string {
   const starts = new Date(meeting.starts_at);
   const ends = new Date(meeting.ends_at);
   return `${starts.toLocaleDateString([], { month: "short", day: "numeric" })} ${starts.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}-${ends.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+}
+
+function datetimeLocalValue(date: Date): string {
+  const offsetMs = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
 }
 
 function sanitizeHtml(html: string): string {
@@ -326,6 +331,27 @@ function ConversationList({
     }
   };
 
+  const handleCreateMeeting = async (input: {
+    title: string;
+    starts_at: string;
+    ends_at: string;
+    participants: string[];
+    mode: "audio" | "video";
+  }) => {
+    if (!connected || !baseUrl || !token) {
+      toast({ type: "error", title: "Not connected to server" });
+      return;
+    }
+    try {
+      const meeting = await paleServerCreateMeeting(baseUrl, token, input);
+      setMeetings((existing) => [...existing.filter((item) => item.id !== meeting.id), meeting]);
+      setShowNewChat(false);
+      toast({ type: "success", title: "Meeting scheduled" });
+    } catch (err) {
+      toast({ type: "error", title: "Could not schedule meeting", description: String(err) });
+    }
+  };
+
   const normalizedQuery = query.trim().toLowerCase();
   const scopedRooms = focusedTeam ? rooms.filter((room) => room.team_id === focusedTeam.id) : rooms;
   const filteredRooms = scopedRooms.filter((room) =>
@@ -456,7 +482,13 @@ function ConversationList({
         </button>
       </div>
 
-      {showNewChat && <NewChatInput onSubmit={handleNewDm} onCreateRoom={handleCreateRoom} />}
+      {showNewChat && (
+        <NewChatInput
+          onSubmit={handleNewDm}
+          onCreateRoom={handleCreateRoom}
+          onCreateMeeting={handleCreateMeeting}
+        />
+      )}
 
       <div className="px-4 pb-2">
         {focusedTeam && (
@@ -1284,13 +1316,28 @@ function ChatRoom({
 function NewChatInput({
   onSubmit,
   onCreateRoom,
+  onCreateMeeting,
 }: {
   onSubmit: (user: { display_name: string; sip_uri: string; matrix_user_id?: string | null }) => void;
   onCreateRoom: (name: string, members: string[]) => void;
+  onCreateMeeting: (input: {
+    title: string;
+    starts_at: string;
+    ends_at: string;
+    participants: string[];
+    mode: "audio" | "video";
+  }) => void;
 }) {
-  const [mode, setMode] = useState<"dm" | "room">("dm");
+  const [mode, setMode] = useState<"dm" | "room" | "meeting">("dm");
   const [userId, setUserId] = useState("");
   const [roomName, setRoomName] = useState("");
+  const now = new Date();
+  const defaultStartsAt = datetimeLocalValue(new Date(now.getTime() + 30 * 60_000));
+  const defaultEndsAt = datetimeLocalValue(new Date(now.getTime() + 60 * 60_000));
+  const [meetingTitle, setMeetingTitle] = useState("");
+  const [meetingStartsAt, setMeetingStartsAt] = useState(defaultStartsAt);
+  const [meetingEndsAt, setMeetingEndsAt] = useState(defaultEndsAt);
+  const [meetingMode, setMeetingMode] = useState<"audio" | "video">("video");
   const [memberQuery, setMemberQuery] = useState("");
   const [selectedMembers, setSelectedMembers] = useState<ServerUser[]>([]);
   const [serverUsers, setServerUsers] = useState<ServerUser[]>([]);
@@ -1340,6 +1387,17 @@ function NewChatInput({
     onCreateRoom(roomName.trim(), selectedMembers.map((member) => member.sip_uri));
   };
 
+  const createMeeting = () => {
+    if (!meetingTitle.trim() || !meetingStartsAt || !meetingEndsAt) return;
+    onCreateMeeting({
+      title: meetingTitle.trim(),
+      starts_at: new Date(meetingStartsAt).toISOString(),
+      ends_at: new Date(meetingEndsAt).toISOString(),
+      participants: selectedMembers.map((member) => member.sip_uri),
+      mode: meetingMode,
+    });
+  };
+
   return (
     <div className="px-4 pb-3 space-y-2">
       <div className="flex gap-1">
@@ -1360,6 +1418,15 @@ function NewChatInput({
           )}
         >
           Group Room
+        </button>
+        <button
+          onClick={() => setMode("meeting")}
+          className={cn(
+            "px-2 py-1 text-xs rounded-md",
+            mode === "meeting" ? "bg-accent-muted text-accent" : "text-tertiary hover:text-secondary"
+          )}
+        >
+          Meeting
         </button>
       </div>
 
@@ -1422,7 +1489,7 @@ function NewChatInput({
           </div>
           <p className="text-[10px] text-tertiary">Search for a user to start a conversation</p>
         </>
-      ) : (
+      ) : mode === "room" ? (
         <>
           <input
             type="text"
@@ -1506,6 +1573,125 @@ function NewChatInput({
             Create Room
           </button>
           <p className="text-[10px] text-tertiary">Create a group chat on the Pale server</p>
+        </>
+      ) : (
+        <>
+          <input
+            type="text"
+            value={meetingTitle}
+            onChange={(e) => setMeetingTitle(e.target.value)}
+            placeholder="Meeting title"
+            className={cn(
+              "w-full bg-surface border border-border-subtle rounded-lg",
+              "px-3 py-2 text-sm text-primary placeholder:text-tertiary",
+              "focus:outline-none focus:border-border-focus"
+            )}
+            autoFocus
+          />
+          <div className="grid grid-cols-2 gap-2">
+            <input
+              type="datetime-local"
+              value={meetingStartsAt}
+              onChange={(e) => setMeetingStartsAt(e.target.value)}
+              className="bg-surface border border-border-subtle rounded-lg px-2 py-2 text-xs text-primary focus:outline-none focus:border-border-focus"
+            />
+            <input
+              type="datetime-local"
+              value={meetingEndsAt}
+              onChange={(e) => setMeetingEndsAt(e.target.value)}
+              className="bg-surface border border-border-subtle rounded-lg px-2 py-2 text-xs text-primary focus:outline-none focus:border-border-focus"
+            />
+          </div>
+          <div className="flex gap-1">
+            <button
+              onClick={() => setMeetingMode("video")}
+              className={cn(
+                "flex-1 px-2 py-1.5 text-xs rounded-md",
+                meetingMode === "video" ? "bg-accent-muted text-accent" : "bg-surface text-tertiary hover:text-secondary"
+              )}
+            >
+              Video
+            </button>
+            <button
+              onClick={() => setMeetingMode("audio")}
+              className={cn(
+                "flex-1 px-2 py-1.5 text-xs rounded-md",
+                meetingMode === "audio" ? "bg-accent-muted text-accent" : "bg-surface text-tertiary hover:text-secondary"
+              )}
+            >
+              Audio
+            </button>
+          </div>
+          {selectedMembers.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {selectedMembers.map((member) => (
+                <span
+                  key={member.id}
+                  className="inline-flex items-center gap-1 rounded-md bg-accent-muted px-2 py-1 text-xs text-accent"
+                >
+                  {member.display_name}
+                  <button
+                    onClick={() => removeRoomMember(member.id)}
+                    className="rounded text-accent hover:text-primary"
+                    title={`Remove ${member.display_name}`}
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="relative">
+            <input
+              type="text"
+              value={memberQuery}
+              onChange={(e) => setMemberQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && memberSuggestions[0]) {
+                  e.preventDefault();
+                  addRoomMember(memberSuggestions[0]);
+                }
+              }}
+              placeholder="Search users to invite..."
+              className={cn(
+                "w-full bg-surface border border-border-subtle rounded-lg",
+                "px-3 py-2 text-sm text-primary placeholder:text-tertiary",
+                "focus:outline-none focus:border-border-focus"
+              )}
+            />
+            {memberSuggestions.length > 0 && (
+              <div className="absolute z-10 left-0 right-0 mt-1 bg-surface border border-border-subtle rounded-lg shadow-lg max-h-44 overflow-y-auto">
+                {memberSuggestions.map((u) => (
+                  <button
+                    key={u.id}
+                    onClick={() => addRoomMember(u)}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-elevated transition-colors"
+                  >
+                    <div className="w-7 h-7 rounded-full bg-accent-muted text-accent flex items-center justify-center text-xs font-bold">
+                      {u.display_name.charAt(0)}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-primary truncate">{u.display_name}</p>
+                      <p className="text-[10px] text-tertiary truncate">{u.sip_uri}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <button
+            onClick={createMeeting}
+            disabled={!meetingTitle.trim() || !meetingStartsAt || !meetingEndsAt}
+            className={cn(
+              "w-full px-3 py-2 rounded-lg text-sm font-medium transition-colors",
+              meetingTitle.trim() && meetingStartsAt && meetingEndsAt
+                ? "bg-accent text-white hover:bg-accent-hover"
+                : "bg-elevated text-tertiary cursor-not-allowed"
+            )}
+          >
+            Schedule Meeting
+          </button>
+          <p className="text-[10px] text-tertiary">Create a scheduled meeting with selected participants</p>
         </>
       )}
     </div>
