@@ -6,7 +6,7 @@ import { useMatrixStore } from "@/store/matrixStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
-import { matrixSendMessage, matrixSetTyping, matrixCreateDm, paleServerGetMessages, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerGetConferences, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerStartMeeting, type ServerRoom, type ServerUser, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult } from "@/lib/tauri";
+import { matrixSendMessage, matrixSetTyping, matrixCreateDm, paleServerGetMessages, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerGetConferences, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerStartMeeting, paleServerGetRoomMessages, paleServerSendRoomMessage, paleServerEditMessage, paleServerDeleteMessage, type ServerRoom, type ServerUser, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult } from "@/lib/tauri";
 import { toast } from "@/components/ui/Toast";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
 import { EncryptionBadge } from "@/components/encryption/EncryptionBadge";
@@ -662,31 +662,29 @@ function ChatRoom({
   // Load server room messages on mount (stable deps only — no addMessage to avoid re-render loop)
   useEffect(() => {
     if (isServerRoom && connected && baseUrl && token) {
-      import("@/lib/tauri").then(({ paleServerGetRoomMessages }) => {
-        paleServerGetRoomMessages(baseUrl, token, room.room_id)
-          .then((msgs) => {
-            const add = useChatStore.getState().addMessage;
-            for (const msg of msgs) {
-              add({
-                event_id: msg.id,
-                room_id: room.room_id,
-                sender: msg.sender_uri,
-                sender_name: null,
-                body: msg.body,
-                msg_type: "text",
-                timestamp: Math.floor(new Date(msg.created_at).getTime() / 1000),
-                is_encrypted: false,
-                is_own: currentSipUri != null && msg.sender_uri === currentSipUri,
-                reply_to: msg.reply_to,
-                edited_at: msg.edited_at ? Math.floor(new Date(msg.edited_at).getTime() / 1000) : undefined,
-                pinned: msg.pinned,
-                mentions: msg.mentions ?? [],
-                mentioned_user_uris: msg.mentioned_user_uris ?? [],
-              });
-            }
-          })
-          .catch(() => {});
-      });
+      paleServerGetRoomMessages(baseUrl, token, room.room_id)
+        .then((msgs) => {
+          const add = useChatStore.getState().addMessage;
+          for (const msg of msgs) {
+            add({
+              event_id: msg.id,
+              room_id: room.room_id,
+              sender: msg.sender_uri,
+              sender_name: null,
+              body: msg.body,
+              msg_type: "text",
+              timestamp: Math.floor(new Date(msg.created_at).getTime() / 1000),
+              is_encrypted: false,
+              is_own: currentSipUri != null && msg.sender_uri === currentSipUri,
+              reply_to: msg.reply_to,
+              edited_at: msg.edited_at ? Math.floor(new Date(msg.edited_at).getTime() / 1000) : undefined,
+              pinned: msg.pinned,
+              mentions: msg.mentions ?? [],
+              mentioned_user_uris: msg.mentioned_user_uris ?? [],
+            });
+          }
+        })
+        .catch(() => {});
     }
   }, [room.room_id, isServerRoom, connected, baseUrl, token, currentSipUri]);
 
@@ -841,7 +839,6 @@ function ChatRoom({
         const uploaded = await paleServerUploadFile(baseUrl, token, file);
         const fileUrl = `${baseUrl.replace(/\/+$/, "")}/v1/files/${uploaded.id}`;
         const body = `[File: ${uploaded.filename}](${fileUrl})`;
-        const { paleServerSendRoomMessage } = await import("@/lib/tauri");
         const msg = await paleServerSendRoomMessage(baseUrl, token, room.room_id, body);
         addMessage({
           event_id: msg.id,
@@ -874,7 +871,6 @@ function ChatRoom({
       setEditingMessage(null);
       try {
         if (connected && baseUrl && token) {
-          const { paleServerEditMessage } = await import("@/lib/tauri");
           const updated = await paleServerEditMessage(baseUrl, token, msgId, body);
           updateMessage(room.room_id, msgId, {
             body: updated.body,
@@ -892,7 +888,6 @@ function ChatRoom({
     // Handle reply or normal send
     try {
       if (isServerRoom && connected && baseUrl && token) {
-        const { paleServerSendRoomMessage } = await import("@/lib/tauri");
         const msg = await paleServerSendRoomMessage(baseUrl, token, room.room_id, body, replyingTo?.event_id);
         addMessage({
           event_id: msg.id,
@@ -937,7 +932,6 @@ function ChatRoom({
     const senderLabel = msg.sender_name ?? msg.sender;
     const body = `Forwarded from ${senderLabel}:\n${msg.body}`;
     try {
-      const { paleServerSendRoomMessage } = await import("@/lib/tauri");
       await paleServerSendRoomMessage(baseUrl, token, target, body);
       toast({ type: "success", title: "Message forwarded" });
     } catch (err) {
@@ -1480,7 +1474,6 @@ function MessageBubble({
 
   const handleDelete = async () => {
     if (!connected || !baseUrl || !token) return;
-    const { paleServerDeleteMessage } = await import("@/lib/tauri");
     paleServerDeleteMessage(baseUrl, token, message.event_id).catch(() => {});
   };
 

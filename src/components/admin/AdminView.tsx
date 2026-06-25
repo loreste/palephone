@@ -37,7 +37,7 @@ import {
 import { toast } from "@/components/ui/Toast";
 import { useServerStore } from "@/store/serverStore";
 import { disconnectServer } from "@/lib/session";
-import { paleServerApi } from "@/lib/tauri";
+import { paleServerApi, paleServerUploadFile } from "@/lib/tauri";
 
 // Helper: all server calls go through Tauri invoke (not webview fetch)
 async function api<T = any>(baseUrl: string, token: string, path: string, opts?: { method?: string; body?: unknown }): Promise<T> {
@@ -1168,8 +1168,6 @@ function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
   const uploadGreeting = async (file: File) => {
     setUploading(true);
     try {
-      // File uploads need special handling — use paleServerUploadFile from tauri.ts
-      const { paleServerUploadFile } = await import("@/lib/tauri");
       const record = await paleServerUploadFile(baseUrl, token, file);
       setGreetingFileId(record.id);
       toast({ type: "success", title: `Uploaded: ${file.name}` });

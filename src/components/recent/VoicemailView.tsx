@@ -24,16 +24,11 @@ export function VoicemailView() {
   const load = useCallback(async () => {
     if (!baseUrl || !token) { setLoading(false); return; }
     try {
-      const { serverFetch } = await import("@/lib/tauri").then(() => ({
-        serverFetch: async (path: string) => {
-          const res = await fetch(`${baseUrl.replace(/\/+$/, "")}${path}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          if (!res.ok) throw new Error(res.statusText);
-          return res.json();
-        },
-      }));
-      setVoicemails(await serverFetch("/v1/voicemail"));
+      const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/voicemail`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error(res.statusText);
+      setVoicemails(await res.json());
     } catch { setVoicemails([]); }
     setLoading(false);
   }, [baseUrl, token]);
