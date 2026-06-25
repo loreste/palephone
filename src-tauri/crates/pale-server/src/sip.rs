@@ -172,9 +172,9 @@ fn handle_request(request: &SipRequest, peer: SocketAddr, state: &AppState) -> O
         "REFER" => handle_refer(&request, state),
         "NOTIFY" => handle_notify(&request, state),
         "SUBSCRIBE" => handle_subscribe(&request, peer, state),
-        "PRACK" => Some(request.response(200, "OK", &[])),
-        "UPDATE" => Some(request.response(200, "OK", &[])),
-        "PUBLISH" => Some(request.response(202, "Accepted", &[])),
+        "PRACK" => handle_prack(request, state),
+        "UPDATE" => handle_update(request, state),
+        "PUBLISH" => handle_publish(request, state),
         _ => Some(request.response(
             501,
             "Not Implemented",
@@ -627,6 +627,87 @@ fn handle_info(request: &SipRequest, state: &AppState) -> Option<String> {
         }
     }
     Some(request.response(200, "OK", &[]))
+}
+
+fn handle_prack(request: &SipRequest, state: &AppState) -> Option<String> {
+    let Some(realm) = request.sender_realm() else {
+        return Some(request.response(400, "Bad Request", &[]));
+    };
+    if !request.is_authorized(state, &realm) {
+        return Some(request.digest_challenge(&realm, state.issue_sip_nonce()));
+    }
+    if let Some(call_id) = request.call_id() {
+        if !state.dialog_exists(call_id) {
+            return Some(request.response(481, "Call/Transaction Does Not Exist", &[]));
+        }
+    }
+    Some(request.response(200, "OK", &[]))
+}
+
+fn handle_update(request: &SipRequest, state: &AppState) -> Option<String> {
+    let Some(realm) = request.sender_realm() else {
+        return Some(request.response(400, "Bad Request", &[]));
+    };
+    if !request.is_authorized(state, &realm) {
+        return Some(request.digest_challenge(&realm, state.issue_sip_nonce()));
+    }
+    if let Some(call_id) = request.call_id() {
+        if !state.dialog_exists(call_id) {
+            return Some(request.response(481, "Call/Transaction Does Not Exist", &[]));
+        }
+        let body = request.body_text();
+        let hold_status = detect_hold_from_sdp(&body);
+        let status = match hold_status {
+            Some(true) => SipDialogStatus::Held,
+            Some(false) => SipDialogStatus::Answered,
+            None => state
+                .dialog_for(call_id)
+                .map(|dialog| dialog.status)
+                .unwrap_or(SipDialogStatus::Answered),
+        };
+        let _ = state.update_sip_dialog_status(call_id, status);
+    }
+    Some(request.response(200, "OK", &[]))
+}
+
+fn handle_publish(request: &SipRequest, state: &AppState) -> Option<String> {
+    let Some(publisher) = request.header("from").and_then(extract_sip_uri) else {
+        return Some(request.response(400, "Bad Request", &[]));
+    };
+    let Some((_, realm)) = split_sip_aor(&publisher) else {
+        return Some(request.response(400, "Bad Request", &[]));
+    };
+    if !request.is_authorized(state, &realm) {
+        return Some(request.digest_challenge(&realm, state.issue_sip_nonce()));
+    }
+
+    let event = request
+        .header("event")
+        .map(|v| v.split(';').next().unwrap_or(v).trim().to_string())
+        .unwrap_or_else(|| "presence".to_string());
+    if !SUPPORTED_EVENTS.contains(&event.as_str()) {
+        return Some(request.response(
+            489,
+            "Bad Event",
+            &[("Allow-Events", SUPPORTED_EVENTS.join(", "))],
+        ));
+    }
+
+    if event == "presence" {
+        let body = request.body_text();
+        let status = if body.contains("<basic>open</basic>") {
+            Some(PresenceStatus::Online)
+        } else if body.contains("<basic>closed</basic>") {
+            Some(PresenceStatus::Offline)
+        } else {
+            None
+        };
+        if let Some(status) = status {
+            state.update_presence(&publisher, status, None);
+        }
+    }
+
+    Some(request.response(202, "Accepted", &[]))
 }
 
 fn handle_message(request: &SipRequest, state: &AppState) -> Option<String> {
@@ -1826,8 +1907,25 @@ fn status_reason(status: &StatusCode) -> String {
 }
 
 fn allowed_methods() -> String {
-    "INVITE, ACK, BYE, CANCEL, OPTIONS, REGISTER, INFO, MESSAGE, REFER, NOTIFY, SUBSCRIBE, PRACK, UPDATE, PUBLISH".to_string()
+    SUPPORTED_METHODS.join(", ")
 }
+
+const SUPPORTED_METHODS: &[&str] = &[
+    "INVITE",
+    "ACK",
+    "BYE",
+    "CANCEL",
+    "OPTIONS",
+    "REGISTER",
+    "INFO",
+    "MESSAGE",
+    "REFER",
+    "NOTIFY",
+    "SUBSCRIBE",
+    "PRACK",
+    "UPDATE",
+    "PUBLISH",
+];
 
 fn extract_media_types(sdp_body: &str) -> Vec<MediaKind> {
     let mut media = Vec::new();
@@ -2215,8 +2313,38 @@ CSeq: 1 OPTIONS\r\n\r\n";
         let response = handle_packet(packet, peer, &state).unwrap();
 
         assert!(response.starts_with("SIP/2.0 200 OK"));
-        assert!(response.contains("Allow: INVITE, ACK, BYE"));
+        assert!(response.contains(&format!("Allow: {}", allowed_methods())));
         assert!(response.contains("Supported: 100rel"));
+    }
+
+    #[test]
+    fn advertised_methods_have_handlers() {
+        let state = test_state();
+        let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
+
+        for method in SUPPORTED_METHODS {
+            let packet = format!(
+                "{} sip:bob@example.com SIP/2.0\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: advertised-{}\r\n\
+CSeq: 1 {}\r\n\r\n",
+                method,
+                method.to_ascii_lowercase(),
+                method
+            );
+            let response = handle_packet(&packet, peer, &state);
+
+            if *method == "ACK" {
+                assert!(response.is_none(), "ACK must remain response-less");
+            } else {
+                let response = response.unwrap_or_else(|| panic!("{method} returned no response"));
+                assert!(
+                    !response.starts_with("SIP/2.0 501 Not Implemented"),
+                    "{method} fell through to unsupported handling"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2463,6 +2591,131 @@ Authorization: {}\r\n\r\n{}",
         let presence = state.presence("sip:bob@example.com");
         assert!(presence.is_some());
         assert_eq!(presence.unwrap().status, crate::PresenceStatus::Online);
+    }
+
+    #[test]
+    fn publish_requires_auth_and_updates_presence() {
+        let state = test_state();
+        let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
+        let pidf_body = "<presence><tuple><status><basic>open</basic></status></tuple></presence>";
+        let unauthenticated = format!(
+            "PUBLISH sip:alice@example.com SIP/2.0\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:alice@example.com>\r\n\
+Call-ID: publish-1\r\n\
+CSeq: 1 PUBLISH\r\n\
+Event: presence\r\n\
+Content-Type: application/pidf+xml\r\n\
+Content-Length: {}\r\n\r\n{}",
+            pidf_body.len(),
+            pidf_body
+        );
+
+        let response = handle_packet(&unauthenticated, peer, &state).unwrap();
+        assert!(response.starts_with("SIP/2.0 401 Unauthorized"));
+
+        let nonce = state.issue_sip_nonce();
+        let auth = authorization(
+            "alice",
+            "example.com",
+            "secret",
+            "PUBLISH",
+            "sip:alice@example.com",
+            &nonce,
+        );
+        let authenticated = format!(
+            "PUBLISH sip:alice@example.com SIP/2.0\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:alice@example.com>\r\n\
+Call-ID: publish-1\r\n\
+CSeq: 2 PUBLISH\r\n\
+Event: presence\r\n\
+Content-Type: application/pidf+xml\r\n\
+Content-Length: {}\r\n\
+Authorization: {}\r\n\r\n{}",
+            pidf_body.len(),
+            auth,
+            pidf_body
+        );
+
+        let response = handle_packet(&authenticated, peer, &state).unwrap();
+        assert!(response.starts_with("SIP/2.0 202 Accepted"));
+        assert_eq!(
+            state.presence("sip:alice@example.com").unwrap().status,
+            crate::PresenceStatus::Online
+        );
+    }
+
+    #[test]
+    fn prack_and_update_validate_existing_dialog() {
+        let state = test_state();
+        let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
+
+        for method in ["PRACK", "UPDATE"] {
+            let nonce = state.issue_sip_nonce();
+            let auth = authorization(
+                "alice",
+                "example.com",
+                "secret",
+                method,
+                "sip:bob@example.com",
+                &nonce,
+            );
+            let packet = format!(
+                "{} sip:bob@example.com SIP/2.0\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>;tag=2\r\n\
+Call-ID: missing-dialog-{}\r\n\
+CSeq: 1 {}\r\n\
+Authorization: {}\r\n\r\n",
+                method,
+                method.to_ascii_lowercase(),
+                method,
+                auth
+            );
+            let response = handle_packet(&packet, peer, &state).unwrap();
+            assert!(
+                response.starts_with("SIP/2.0 481 Call/Transaction Does Not Exist"),
+                "{method} should reject missing dialogs"
+            );
+        }
+
+        state.upsert_sip_dialog(UpsertSipDialog {
+            call_id: "update-dialog".to_string(),
+            from_uri: "sip:alice@example.com".to_string(),
+            to_uri: "sip:bob@example.com".to_string(),
+            target_contact: Some("sip:bob@127.0.0.1:5063".to_string()),
+            status: SipDialogStatus::Answered,
+            media_types: vec![],
+            peer: Default::default(),
+        });
+        let nonce = state.issue_sip_nonce();
+        let auth = authorization(
+            "alice",
+            "example.com",
+            "secret",
+            "UPDATE",
+            "sip:bob@example.com",
+            &nonce,
+        );
+        let body = "v=0\r\nm=audio 5004 RTP/AVP 0\r\na=sendonly\r\n";
+        let update = format!(
+            "UPDATE sip:bob@example.com SIP/2.0\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>;tag=2\r\n\
+Call-ID: update-dialog\r\n\
+CSeq: 2 UPDATE\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: {}\r\n\
+Authorization: {}\r\n\r\n{}",
+            body.len(),
+            auth,
+            body
+        );
+
+        let response = handle_packet(&update, peer, &state).unwrap();
+        assert!(response.starts_with("SIP/2.0 200 OK"));
+        assert_eq!(state.dialog_for("update-dialog").unwrap().status, SipDialogStatus::Held);
     }
 
     #[test]
