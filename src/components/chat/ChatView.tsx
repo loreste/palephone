@@ -686,10 +686,12 @@ function ChatRoom({
   const currentSipUri = useAccountStore((s) => s.account?.sipUri);
   const addMessage = useChatStore((s) => s.addMessage);
   const updateMessage = useChatStore((s) => s.updateMessage);
+  const upsertRoom = useChatStore((s) => s.upsertRoom);
   const isServerRoom = !room.room_id.startsWith("!");
   const localMemberUri = currentSipUri ?? room.created_by;
   const otherDirectMember = room.members?.find((member) => member !== localMemberUri);
   const canStartRoomCall = isServerRoom && (!room.is_direct || Boolean(otherDirectMember));
+  const hasActiveRoomCall = isServerRoom && !room.is_direct && Boolean(room.call_uri);
 
   // Load server users for mentions
   useEffect(() => {
@@ -996,6 +998,11 @@ function ChatRoom({
         return;
       }
       const target = await paleServerStartRoomCall(baseUrl, token, room.room_id, mode);
+      upsertRoom({
+        ...room,
+        call_uri: target.call_uri,
+        conference_id: target.conference_id,
+      });
       if (mode === "video") {
         await ipcMakeVideoCall(target.call_uri);
       } else {
@@ -1003,6 +1010,15 @@ function ChatRoom({
       }
     } catch (err) {
       toast({ type: "error", title: `Failed to start ${mode} call`, description: String(err) });
+    }
+  };
+
+  const joinActiveRoomCall = async () => {
+    if (!room.call_uri) return;
+    try {
+      await ipcMakeCall(room.call_uri);
+    } catch (err) {
+      toast({ type: "error", title: "Failed to join call", description: String(err) });
     }
   };
 
@@ -1066,6 +1082,21 @@ function ChatRoom({
           <Video size={17} />
         </button>
       </div>
+
+      {hasActiveRoomCall && (
+        <div className="flex items-center justify-between gap-3 px-4 py-2 border-b border-border-subtle bg-success/10 text-sm">
+          <div className="flex items-center gap-2 min-w-0 text-success">
+            <Phone size={14} />
+            <span className="font-medium truncate">Group call in progress</span>
+          </div>
+          <button
+            onClick={joinActiveRoomCall}
+            className="h-8 px-3 rounded-md bg-success text-white hover:opacity-90 transition-opacity text-xs font-medium"
+          >
+            Join
+          </button>
+        </div>
+      )}
 
       {/* Messages */}
       <div

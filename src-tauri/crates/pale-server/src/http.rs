@@ -2240,7 +2240,7 @@ fn event_visible_to(state: &AppState, event: &crate::SseEvent, principal: &str) 
                         == Some(principal)
                 })
             }),
-        "room_message" | "typing" => event
+        "room_message" | "typing" | "room_call_started" => event
             .payload
             .get("room_id")
             .and_then(|id| id.as_str())
@@ -2605,6 +2605,13 @@ mod auth_tests {
         };
         assert!(event_visible_to(&state, &reaction_event, "sip:alice@example.com"));
         assert!(!event_visible_to(&state, &reaction_event, "sip:mallory@example.com"));
+
+        let call_event = crate::SseEvent {
+            event_type: "room_call_started".to_string(),
+            payload: serde_json::json!({ "room_id": room.id }),
+        };
+        assert!(event_visible_to(&state, &call_event, "sip:bob@example.com"));
+        assert!(!event_visible_to(&state, &call_event, "sip:mallory@example.com"));
     }
 
     #[test]

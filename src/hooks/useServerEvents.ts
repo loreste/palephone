@@ -222,6 +222,20 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
         } catch { /* ignore */ }
       });
 
+      es.addEventListener("room_call_started", (e) => {
+        try {
+          const target = JSON.parse(e.data);
+          if (!target.room_id || !target.call_uri || !target.conference_id) return;
+          const existing = useChatStore.getState().rooms.find((room) => room.room_id === target.room_id);
+          if (!existing) return;
+          upsertRoom({
+            ...existing,
+            call_uri: target.call_uri,
+            conference_id: target.conference_id,
+          });
+        } catch { /* ignore */ }
+      });
+
       es.addEventListener("reaction", (e) => {
         try {
           const payload = JSON.parse(e.data);

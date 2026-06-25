@@ -415,6 +415,7 @@ SSE stream for real-time updates.
 | `message_edited` | `{ message_id, new_body, edited_by, edited_at }` | Message edited |
 | `message_deleted` | `{ message_id, deleted_by, deleted_at }` | Message deleted |
 | `reaction` | `{ message_id, room_id, emoji, user, added, created_at }` | Reaction toggled |
+| `room_call_started` | `{ room_id, conference_id, call_uri, mode }` | Room group call started |
 
 **Keep-alive:** Default interval. Buffer: 256 messages (older dropped if client lags).
 
