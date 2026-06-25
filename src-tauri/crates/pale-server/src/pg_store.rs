@@ -8,8 +8,9 @@ use uuid::Uuid;
 use crate::{
     AdminAuditEvent, AdminSession, BusinessHours, CallDetailRecord, CallHistoryEntry, CallRecording,
     CallSession, Conference, FileRecord, Holiday, QueueCallback, QueueCallerEntry, RoutingRule,
-    SipAccount, SipDialog, SipMessage, SipNotification, SipRegistration, SipSubscription,
-    SipTransaction, User, UserCallSettings, UserPresence, VipCaller, Voicemail,
+    Room, RoomMember, RoomMessage, SipAccount, SipDialog, SipMessage, SipNotification,
+    SipRegistration, SipSubscription, SipTransaction, User, UserCallSettings, UserPresence,
+    VipCaller, Voicemail,
 };
 
 pub type PgError = Box<dyn std::error::Error + Send + Sync>;
@@ -61,6 +62,8 @@ impl PgStore {
             include_str!("../migrations/011_call_center_enterprise.sql"),
             include_str!("../migrations/012_chat_enterprise.sql"),
             include_str!("../migrations/013_comprehensive_routing.sql"),
+            include_str!("../migrations/013_user_uniqueness.sql"),
+            include_str!("../migrations/014_room_call_metadata.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {
@@ -841,15 +844,107 @@ impl PgStore {
 
     // ─── Room Messages (Enterprise) ───
 
-    pub async fn insert_room_message(&self, msg: &crate::RoomMessage) -> Result<(), PgError> {
+    pub async fn upsert_room(&self, room: &Room) -> Result<(), PgError> {
+        let mut client = self.pool.get().await?;
+        let transaction = client.transaction().await?;
+        transaction.execute(
+            "INSERT INTO rooms (id, name, description, is_direct, created_by, conference_id, call_uri, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+             ON CONFLICT (id) DO UPDATE SET
+                name = $2,
+                description = $3,
+                is_direct = $4,
+                created_by = $5,
+                conference_id = $6,
+                call_uri = $7",
+            &[
+                &room.id,
+                &room.name,
+                &room.description,
+                &room.is_direct,
+                &room.created_by,
+                &room.conference_id,
+                &room.call_uri,
+                &room.created_at,
+            ],
+        ).await?;
+        transaction.execute("DELETE FROM room_members WHERE room_id = $1", &[&room.id]).await?;
+        for member in &room.members {
+            transaction.execute(
+                "INSERT INTO room_members (room_id, user_sip_uri, role, joined_at)
+                 VALUES ($1,$2,$3,$4)
+                 ON CONFLICT (room_id, user_sip_uri) DO UPDATE SET role = $3",
+                &[&room.id, &member.user_sip_uri, &member.role, &member.joined_at],
+            ).await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn load_rooms(&self) -> Result<Vec<Room>, PgError> {
+        let client = self.pool.get().await?;
+        let room_rows = client.query(
+            "SELECT id, name, description, is_direct, created_by, conference_id, call_uri, created_at FROM rooms ORDER BY created_at",
+            &[],
+        ).await?;
+        let mut rooms = Vec::with_capacity(room_rows.len());
+        for row in room_rows {
+            let room_id: Uuid = row.get("id");
+            let member_rows = client.query(
+                "SELECT user_sip_uri, role, joined_at FROM room_members WHERE room_id = $1 ORDER BY joined_at",
+                &[&room_id],
+            ).await?;
+            let members = member_rows
+                .iter()
+                .map(|member| RoomMember {
+                    user_sip_uri: member.get("user_sip_uri"),
+                    role: member.get("role"),
+                    joined_at: member.get("joined_at"),
+                })
+                .collect();
+            rooms.push(Room {
+                id: room_id,
+                name: row.get("name"),
+                description: row.get("description"),
+                is_direct: row.get("is_direct"),
+                created_by: row.get("created_by"),
+                members,
+                conference_id: row.try_get("conference_id").ok().flatten(),
+                call_uri: row.try_get("call_uri").ok().flatten(),
+                created_at: row.get("created_at"),
+            });
+        }
+        Ok(rooms)
+    }
+
+    pub async fn insert_room_message(&self, msg: &RoomMessage) -> Result<(), PgError> {
         let client = self.pool.get().await?;
         client.execute(
             "INSERT INTO room_messages (id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-             ON CONFLICT (id) DO NOTHING",
+             ON CONFLICT (id) DO UPDATE SET body = $4, edited_at = $8, pinned = $9",
             &[&msg.id, &msg.room_id, &msg.sender_uri, &msg.body, &msg.content_type, &msg.created_at, &msg.reply_to, &msg.edited_at, &msg.pinned],
         ).await?;
         Ok(())
+    }
+
+    pub async fn load_room_messages(&self) -> Result<Vec<RoomMessage>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned FROM room_messages ORDER BY created_at",
+            &[],
+        ).await?;
+        Ok(rows.iter().map(|r| RoomMessage {
+            id: r.get("id"),
+            room_id: r.get("room_id"),
+            sender_uri: r.get("sender_uri"),
+            body: r.get("body"),
+            content_type: r.get("content_type"),
+            created_at: r.get("created_at"),
+            reply_to: r.try_get("reply_to").ok().flatten(),
+            edited_at: r.try_get("edited_at").ok().flatten(),
+            pinned: r.try_get("pinned").unwrap_or(false),
+        }).collect())
     }
 
     pub async fn update_room_message_body(&self, id: Uuid, body: &str) -> Result<(), PgError> {
@@ -867,6 +962,12 @@ impl PgStore {
             "UPDATE room_messages SET pinned = $2 WHERE id = $1",
             &[&id, &pinned],
         ).await?;
+        Ok(())
+    }
+
+    pub async fn delete_room_message(&self, id: Uuid) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute("DELETE FROM room_messages WHERE id = $1", &[&id]).await?;
         Ok(())
     }
 

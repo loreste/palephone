@@ -533,6 +533,20 @@ impl AppState {
             }
             Err(e) => log::warn!("Failed to load extensions from Postgres: {}", e),
         }
+        match pg.load_rooms().await {
+            Ok(rooms) => {
+                for room in rooms {
+                    self.rooms.insert(room.id, room);
+                }
+            }
+            Err(e) => log::warn!("Failed to load rooms from Postgres: {}", e),
+        }
+        match pg.load_room_messages().await {
+            Ok(messages) => {
+                *self.room_messages.write().expect("room messages lock poisoned") = messages;
+            }
+            Err(e) => log::warn!("Failed to load room messages from Postgres: {}", e),
+        }
         log::info!("Loaded data from PostgreSQL into memory cache");
     }
 
@@ -751,6 +765,8 @@ impl AppState {
         self.load_collection::<CallSession>(&self.calls);
         self.load_collection::<FileRecord>(&self.files);
         self.load_collection::<RoutingRule>(&self.routing_rules);
+        self.load_collection::<Room>(&self.rooms);
+        self.load_vec_collection::<RoomMessage>(&self.room_messages);
         self.load_vec_collection::<AdminAuditEvent>(&self.audit_events);
     }
 
@@ -2945,6 +2961,9 @@ impl AppState {
         };
         self.rooms.insert(room.id, room.clone());
         self.rooms.trim_to_len(MAX_ROOMS);
+        self.persist(&room);
+        let room_for_pg = room.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.upsert_room(&room_for_pg).await }));
         self.broadcast_sse(SseEvent {
             event_type: "room_created".to_string(),
             payload: serde_json::to_value(&room).unwrap_or_default(),
@@ -2953,7 +2972,7 @@ impl AppState {
     }
 
     pub fn start_room_call(&self, room_id: Uuid, mode: RoomCallMode) -> Option<RoomCallTarget> {
-        let target = self.rooms.with_write(&room_id, |rooms| {
+        let (target, updated_room) = self.rooms.with_write(&room_id, |rooms| {
             let room = rooms.get_mut(&room_id)?;
             if room.is_direct {
                 return None;
@@ -2972,14 +2991,18 @@ impl AppState {
             };
             let call_uri = format!("sip:conf-{}@pale.local", conference_id);
             room.call_uri = Some(call_uri.clone());
-            Some(RoomCallTarget {
+            let target = RoomCallTarget {
                 room_id,
                 conference_id,
                 call_uri,
                 mode,
-            })
+            };
+            Some((target, room.clone()))
         })?;
 
+        self.persist(&updated_room);
+        let room_for_pg = updated_room.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.upsert_room(&room_for_pg).await }));
         let _ = self.activate_conference(target.conference_id);
         self.broadcast_sse(SseEvent {
             event_type: "room_call_started".to_string(),
@@ -3026,7 +3049,7 @@ impl AppState {
     }
 
     pub fn add_room_member(&self, room_id: Uuid, user_sip_uri: &str) -> Option<Room> {
-        self.rooms.with_write(&room_id, |rooms| {
+        let updated = self.rooms.with_write(&room_id, |rooms| {
             let room = rooms.get_mut(&room_id)?;
             if !room.members.iter().any(|m| m.user_sip_uri == user_sip_uri) {
                 room.members.push(RoomMember {
@@ -3036,15 +3059,23 @@ impl AppState {
                 });
             }
             Some(room.clone())
-        })
+        })?;
+        self.persist(&updated);
+        let room_for_pg = updated.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.upsert_room(&room_for_pg).await }));
+        Some(updated)
     }
 
     pub fn remove_room_member(&self, room_id: Uuid, user_sip_uri: &str) -> Option<Room> {
-        self.rooms.with_write(&room_id, |rooms| {
+        let updated = self.rooms.with_write(&room_id, |rooms| {
             let room = rooms.get_mut(&room_id)?;
             room.members.retain(|m| m.user_sip_uri != user_sip_uri);
             Some(room.clone())
-        })
+        })?;
+        self.persist(&updated);
+        let room_for_pg = updated.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.upsert_room(&room_for_pg).await }));
+        Some(updated)
     }
 
     pub fn send_room_message(&self, room_id: Uuid, sender_uri: &str, body: &str, reply_to: Option<Uuid>) -> RoomMessage {
@@ -3065,6 +3096,9 @@ impl AppState {
             let overflow = messages.len() - MAX_ROOM_MESSAGES;
             messages.drain(..overflow);
         }
+        self.persist(&msg);
+        let msg_for_pg = msg.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.insert_room_message(&msg_for_pg).await }));
         self.broadcast_sse(SseEvent {
             event_type: "room_message".to_string(),
             payload: serde_json::to_value(&msg).unwrap_or_default(),
@@ -3082,6 +3116,9 @@ impl AppState {
             event_type: "message_edited".to_string(),
             payload: serde_json::to_value(&updated).unwrap_or_default(),
         });
+        self.persist(&updated);
+        let body = updated.body.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.update_room_message_body(id, &body).await }));
         Some(updated)
     }
 
@@ -3094,7 +3131,19 @@ impl AppState {
             event_type: "message_pinned".to_string(),
             payload: serde_json::to_value(&updated).unwrap_or_default(),
         });
+        self.persist(&updated);
+        let pinned = updated.pinned;
+        self.pg_spawn(move |pg| Box::pin(async move { pg.toggle_pin(id, pinned).await }));
         Some(updated)
+    }
+
+    pub fn delete_room_message(&self, id: Uuid) -> Option<RoomMessage> {
+        let mut messages = self.room_messages.write().expect("room messages lock poisoned");
+        let index = messages.iter().position(|m| m.id == id)?;
+        let deleted = messages.remove(index);
+        self.delete_persisted(RoomMessage::collection(), deleted.key());
+        self.pg_spawn(move |pg| Box::pin(async move { pg.delete_room_message(id).await }));
+        Some(deleted)
     }
 
     pub fn pinned_messages(&self, room_id: Uuid) -> Vec<RoomMessage> {
@@ -4755,6 +4804,14 @@ impl PersistedMapObject for RoutingRule {
     }
 }
 
+impl PersistedMapObject for Room {
+    type Key = Uuid;
+
+    fn map_key(&self) -> Self::Key {
+        self.id
+    }
+}
+
 impl PersistedMapObject for AdminAuditEvent {
     type Key = Uuid;
 
@@ -5045,6 +5102,76 @@ mod tests {
         assert_eq!(conference.mode, ConferenceMode::Video);
         assert!(conference.active);
         assert_eq!(conference.participants[0].sip_uri, "sip:alice@example.com");
+    }
+
+    #[test]
+    fn rooms_messages_and_group_calls_survive_persistent_reload() {
+        let data_dir = std::env::temp_dir().join(format!("pale-room-persist-{}", Uuid::new_v4()));
+        let storage_key = "01234567890123456789012345678901".to_string();
+
+        let state = AppState::persistent(
+            data_dir.clone(),
+            "012345678901234567890123".to_string(),
+            "admin".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+            storage_key.clone(),
+            DEFAULT_MAX_UPLOAD_BYTES,
+            MediaConfig::default(),
+        )
+        .unwrap();
+        let room = state.create_room(
+            "sip:alice@example.com",
+            CreateRoomRequest {
+                name: "Project".to_string(),
+                description: Some("Persistent room".to_string()),
+                members: vec!["sip:bob@example.com".to_string()],
+                is_direct: Some(false),
+            },
+        );
+        let target = state
+            .start_room_call(room.id, RoomCallMode::Audio)
+            .expect("room call target");
+        let message = state.send_room_message(room.id, "sip:alice@example.com", "hello", None);
+        let edited = state.edit_room_message(message.id, "hello team").unwrap();
+        assert_eq!(edited.body, "hello team");
+        let pinned = state.pin_room_message(message.id).unwrap();
+        assert!(pinned.pinned);
+        drop(state);
+
+        let reloaded = AppState::persistent(
+            data_dir.clone(),
+            "012345678901234567890123".to_string(),
+            "admin".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+            storage_key.clone(),
+            DEFAULT_MAX_UPLOAD_BYTES,
+            MediaConfig::default(),
+        )
+        .unwrap();
+        let persisted_room = reloaded.room(room.id).expect("persisted room");
+        assert_eq!(persisted_room.conference_id, Some(target.conference_id));
+        assert_eq!(persisted_room.call_uri, Some(target.call_uri));
+        let persisted_messages = reloaded.room_messages(room.id);
+        assert_eq!(persisted_messages.len(), 1);
+        assert_eq!(persisted_messages[0].body, "hello team");
+        assert!(persisted_messages[0].pinned);
+
+        assert!(reloaded.delete_room_message(message.id).is_some());
+        drop(reloaded);
+
+        let reloaded_after_delete = AppState::persistent(
+            data_dir.clone(),
+            "012345678901234567890123".to_string(),
+            "admin".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+            storage_key,
+            DEFAULT_MAX_UPLOAD_BYTES,
+            MediaConfig::default(),
+        )
+        .unwrap();
+        assert!(reloaded_after_delete.room_messages(room.id).is_empty());
+        drop(reloaded_after_delete);
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[test]

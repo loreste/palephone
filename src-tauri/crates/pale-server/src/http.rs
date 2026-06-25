@@ -1024,9 +1024,6 @@ async fn edit_message(
     let existing = state.room_message(id).ok_or(ApiError::NotFound)?;
     require_room_member(&state, existing.room_id, &principal)?;
     let msg = state.edit_room_message(id, &input.body).ok_or(ApiError::NotFound)?;
-    // Persist to PG
-    let body_clone = input.body.clone();
-    state.pg_spawn(move |pg| Box::pin(async move { pg.update_room_message_body(id, &body_clone).await }));
     Ok(Json(msg))
 }
 
@@ -1038,6 +1035,7 @@ async fn delete_message(
     let principal = authenticated_principal(&headers, &state)?;
     let msg = state.room_message(id).ok_or(ApiError::NotFound)?;
     require_room_member(&state, msg.room_id, &principal)?;
+    state.delete_room_message(id).ok_or(ApiError::NotFound)?;
     state.broadcast_sse(crate::SseEvent {
         event_type: "message_deleted".to_string(),
         payload: json!({
@@ -1091,8 +1089,6 @@ async fn pin_message_handler(
     let existing = state.room_message(id).ok_or(ApiError::NotFound)?;
     require_room_member(&state, existing.room_id, &principal)?;
     let msg = state.pin_room_message(id).ok_or(ApiError::NotFound)?;
-    let pinned = msg.pinned;
-    state.pg_spawn(move |pg| Box::pin(async move { pg.toggle_pin(id, pinned).await }));
     Ok(Json(msg))
 }
 
