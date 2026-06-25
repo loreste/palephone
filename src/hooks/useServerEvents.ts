@@ -250,6 +250,13 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
         } catch { /* ignore */ }
       });
 
+      es.addEventListener("meeting_scheduled", (e) => {
+        try {
+          const meeting = JSON.parse(e.data);
+          window.dispatchEvent(new CustomEvent("pale:meeting-scheduled", { detail: meeting }));
+        } catch { /* ignore */ }
+      });
+
       es.addEventListener("reaction", (e) => {
         try {
           const payload = JSON.parse(e.data);

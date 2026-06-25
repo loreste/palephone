@@ -2271,6 +2271,29 @@ fn event_visible_to(state: &AppState, event: &crate::SseEvent, principal: &str) 
             .and_then(|id| Uuid::parse_str(id).ok())
             .and_then(|message_id| state.room_message(message_id))
             .is_some_and(|message| room_member(state, message.room_id, principal)),
+        "meeting_scheduled" => {
+            let is_organizer = event
+                .payload
+                .get("organizer_uri")
+                .and_then(|uri| uri.as_str())
+                == Some(principal);
+            let is_participant = event
+                .payload
+                .get("participants")
+                .and_then(|participants| participants.as_array())
+                .is_some_and(|participants| {
+                    participants
+                        .iter()
+                        .any(|participant| participant.as_str() == Some(principal))
+                });
+            let is_room_member = event
+                .payload
+                .get("room_id")
+                .and_then(|id| id.as_str())
+                .and_then(|id| Uuid::parse_str(id).ok())
+                .is_some_and(|room_id| room_member(state, room_id, principal));
+            is_organizer || is_participant || is_room_member
+        }
         _ => true,
     }
 }
@@ -2631,6 +2654,17 @@ mod auth_tests {
         };
         assert!(event_visible_to(&state, &call_ended_event, "sip:bob@example.com"));
         assert!(!event_visible_to(&state, &call_ended_event, "sip:mallory@example.com"));
+
+        let meeting_event = crate::SseEvent {
+            event_type: "meeting_scheduled".to_string(),
+            payload: serde_json::json!({
+                "organizer_uri": "sip:alice@example.com",
+                "participants": ["sip:bob@example.com"],
+            }),
+        };
+        assert!(event_visible_to(&state, &meeting_event, "sip:alice@example.com"));
+        assert!(event_visible_to(&state, &meeting_event, "sip:bob@example.com"));
+        assert!(!event_visible_to(&state, &meeting_event, "sip:mallory@example.com"));
     }
 
     #[test]

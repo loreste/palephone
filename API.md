@@ -425,6 +425,7 @@ SSE stream for real-time updates.
 | `reaction` | `{ message_id, room_id, emoji, user, added, created_at }` | Reaction toggled |
 | `room_call_started` | `{ room_id, conference_id, call_uri, mode }` | Room group call started |
 | `room_call_ended` | `{ room_id, conference_id, call_uri }` | Room group call ended |
+| `meeting_scheduled` | `ScheduledMeeting` | Meeting scheduled for organizer, participants, or room members |
 
 **Keep-alive:** Default interval. Buffer: 256 messages (older dropped if client lags).
 

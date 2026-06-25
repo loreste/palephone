@@ -298,6 +298,16 @@ function ConversationList({
     };
   }, [connected, baseUrl, token, query]);
 
+  useEffect(() => {
+    const handleMeetingScheduled = (event: Event) => {
+      const meeting = (event as CustomEvent<ServerMeeting>).detail;
+      if (!meeting?.id) return;
+      setMeetings((existing) => [...existing.filter((item) => item.id !== meeting.id), meeting]);
+    };
+    window.addEventListener("pale:meeting-scheduled", handleMeetingScheduled);
+    return () => window.removeEventListener("pale:meeting-scheduled", handleMeetingScheduled);
+  }, []);
+
   const handleNewDm = async (user: { display_name: string; sip_uri: string; matrix_user_id?: string | null }) => {
     try {
       if (connected && baseUrl && token) {
