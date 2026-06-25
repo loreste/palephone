@@ -575,6 +575,18 @@ export interface ServerMeeting {
   created_at: string;
 }
 
+export interface ServerCollaborationSearchResult {
+  kind: "direct" | "room" | "channel" | "team" | "meeting" | "conference";
+  id: string;
+  title: string;
+  subtitle: string;
+  room_id?: string | null;
+  team_id?: string | null;
+  conference_id?: string | null;
+  call_uri?: string | null;
+  updated_at: string;
+}
+
 export interface ServerRetentionPolicy {
   id: string;
   name: string;
@@ -706,6 +718,16 @@ export function paleServerStartMeeting(
   meetingId: string,
 ): Promise<ServerRoomCallTarget> {
   return serverFetch(baseUrl, token, `/v1/meetings/${meetingId}/start`, { method: "POST" });
+}
+
+export function paleServerSearchCollaboration(
+  baseUrl: string,
+  token: string,
+  query: string,
+  limit = 25,
+): Promise<ServerCollaborationSearchResult[]> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  return serverFetch(baseUrl, token, `/v1/search/collaboration?${params.toString()}`);
 }
 
 export function paleServerGetRetentionPolicies(

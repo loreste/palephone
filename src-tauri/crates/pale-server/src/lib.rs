@@ -3297,6 +3297,138 @@ impl AppState {
             .collect()
     }
 
+    pub fn search_collaboration(
+        &self,
+        sip_uri: &str,
+        query: &str,
+        limit: usize,
+    ) -> Vec<CollaborationSearchResult> {
+        let term = query.trim().to_lowercase();
+        if term.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+
+        let mut results = Vec::new();
+        for room in self.list_rooms_for_user(sip_uri) {
+            let mut haystack = vec![
+                room.name.clone(),
+                room.description.clone(),
+                room.channel_name.clone().unwrap_or_default(),
+                room.call_uri.clone().unwrap_or_default(),
+            ];
+            if let Some(team_id) = room.team_id {
+                if let Some(team) = self.team(team_id) {
+                    haystack.push(team.name);
+                    haystack.push(team.description);
+                }
+            }
+            haystack.extend(room.members.iter().map(|member| member.user_sip_uri.clone()));
+            if !collaboration_matches(&haystack, &term) {
+                continue;
+            }
+            results.push(CollaborationSearchResult {
+                kind: if room.team_id.is_some() {
+                    "channel".to_string()
+                } else if room.is_direct {
+                    "direct".to_string()
+                } else {
+                    "room".to_string()
+                },
+                id: room.id,
+                title: room.name,
+                subtitle: room.description,
+                room_id: Some(room.id),
+                team_id: room.team_id,
+                conference_id: room.conference_id,
+                call_uri: room.call_uri,
+                updated_at: room.created_at,
+            });
+        }
+
+        for team in self.list_teams_for_user(sip_uri) {
+            let mut haystack = vec![team.name.clone(), team.description.clone(), team.owner_uri.clone()];
+            haystack.extend(team.members.iter().map(|member| member.user_sip_uri.clone()));
+            if !collaboration_matches(&haystack, &term) {
+                continue;
+            }
+            results.push(CollaborationSearchResult {
+                kind: "team".to_string(),
+                id: team.id,
+                title: team.name,
+                subtitle: team.description,
+                room_id: None,
+                team_id: Some(team.id),
+                conference_id: None,
+                call_uri: None,
+                updated_at: team.created_at,
+            });
+        }
+
+        for meeting in self.list_meetings_for_user(sip_uri) {
+            let mut haystack = vec![
+                meeting.title.clone(),
+                meeting.description.clone(),
+                meeting.organizer_uri.clone(),
+            ];
+            haystack.extend(meeting.participants.iter().cloned());
+            if !collaboration_matches(&haystack, &term) {
+                continue;
+            }
+            results.push(CollaborationSearchResult {
+                kind: "meeting".to_string(),
+                id: meeting.id,
+                title: meeting.title,
+                subtitle: meeting.description,
+                room_id: meeting.room_id,
+                team_id: meeting
+                    .room_id
+                    .and_then(|room_id| self.room(room_id).and_then(|room| room.team_id)),
+                conference_id: meeting.conference_id,
+                call_uri: meeting.conference_id.map(|id| format!("sip:conf-{}@pale.local", id)),
+                updated_at: meeting.starts_at,
+            });
+        }
+
+        for conference in self.list_conferences().into_iter().filter(|conference| {
+            conference
+                .participants
+                .iter()
+                .any(|participant| participant.sip_uri == sip_uri)
+        }) {
+            let mut haystack = vec![conference.title.clone(), format!("{:?}", conference.mode)];
+            haystack.extend(
+                conference
+                    .participants
+                    .iter()
+                    .map(|participant| participant.sip_uri.clone()),
+            );
+            if !collaboration_matches(&haystack, &term) {
+                continue;
+            }
+            results.push(CollaborationSearchResult {
+                kind: "conference".to_string(),
+                id: conference.id,
+                title: conference.title,
+                subtitle: format!("{:?} conference", conference.mode).to_lowercase(),
+                room_id: None,
+                team_id: None,
+                conference_id: Some(conference.id),
+                call_uri: Some(format!("sip:conf-{}@pale.local", conference.id)),
+                updated_at: conference.created_at,
+            });
+        }
+
+        results.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| left.kind.cmp(&right.kind))
+                .then_with(|| left.title.cmp(&right.title))
+        });
+        results.truncate(limit);
+        results
+    }
+
     pub fn start_scheduled_meeting(&self, id: Uuid, user_sip_uri: &str) -> Option<RoomCallTarget> {
         let meeting = self.scheduled_meetings.get(&id)?;
         if !meeting.participants.iter().any(|participant| participant == user_sip_uri)
@@ -4486,6 +4618,19 @@ pub struct RoomCallTarget {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollaborationSearchResult {
+    pub kind: String,
+    pub id: Uuid,
+    pub title: String,
+    pub subtitle: String,
+    pub room_id: Option<Uuid>,
+    pub team_id: Option<Uuid>,
+    pub conference_id: Option<Uuid>,
+    pub call_uri: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomMessage {
     pub id: Uuid,
     pub room_id: Uuid,
@@ -5422,6 +5567,12 @@ fn matches_room_call_mode(conference_mode: &ConferenceMode, room_mode: &RoomCall
     )
 }
 
+fn collaboration_matches(values: &[String], term: &str) -> bool {
+    values
+        .iter()
+        .any(|value| value.to_lowercase().contains(term))
+}
+
 fn nats_subject_token(value: &str) -> String {
     value
         .chars()
@@ -5970,6 +6121,89 @@ mod tests {
         assert_eq!(conference.mode, ConferenceMode::Video);
         assert!(conference.active);
         assert_eq!(conference.participants[0].sip_uri, "sip:alice@example.com");
+    }
+
+    #[test]
+    fn collaboration_search_discovers_visible_business_containers() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-collaboration-search-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+
+        let team = state.create_team(
+            "sip:alice@example.com",
+            CreateTeamRequest {
+                name: "Revenue Ops".to_string(),
+                description: Some("Pipeline planning".to_string()),
+                members: vec!["sip:bob@example.com".to_string()],
+            },
+        );
+        let channel = state
+            .create_team_channel(
+                "sip:alice@example.com",
+                team.id,
+                CreateRoomRequest {
+                    name: "Forecast".to_string(),
+                    description: Some("Quarterly forecast room".to_string()),
+                    members: vec![],
+                    is_direct: Some(false),
+                    team_id: None,
+                    channel_name: Some("forecast".to_string()),
+                },
+            )
+            .expect("team channel");
+        let private_room = state.create_room(
+            "sip:carol@example.com",
+            CreateRoomRequest {
+                name: "Revenue Escalations".to_string(),
+                description: Some("Not visible to Alice".to_string()),
+                members: vec!["sip:dave@example.com".to_string()],
+                is_direct: Some(false),
+                team_id: None,
+                channel_name: None,
+            },
+        );
+        let meeting = state
+            .create_scheduled_meeting(
+                "sip:alice@example.com",
+                CreateScheduledMeetingRequest {
+                    title: "Forecast Review".to_string(),
+                    description: Some("Revenue forecast sync".to_string()),
+                    room_id: Some(channel.id),
+                    participants: vec!["sip:bob@example.com".to_string()],
+                    starts_at: Utc::now() + Duration::hours(1),
+                    ends_at: Utc::now() + Duration::hours(2),
+                    mode: Some(RoomCallMode::Video),
+                },
+            )
+            .expect("meeting");
+        let conference = state.create_conference(CreateConferenceRequest {
+            title: "Revenue Standup".to_string(),
+            mode: ConferenceMode::Audio,
+        });
+        state.join_conference(
+            conference.id,
+            JoinConferenceRequest {
+                user_id: Uuid::new_v4(),
+                sip_uri: "sip:alice@example.com".to_string(),
+                role: Some(ParticipantRole::Member),
+            },
+        );
+
+        let results = state.search_collaboration("sip:alice@example.com", "revenue", 10);
+        let kinds: Vec<_> = results.iter().map(|result| result.kind.as_str()).collect();
+        assert!(kinds.contains(&"team"));
+        assert!(kinds.contains(&"channel"));
+        assert!(kinds.contains(&"meeting"));
+        assert!(kinds.contains(&"conference"));
+        assert!(results.iter().any(|result| result.id == team.id));
+        assert!(results.iter().any(|result| result.id == meeting.id));
+        assert!(!results.iter().any(|result| result.id == private_room.id));
+
+        let limited = state.search_collaboration("sip:alice@example.com", "revenue", 2);
+        assert_eq!(limited.len(), 2);
+        assert!(state.search_collaboration("sip:alice@example.com", "   ", 10).is_empty());
     }
 
     #[test]

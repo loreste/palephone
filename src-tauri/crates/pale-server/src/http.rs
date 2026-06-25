@@ -91,6 +91,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/rooms/{id}/call", post(start_room_call))
         .route("/v1/rooms/{id}/typing", post(room_typing))
         .route("/v1/search/messages", get(search_messages))
+        .route("/v1/search/collaboration", get(search_collaboration))
         .route("/v1/messages/{id}/read", put(mark_message_read))
         .route("/v1/messages/{id}", put(edit_message).delete(delete_message))
         .route("/v1/messages/{id}/react", post(react_to_message))
@@ -1281,6 +1282,16 @@ async fn search_messages(
     results.truncate(limit);
 
     Ok(Json(results))
+}
+
+async fn search_collaboration(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<SearchQuery>,
+) -> Result<Json<Vec<crate::CollaborationSearchResult>>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let limit = query.limit.unwrap_or(25).min(100);
+    Ok(Json(state.search_collaboration(&principal, &query.q, limit)))
 }
 
 // ─── Read Receipts ───
