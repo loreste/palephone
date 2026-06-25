@@ -39,10 +39,6 @@ export function FilesView() {
     }
   }, [serverConnected, baseUrl, token, setServerFiles]);
 
-  if (authState !== "logged_in" && !serverConnected) {
-    return <MatrixLoginView />;
-  }
-
   const filteredFiles = searchQuery
     ? sharedFiles.filter(
         (f) =>
@@ -76,6 +72,10 @@ export function FilesView() {
     },
     [rooms]
   );
+
+  if (authState !== "logged_in" && !serverConnected) {
+    return <MatrixLoginView />;
+  }
 
   return (
     <div

@@ -236,8 +236,6 @@ impl MatrixClient {
             .first()
             .unwrap_or(mime::APPLICATION_OCTET_STREAM);
 
-        let file_size = file_data.len() as u64;
-
         // Upload the file to the Matrix content repository
         let upload = client
             .media()

@@ -2136,7 +2136,7 @@ function QaPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
       toast({ type: "success", title: "Scorecard saved" });
       const updated = await api<any[]>(baseUrl, token, "/v1/qa/scorecards");
       setScorecards(updated);
-    } catch (err) { toast({ type: "error", title: "Failed" }); }
+    } catch { toast({ type: "error", title: "Failed" }); }
   };
 
   const avgScore = scorecards.length > 0
@@ -2225,7 +2225,7 @@ function DirectoryPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
         body: config,
       });
       toast({ type: "success", title: "Directory configuration saved" });
-    } catch (err) {
+    } catch {
       toast({ type: "error", title: "Failed to save" });
     }
   };

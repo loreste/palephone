@@ -290,7 +290,6 @@ function ChatRoom({
           .catch(() => {});
       });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room.room_id, isServerRoom, connected, baseUrl, token]);
 
   useEffect(() => {
@@ -345,7 +344,6 @@ function ChatRoom({
       }
     } catch { /* ignore */ }
     setLoadingHistory(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connected, baseUrl, token, loadingHistory, hasMore, room.room_id]);
 
   useEffect(() => {

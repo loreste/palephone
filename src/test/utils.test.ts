@@ -7,7 +7,9 @@ describe("cn utility", () => {
   });
 
   it("handles conditional classes", () => {
-    expect(cn("base", true && "active", false && "hidden")).toBe("base active");
+    const enabled = true;
+    const hidden = false;
+    expect(cn("base", enabled && "active", hidden && "hidden")).toBe("base active");
   });
 
   it("resolves tailwind conflicts", () => {

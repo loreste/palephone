@@ -35,23 +35,33 @@ sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;27.0.12077973"
 rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android
 ```
 
-### 4. Initialize Tauri Android
+### 4. Verify the local Android toolchain
 
 ```bash
-cd /Users/loreste/projects/softphone/pale
-npm run tauri android init
+java -version
+test -d "$ANDROID_HOME"
+test -d "$NDK_HOME"
+```
+
+All three checks must pass before Tauri can initialize or build the Android project.
+
+### 5. Initialize Tauri Android
+
+```bash
+cd /Users/loreste/palephone
+npm run android:init
 ```
 
 This generates the `src-tauri/gen/android/` directory with the Gradle project.
 
-### 5. Build and run
+### 6. Build and run
 
 ```bash
 # Development (USB debugging)
-npm run tauri android dev
+npm run android:dev
 
 # Production APK
-npm run tauri android build
+npm run android:build
 ```
 
 ## Android-Specific Configuration
