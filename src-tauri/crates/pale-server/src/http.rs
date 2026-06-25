@@ -1722,6 +1722,13 @@ struct RoutePreviewQuery {
     source: Option<String>,
     destination: String,
     method: Option<String>,
+    headers: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct PreviewHeader {
+    name: String,
+    value: String,
 }
 
 async fn preview_route(
@@ -1730,12 +1737,20 @@ async fn preview_route(
     Query(query): Query<RoutePreviewQuery>,
 ) -> Result<Json<crate::RoutePreview>, ApiError> {
     authenticated_admin(&headers, &state)?;
+    let preview_headers = query
+        .headers
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Vec<PreviewHeader>>(raw).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|header| (header.name, header.value))
+        .collect::<Vec<_>>();
     Ok(Json(state.preview_route(
         query.direction.as_deref().unwrap_or("inbound"),
         query.source.as_deref().unwrap_or("*"),
         &query.destination,
         query.method.as_deref().unwrap_or("INVITE"),
-        &[],
+        &preview_headers,
     )))
 }
 

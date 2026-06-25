@@ -701,6 +701,7 @@ function RoutingPanel({
   const [previewSource, setPreviewSource] = useState("*");
   const [previewDestination, setPreviewDestination] = useState("");
   const [previewMethod, setPreviewMethod] = useState("INVITE");
+  const [previewHeaders, setPreviewHeaders] = useState("[]");
   const [preview, setPreview] = useState<any | null>(null);
 
   const parseArray = (value: string, label: string) => {
@@ -776,6 +777,7 @@ function RoutingPanel({
         source: previewSource,
         destination: previewDestination,
         method: previewMethod,
+        headers: previewHeaders,
       });
       setPreview(await api(baseUrl, token, `/v1/routes/preview?${params}`));
     } catch (err) {
@@ -837,6 +839,9 @@ function RoutingPanel({
         <Field label="Source" value={previewSource} onChange={setPreviewSource} />
         <Field label="Destination" value={previewDestination} onChange={setPreviewDestination} />
         <Field label="Method" value={previewMethod} onChange={setPreviewMethod} />
+        <div className="md:col-span-2">
+          <JsonField label="Preview headers" value={previewHeaders} onChange={setPreviewHeaders} />
+        </div>
         <button className="h-10 self-end rounded-md border border-border-default hover:bg-elevated text-sm font-medium">
           Preview
         </button>
