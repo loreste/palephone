@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use pale_server::{
     http, metrics,
@@ -183,7 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tokio::spawn(async move {
         loop {
             metrics::record_app_gauges(&gauge_state);
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            tokio::time::sleep(Duration::from_secs(30)).await;
         }
     });
 
@@ -198,9 +199,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     Err(e) => log::warn!("Database cleanup failed: {}", e),
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_secs(86400)).await;
+            tokio::time::sleep(Duration::from_secs(86400)).await;
         }
     });
+
+    if let Some(interval) = retention_enforcement_interval_from_env() {
+        let retention_state = state.clone();
+        let run_on_startup = env_bool("PALE_RETENTION_ENFORCEMENT_RUN_ON_STARTUP", false);
+        log::info!(
+            "Retention enforcement worker enabled every {} seconds{}",
+            interval.as_secs(),
+            if run_on_startup {
+                " and on startup"
+            } else {
+                ""
+            }
+        );
+        tokio::spawn(async move {
+            if run_on_startup {
+                run_retention_enforcement(&retention_state);
+            }
+            loop {
+                tokio::time::sleep(interval).await;
+                run_retention_enforcement(&retention_state);
+            }
+        });
+    } else {
+        log::info!(
+            "Retention enforcement worker disabled; set PALE_RETENTION_ENFORCEMENT_INTERVAL_SECS to enable it"
+        );
+    }
 
     // Build app router with /metrics endpoint
     let metrics_router = axum::Router::new()
@@ -232,6 +260,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+fn run_retention_enforcement(state: &AppState) {
+    let result = state.enforce_retention(false);
+    log::info!(
+        "Retention enforcement completed: policies={}, matched_messages={}, deleted_messages={}",
+        result.policy_results.len(),
+        result.matched_messages,
+        result.deleted_messages
+    );
+}
+
+fn retention_enforcement_interval_from_env() -> Option<Duration> {
+    retention_enforcement_interval(optional_env("PALE_RETENTION_ENFORCEMENT_INTERVAL_SECS").as_deref())
+}
+
+fn retention_enforcement_interval(value: Option<&str>) -> Option<Duration> {
+    let seconds = value?.trim().parse::<u64>().ok()?;
+    if seconds == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(seconds.max(60)))
+    }
 }
 
 trait EnvAddr {
@@ -412,5 +463,30 @@ fn sip_backend_from_env() -> SipBackend {
     {
         "udp-parser" | "parser" | "custom" => SipBackend::UdpParser,
         _ => SipBackend::Pjsip,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retention_enforcement_interval_parses_disabled_values() {
+        assert_eq!(retention_enforcement_interval(None), None);
+        assert_eq!(retention_enforcement_interval(Some("")), None);
+        assert_eq!(retention_enforcement_interval(Some("0")), None);
+        assert_eq!(retention_enforcement_interval(Some("not-a-number")), None);
+    }
+
+    #[test]
+    fn retention_enforcement_interval_clamps_and_accepts_seconds() {
+        assert_eq!(
+            retention_enforcement_interval(Some("30")),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            retention_enforcement_interval(Some("86400")),
+            Some(Duration::from_secs(86400))
+        );
     }
 }

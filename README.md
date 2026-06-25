@@ -215,6 +215,8 @@ for the full annotated list. Two you will almost certainly want in production:
 - `NATS_URL` — optional NATS server URL, for example `nats://nats:4222`.
   When set, pale-server publishes SSE events to `pale.events.<event_type>` as
   JSON for server-side automations and integrations.
+- `PALE_RETENTION_ENFORCEMENT_INTERVAL_SECS` — optional scheduled retention
+  enforcement interval. Unset/`0` disables it; `86400` runs daily.
 
 ### Build & Run Desktop Client
 
@@ -266,6 +268,8 @@ See [ANDROID_SETUP.md](ANDROID_SETUP.md) for detailed environment setup.
 | `TURN_SECRET` | Yes | TURN relay shared secret |
 | `PALE_ADMIN_USERNAME` | No | Admin username (default: `admin`) |
 | `PALE_SIP_EXTERNAL_ADDR` | No | Public SIP address for clients (default: derived from bind address) |
+| `PALE_RETENTION_ENFORCEMENT_INTERVAL_SECS` | No | Scheduled retention enforcement interval in seconds (`0` disables) |
+| `PALE_RETENTION_ENFORCEMENT_RUN_ON_STARTUP` | No | Run retention enforcement once when the server starts |
 | `RUST_LOG` | No | Log level (default: `info`) |
 
 ## Database
