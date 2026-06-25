@@ -3693,6 +3693,88 @@ impl AppState {
         }
     }
 
+    pub fn enforce_retention(&self, dry_run: bool) -> RetentionEnforcementResult {
+        let evaluated_at = Utc::now();
+        let policies = self.retention_policies();
+        let messages = self
+            .room_messages
+            .read()
+            .expect("room messages lock poisoned")
+            .clone();
+        let mut policy_results = Vec::new();
+        let mut skipped_legal_hold_policies = Vec::new();
+        let mut ids_to_delete = Vec::new();
+
+        for policy in policies {
+            if policy.legal_hold {
+                skipped_legal_hold_policies.push(policy.id);
+                policy_results.push(RetentionPolicyResult {
+                    policy_id: policy.id,
+                    room_id: policy.room_id,
+                    retain_days: policy.retain_days,
+                    matched_messages: 0,
+                    deleted_messages: 0,
+                    legal_hold: true,
+                });
+                continue;
+            }
+            let Some(retain_days) = policy.retain_days else {
+                policy_results.push(RetentionPolicyResult {
+                    policy_id: policy.id,
+                    room_id: policy.room_id,
+                    retain_days: None,
+                    matched_messages: 0,
+                    deleted_messages: 0,
+                    legal_hold: false,
+                });
+                continue;
+            };
+            let cutoff = evaluated_at - Duration::days(retain_days.max(0));
+            let matched: Vec<Uuid> = messages
+                .iter()
+                .filter(|message| policy.room_id.is_none_or(|room_id| message.room_id == room_id))
+                .filter(|message| message.created_at < cutoff)
+                .map(|message| message.id)
+                .collect();
+            let deleted_messages = matched.len();
+            ids_to_delete.extend(matched.iter().copied());
+            policy_results.push(RetentionPolicyResult {
+                policy_id: policy.id,
+                room_id: policy.room_id,
+                retain_days: Some(retain_days),
+                matched_messages: deleted_messages,
+                deleted_messages: if dry_run { 0 } else { deleted_messages },
+                legal_hold: false,
+            });
+        }
+
+        ids_to_delete.sort();
+        ids_to_delete.dedup();
+        let matched_messages = ids_to_delete.len();
+        let mut deleted_messages = 0;
+        if !dry_run {
+            for id in ids_to_delete {
+                if self.delete_room_message(id).is_some() {
+                    deleted_messages += 1;
+                }
+            }
+        }
+
+        let result = RetentionEnforcementResult {
+            evaluated_at,
+            dry_run,
+            matched_messages,
+            deleted_messages,
+            skipped_legal_hold_policies,
+            policy_results,
+        };
+        self.broadcast_sse(SseEvent {
+            event_type: "retention_enforced".to_string(),
+            payload: serde_json::to_value(&result).unwrap_or_default(),
+        });
+        result
+    }
+
     pub fn pinned_messages(&self, room_id: Uuid) -> Vec<RoomMessage> {
         self.room_messages
             .read()
@@ -3790,6 +3872,14 @@ impl AppState {
             .iter()
             .find(|m| m.id == id)
             .cloned()
+    }
+
+    #[cfg(test)]
+    fn set_room_message_created_at_for_test(&self, id: Uuid, created_at: DateTime<Utc>) -> Option<RoomMessage> {
+        let mut messages = self.room_messages.write().expect("room messages lock poisoned");
+        let msg = messages.iter_mut().find(|m| m.id == id)?;
+        msg.created_at = created_at;
+        Some(msg.clone())
     }
 
     /// Returns true if Postgres is connected and healthy.
@@ -4349,6 +4439,26 @@ pub struct DiscoveryExport {
     pub exported_at: DateTime<Utc>,
     pub room_id: Option<Uuid>,
     pub messages: Vec<RoomMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetentionEnforcementResult {
+    pub evaluated_at: DateTime<Utc>,
+    pub dry_run: bool,
+    pub matched_messages: usize,
+    pub deleted_messages: usize,
+    pub skipped_legal_hold_policies: Vec<Uuid>,
+    pub policy_results: Vec<RetentionPolicyResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetentionPolicyResult {
+    pub policy_id: Uuid,
+    pub room_id: Option<Uuid>,
+    pub retain_days: Option<i64>,
+    pub matched_messages: usize,
+    pub deleted_messages: usize,
+    pub legal_hold: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6115,6 +6225,74 @@ mod tests {
             None,
         );
         assert!(rate_limited.is_err());
+    }
+
+    #[test]
+    fn retention_enforcement_previews_applies_and_skips_legal_hold() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-retention-enforce-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let room = state.create_room(
+            "sip:owner@example.com",
+            CreateRoomRequest {
+                name: "Records".to_string(),
+                description: None,
+                members: vec!["sip:member@example.com".to_string()],
+                is_direct: Some(false),
+                team_id: None,
+                channel_name: None,
+            },
+        );
+        let old = state
+            .send_room_message(room.id, "sip:owner@example.com", "old", None)
+            .unwrap();
+        let fresh = state
+            .send_room_message(room.id, "sip:owner@example.com", "fresh", None)
+            .unwrap();
+        state
+            .set_room_message_created_at_for_test(old.id, Utc::now() - Duration::days(30))
+            .unwrap();
+
+        let hold = state.upsert_retention_policy(
+            "admin",
+            UpsertRetentionPolicyRequest {
+                id: None,
+                name: "Hold".to_string(),
+                scope: "room".to_string(),
+                room_id: Some(room.id),
+                retain_days: Some(1),
+                legal_hold: Some(true),
+                export_enabled: Some(true),
+            },
+        );
+        let preview_hold = state.enforce_retention(true);
+        assert_eq!(preview_hold.matched_messages, 0);
+        assert_eq!(preview_hold.skipped_legal_hold_policies, vec![hold.id]);
+        assert!(state.room_message(old.id).is_some());
+
+        state.upsert_retention_policy(
+            "admin",
+            UpsertRetentionPolicyRequest {
+                id: Some(hold.id),
+                name: "One day".to_string(),
+                scope: "room".to_string(),
+                room_id: Some(room.id),
+                retain_days: Some(1),
+                legal_hold: Some(false),
+                export_enabled: Some(true),
+            },
+        );
+        let preview = state.enforce_retention(true);
+        assert_eq!(preview.matched_messages, 1);
+        assert_eq!(preview.deleted_messages, 0);
+        assert!(state.room_message(old.id).is_some());
+
+        let applied = state.enforce_retention(false);
+        assert_eq!(applied.deleted_messages, 1);
+        assert!(state.room_message(old.id).is_none());
+        assert!(state.room_message(fresh.id).is_some());
     }
 
     #[test]

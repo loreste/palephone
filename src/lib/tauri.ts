@@ -587,6 +587,22 @@ export interface ServerRetentionPolicy {
   updated_at: string;
 }
 
+export interface ServerRetentionEnforcementResult {
+  evaluated_at: string;
+  dry_run: boolean;
+  matched_messages: number;
+  deleted_messages: number;
+  skipped_legal_hold_policies: string[];
+  policy_results: {
+    policy_id: string;
+    room_id?: string | null;
+    retain_days?: number | null;
+    matched_messages: number;
+    deleted_messages: number;
+    legal_hold: boolean;
+  }[];
+}
+
 export interface ServerCollaborationPolicy {
   id: string;
   structured_mentions_enabled: boolean;
@@ -707,6 +723,22 @@ export function paleServerUpsertRetentionPolicy(
   return serverFetch(baseUrl, token, "/v1/admin/governance/retention", {
     method: "PUT",
     body: JSON.stringify(policy),
+  });
+}
+
+export function paleServerPreviewRetentionEnforcement(
+  baseUrl: string,
+  token: string,
+): Promise<ServerRetentionEnforcementResult> {
+  return serverFetch(baseUrl, token, "/v1/admin/governance/retention/enforce");
+}
+
+export function paleServerApplyRetentionEnforcement(
+  baseUrl: string,
+  token: string,
+): Promise<ServerRetentionEnforcementResult> {
+  return serverFetch(baseUrl, token, "/v1/admin/governance/retention/enforce", {
+    method: "POST",
   });
 }
 

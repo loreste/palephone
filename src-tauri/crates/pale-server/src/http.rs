@@ -79,6 +79,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/meetings", get(list_meetings).post(create_meeting))
         .route("/v1/meetings/{id}/start", post(start_meeting))
         .route("/v1/admin/governance/retention", get(list_retention_policies).put(upsert_retention_policy))
+        .route("/v1/admin/governance/retention/enforce", get(preview_retention_enforcement).post(apply_retention_enforcement))
         .route("/v1/admin/collaboration/policy", get(get_collaboration_policy).put(update_collaboration_policy))
         .route("/v1/admin/ediscovery/export", get(discovery_export))
         .route("/v1/scim/v2/Users", get(scim_list_users).post(scim_create_user))
@@ -933,6 +934,28 @@ async fn upsert_retention_policy(
     let policy = state.upsert_retention_policy(&principal, input);
     state.record_audit_event(&principal, "retention_policy.upserted", Some(policy.id.to_string()));
     Ok(Json(policy))
+}
+
+async fn preview_retention_enforcement(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::RetentionEnforcementResult>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.enforce_retention(true)))
+}
+
+async fn apply_retention_enforcement(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::RetentionEnforcementResult>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let result = state.enforce_retention(false);
+    state.record_audit_event(
+        &principal,
+        "retention.enforced",
+        Some(format!("deleted={}", result.deleted_messages)),
+    );
+    Ok(Json(result))
 }
 
 async fn get_collaboration_policy(
