@@ -184,6 +184,7 @@ function ConversationList({
   const [pagingGroups, setPagingGroups] = useState<PagingGroupSummary[]>([]);
   const [collaborationResults, setCollaborationResults] = useState<ServerCollaborationSearchResult[]>([]);
   const [collaborationSearchLoading, setCollaborationSearchLoading] = useState(false);
+  const [focusedTeam, setFocusedTeam] = useState<{ id: string; name: string } | null>(null);
 
   const { baseUrl, token, connected } = useServerStore();
   const currentSipUri = useAccountStore((s) => s.account?.sipUri);
@@ -278,8 +279,9 @@ function ConversationList({
   };
 
   const normalizedQuery = query.trim().toLowerCase();
-  const filteredRooms = rooms.filter((room) =>
-    groupMatches(normalizedQuery, room.name, room.last_message ?? undefined)
+  const scopedRooms = focusedTeam ? rooms.filter((room) => room.team_id === focusedTeam.id) : rooms;
+  const filteredRooms = scopedRooms.filter((room) =>
+    groupMatches(normalizedQuery, room.name, room.channel_name, room.last_message ?? undefined)
   );
   const filteredConferences = conferences.filter((conf) =>
     groupMatches(normalizedQuery, conf.title, conf.mode, conf.participants.map((p) => p.sip_uri))
@@ -339,9 +341,27 @@ function ConversationList({
     }
   };
 
+  const openTeamResult = async (teamId: string, teamName: string) => {
+    if (!connected || !baseUrl || !token) return;
+    try {
+      const serverRooms = await paleServerGetRooms(baseUrl, token);
+      for (const room of serverRooms) {
+        upsertRoom(serverRoomToSummary(room, currentSipUri));
+      }
+      setFocusedTeam({ id: teamId, name: teamName });
+      setQuery("");
+    } catch (err) {
+      toast({ type: "error", title: "Could not open team", description: String(err) });
+    }
+  };
+
   const openCollaborationResult = async (result: ServerCollaborationSearchResult) => {
     if (result.room_id) {
       await openRoomResult(result.room_id);
+      return;
+    }
+    if (result.kind === "team" && result.team_id) {
+      await openTeamResult(result.team_id, result.title);
       return;
     }
     if (result.kind === "meeting") {
@@ -376,6 +396,21 @@ function ConversationList({
       {showNewChat && <NewChatInput onSubmit={handleNewDm} onCreateRoom={handleCreateRoom} />}
 
       <div className="px-4 pb-2">
+        {focusedTeam && (
+          <div className="mb-2 flex items-center justify-between rounded-lg border border-border-subtle bg-elevated px-3 py-2">
+            <div className="min-w-0">
+              <p className="text-xs font-semibold uppercase text-tertiary">Team</p>
+              <p className="truncate text-sm font-medium text-primary">{focusedTeam.name}</p>
+            </div>
+            <button
+              onClick={() => setFocusedTeam(null)}
+              className="shrink-0 rounded-md p-1.5 text-tertiary transition-colors hover:bg-surface hover:text-primary"
+              title="Show all conversations"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
         <div className="relative">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-tertiary" />
           <input
@@ -408,7 +443,9 @@ function ConversationList({
           <>
             {filteredRooms.length > 0 && (
               <div className="pb-2">
-                <p className="px-3 py-1 text-[10px] font-semibold uppercase text-tertiary">Conversations</p>
+                <p className="px-3 py-1 text-[10px] font-semibold uppercase text-tertiary">
+                  {focusedTeam ? "Team Channels" : "Conversations"}
+                </p>
                 {filteredRooms.map((room) => (
                   <button
                     key={room.room_id}
@@ -441,6 +478,13 @@ function ConversationList({
               </div>
             )}
 
+            {focusedTeam && filteredRooms.length === 0 && !normalizedQuery && (
+              <div className="flex flex-col items-center justify-center h-32 gap-2">
+                <Hash size={24} className="text-tertiary" />
+                <p className="text-sm text-tertiary">No channels in this team</p>
+              </div>
+            )}
+
             {(visibleCollaborationResults.length > 0 || collaborationSearchLoading) && (
               <div className="pb-2">
                 <p className="px-3 py-1 text-[10px] font-semibold uppercase text-tertiary">Directory Results</p>
@@ -451,7 +495,7 @@ function ConversationList({
                   </div>
                 )}
                 {visibleCollaborationResults.map((result) => {
-                  const canOpen = Boolean(result.room_id || result.call_uri || result.kind === "meeting");
+                  const canOpen = Boolean(result.room_id || result.team_id || result.call_uri || result.kind === "meeting");
                   return (
                     <GroupResultButton
                       key={`${result.kind}-${result.id}`}
