@@ -153,6 +153,38 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/voicemail/{id}", delete(delete_voicemail))
         .route("/v1/recordings", get(list_recordings))
         .route("/v1/recordings/{id}", delete(delete_recording))
+        // Meeting lobby
+        .route("/v1/conferences/{id}/lobby", get(get_lobby).put(set_lobby_settings))
+        .route("/v1/conferences/{id}/lobby/join", post(join_lobby))
+        .route("/v1/conferences/{id}/lobby/admit", post(admit_lobby_participant))
+        .route("/v1/conferences/{id}/lobby/admit-all", post(admit_all_lobby))
+        // Raise hand
+        .route("/v1/conferences/{id}/hands", get(get_raised_hands).post(raise_hand))
+        .route("/v1/conferences/{id}/hands/lower-all", post(lower_all_hands))
+        // Polls
+        .route("/v1/conferences/{id}/polls", get(list_polls).post(create_poll))
+        .route("/v1/polls/{id}/launch", post(launch_poll))
+        .route("/v1/polls/{id}/close", post(close_poll))
+        .route("/v1/polls/{id}/vote", post(cast_vote))
+        // Q&A
+        .route("/v1/conferences/{id}/questions", get(list_questions).post(ask_question))
+        .route("/v1/questions/{id}/upvote", post(upvote_question))
+        .route("/v1/questions/{id}/answer", post(answer_question))
+        // Breakout rooms
+        .route("/v1/conferences/{id}/breakouts", get(list_breakouts).post(create_breakout))
+        .route("/v1/breakouts/{id}/start", post(start_breakout))
+        .route("/v1/breakouts/{id}/close", post(close_breakout))
+        // Live captions / transcription
+        .route("/v1/conferences/{id}/transcript", get(get_transcript).post(post_transcript))
+        .route("/v1/conferences/{id}/transcript/export", get(export_transcript))
+        // Call quality
+        .route("/v1/call-quality", get(list_call_quality).post(post_call_quality))
+        .route("/v1/call-quality/summary", get(call_quality_summary))
+        // DLP
+        .route("/v1/admin/dlp/policies", get(list_dlp_policies).post(create_dlp_policy))
+        .route("/v1/admin/dlp/policies/{id}", delete(delete_dlp_policy))
+        .route("/v1/admin/dlp/violations", get(list_dlp_violations))
+        .route("/v1/admin/dlp/scan", post(scan_content_dlp))
         .route("/v1/events", get(sse_stream))
         .layer(from_fn(crate::metrics::request_metrics))
         .layer(from_fn(cors))
@@ -565,6 +597,431 @@ async fn leave_conference(
         Some(format!("{id}:{user_id}")),
     );
     Ok(Json(conference))
+}
+
+// ── Meeting lobby handlers ─────────────────────────────────────────
+
+async fn get_lobby(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::ConferenceLobby>, ApiError> {
+    require_bearer(&headers, &state)?;
+    Ok(Json(state.get_lobby(id)))
+}
+
+async fn set_lobby_settings(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::LobbySettingsRequest>,
+) -> Result<Json<crate::ConferenceLobby>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let lobby = state.set_lobby_enabled(id, input.enabled);
+    state.record_audit_event(&principal, "lobby.settings_updated", Some(id.to_string()));
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "lobby_updated".to_string(),
+        payload: serde_json::to_value(&lobby).unwrap(),
+    });
+    Ok(Json(lobby))
+}
+
+async fn join_lobby(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::JoinConferenceRequest>,
+) -> Result<Json<crate::ConferenceLobby>, ApiError> {
+    require_bearer(&headers, &state)?;
+    let display = input.sip_uri.clone();
+    let lobby = state.join_lobby(id, input.user_id, input.sip_uri, display);
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "lobby_updated".to_string(),
+        payload: serde_json::to_value(&lobby).unwrap(),
+    });
+    Ok(Json(lobby))
+}
+
+async fn admit_lobby_participant(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::LobbyAdmitRequest>,
+) -> Result<Json<crate::ConferenceLobby>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let lobby = state
+        .admit_lobby_participant(id, input.user_id, input.admit)
+        .ok_or(ApiError::NotFound)?;
+    state.record_audit_event(
+        &principal,
+        if input.admit { "lobby.participant_admitted" } else { "lobby.participant_rejected" },
+        Some(format!("{id}:{}", input.user_id)),
+    );
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "lobby_updated".to_string(),
+        payload: serde_json::to_value(&lobby).unwrap(),
+    });
+    Ok(Json(lobby))
+}
+
+async fn admit_all_lobby(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::ConferenceLobby>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let lobby = state.admit_all_lobby(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "lobby.all_admitted", Some(id.to_string()));
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "lobby_updated".to_string(),
+        payload: serde_json::to_value(&lobby).unwrap(),
+    });
+    Ok(Json(lobby))
+}
+
+// ── Raise hand handlers ───────────────────────────────────────────
+
+async fn get_raised_hands(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::HandRaise>>, ApiError> {
+    require_bearer(&headers, &state)?;
+    Ok(Json(state.get_raised_hands(id)))
+}
+
+async fn raise_hand(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::RaiseHandRequest>,
+) -> Result<Json<Vec<crate::HandRaise>>, ApiError> {
+    require_bearer(&headers, &state)?;
+    let hands = if input.raised {
+        state.raise_hand(id, input.user_id, input.sip_uri)
+    } else {
+        state.lower_hand(id, input.user_id)
+    };
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "hand_raised".to_string(),
+        payload: serde_json::json!({
+            "conference_id": id,
+            "hands": hands,
+        }),
+    });
+    Ok(Json(hands))
+}
+
+async fn lower_all_hands(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::HandRaise>>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let hands = state.lower_all_hands(id);
+    state.record_audit_event(&principal, "hands.lowered_all", Some(id.to_string()));
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "hand_raised".to_string(),
+        payload: serde_json::json!({
+            "conference_id": id,
+            "hands": hands,
+        }),
+    });
+    Ok(Json(hands))
+}
+
+// ── Poll handlers ─────────────────────────────────────────────────
+
+async fn list_polls(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::MeetingPoll>>, ApiError> {
+    require_bearer(&headers, &state)?;
+    Ok(Json(state.list_polls(id)))
+}
+
+async fn create_poll(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::CreatePollRequest>,
+) -> Result<Json<crate::MeetingPoll>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let poll = state.create_poll(id, &principal, input);
+    state.record_audit_event(&principal, "poll.created", Some(poll.id.to_string()));
+    Ok(Json(poll))
+}
+
+async fn launch_poll(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::MeetingPoll>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let poll = state.launch_poll(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "poll.launched", Some(id.to_string()));
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "poll_updated".to_string(),
+        payload: serde_json::to_value(&poll).unwrap(),
+    });
+    Ok(Json(poll))
+}
+
+async fn close_poll(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::MeetingPoll>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let poll = state.close_poll(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "poll.closed", Some(id.to_string()));
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "poll_updated".to_string(),
+        payload: serde_json::to_value(&poll).unwrap(),
+    });
+    Ok(Json(poll))
+}
+
+async fn cast_vote(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::CastVoteRequest>,
+) -> Result<Json<crate::MeetingPoll>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let poll = state
+        .cast_vote(id, &principal, input.option_ids)
+        .ok_or(ApiError::NotFound)?;
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "poll_updated".to_string(),
+        payload: serde_json::to_value(&poll).unwrap(),
+    });
+    Ok(Json(poll))
+}
+
+// ── Q&A handlers ──────────────────────────────────────────────────
+
+async fn list_questions(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::QaQuestion>>, ApiError> {
+    require_bearer(&headers, &state)?;
+    Ok(Json(state.list_questions(id)))
+}
+
+async fn ask_question(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::AskQuestionRequest>,
+) -> Result<Json<crate::QaQuestion>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let q = state.ask_question(id, &principal, input.text);
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "qa_updated".to_string(),
+        payload: serde_json::to_value(&q).unwrap(),
+    });
+    Ok(Json(q))
+}
+
+async fn upvote_question(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::QaQuestion>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let q = state.upvote_question(id, &principal).ok_or(ApiError::NotFound)?;
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "qa_updated".to_string(),
+        payload: serde_json::to_value(&q).unwrap(),
+    });
+    Ok(Json(q))
+}
+
+async fn answer_question(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::AnswerQuestionRequest>,
+) -> Result<Json<crate::QaQuestion>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let q = state.answer_question(id, input.answer).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "qa.answered", Some(id.to_string()));
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "qa_updated".to_string(),
+        payload: serde_json::to_value(&q).unwrap(),
+    });
+    Ok(Json(q))
+}
+
+// ── Breakout room handlers ────────────────────────────────────────
+
+async fn list_breakouts(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::BreakoutSession>>, ApiError> {
+    require_bearer(&headers, &state)?;
+    Ok(Json(state.list_breakouts(id)))
+}
+
+async fn create_breakout(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::CreateBreakoutRequest>,
+) -> Result<Json<crate::BreakoutSession>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let session = state.create_breakout_session(id, input);
+    state.record_audit_event(&principal, "breakout.created", Some(session.id.to_string()));
+    Ok(Json(session))
+}
+
+async fn start_breakout(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::BreakoutSession>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let session = state.start_breakout(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "breakout.started", Some(id.to_string()));
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "breakout_updated".to_string(),
+        payload: serde_json::to_value(&session).unwrap(),
+    });
+    Ok(Json(session))
+}
+
+async fn close_breakout(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::BreakoutSession>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let session = state.close_breakout(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "breakout.closed", Some(id.to_string()));
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "breakout_updated".to_string(),
+        payload: serde_json::to_value(&session).unwrap(),
+    });
+    Ok(Json(session))
+}
+
+// ── Transcript / live captions handlers ───────────────────────────
+
+async fn get_transcript(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::TranscriptSegment>>, ApiError> {
+    require_bearer(&headers, &state)?;
+    Ok(Json(state.get_transcript(id)))
+}
+
+async fn post_transcript(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::PostTranscriptRequest>,
+) -> Result<Json<crate::TranscriptSegment>, ApiError> {
+    require_bearer(&headers, &state)?;
+    let segment = state.post_transcript(id, input);
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "live_caption".to_string(),
+        payload: serde_json::to_value(&segment).unwrap(),
+    });
+    Ok(Json(segment))
+}
+
+async fn export_transcript(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::TranscriptExport>, ApiError> {
+    require_bearer(&headers, &state)?;
+    Ok(Json(state.export_transcript(id)))
+}
+
+// ── Call quality handlers ─────────────────────────────────────────
+
+async fn list_call_quality(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::CallQualityReport>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_call_quality()))
+}
+
+async fn post_call_quality(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::PostCallQualityRequest>,
+) -> Result<Json<crate::CallQualityReport>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let report = state.post_call_quality(&principal, input);
+    Ok(Json(report))
+}
+
+async fn call_quality_summary(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::CallQualitySummary>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.call_quality_summary()))
+}
+
+// ── DLP handlers ──────────────────────────────────────────────────
+
+async fn list_dlp_policies(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::DlpPolicy>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_dlp_policies()))
+}
+
+async fn create_dlp_policy(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::CreateDlpPolicyRequest>,
+) -> Result<Json<crate::DlpPolicy>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let policy = state.create_dlp_policy(&principal, input);
+    state.record_audit_event(&principal, "dlp.policy_created", Some(policy.id.to_string()));
+    Ok(Json(policy))
+}
+
+async fn delete_dlp_policy(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if !state.delete_dlp_policy(id) {
+        return Err(ApiError::NotFound);
+    }
+    state.record_audit_event(&principal, "dlp.policy_deleted", Some(id.to_string()));
+    Ok(Json(serde_json::json!({ "deleted": true })))
+}
+
+async fn list_dlp_violations(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::DlpViolation>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_dlp_violations()))
+}
+
+async fn scan_content_dlp(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<crate::DlpScanResult>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    Ok(Json(state.scan_content_dlp(&principal, content)))
 }
 
 async fn create_call(

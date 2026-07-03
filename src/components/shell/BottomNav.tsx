@@ -1,4 +1,4 @@
-import { Phone, MessageSquare, Users, FolderLock, Clock, ShieldCheck, Settings } from "lucide-react";
+import { Phone, MessageSquare, Users, FolderLock, Clock, CalendarDays, ShieldCheck, Settings } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/cn";
 import { useUiStore } from "@/store/uiStore";
@@ -12,6 +12,7 @@ const allTabs: { id: Tab; labelKey: string; icon: typeof Phone; adminOnly?: bool
   { id: "people", labelKey: "nav.people", icon: Users },
   { id: "files", labelKey: "nav.files", icon: FolderLock },
   { id: "recent", labelKey: "nav.recent", icon: Clock },
+  { id: "calendar", labelKey: "nav.calendar", icon: CalendarDays },
   { id: "admin", labelKey: "nav.admin", icon: ShieldCheck, adminOnly: true },
   { id: "settings", labelKey: "nav.settings", icon: Settings },
 ];

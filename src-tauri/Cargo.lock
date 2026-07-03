@@ -4494,6 +4494,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "pjsip-sys",
  "rand 0.8.6",
+ "regex",
  "rsip",
  "rusqlite",
  "serde",

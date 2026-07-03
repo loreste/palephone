@@ -12,6 +12,7 @@ import { ChatView } from "@/components/chat/ChatView";
 import { PeopleView } from "@/components/people/PeopleView";
 import { FilesView } from "@/components/files/FilesView";
 import { AdminView } from "@/components/admin/AdminView";
+import { CalendarView } from "@/components/calendar/CalendarView";
 import { ActiveCallView } from "@/components/call/ActiveCallView";
 import { IncomingCallOverlay } from "@/components/call/IncomingCallOverlay";
 import { CommandPalette } from "@/components/shared/CommandPalette";
@@ -38,6 +39,7 @@ const views = {
   people: PeopleView,
   files: FilesView,
   recent: RecentCallsList,
+  calendar: CalendarView,
   admin: AdminView,
   settings: SettingsView,
 } as const;

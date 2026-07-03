@@ -1,7 +1,11 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   Activity,
+  BarChart3,
+  Archive,
+  CheckCircle2,
   ClipboardList,
+  Download,
   FileText,
   GitBranch,
   Lock,
@@ -10,7 +14,10 @@ import {
   RadioTower,
   RefreshCw,
   Router,
+  Save,
+  Search,
   Server,
+  Shield,
   Trash2,
   UserPlus,
   Users,
@@ -44,7 +51,7 @@ async function api<T = any>(baseUrl: string, token: string, path: string, opts?:
   return paleServerApi<T>(baseUrl, token, path, opts);
 }
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "retention" | "dlp";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -70,6 +77,9 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "files", label: "Files", icon: FileText },
   { id: "directory", label: "Directory", icon: Users },
   { id: "audit", label: "Audit", icon: ClipboardList },
+  { id: "cqd", label: "Call Quality", icon: BarChart3 },
+  { id: "retention", label: "Retention", icon: Archive },
+  { id: "dlp", label: "DLP", icon: Shield },
 ];
 
 export function AdminView() {
@@ -281,6 +291,9 @@ export function AdminView() {
         {activeTab === "files" && <FilesPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
         {activeTab === "directory" && <DirectoryPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "audit" && <AuditPanel snapshot={snapshot} />}
+        {activeTab === "cqd" && <CqdPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "retention" && <RetentionPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "dlp" && <DlpPanel baseUrl={baseUrl} token={token} />}
       </div>
     </div>
   );
@@ -2848,6 +2861,610 @@ function Table({
         </table>
       </div>
     </section>
+  );
+}
+
+// ── Call Quality Dashboard ─────────────────────────────────────────
+
+function CqdPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [summary, setSummary] = useState<any>(null);
+  const [reports, setReports] = useState<any[]>([]);
+
+  useEffect(() => {
+    if (!token) return;
+    api(baseUrl, token, "/v1/call-quality/summary").then(setSummary).catch(() => {});
+    api(baseUrl, token, "/v1/call-quality").then(setReports).catch(() => {});
+  }, [baseUrl, token]);
+
+  return (
+    <div className="space-y-4">
+      {summary && (
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <Metric label="Total Reports" value={summary.total_reports} />
+          <div className="rounded-md border border-border-subtle bg-surface p-3">
+            <div className="text-xl font-semibold tabular-nums">{summary.avg_mos?.toFixed(2)}</div>
+            <div className="text-xs text-secondary">Avg MOS Score</div>
+          </div>
+          <div className="rounded-md border border-border-subtle bg-surface p-3">
+            <div className="text-xl font-semibold tabular-nums">{summary.avg_jitter_ms?.toFixed(1)}ms</div>
+            <div className="text-xs text-secondary">Avg Jitter</div>
+          </div>
+          <div className="rounded-md border border-border-subtle bg-surface p-3">
+            <div className="text-xl font-semibold tabular-nums">{summary.avg_packet_loss_pct?.toFixed(2)}%</div>
+            <div className="text-xs text-secondary">Avg Packet Loss</div>
+          </div>
+          <Metric label="Poor Quality Calls" value={summary.poor_quality_calls} />
+        </div>
+      )}
+      <Table
+        title="Recent Quality Reports"
+        columns={["User", "Codec", "MOS", "Jitter", "Loss", "RTT", "Reported"]}
+        rows={reports.slice(-50).reverse().map((r: any) => [
+          r.user_sip_uri?.replace(/^sip:/, "") ?? "",
+          r.codec ?? "",
+          r.mos_score?.toFixed(2) ?? "",
+          `${r.jitter_ms?.toFixed(1)}ms`,
+          `${r.packet_loss_pct?.toFixed(2)}%`,
+          `${r.round_trip_ms?.toFixed(0)}ms`,
+          shortDate(r.reported_at),
+        ])}
+      />
+    </div>
+  );
+}
+
+// ── Retention Panel ───────────────────────────────────────────────
+
+function RetentionPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  type RetentionPolicyRow = {
+    id: string;
+    name: string;
+    scope: string;
+    room_id?: string | null;
+    retain_days?: number | null;
+    legal_hold: boolean;
+    export_enabled: boolean;
+    created_by: string;
+    updated_at: string;
+  };
+  type RetentionResult = {
+    evaluated_at: string;
+    dry_run: boolean;
+    matched_messages: number;
+    deleted_messages: number;
+    skipped_legal_hold_policies: string[];
+    policy_results: {
+      policy_id: string;
+      room_id?: string | null;
+      retain_days?: number | null;
+      matched_messages: number;
+      deleted_messages: number;
+      legal_hold: boolean;
+    }[];
+  };
+  type RoomOption = { id: string; name: string; team_id?: string | null; channel_name?: string | null };
+
+  const [policies, setPolicies] = useState<RetentionPolicyRow[]>([]);
+  const [rooms, setRooms] = useState<RoomOption[]>([]);
+  const [selectedPolicyId, setSelectedPolicyId] = useState<string | null>(null);
+  const [name, setName] = useState("");
+  const [scope, setScope] = useState("global");
+  const [roomId, setRoomId] = useState("");
+  const [retainDays, setRetainDays] = useState("90");
+  const [legalHold, setLegalHold] = useState(false);
+  const [exportEnabled, setExportEnabled] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [running, setRunning] = useState<"preview" | "apply" | null>(null);
+  const [lastResult, setLastResult] = useState<RetentionResult | null>(null);
+  const [exportRoomId, setExportRoomId] = useState("");
+  const [exportSummary, setExportSummary] = useState<{ exported_at: string; count: number; room_id?: string | null } | null>(null);
+
+  const load = () => {
+    if (!token) return;
+    api<RetentionPolicyRow[]>(baseUrl, token, "/v1/admin/governance/retention").then(setPolicies).catch(() => {});
+    api<RoomOption[]>(baseUrl, token, "/v1/rooms").then(setRooms).catch(() => {});
+  };
+
+  useEffect(load, [baseUrl, token]);
+
+  const resetForm = () => {
+    setSelectedPolicyId(null);
+    setName("");
+    setScope("global");
+    setRoomId("");
+    setRetainDays("90");
+    setLegalHold(false);
+    setExportEnabled(true);
+  };
+
+  const editPolicy = (policy: RetentionPolicyRow) => {
+    setSelectedPolicyId(policy.id);
+    setName(policy.name);
+    setScope(policy.scope);
+    setRoomId(policy.room_id ?? "");
+    setRetainDays(policy.retain_days?.toString() ?? "");
+    setLegalHold(policy.legal_hold);
+    setExportEnabled(policy.export_enabled);
+  };
+
+  const savePolicy = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!name.trim()) return;
+    setSaving(true);
+    try {
+      await api<RetentionPolicyRow>(baseUrl, token, "/v1/admin/governance/retention", {
+        method: "PUT",
+        body: {
+          id: selectedPolicyId,
+          name: name.trim(),
+          scope,
+          room_id: scope === "room" ? roomId || null : null,
+          retain_days: retainDays.trim() ? Math.max(1, Number.parseInt(retainDays, 10) || 1) : null,
+          legal_hold: legalHold,
+          export_enabled: exportEnabled,
+        },
+      });
+      resetForm();
+      load();
+      toast({ type: "success", title: selectedPolicyId ? "Policy updated" : "Policy saved" });
+    } catch {
+      toast({ type: "error", title: "Policy save failed" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const enforce = async (dryRun: boolean) => {
+    setRunning(dryRun ? "preview" : "apply");
+    try {
+      const result = await api<RetentionResult>(baseUrl, token, "/v1/admin/governance/retention/enforce", {
+        method: dryRun ? "GET" : "POST",
+      });
+      setLastResult(result);
+      toast({
+        type: dryRun ? "info" : "success",
+        title: dryRun
+          ? `${result.deleted_messages} messages would be removed`
+          : `${result.deleted_messages} messages removed`,
+      });
+      if (!dryRun) load();
+    } catch {
+      toast({ type: "error", title: dryRun ? "Preview failed" : "Enforcement failed" });
+    } finally {
+      setRunning(null);
+    }
+  };
+
+  const exportDiscovery = async () => {
+    try {
+      const query = exportRoomId ? `?room_id=${encodeURIComponent(exportRoomId)}` : "";
+      const data = await api<{ exported_at: string; room_id?: string | null; messages: any[] }>(
+        baseUrl,
+        token,
+        `/v1/admin/ediscovery/export${query}`
+      );
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ediscovery-${exportRoomId || "all"}-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setExportSummary({ exported_at: data.exported_at, count: data.messages.length, room_id: data.room_id });
+      toast({ type: "success", title: `Exported ${data.messages.length} messages` });
+    } catch {
+      toast({ type: "error", title: "Export failed" });
+    }
+  };
+
+  const stats = useMemo(() => {
+    const legalHolds = policies.filter((policy) => policy.legal_hold).length;
+    const finiteRetention = policies.filter((policy) => policy.retain_days != null && !policy.legal_hold).length;
+    const exportable = policies.filter((policy) => policy.export_enabled).length;
+    return { policies: policies.length, legalHolds, finiteRetention, exportable };
+  }, [policies]);
+
+  const roomName = (id?: string | null) => {
+    if (!id) return "All rooms";
+    const room = rooms.find((item) => item.id === id);
+    return room ? room.name : id.slice(0, 8);
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <Metric label="Policies" value={stats.policies} />
+        <Metric label="Legal holds" value={stats.legalHolds} />
+        <Metric label="Retention rules" value={stats.finiteRetention} />
+        <Metric label="Export enabled" value={stats.exportable} />
+      </div>
+
+      <div className="grid xl:grid-cols-[1fr_380px] gap-4">
+        <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+          <div className="p-3 border-b border-border-subtle flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Archive size={17} className="text-accent" />
+              <h2 className="font-medium">Retention and legal hold</h2>
+            </div>
+            <button
+              onClick={resetForm}
+              className="h-8 px-3 rounded-md border border-border-default hover:bg-elevated text-sm inline-flex items-center gap-2"
+            >
+              <Plus size={15} />
+              New
+            </button>
+          </div>
+
+          <form onSubmit={savePolicy} className="p-3 grid md:grid-cols-2 xl:grid-cols-4 gap-3 border-b border-border-subtle">
+            <label className="block xl:col-span-2">
+              <span className="block text-xs text-tertiary mb-1">Policy name</span>
+              <input
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+                placeholder="Executive chat retention"
+                required
+              />
+            </label>
+            <label className="block">
+              <span className="block text-xs text-tertiary mb-1">Scope</span>
+              <select
+                value={scope}
+                onChange={(event) => setScope(event.target.value)}
+                className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+              >
+                <option value="global">Global</option>
+                <option value="room">Room or channel</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="block text-xs text-tertiary mb-1">Retain days</span>
+              <input
+                value={retainDays}
+                onChange={(event) => setRetainDays(event.target.value)}
+                className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+                placeholder="Leave blank to retain indefinitely"
+                type="number"
+                min={1}
+              />
+            </label>
+            {scope === "room" && (
+              <div className="block xl:col-span-2 space-y-2">
+                {rooms.length > 0 && (
+                  <label className="block">
+                    <span className="block text-xs text-tertiary mb-1">Known room or channel</span>
+                    <select
+                      value={rooms.some((room) => room.id === roomId) ? roomId : ""}
+                      onChange={(event) => setRoomId(event.target.value)}
+                      className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+                    >
+                      <option value="">Select a room</option>
+                      {rooms.map((room) => (
+                        <option key={room.id} value={room.id}>{room.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                <label className="block">
+                  <span className="block text-xs text-tertiary mb-1">Room ID</span>
+                  <input
+                    value={roomId}
+                    onChange={(event) => setRoomId(event.target.value)}
+                    className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+                    placeholder="Paste a room UUID"
+                    required
+                  />
+                </label>
+              </div>
+            )}
+            <label className="h-10 self-end rounded-md border border-border-default px-3 flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={legalHold} onChange={(event) => setLegalHold(event.target.checked)} />
+              Legal hold
+            </label>
+            <label className="h-10 self-end rounded-md border border-border-default px-3 flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={exportEnabled} onChange={(event) => setExportEnabled(event.target.checked)} />
+              eDiscovery export
+            </label>
+            <button
+              disabled={saving || (scope === "room" && !roomId)}
+              className="h-10 self-end rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-60"
+            >
+              <Save size={16} />
+              {saving ? "Saving..." : selectedPolicyId ? "Update policy" : "Save policy"}
+            </button>
+          </form>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-tertiary">
+                <tr className="border-b border-border-subtle">
+                  {["Policy", "Scope", "Retention", "Controls", "Updated", ""].map((column) => (
+                    <th key={column} className="text-left py-2 px-3 font-medium">{column}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {policies.length === 0 ? (
+                  <tr>
+                    <td className="py-4 px-3 text-secondary" colSpan={6}>No retention policies</td>
+                  </tr>
+                ) : policies.map((policy) => (
+                  <tr key={policy.id} className="border-b border-border-subtle last:border-0">
+                    <td className="py-2 px-3">
+                      <div className="font-medium">{policy.name}</div>
+                      <div className="text-xs text-tertiary">{policy.created_by}</div>
+                    </td>
+                    <td className="py-2 px-3">
+                      <div>{policy.scope}</div>
+                      <div className="text-xs text-tertiary">{roomName(policy.room_id)}</div>
+                    </td>
+                    <td className="py-2 px-3">{policy.retain_days ? `${policy.retain_days} days` : "Indefinite"}</td>
+                    <td className="py-2 px-3">
+                      <div className="flex flex-wrap gap-1">
+                        {policy.legal_hold && <Badge tone="warn">Legal hold</Badge>}
+                        {policy.export_enabled && <Badge tone="ok">Export</Badge>}
+                        {!policy.legal_hold && !policy.export_enabled && <span className="text-tertiary">Standard</span>}
+                      </div>
+                    </td>
+                    <td className="py-2 px-3">{shortDate(policy.updated_at)}</td>
+                    <td className="py-2 px-3 text-right">
+                      <button
+                        onClick={() => editPolicy(policy)}
+                        className="h-8 px-3 rounded-md border border-border-default hover:bg-elevated text-sm"
+                      >
+                        Edit
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <div className="space-y-4">
+          <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+            <div className="p-3 border-b border-border-subtle flex items-center gap-2">
+              <CheckCircle2 size={17} className="text-accent" />
+              <h2 className="font-medium">Enforcement</h2>
+            </div>
+            <div className="p-3 space-y-3">
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => enforce(true)}
+                  disabled={running !== null}
+                  className="h-10 rounded-md border border-border-default hover:bg-elevated text-sm inline-flex items-center justify-center gap-2 disabled:opacity-60"
+                >
+                  <Search size={16} />
+                  {running === "preview" ? "Checking..." : "Preview"}
+                </button>
+                <button
+                  onClick={() => enforce(false)}
+                  disabled={running !== null}
+                  className="h-10 rounded-md bg-destructive hover:opacity-90 text-white text-sm inline-flex items-center justify-center gap-2 disabled:opacity-60"
+                >
+                  <Trash2 size={16} />
+                  {running === "apply" ? "Running..." : "Apply"}
+                </button>
+              </div>
+              {lastResult ? (
+                <div className="rounded-md border border-border-subtle bg-base p-3 space-y-3">
+                  <div className="grid grid-cols-2 gap-2">
+                    <Metric label="Matched" value={lastResult.matched_messages} />
+                    <Metric label={lastResult.dry_run ? "Would delete" : "Deleted"} value={lastResult.deleted_messages} />
+                  </div>
+                  <div className="text-xs text-secondary">
+                    Evaluated {shortDate(lastResult.evaluated_at)}
+                    {lastResult.skipped_legal_hold_policies.length > 0
+                      ? `; skipped ${lastResult.skipped_legal_hold_policies.length} legal hold policies`
+                      : ""}
+                  </div>
+                  <div className="space-y-2">
+                    {lastResult.policy_results.slice(0, 5).map((result) => (
+                      <div key={result.policy_id} className="rounded border border-border-subtle p-2 text-xs">
+                        <div className="font-medium">{roomName(result.room_id)}</div>
+                        <div className="text-secondary">
+                          {result.matched_messages} matched, {result.deleted_messages} {lastResult.dry_run ? "would delete" : "deleted"}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <p className="text-sm text-secondary">Preview before applying retention so admins can see the exact impact.</p>
+              )}
+            </div>
+          </section>
+
+          <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+            <div className="p-3 border-b border-border-subtle flex items-center gap-2">
+              <Download size={17} className="text-accent" />
+              <h2 className="font-medium">eDiscovery export</h2>
+            </div>
+            <div className="p-3 space-y-3">
+              {rooms.length > 0 && (
+                <label className="block">
+                  <span className="block text-xs text-tertiary mb-1">Known room filter</span>
+                  <select
+                    value={rooms.some((room) => room.id === exportRoomId) ? exportRoomId : ""}
+                    onChange={(event) => setExportRoomId(event.target.value)}
+                    className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+                  >
+                    <option value="">All rooms</option>
+                    {rooms.map((room) => (
+                      <option key={room.id} value={room.id}>{room.name}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <label className="block">
+                <span className="block text-xs text-tertiary mb-1">Room ID filter</span>
+                <input
+                  value={exportRoomId}
+                  onChange={(event) => setExportRoomId(event.target.value)}
+                  className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+                  placeholder="Blank exports all rooms"
+                />
+              </label>
+              <button
+                onClick={exportDiscovery}
+                className="w-full h-10 rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium inline-flex items-center justify-center gap-2"
+              >
+                <Download size={16} />
+                Download JSON
+              </button>
+              {exportSummary && (
+                <div className="rounded-md border border-border-subtle bg-base p-3 text-sm">
+                  <div className="font-medium">{exportSummary.count} messages exported</div>
+                  <div className="text-xs text-secondary">{roomName(exportSummary.room_id)} - {shortDate(exportSummary.exported_at)}</div>
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Badge({ children, tone }: { children: React.ReactNode; tone: "ok" | "warn" }) {
+  return (
+    <span
+      className={cn(
+        "inline-flex h-6 items-center rounded px-2 text-xs",
+        tone === "ok"
+          ? "bg-emerald-500/10 text-emerald-500"
+          : "bg-amber-500/10 text-amber-500"
+      )}
+    >
+      {children}
+    </span>
+  );
+}
+
+// ── DLP Panel ─────────────────────────────────────────────────────
+
+function DlpPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [policies, setPolicies] = useState<any[]>([]);
+  const [violations, setViolations] = useState<any[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [pattern, setPattern] = useState("");
+  const [action, setAction] = useState("block");
+  const [tab, setTab] = useState<"policies" | "violations">("policies");
+
+  const load = () => {
+    if (!token) return;
+    api(baseUrl, token, "/v1/admin/dlp/policies").then(setPolicies).catch(() => {});
+    api(baseUrl, token, "/v1/admin/dlp/violations").then(setViolations).catch(() => {});
+  };
+
+  useEffect(load, [baseUrl, token]);
+
+  const create = async () => {
+    if (!name || !pattern) return;
+    try {
+      await api(baseUrl, token, "/v1/admin/dlp/policies", {
+        method: "POST",
+        body: { name, pattern, action, enabled: true },
+      });
+      setName("");
+      setPattern("");
+      setCreating(false);
+      load();
+      toast({ type: "info", title: "DLP policy created" });
+    } catch { toast({ type: "error", title: "Failed" }); }
+  };
+
+  const handleDeleteDlpPolicy = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/dlp/policies/${id}`, { method: "DELETE" });
+      load();
+    } catch { toast({ type: "error", title: "Failed" }); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => setTab("policies")}
+          className={cn("px-3 py-1.5 rounded text-sm", tab === "policies" ? "bg-accent text-white" : "hover:bg-hover")}
+        >
+          Policies ({policies.length})
+        </button>
+        <button
+          onClick={() => setTab("violations")}
+          className={cn("px-3 py-1.5 rounded text-sm", tab === "violations" ? "bg-accent text-white" : "hover:bg-hover")}
+        >
+          Violations ({violations.length})
+        </button>
+        <button onClick={() => setCreating(!creating)} className="ml-auto flex items-center gap-1 px-3 py-1.5 bg-accent text-white rounded text-sm">
+          <Plus size={14} /> New Policy
+        </button>
+      </div>
+
+      {creating && (
+        <div className="p-3 border border-border-subtle rounded space-y-2">
+          <input className="w-full rounded border border-border-subtle bg-input px-3 py-2 text-sm" placeholder="Policy name (e.g. Credit Card Numbers)" value={name} onChange={(e) => setName(e.target.value)} />
+          <input className="w-full rounded border border-border-subtle bg-input px-3 py-2 text-sm font-mono" placeholder="Regex pattern (e.g. \b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b)" value={pattern} onChange={(e) => setPattern(e.target.value)} />
+          <select className="w-full rounded border border-border-subtle bg-input px-3 py-2 text-sm" value={action} onChange={(e) => setAction(e.target.value)}>
+            <option value="block">Block</option>
+            <option value="warn">Warn</option>
+            <option value="audit">Audit Only</option>
+          </select>
+          <button onClick={create} className="px-4 py-2 bg-accent text-white rounded text-sm">Create</button>
+        </div>
+      )}
+
+      {tab === "policies" && (
+        <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+          <h2 className="p-3 border-b border-border-subtle font-medium">DLP Policies</h2>
+          <table className="w-full text-sm">
+            <thead className="text-tertiary">
+              <tr className="border-b border-border-subtle">
+                {["Name", "Pattern", "Action", "Enabled", "Created", ""].map((col) => (
+                  <th key={col} className="text-left py-2 px-2 font-medium">{col}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {policies.length === 0 ? (
+                <tr><td className="py-4 px-2 text-secondary" colSpan={6}>No policies</td></tr>
+              ) : (
+                policies.map((p: any) => (
+                  <tr key={p.id} className="border-b border-border-subtle last:border-b-0">
+                    <td className="py-2 px-2">{p.name}</td>
+                    <td className="py-2 px-2 max-w-[200px] truncate font-mono text-xs">{p.pattern}</td>
+                    <td className="py-2 px-2">{p.action}</td>
+                    <td className="py-2 px-2">{p.enabled ? "Yes" : "No"}</td>
+                    <td className="py-2 px-2">{shortDate(p.created_at)}</td>
+                    <td className="py-2 px-2">
+                      <button onClick={() => handleDeleteDlpPolicy(p.id)} className="text-red-500 hover:text-red-400">
+                        <Trash2 size={14} />
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </section>
+      )}
+
+      {tab === "violations" && (
+        <Table
+          title="DLP Violations"
+          columns={["Policy", "User", "Action", "Snippet", "Detected"]}
+          rows={violations.slice(-100).reverse().map((v: any) => [
+            v.policy_name,
+            v.user_uri?.replace(/^sip:/, "") ?? "",
+            v.action_taken,
+            v.content_snippet?.slice(0, 50) ?? "",
+            shortDate(v.detected_at),
+          ])}
+        />
+      )}
+    </div>
   );
 }
 

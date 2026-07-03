@@ -247,6 +247,23 @@ pub struct AppState {
     vip_callers: ShardedMap<Uuid, VipCaller>,
     message_reactions: ShardedMap<Uuid, Vec<MessageReaction>>,
     user_favorites: ShardedMap<String, Vec<String>>,
+    // Meeting lobby state keyed by conference_id
+    conference_lobbies: ShardedMap<Uuid, ConferenceLobby>,
+    // Raised hands keyed by conference_id
+    raised_hands: ShardedMap<Uuid, Vec<HandRaise>>,
+    // Polls keyed by poll_id
+    meeting_polls: ShardedMap<Uuid, MeetingPoll>,
+    // Q&A keyed by question_id
+    qa_questions: ShardedMap<Uuid, QaQuestion>,
+    // Breakout sessions keyed by session_id
+    breakout_sessions: ShardedMap<Uuid, BreakoutSession>,
+    // Transcript segments
+    transcripts: RwLock<Vec<TranscriptSegment>>,
+    // Call quality reports
+    call_quality_reports: RwLock<Vec<CallQualityReport>>,
+    // DLP policies and violations
+    dlp_policies: ShardedMap<Uuid, DlpPolicy>,
+    dlp_violations: RwLock<Vec<DlpViolation>>,
     user_create_lock: std::sync::Mutex<()>,
     agent_assignment_lock: std::sync::Mutex<()>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
@@ -390,6 +407,15 @@ impl AppState {
             vip_callers: ShardedMap::new(),
             message_reactions: ShardedMap::new(),
             user_favorites: ShardedMap::new(),
+            conference_lobbies: ShardedMap::new(),
+            raised_hands: ShardedMap::new(),
+            meeting_polls: ShardedMap::new(),
+            qa_questions: ShardedMap::new(),
+            breakout_sessions: ShardedMap::new(),
+            transcripts: RwLock::new(Vec::new()),
+            call_quality_reports: RwLock::new(Vec::new()),
+            dlp_policies: ShardedMap::new(),
+            dlp_violations: RwLock::new(Vec::new()),
             user_create_lock: std::sync::Mutex::new(()),
             agent_assignment_lock: std::sync::Mutex::new(()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
@@ -1679,6 +1705,434 @@ impl AppState {
         let uuid_str = user_part.strip_prefix("conf-")?;
         let id = Uuid::parse_str(uuid_str).ok()?;
         self.conferences.get(&id)
+    }
+
+    // ── Lobby methods ──────────────────────────────────────────────
+
+    pub fn get_lobby(&self, conference_id: Uuid) -> ConferenceLobby {
+        self.conference_lobbies
+            .get(&conference_id)
+            .unwrap_or_else(|| ConferenceLobby {
+                conference_id,
+                enabled: false,
+                participants: Vec::new(),
+            })
+    }
+
+    pub fn set_lobby_enabled(&self, conference_id: Uuid, enabled: bool) -> ConferenceLobby {
+        let lobby = self.conference_lobbies.with_write(&conference_id, |lobbies| {
+            let lobby = lobbies.entry(conference_id).or_insert_with(|| ConferenceLobby {
+                conference_id,
+                enabled: false,
+                participants: Vec::new(),
+            });
+            lobby.enabled = enabled;
+            lobby.clone()
+        });
+        lobby
+    }
+
+    pub fn join_lobby(&self, conference_id: Uuid, user_id: Uuid, sip_uri: String, display_name: String) -> ConferenceLobby {
+        self.conference_lobbies.with_write(&conference_id, |lobbies| {
+            let lobby = lobbies.entry(conference_id).or_insert_with(|| ConferenceLobby {
+                conference_id,
+                enabled: true,
+                participants: Vec::new(),
+            });
+            if !lobby.participants.iter().any(|p| p.user_id == user_id) {
+                lobby.participants.push(LobbyParticipant {
+                    user_id,
+                    sip_uri,
+                    display_name,
+                    state: LobbyParticipantState::Waiting,
+                    requested_at: Utc::now(),
+                });
+            }
+            lobby.clone()
+        })
+    }
+
+    pub fn admit_lobby_participant(&self, conference_id: Uuid, user_id: Uuid, admit: bool) -> Option<ConferenceLobby> {
+        let lobby = self.conference_lobbies.with_write(&conference_id, |lobbies| {
+            let lobby = lobbies.get_mut(&conference_id)?;
+            if let Some(p) = lobby.participants.iter_mut().find(|p| p.user_id == user_id) {
+                p.state = if admit {
+                    LobbyParticipantState::Admitted
+                } else {
+                    LobbyParticipantState::Rejected
+                };
+            }
+            Some(lobby.clone())
+        });
+        lobby
+    }
+
+    pub fn admit_all_lobby(&self, conference_id: Uuid) -> Option<ConferenceLobby> {
+        self.conference_lobbies.with_write(&conference_id, |lobbies| {
+            let lobby = lobbies.get_mut(&conference_id)?;
+            for p in &mut lobby.participants {
+                if p.state == LobbyParticipantState::Waiting {
+                    p.state = LobbyParticipantState::Admitted;
+                }
+            }
+            Some(lobby.clone())
+        })
+    }
+
+    // ── Raise hand methods ─────────────────────────────────────────
+
+    pub fn get_raised_hands(&self, conference_id: Uuid) -> Vec<HandRaise> {
+        self.raised_hands.get(&conference_id).unwrap_or_default()
+    }
+
+    pub fn raise_hand(&self, conference_id: Uuid, user_id: Uuid, sip_uri: String) -> Vec<HandRaise> {
+        self.raised_hands.with_write(&conference_id, |hands| {
+            let list = hands.entry(conference_id).or_default();
+            if !list.iter().any(|h| h.user_id == user_id) {
+                list.push(HandRaise {
+                    user_id,
+                    sip_uri,
+                    raised_at: Utc::now(),
+                });
+            }
+            list.clone()
+        })
+    }
+
+    pub fn lower_hand(&self, conference_id: Uuid, user_id: Uuid) -> Vec<HandRaise> {
+        self.raised_hands.with_write(&conference_id, |hands| {
+            let list = hands.entry(conference_id).or_default();
+            list.retain(|h| h.user_id != user_id);
+            list.clone()
+        })
+    }
+
+    pub fn lower_all_hands(&self, conference_id: Uuid) -> Vec<HandRaise> {
+        self.raised_hands.with_write(&conference_id, |hands| {
+            let list = hands.entry(conference_id).or_default();
+            list.clear();
+            list.clone()
+        })
+    }
+
+    // ── Poll methods ───────────────────────────────────────────────
+
+    pub fn create_poll(&self, conference_id: Uuid, principal: &str, input: CreatePollRequest) -> MeetingPoll {
+        let poll = MeetingPoll {
+            id: Uuid::new_v4(),
+            conference_id,
+            question: input.question,
+            options: input.options.into_iter().map(|text| PollOption {
+                id: Uuid::new_v4(),
+                text,
+                votes: Vec::new(),
+            }).collect(),
+            status: PollStatus::Draft,
+            anonymous: input.anonymous,
+            multi_select: input.multi_select,
+            created_by: principal.to_string(),
+            created_at: Utc::now(),
+        };
+        self.meeting_polls.insert(poll.id, poll.clone());
+        poll
+    }
+
+    pub fn launch_poll(&self, poll_id: Uuid) -> Option<MeetingPoll> {
+        self.meeting_polls.with_write(&poll_id, |polls| {
+            let poll = polls.get_mut(&poll_id)?;
+            poll.status = PollStatus::Active;
+            Some(poll.clone())
+        })
+    }
+
+    pub fn close_poll(&self, poll_id: Uuid) -> Option<MeetingPoll> {
+        self.meeting_polls.with_write(&poll_id, |polls| {
+            let poll = polls.get_mut(&poll_id)?;
+            poll.status = PollStatus::Closed;
+            Some(poll.clone())
+        })
+    }
+
+    pub fn cast_vote(&self, poll_id: Uuid, voter_uri: &str, option_ids: Vec<Uuid>) -> Option<MeetingPoll> {
+        self.meeting_polls.with_write(&poll_id, |polls| {
+            let poll = polls.get_mut(&poll_id)?;
+            if poll.status != PollStatus::Active {
+                return None;
+            }
+            // Remove previous votes by this voter
+            for opt in &mut poll.options {
+                opt.votes.retain(|v| v != voter_uri);
+            }
+            // Cast new votes
+            for opt in &mut poll.options {
+                if option_ids.contains(&opt.id) {
+                    if poll.multi_select || option_ids.len() == 1 {
+                        opt.votes.push(voter_uri.to_string());
+                    }
+                }
+            }
+            Some(poll.clone())
+        })
+    }
+
+    pub fn list_polls(&self, conference_id: Uuid) -> Vec<MeetingPoll> {
+        self.meeting_polls.values().into_iter().filter(|p| p.conference_id == conference_id).collect()
+    }
+
+    // ── Q&A methods ────────────────────────────────────────────────
+
+    pub fn ask_question(&self, conference_id: Uuid, asked_by: &str, text: String) -> QaQuestion {
+        let q = QaQuestion {
+            id: Uuid::new_v4(),
+            conference_id,
+            text,
+            asked_by: asked_by.to_string(),
+            upvotes: Vec::new(),
+            answered: false,
+            answer: None,
+            created_at: Utc::now(),
+        };
+        self.qa_questions.insert(q.id, q.clone());
+        q
+    }
+
+    pub fn upvote_question(&self, question_id: Uuid, voter_uri: &str) -> Option<QaQuestion> {
+        self.qa_questions.with_write(&question_id, |questions| {
+            let q = questions.get_mut(&question_id)?;
+            if !q.upvotes.contains(&voter_uri.to_string()) {
+                q.upvotes.push(voter_uri.to_string());
+            }
+            Some(q.clone())
+        })
+    }
+
+    pub fn answer_question(&self, question_id: Uuid, answer: String) -> Option<QaQuestion> {
+        self.qa_questions.with_write(&question_id, |questions| {
+            let q = questions.get_mut(&question_id)?;
+            q.answered = true;
+            q.answer = Some(answer);
+            Some(q.clone())
+        })
+    }
+
+    pub fn list_questions(&self, conference_id: Uuid) -> Vec<QaQuestion> {
+        self.qa_questions.values().into_iter().filter(|q| q.conference_id == conference_id).collect()
+    }
+
+    // ── Breakout room methods ──────────────────────────────────────
+
+    pub fn create_breakout_session(&self, conference_id: Uuid, input: CreateBreakoutRequest) -> BreakoutSession {
+        let session = BreakoutSession {
+            id: Uuid::new_v4(),
+            conference_id,
+            rooms: input.rooms.into_iter().map(|r| BreakoutRoom {
+                id: Uuid::new_v4(),
+                name: r.name,
+                participants: r.participants,
+            }).collect(),
+            status: BreakoutStatus::Pending,
+            duration_secs: input.duration_secs,
+            created_at: Utc::now(),
+        };
+        self.breakout_sessions.insert(session.id, session.clone());
+        session
+    }
+
+    pub fn start_breakout(&self, session_id: Uuid) -> Option<BreakoutSession> {
+        self.breakout_sessions.with_write(&session_id, |sessions| {
+            let session = sessions.get_mut(&session_id)?;
+            session.status = BreakoutStatus::Active;
+            Some(session.clone())
+        })
+    }
+
+    pub fn close_breakout(&self, session_id: Uuid) -> Option<BreakoutSession> {
+        self.breakout_sessions.with_write(&session_id, |sessions| {
+            let session = sessions.get_mut(&session_id)?;
+            session.status = BreakoutStatus::Closed;
+            Some(session.clone())
+        })
+    }
+
+    pub fn list_breakouts(&self, conference_id: Uuid) -> Vec<BreakoutSession> {
+        self.breakout_sessions.values().into_iter().filter(|s| s.conference_id == conference_id).collect()
+    }
+
+    // ── Transcript / live captions methods ─────────────────────────
+
+    pub fn post_transcript(&self, conference_id: Uuid, input: PostTranscriptRequest) -> TranscriptSegment {
+        let segment = TranscriptSegment {
+            id: Uuid::new_v4(),
+            conference_id,
+            speaker_uri: input.speaker_uri,
+            speaker_name: input.speaker_name,
+            text: input.text,
+            timestamp: Utc::now(),
+            is_final: input.is_final,
+        };
+        {
+            let mut transcripts = self.transcripts.write().expect("transcripts lock");
+            transcripts.push(segment.clone());
+            // Keep last 50000 segments
+            if transcripts.len() > 50000 {
+                let drain_count = transcripts.len() - 50000;
+                transcripts.drain(..drain_count);
+            }
+        }
+        segment
+    }
+
+    pub fn get_transcript(&self, conference_id: Uuid) -> Vec<TranscriptSegment> {
+        self.transcripts
+            .read()
+            .expect("transcripts lock")
+            .iter()
+            .filter(|s| s.conference_id == conference_id)
+            .cloned()
+            .collect()
+    }
+
+    pub fn export_transcript(&self, conference_id: Uuid) -> TranscriptExport {
+        let segments = self.get_transcript(conference_id);
+        let title = self.conferences.get(&conference_id)
+            .map(|c| c.title)
+            .unwrap_or_else(|| format!("Conference {}", conference_id));
+        TranscriptExport {
+            conference_id,
+            title,
+            segments,
+            exported_at: Utc::now(),
+        }
+    }
+
+    // ── Call quality methods ───────────────────────────────────────
+
+    pub fn post_call_quality(&self, principal: &str, input: PostCallQualityRequest) -> CallQualityReport {
+        let report = CallQualityReport {
+            id: Uuid::new_v4(),
+            call_id: input.call_id,
+            user_sip_uri: principal.to_string(),
+            codec: input.codec,
+            jitter_ms: input.jitter_ms,
+            packet_loss_pct: input.packet_loss_pct,
+            round_trip_ms: input.round_trip_ms,
+            mos_score: input.mos_score,
+            bytes_sent: input.bytes_sent,
+            bytes_received: input.bytes_received,
+            reported_at: Utc::now(),
+        };
+        {
+            let mut reports = self.call_quality_reports.write().expect("cqd lock");
+            reports.push(report.clone());
+            if reports.len() > 100000 {
+                let drain_count = reports.len() - 100000;
+                reports.drain(..drain_count);
+            }
+        }
+        report
+    }
+
+    pub fn list_call_quality(&self) -> Vec<CallQualityReport> {
+        self.call_quality_reports.read().expect("cqd lock").clone()
+    }
+
+    pub fn call_quality_summary(&self) -> CallQualitySummary {
+        let reports = self.call_quality_reports.read().expect("cqd lock");
+        let total = reports.len();
+        if total == 0 {
+            return CallQualitySummary {
+                total_reports: 0,
+                avg_mos: 0.0,
+                avg_jitter_ms: 0.0,
+                avg_packet_loss_pct: 0.0,
+                avg_round_trip_ms: 0.0,
+                poor_quality_calls: 0,
+            };
+        }
+        let n = total as f64;
+        CallQualitySummary {
+            total_reports: total,
+            avg_mos: reports.iter().map(|r| r.mos_score).sum::<f64>() / n,
+            avg_jitter_ms: reports.iter().map(|r| r.jitter_ms).sum::<f64>() / n,
+            avg_packet_loss_pct: reports.iter().map(|r| r.packet_loss_pct).sum::<f64>() / n,
+            avg_round_trip_ms: reports.iter().map(|r| r.round_trip_ms).sum::<f64>() / n,
+            poor_quality_calls: reports.iter().filter(|r| r.mos_score < 3.0).count(),
+        }
+    }
+
+    // ── DLP methods ────────────────────────────────────────────────
+
+    pub fn create_dlp_policy(&self, principal: &str, input: CreateDlpPolicyRequest) -> DlpPolicy {
+        let policy = DlpPolicy {
+            id: Uuid::new_v4(),
+            name: input.name,
+            description: input.description.unwrap_or_default(),
+            pattern: input.pattern,
+            action: input.action,
+            enabled: input.enabled,
+            created_by: principal.to_string(),
+            created_at: Utc::now(),
+        };
+        self.dlp_policies.insert(policy.id, policy.clone());
+        policy
+    }
+
+    pub fn delete_dlp_policy(&self, id: Uuid) -> bool {
+        self.dlp_policies.remove(&id).is_some()
+    }
+
+    pub fn list_dlp_policies(&self) -> Vec<DlpPolicy> {
+        self.dlp_policies.values()
+    }
+
+    pub fn scan_content_dlp(&self, user_uri: &str, content: &str) -> DlpScanResult {
+        let policies = self.dlp_policies.values();
+        let mut violations = Vec::new();
+        for policy in &policies {
+            if !policy.enabled {
+                continue;
+            }
+            if let Ok(re) = regex::Regex::new(&policy.pattern) {
+                if re.is_match(content) {
+                    let snippet = if content.len() > 80 {
+                        format!("{}...", &content[..80])
+                    } else {
+                        content.to_string()
+                    };
+                    let violation = DlpViolation {
+                        id: Uuid::new_v4(),
+                        policy_id: policy.id,
+                        policy_name: policy.name.clone(),
+                        user_uri: user_uri.to_string(),
+                        action_taken: policy.action.clone(),
+                        content_snippet: snippet,
+                        detected_at: Utc::now(),
+                    };
+                    violations.push(violation);
+                }
+            }
+        }
+
+        let blocked = violations.iter().any(|v| v.action_taken == DlpAction::Block);
+
+        // Record violations
+        if !violations.is_empty() {
+            let mut stored = self.dlp_violations.write().expect("dlp violations lock");
+            stored.extend(violations.clone());
+            if stored.len() > 50000 {
+                let drain_count = stored.len() - 50000;
+                stored.drain(..drain_count);
+            }
+        }
+
+        DlpScanResult {
+            allowed: !blocked,
+            violations,
+        }
+    }
+
+    pub fn list_dlp_violations(&self) -> Vec<DlpViolation> {
+        self.dlp_violations.read().expect("dlp violations lock").clone()
     }
 
     pub fn create_call(&self, input: CreateCallRequest) -> CallSession {
@@ -5088,6 +5542,289 @@ pub enum TurnTransport {
     Udp,
     Tcp,
     Tls,
+}
+
+// ── Meeting lobby ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LobbyParticipantState {
+    Waiting,
+    Admitted,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LobbyParticipant {
+    pub user_id: Uuid,
+    pub sip_uri: String,
+    pub display_name: String,
+    pub state: LobbyParticipantState,
+    pub requested_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConferenceLobby {
+    pub conference_id: Uuid,
+    pub enabled: bool,
+    pub participants: Vec<LobbyParticipant>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LobbyAdmitRequest {
+    pub user_id: Uuid,
+    pub admit: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LobbySettingsRequest {
+    pub enabled: bool,
+}
+
+// ── Raise hand ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandRaise {
+    pub user_id: Uuid,
+    pub sip_uri: String,
+    pub raised_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RaiseHandRequest {
+    pub user_id: Uuid,
+    pub sip_uri: String,
+    pub raised: bool,
+}
+
+// ── Meeting polls & Q&A ────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PollStatus {
+    Draft,
+    Active,
+    Closed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PollOption {
+    pub id: Uuid,
+    pub text: String,
+    pub votes: Vec<String>, // SIP URIs of voters
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeetingPoll {
+    pub id: Uuid,
+    pub conference_id: Uuid,
+    pub question: String,
+    pub options: Vec<PollOption>,
+    pub status: PollStatus,
+    pub anonymous: bool,
+    pub multi_select: bool,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreatePollRequest {
+    pub question: String,
+    pub options: Vec<String>,
+    #[serde(default)]
+    pub anonymous: bool,
+    #[serde(default)]
+    pub multi_select: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CastVoteRequest {
+    pub option_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QaQuestion {
+    pub id: Uuid,
+    pub conference_id: Uuid,
+    pub text: String,
+    pub asked_by: String,
+    pub upvotes: Vec<String>,
+    pub answered: bool,
+    pub answer: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AskQuestionRequest {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AnswerQuestionRequest {
+    pub answer: String,
+}
+
+// ── Breakout rooms ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BreakoutStatus {
+    Pending,
+    Active,
+    Closed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BreakoutRoom {
+    pub id: Uuid,
+    pub name: String,
+    pub participants: Vec<String>, // SIP URIs
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BreakoutSession {
+    pub id: Uuid,
+    pub conference_id: Uuid,
+    pub rooms: Vec<BreakoutRoom>,
+    pub status: BreakoutStatus,
+    pub duration_secs: Option<u64>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateBreakoutRequest {
+    pub rooms: Vec<CreateBreakoutRoomInput>,
+    pub duration_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateBreakoutRoomInput {
+    pub name: String,
+    pub participants: Vec<String>,
+}
+
+// ── Live captions / transcription ──────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptSegment {
+    pub id: Uuid,
+    pub conference_id: Uuid,
+    pub speaker_uri: String,
+    pub speaker_name: String,
+    pub text: String,
+    pub timestamp: DateTime<Utc>,
+    pub is_final: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PostTranscriptRequest {
+    pub speaker_uri: String,
+    pub speaker_name: String,
+    pub text: String,
+    #[serde(default = "default_true")]
+    pub is_final: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptExport {
+    pub conference_id: Uuid,
+    pub title: String,
+    pub segments: Vec<TranscriptSegment>,
+    pub exported_at: DateTime<Utc>,
+}
+
+// ── Call quality metrics (CQD) ─────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallQualityReport {
+    pub id: Uuid,
+    pub call_id: Uuid,
+    pub user_sip_uri: String,
+    pub codec: String,
+    pub jitter_ms: f64,
+    pub packet_loss_pct: f64,
+    pub round_trip_ms: f64,
+    pub mos_score: f64,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub reported_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PostCallQualityRequest {
+    pub call_id: Uuid,
+    pub codec: String,
+    pub jitter_ms: f64,
+    pub packet_loss_pct: f64,
+    pub round_trip_ms: f64,
+    pub mos_score: f64,
+    #[serde(default)]
+    pub bytes_sent: u64,
+    #[serde(default)]
+    pub bytes_received: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CallQualitySummary {
+    pub total_reports: usize,
+    pub avg_mos: f64,
+    pub avg_jitter_ms: f64,
+    pub avg_packet_loss_pct: f64,
+    pub avg_round_trip_ms: f64,
+    pub poor_quality_calls: usize, // MOS < 3.0
+}
+
+// ── DLP (Data Loss Prevention) ─────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DlpAction {
+    Block,
+    Warn,
+    Audit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DlpPolicy {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub pattern: String,     // regex pattern
+    pub action: DlpAction,
+    pub enabled: bool,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateDlpPolicyRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub pattern: String,
+    pub action: DlpAction,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DlpViolation {
+    pub id: Uuid,
+    pub policy_id: Uuid,
+    pub policy_name: String,
+    pub user_uri: String,
+    pub action_taken: DlpAction,
+    pub content_snippet: String,
+    pub detected_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DlpScanResult {
+    pub allowed: bool,
+    pub violations: Vec<DlpViolation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

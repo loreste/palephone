@@ -1,4 +1,4 @@
-export type Tab = "dialpad" | "chat" | "people" | "files" | "recent" | "admin" | "settings";
+export type Tab = "dialpad" | "chat" | "people" | "files" | "recent" | "calendar" | "admin" | "settings";
 
 export type Theme = "dark" | "light";
 

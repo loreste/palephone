@@ -4,6 +4,7 @@ import { useServerStore } from "@/store/serverStore";
 import { useChatStore } from "@/store/chatStore";
 import { useAccountStore } from "@/store/accountStore";
 import { useActivityStore } from "@/store/activityStore";
+import { useMeetingStore } from "@/store/meetingStore";
 import { paleServerGetPresence } from "@/lib/tauri";
 import { adminRefreshToken } from "@/lib/adminApi";
 import { shouldNotify, shouldPlaySound } from "@/lib/notifications";
@@ -314,6 +315,47 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
       es.addEventListener("user_created", () => {
         // Trigger admin panel refresh via custom event
         window.dispatchEvent(new CustomEvent("pale:admin-refresh"));
+      });
+
+      // Meeting events
+      es.addEventListener("lobby_updated", (e) => {
+        try {
+          useMeetingStore.getState().setLobby(JSON.parse(e.data));
+        } catch { /* ignore */ }
+      });
+
+      es.addEventListener("hand_raised", (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          useMeetingStore.getState().setRaisedHands(data.hands ?? []);
+        } catch { /* ignore */ }
+      });
+
+      es.addEventListener("poll_updated", (e) => {
+        try {
+          useMeetingStore.getState().upsertPoll(JSON.parse(e.data));
+        } catch { /* ignore */ }
+      });
+
+      es.addEventListener("qa_updated", (e) => {
+        try {
+          useMeetingStore.getState().upsertQuestion(JSON.parse(e.data));
+        } catch { /* ignore */ }
+      });
+
+      es.addEventListener("breakout_updated", (e) => {
+        try {
+          useMeetingStore.getState().upsertBreakout(JSON.parse(e.data));
+        } catch { /* ignore */ }
+      });
+
+      es.addEventListener("live_caption", (e) => {
+        try {
+          const segment = JSON.parse(e.data);
+          if (useMeetingStore.getState().captionsEnabled) {
+            useMeetingStore.getState().addCaption(segment);
+          }
+        } catch { /* ignore */ }
       });
 
       es.onerror = () => {
