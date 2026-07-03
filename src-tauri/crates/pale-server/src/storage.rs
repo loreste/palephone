@@ -485,3 +485,33 @@ impl StoredObject for AdminAuditEvent {
         self.id.to_string()
     }
 }
+
+impl StoredObject for crate::SsoProvider {
+    fn collection() -> &'static str {
+        "sso_providers"
+    }
+
+    fn key(&self) -> String {
+        self.id.to_string()
+    }
+}
+
+impl StoredObject for crate::EncryptionConfig {
+    fn collection() -> &'static str {
+        "encryption_configs"
+    }
+
+    fn key(&self) -> String {
+        self.id.to_string()
+    }
+}
+
+impl StoredObject for crate::AdminElevation {
+    fn collection() -> &'static str {
+        "admin_elevations"
+    }
+
+    fn key(&self) -> String {
+        self.id.to_string()
+    }
+}

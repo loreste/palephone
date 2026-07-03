@@ -54,7 +54,7 @@ async function api<T = any>(baseUrl: string, token: string, path: string, opts?:
   return paleServerApi<T>(baseUrl, token, path, opts);
 }
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music" | "sso" | "encryption" | "pam";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -92,6 +92,9 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "meeting_templates", label: "Meeting Templates", icon: ClipboardList },
   { id: "recording_policies", label: "Rec. Policies", icon: Mic },
   { id: "hold_music", label: "Hold Music", icon: RadioTower },
+  { id: "sso", label: "SSO", icon: Shield },
+  { id: "encryption", label: "Encryption", icon: Lock },
+  { id: "pam", label: "Priv. Access", icon: Shield },
 ];
 
 export function AdminView() {
@@ -212,6 +215,17 @@ export function AdminView() {
               {loading ? "Signing in..." : "Sign in"}
             </button>
           </form>
+          <div className="mt-3 pt-3 border-t border-border-subtle">
+            <button
+              onClick={() => {
+                toast({ type: "info", title: "SSO login requires a configured SSO provider. Configure one in Admin > SSO tab." });
+              }}
+              className="w-full h-10 rounded-md border border-border-default hover:bg-elevated text-sm font-medium flex items-center justify-center gap-2"
+            >
+              <Shield size={16} />
+              Sign in with SSO
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -315,6 +329,9 @@ export function AdminView() {
         {activeTab === "meeting_templates" && <MeetingTemplatesPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "recording_policies" && <RecordingPoliciesPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "hold_music" && <HoldMusicPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "sso" && <SsoProvidersPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "encryption" && <EncryptionPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "pam" && <PrivilegedAccessPanel baseUrl={baseUrl} token={token} />}
       </div>
     </div>
   );
@@ -5165,6 +5182,277 @@ function MeetingTemplatesPanel({ baseUrl, token }: { baseUrl: string; token: str
                 {t.max_participants && <span className="px-1.5 py-0.5 bg-purple-500/10 text-purple-600 rounded">Max: {t.max_participants}</span>}
               </div>
               <div className="text-[10px] text-tertiary">Created by {t.created_by} on {shortDate(t.created_at)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── SSO Providers Panel ───
+
+function SsoProvidersPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [providers, setProviders] = useState<any[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [providerType, setProviderType] = useState("oidc");
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [issuerUrl, setIssuerUrl] = useState("");
+  const [redirectUri, setRedirectUri] = useState("");
+
+  const load = useCallback(() => {
+    api(baseUrl, token, "/v1/admin/sso-providers").then(setProviders).catch(() => {});
+  }, [baseUrl, token]);
+
+  useEffect(load, [load]);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      await api(baseUrl, token, "/v1/admin/sso-providers", {
+        method: "POST",
+        body: {
+          name,
+          provider_type: providerType,
+          client_id: clientId,
+          client_secret: clientSecret,
+          issuer_url: issuerUrl,
+          redirect_uri: redirectUri,
+        },
+      });
+      setName(""); setClientId(""); setClientSecret(""); setIssuerUrl(""); setRedirectUri("");
+      setCreating(false);
+      toast({ type: "success", title: "SSO provider created" });
+      load();
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Failed" });
+    }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/sso-providers/${id}`, { method: "DELETE" });
+      toast({ type: "success", title: "SSO provider deleted" });
+      load();
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Failed" });
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold">SSO / OIDC Providers</h2>
+        <button onClick={() => setCreating(!creating)} className="text-xs text-accent hover:underline flex items-center gap-1">
+          <Plus size={14} /> Add Provider
+        </button>
+      </div>
+
+      {creating && (
+        <form onSubmit={submit} className="border border-border-subtle rounded-md p-3 space-y-2">
+          <Field label="Name" value={name} onChange={setName} />
+          <div className="space-y-1">
+            <label className="text-xs text-secondary">Type</label>
+            <select value={providerType} onChange={(e) => setProviderType(e.target.value)} className="w-full h-8 rounded border border-border-default bg-base px-2 text-sm">
+              <option value="oidc">OIDC</option>
+              <option value="saml">SAML</option>
+            </select>
+          </div>
+          <Field label="Client ID" value={clientId} onChange={setClientId} />
+          <Field label="Client Secret" value={clientSecret} onChange={setClientSecret} type="password" />
+          <Field label="Issuer URL" value={issuerUrl} onChange={setIssuerUrl} />
+          <Field label="Redirect URI" value={redirectUri} onChange={setRedirectUri} />
+          <button className="w-full py-1.5 bg-accent text-white rounded text-sm">Create Provider</button>
+        </form>
+      )}
+
+      {providers.length === 0 ? (
+        <p className="text-xs text-secondary text-center py-4">No SSO providers configured</p>
+      ) : (
+        <div className="space-y-2">
+          {providers.map((p) => (
+            <div key={p.id} className="p-3 border border-border-subtle rounded space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">{p.name}</span>
+                <div className="flex items-center gap-2">
+                  <span className={cn("text-[10px] px-1.5 py-0.5 rounded", p.enabled ? "bg-green-500/10 text-green-600" : "bg-red-500/10 text-red-600")}>
+                    {p.enabled ? "Enabled" : "Disabled"}
+                  </span>
+                  <button onClick={() => remove(p.id)} className="text-xs text-destructive hover:underline">
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              </div>
+              <div className="text-xs text-secondary">
+                {p.provider_type.toUpperCase()} | Issuer: {p.issuer_url || "-"}
+              </div>
+              <div className="text-[10px] text-tertiary">Client ID: {p.client_id}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Encryption Panel ───
+
+function EncryptionPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [status, setStatus] = useState<any>(null);
+  const [customerKey, setCustomerKey] = useState("");
+  const [rotating, setRotating] = useState(false);
+
+  const load = useCallback(() => {
+    api(baseUrl, token, "/v1/admin/encryption/status").then(setStatus).catch(() => {});
+  }, [baseUrl, token]);
+
+  useEffect(load, [load]);
+
+  const rotateKey = async (source: "server" | "customer") => {
+    setRotating(true);
+    try {
+      const body: any = {};
+      if (source === "customer" && customerKey) {
+        body.customer_key_base64 = customerKey;
+      }
+      await api(baseUrl, token, "/v1/admin/encryption/rotate-key", {
+        method: "POST",
+        body,
+      });
+      setCustomerKey("");
+      toast({ type: "success", title: `Encryption key rotated (${source})` });
+      load();
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Failed" });
+    } finally {
+      setRotating(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-sm font-semibold">Encryption at Rest (BYOK)</h2>
+
+      <div className="border border-border-subtle rounded-md p-3 space-y-2">
+        <h3 className="text-xs font-medium">Current Status</h3>
+        {status ? (
+          <div className="text-xs space-y-1">
+            <div>Active: <span className="font-medium">{status.active ? "Yes" : "No"}</span></div>
+            <div>Key Source: <span className="font-medium">{status.key_source}</span></div>
+            {status.key_id && <div>Key ID: <span className="font-mono text-[10px]">{status.key_id}</span></div>}
+            {status.rotated_at && <div>Last Rotated: <span className="font-medium">{shortDate(status.rotated_at)}</span></div>}
+            <div>Total Keys: <span className="font-medium">{status.total_keys}</span></div>
+          </div>
+        ) : (
+          <p className="text-xs text-secondary">Loading...</p>
+        )}
+      </div>
+
+      <div className="border border-border-subtle rounded-md p-3 space-y-2">
+        <h3 className="text-xs font-medium">Rotate Key</h3>
+        <button
+          onClick={() => rotateKey("server")}
+          disabled={rotating}
+          className="w-full py-1.5 bg-accent text-white rounded text-sm disabled:opacity-60"
+        >
+          {rotating ? "Rotating..." : "Generate Server Key"}
+        </button>
+        <div className="border-t border-border-subtle pt-2 space-y-1">
+          <Field label="Customer Key (Base64)" value={customerKey} onChange={setCustomerKey} type="password" />
+          <button
+            onClick={() => rotateKey("customer")}
+            disabled={rotating || !customerKey}
+            className="w-full py-1.5 border border-border-default rounded text-sm hover:bg-elevated disabled:opacity-60"
+          >
+            Use Customer Key (BYOK)
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Privileged Access Management Panel ───
+
+function PrivilegedAccessPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [elevations, setElevations] = useState<any[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [userId, setUserId] = useState("");
+  const [reason, setReason] = useState("");
+  const [durationMin, setDurationMin] = useState("60");
+
+  const load = useCallback(() => {
+    api(baseUrl, token, "/v1/admin/elevations").then(setElevations).catch(() => {});
+  }, [baseUrl, token]);
+
+  useEffect(load, [load]);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      await api(baseUrl, token, "/v1/admin/elevations", {
+        method: "POST",
+        body: {
+          user_id: userId,
+          reason,
+          duration_minutes: parseInt(durationMin) || 60,
+        },
+      });
+      setUserId(""); setReason(""); setDurationMin("60");
+      setCreating(false);
+      toast({ type: "success", title: "Admin elevation granted" });
+      load();
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Failed" });
+    }
+  };
+
+  const revoke = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/elevations/${id}/revoke`, { method: "POST" });
+      toast({ type: "success", title: "Elevation revoked" });
+      load();
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Failed" });
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold">Privileged Access (JIT Admin)</h2>
+        <button onClick={() => setCreating(!creating)} className="text-xs text-accent hover:underline flex items-center gap-1">
+          <Plus size={14} /> Grant Elevation
+        </button>
+      </div>
+
+      {creating && (
+        <form onSubmit={submit} className="border border-border-subtle rounded-md p-3 space-y-2">
+          <Field label="User ID (UUID)" value={userId} onChange={setUserId} />
+          <Field label="Reason" value={reason} onChange={setReason} />
+          <Field label="Duration (minutes)" value={durationMin} onChange={setDurationMin} />
+          <button className="w-full py-1.5 bg-accent text-white rounded text-sm">Grant Elevation</button>
+        </form>
+      )}
+
+      {elevations.length === 0 ? (
+        <p className="text-xs text-secondary text-center py-4">No active admin elevations</p>
+      ) : (
+        <div className="space-y-2">
+          {elevations.map((e) => (
+            <div key={e.id} className="p-3 border border-border-subtle rounded space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">User: {e.user_id}</span>
+                <button onClick={() => revoke(e.id)} className="text-xs text-destructive hover:underline">
+                  Revoke
+                </button>
+              </div>
+              <div className="text-xs text-secondary">Reason: {e.reason}</div>
+              <div className="text-[10px] text-tertiary">
+                Granted by {e.granted_by} | Expires {shortDate(e.expires_at)}
+              </div>
             </div>
           ))}
         </div>

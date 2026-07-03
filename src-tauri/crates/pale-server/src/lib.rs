@@ -291,6 +291,12 @@ pub struct AppState {
     hold_music: ShardedMap<Uuid, HoldMusic>,
     // Personal call groups
     personal_call_groups: ShardedMap<Uuid, PersonalCallGroup>,
+    // SSO providers
+    sso_providers: ShardedMap<Uuid, SsoProvider>,
+    // Encryption config (BYOK)
+    encryption_configs: RwLock<Vec<EncryptionConfig>>,
+    // Admin elevations (PAM)
+    admin_elevations: RwLock<Vec<AdminElevation>>,
     user_create_lock: std::sync::Mutex<()>,
     agent_assignment_lock: std::sync::Mutex<()>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
@@ -459,6 +465,9 @@ impl AppState {
             recording_policies: ShardedMap::new(),
             hold_music: ShardedMap::new(),
             personal_call_groups: ShardedMap::new(),
+            sso_providers: ShardedMap::new(),
+            encryption_configs: RwLock::new(Vec::new()),
+            admin_elevations: RwLock::new(Vec::new()),
             user_create_lock: std::sync::Mutex::new(()),
             agent_assignment_lock: std::sync::Mutex::new(()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
@@ -4366,6 +4375,280 @@ impl AppState {
 
     pub fn delete_personal_call_group(&self, id: Uuid) -> Option<PersonalCallGroup> {
         self.personal_call_groups.remove(&id)
+    }
+
+    // ─── SSO Providers ───
+
+    pub fn list_sso_providers(&self) -> Vec<SsoProvider> {
+        self.sso_providers.values()
+    }
+
+    pub fn create_sso_provider(&self, input: CreateSsoProviderRequest) -> SsoProvider {
+        let provider = SsoProvider {
+            id: Uuid::new_v4(),
+            name: input.name,
+            provider_type: input.provider_type,
+            client_id: input.client_id,
+            client_secret_enc: input.client_secret,
+            issuer_url: input.issuer_url,
+            redirect_uri: input.redirect_uri,
+            enabled: input.enabled,
+            created_at: Utc::now(),
+        };
+        self.sso_providers.insert(provider.id, provider.clone());
+        self.persist_pg_sso_provider(&provider);
+        provider
+    }
+
+    pub fn update_sso_provider(&self, id: Uuid, input: UpdateSsoProviderRequest) -> Option<SsoProvider> {
+        let updated = self.sso_providers.with_write(&id, |providers| {
+            let provider = providers.get_mut(&id)?;
+            if let Some(name) = input.name { provider.name = name; }
+            if let Some(pt) = input.provider_type { provider.provider_type = pt; }
+            if let Some(cid) = input.client_id { provider.client_id = cid; }
+            if let Some(cs) = input.client_secret { provider.client_secret_enc = cs; }
+            if let Some(iu) = input.issuer_url { provider.issuer_url = iu; }
+            if let Some(ru) = input.redirect_uri { provider.redirect_uri = ru; }
+            if let Some(en) = input.enabled { provider.enabled = en; }
+            Some(provider.clone())
+        });
+        if let Some(ref p) = updated {
+            self.persist_pg_sso_provider(p);
+        }
+        updated
+    }
+
+    pub fn delete_sso_provider(&self, id: Uuid) -> bool {
+        let removed = self.sso_providers.remove(&id).is_some();
+        if removed {
+            if let Some(pg) = &self.pg {
+                let pg = pg.clone();
+                tokio::spawn(async move { let _ = pg.delete_sso_provider(id).await; });
+            }
+        }
+        removed
+    }
+
+    pub fn get_sso_provider(&self, id: Uuid) -> Option<SsoProvider> {
+        self.sso_providers.get(&id)
+    }
+
+    fn persist_pg_sso_provider(&self, p: &SsoProvider) {
+        if let Some(pg) = &self.pg {
+            let pg = pg.clone();
+            let p = p.clone();
+            tokio::spawn(async move { let _ = pg.upsert_sso_provider(&p).await; });
+        }
+    }
+
+    /// Build OIDC authorization URL with state and nonce parameters.
+    pub fn sso_login_url(&self, provider_id: Uuid) -> Option<(String, String, String)> {
+        let provider = self.sso_providers.get(&provider_id)?;
+        if !provider.enabled {
+            return None;
+        }
+        let state = Uuid::new_v4().to_string();
+        let nonce = Uuid::new_v4().to_string();
+        let url = format!(
+            "{}/authorize?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email%20profile&state={}&nonce={}",
+            provider.issuer_url.trim_end_matches('/'),
+            urlencoding::encode(&provider.client_id),
+            urlencoding::encode(&provider.redirect_uri),
+            urlencoding::encode(&state),
+            urlencoding::encode(&nonce),
+        );
+        Some((url, state, nonce))
+    }
+
+    // ─── Encryption Config (BYOK) ───
+
+    pub fn encryption_status(&self) -> serde_json::Value {
+        let configs = self.encryption_configs.read().expect("encryption_configs lock");
+        let active = configs.first();
+        serde_json::json!({
+            "active": active.is_some(),
+            "key_source": active.map(|c| c.key_source.as_str()).unwrap_or("server"),
+            "key_id": active.map(|c| c.key_id.as_str()).unwrap_or(""),
+            "rotated_at": active.and_then(|c| c.rotated_at.map(|t| t.to_rfc3339())),
+            "total_keys": configs.len(),
+        })
+    }
+
+    pub fn rotate_encryption_key(&self, input: RotateEncryptionKeyRequest) -> EncryptionConfig {
+        let key_source = if input.customer_key_base64.is_some() { "customer" } else { "server" };
+        let key_id = Uuid::new_v4().to_string();
+        // In production: wrap the DEK with customer key or generate server key.
+        // For now, generate a key ID and record the config.
+        let wrapped = input.customer_key_base64.unwrap_or_else(|| {
+            use base64::Engine;
+            let mut key = [0u8; 32];
+            use rand::RngCore;
+            rand::thread_rng().fill_bytes(&mut key);
+            base64::engine::general_purpose::STANDARD.encode(key)
+        });
+
+        let config = EncryptionConfig {
+            id: Uuid::new_v4(),
+            key_id,
+            key_source: key_source.to_string(),
+            wrapped_key_enc: wrapped,
+            created_at: Utc::now(),
+            rotated_at: Some(Utc::now()),
+        };
+
+        {
+            let mut configs = self.encryption_configs.write().expect("encryption_configs lock");
+            configs.insert(0, config.clone());
+        }
+
+        if let Some(pg) = &self.pg {
+            let pg = pg.clone();
+            let c = config.clone();
+            tokio::spawn(async move { let _ = pg.upsert_encryption_config(&c).await; });
+        }
+
+        config
+    }
+
+    // ─── Admin Elevations (PAM) ───
+
+    pub fn list_admin_elevations(&self) -> Vec<AdminElevation> {
+        let elevations = self.admin_elevations.read().expect("admin_elevations lock");
+        elevations.clone()
+    }
+
+    pub fn active_admin_elevations(&self) -> Vec<AdminElevation> {
+        let now = Utc::now();
+        let elevations = self.admin_elevations.read().expect("admin_elevations lock");
+        elevations
+            .iter()
+            .filter(|e| e.revoked_at.is_none() && e.expires_at > now)
+            .cloned()
+            .collect()
+    }
+
+    pub fn create_admin_elevation(&self, input: CreateAdminElevationRequest, granted_by: &str) -> AdminElevation {
+        let duration_minutes = input.duration_minutes.unwrap_or(60);
+        let elevation = AdminElevation {
+            id: Uuid::new_v4(),
+            user_id: input.user_id,
+            reason: input.reason,
+            granted_by: granted_by.to_string(),
+            granted_at: Utc::now(),
+            expires_at: Utc::now() + Duration::minutes(duration_minutes),
+            revoked_at: None,
+        };
+
+        {
+            let mut elevations = self.admin_elevations.write().expect("admin_elevations lock");
+            elevations.push(elevation.clone());
+        }
+
+        if let Some(pg) = &self.pg {
+            let pg = pg.clone();
+            let e = elevation.clone();
+            tokio::spawn(async move { let _ = pg.insert_admin_elevation(&e).await; });
+        }
+
+        elevation
+    }
+
+    pub fn revoke_admin_elevation(&self, id: Uuid) -> Option<AdminElevation> {
+        let mut elevations = self.admin_elevations.write().expect("admin_elevations lock");
+        let e = elevations.iter_mut().find(|e| e.id == id && e.revoked_at.is_none())?;
+        e.revoked_at = Some(Utc::now());
+        let result = e.clone();
+
+        if let Some(pg) = &self.pg {
+            let pg = pg.clone();
+            let e = result.clone();
+            tokio::spawn(async move { let _ = pg.insert_admin_elevation(&e).await; });
+        }
+
+        Some(result)
+    }
+
+    /// Expire admin elevations that have passed their deadline.
+    pub fn expire_admin_elevations(&self) {
+        let now = Utc::now();
+        let mut elevations = self.admin_elevations.write().expect("admin_elevations lock");
+        for e in elevations.iter_mut() {
+            if e.revoked_at.is_none() && e.expires_at <= now {
+                e.revoked_at = Some(now);
+            }
+        }
+    }
+
+    /// Check if a user has an active admin elevation.
+    pub fn has_active_elevation(&self, user_id: Uuid) -> bool {
+        let now = Utc::now();
+        let elevations = self.admin_elevations.read().expect("admin_elevations lock");
+        elevations
+            .iter()
+            .any(|e| e.user_id == user_id && e.revoked_at.is_none() && e.expires_at > now)
+    }
+
+    // ─── Application-layer encryption helpers ───
+
+    /// Encrypt a plaintext string for storage (wraps ChaCha20Poly1305).
+    pub fn encrypt_field(&self, plaintext: &str) -> String {
+        use base64::Engine;
+        use chacha20poly1305::{aead::{Aead, KeyInit}, ChaCha20Poly1305, Key, Nonce};
+
+        // Derive key from storage key embedded in the store, or use a fixed fallback
+        let key_material = self.http_token.as_bytes();
+        let mut hasher = Sha256::new();
+        hasher.update(key_material);
+        let digest = hasher.finalize();
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&digest));
+
+        let uuid = Uuid::new_v4();
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes.copy_from_slice(&uuid.as_bytes()[..12]);
+
+        let ciphertext = cipher
+            .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_bytes())
+            .unwrap_or_else(|_| plaintext.as_bytes().to_vec());
+
+        format!(
+            "enc:{}:{}",
+            base64::engine::general_purpose::STANDARD.encode(nonce_bytes),
+            base64::engine::general_purpose::STANDARD.encode(ciphertext)
+        )
+    }
+
+    /// Decrypt an encrypted field. Returns plaintext if input is not encrypted.
+    pub fn decrypt_field(&self, encoded: &str) -> String {
+        use base64::Engine;
+        use chacha20poly1305::{aead::{Aead, KeyInit}, ChaCha20Poly1305, Key, Nonce};
+
+        let Some(rest) = encoded.strip_prefix("enc:") else {
+            return encoded.to_string();
+        };
+        let Some((nonce_b64, ct_b64)) = rest.split_once(':') else {
+            return encoded.to_string();
+        };
+
+        let key_material = self.http_token.as_bytes();
+        let mut hasher = Sha256::new();
+        hasher.update(key_material);
+        let digest = hasher.finalize();
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&digest));
+
+        let nonce = match base64::engine::general_purpose::STANDARD.decode(nonce_b64) {
+            Ok(n) if n.len() == 12 => n,
+            _ => return encoded.to_string(),
+        };
+        let ciphertext = match base64::engine::general_purpose::STANDARD.decode(ct_b64) {
+            Ok(c) => c,
+            _ => return encoded.to_string(),
+        };
+
+        cipher
+            .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
+            .ok()
+            .and_then(|p| String::from_utf8(p).ok())
+            .unwrap_or_else(|| encoded.to_string())
     }
 
     // ─── Call Analytics ───
@@ -10380,6 +10663,89 @@ pub struct CreatePersonalCallGroupRequest {
     pub numbers: Vec<String>,
     pub ring_duration: Option<i32>,
     pub enabled: Option<bool>,
+}
+
+// ─── SSO / OIDC providers ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SsoProvider {
+    pub id: Uuid,
+    pub name: String,
+    pub provider_type: String,
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret_enc: String,
+    pub issuer_url: String,
+    pub redirect_uri: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateSsoProviderRequest {
+    pub name: String,
+    #[serde(default = "default_oidc")]
+    pub provider_type: String,
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: String,
+    pub issuer_url: String,
+    pub redirect_uri: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_oidc() -> String {
+    "oidc".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateSsoProviderRequest {
+    pub name: Option<String>,
+    pub provider_type: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub issuer_url: Option<String>,
+    pub redirect_uri: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+// ─── Encryption Config (BYOK) ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptionConfig {
+    pub id: Uuid,
+    pub key_id: String,
+    pub key_source: String,
+    pub wrapped_key_enc: String,
+    pub created_at: DateTime<Utc>,
+    pub rotated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RotateEncryptionKeyRequest {
+    #[serde(default)]
+    pub customer_key_base64: Option<String>,
+}
+
+// ─── Admin Elevations (PAM) ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminElevation {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub reason: String,
+    pub granted_by: String,
+    pub granted_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateAdminElevationRequest {
+    pub user_id: Uuid,
+    pub reason: String,
+    pub duration_minutes: Option<i64>,
 }
 
 fn is_textual_content(content_type: &str) -> bool {

@@ -99,6 +99,9 @@ impl PgStore {
             include_str!("../migrations/033_approvals.sql"),
             include_str!("../migrations/034_recording_policies_hold_music.sql"),
             include_str!("../migrations/035_personal_call_groups.sql"),
+            include_str!("../migrations/036_sso_providers.sql"),
+            include_str!("../migrations/037_encryption_config.sql"),
+            include_str!("../migrations/038_admin_elevations.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {
@@ -1632,6 +1635,111 @@ impl PgStore {
             &[&pref.room_id, &pref.user_uri, &pref.notification_level, &pref.updated_at],
         ).await?;
         Ok(())
+    }
+
+    // ─── SSO Providers ───
+
+    pub async fn upsert_sso_provider(&self, p: &crate::SsoProvider) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO sso_providers (id, name, provider_type, client_id, client_secret_enc, issuer_url, redirect_uri, enabled, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+             ON CONFLICT (id) DO UPDATE SET name=$2, provider_type=$3, client_id=$4, client_secret_enc=$5, issuer_url=$6, redirect_uri=$7, enabled=$8",
+            &[&p.id, &p.name, &p.provider_type, &p.client_id, &p.client_secret_enc, &p.issuer_url, &p.redirect_uri, &p.enabled, &p.created_at],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn delete_sso_provider(&self, id: Uuid) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client
+            .execute("DELETE FROM sso_providers WHERE id = $1", &[&id])
+            .await?;
+        Ok(())
+    }
+
+    pub async fn load_sso_providers(&self) -> Result<Vec<crate::SsoProvider>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT id, name, provider_type, client_id, client_secret_enc, issuer_url, redirect_uri, enabled, created_at FROM sso_providers ORDER BY created_at",
+            &[],
+        ).await?;
+        Ok(rows.iter().filter_map(|r| {
+            Some(crate::SsoProvider {
+                id: r.try_get("id").ok()?,
+                name: r.try_get("name").ok()?,
+                provider_type: r.try_get("provider_type").unwrap_or_else(|_| "oidc".to_string()),
+                client_id: r.try_get("client_id").unwrap_or_default(),
+                client_secret_enc: r.try_get("client_secret_enc").unwrap_or_default(),
+                issuer_url: r.try_get("issuer_url").unwrap_or_default(),
+                redirect_uri: r.try_get("redirect_uri").unwrap_or_default(),
+                enabled: r.try_get("enabled").unwrap_or(true),
+                created_at: r.try_get("created_at").ok()?,
+            })
+        }).collect())
+    }
+
+    // ─── Encryption Config ───
+
+    pub async fn upsert_encryption_config(&self, c: &crate::EncryptionConfig) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO encryption_config (id, key_id, key_source, wrapped_key_enc, created_at, rotated_at)
+             VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (id) DO UPDATE SET key_id=$2, key_source=$3, wrapped_key_enc=$4, rotated_at=$6",
+            &[&c.id, &c.key_id, &c.key_source, &c.wrapped_key_enc, &c.created_at, &c.rotated_at],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn load_encryption_configs(&self) -> Result<Vec<crate::EncryptionConfig>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT id, key_id, key_source, wrapped_key_enc, created_at, rotated_at FROM encryption_config ORDER BY created_at DESC",
+            &[],
+        ).await?;
+        Ok(rows.iter().filter_map(|r| {
+            Some(crate::EncryptionConfig {
+                id: r.try_get("id").ok()?,
+                key_id: r.try_get("key_id").unwrap_or_default(),
+                key_source: r.try_get("key_source").unwrap_or_else(|_| "server".to_string()),
+                wrapped_key_enc: r.try_get("wrapped_key_enc").unwrap_or_default(),
+                created_at: r.try_get("created_at").ok()?,
+                rotated_at: r.try_get("rotated_at").ok().flatten(),
+            })
+        }).collect())
+    }
+
+    // ─── Admin Elevations ───
+
+    pub async fn insert_admin_elevation(&self, e: &crate::AdminElevation) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO admin_elevations (id, user_id, reason, granted_by, granted_at, expires_at, revoked_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (id) DO UPDATE SET revoked_at=$7",
+            &[&e.id, &e.user_id, &e.reason, &e.granted_by, &e.granted_at, &e.expires_at, &e.revoked_at],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn load_admin_elevations(&self) -> Result<Vec<crate::AdminElevation>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT id, user_id, reason, granted_by, granted_at, expires_at, revoked_at FROM admin_elevations ORDER BY granted_at DESC LIMIT 500",
+            &[],
+        ).await?;
+        Ok(rows.iter().filter_map(|r| {
+            Some(crate::AdminElevation {
+                id: r.try_get("id").ok()?,
+                user_id: r.try_get("user_id").ok()?,
+                reason: r.try_get("reason").unwrap_or_default(),
+                granted_by: r.try_get("granted_by").unwrap_or_default(),
+                granted_at: r.try_get("granted_at").ok()?,
+                expires_at: r.try_get("expires_at").ok()?,
+                revoked_at: r.try_get("revoked_at").ok().flatten(),
+            })
+        }).collect())
     }
 
     pub async fn load_notification_preferences(&self) -> Result<Vec<crate::NotificationPreference>, PgError> {

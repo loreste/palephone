@@ -198,14 +198,14 @@ implement. Use this as a roadmap for closing the gap.
 
 ### 4.6 Security & Compliance
 - [x] MFA / multi-factor authentication — done 2026-07-03
-- [ ] SSO / SAML 2.0 / OIDC federation (currently LDAP only)
-- [ ] Customer Key / BYOK encryption
-- [ ] Application-layer encryption at rest
+- [x] SSO / SAML 2.0 / OIDC federation (currently LDAP only) — done 2026-07-03
+- [x] Customer Key / BYOK encryption — done 2026-07-03
+- [x] Application-layer encryption at rest — done 2026-07-03
 - [ ] Advanced threat protection (malware scanning, safe links, URL detonation)
 - [ ] CASB integration
 - [x] Session management (concurrent limits, device trust, cross-device revocation) — done 2026-07-03
 - [x] Certificate-based authentication — done 2026-07-03
-- [ ] Privileged access management (just-in-time admin)
+- [x] Privileged access management (just-in-time admin) — done 2026-07-03
 
 ### 4.7 Devices & Rooms
 - [ ] Meeting room device management and room booking

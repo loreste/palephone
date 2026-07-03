@@ -511,6 +511,32 @@ pub fn router(state: SharedState) -> Router {
         )
         // Per-user call analytics
         .route("/v1/users/{id}/call-analytics", get(user_call_analytics))
+        // SSO providers
+        .route(
+            "/v1/admin/sso-providers",
+            get(list_sso_providers).post(create_sso_provider),
+        )
+        .route(
+            "/v1/admin/sso-providers/{id}",
+            put(update_sso_provider).delete(delete_sso_provider),
+        )
+        .route("/v1/auth/sso/{provider_id}/login", get(sso_login))
+        .route("/v1/auth/sso/callback", post(sso_callback))
+        // Encryption (BYOK)
+        .route("/v1/admin/encryption/status", get(encryption_status))
+        .route(
+            "/v1/admin/encryption/rotate-key",
+            post(rotate_encryption_key),
+        )
+        // Privileged access management
+        .route(
+            "/v1/admin/elevations",
+            get(list_admin_elevations).post(create_admin_elevation),
+        )
+        .route(
+            "/v1/admin/elevations/{id}/revoke",
+            post(revoke_admin_elevation),
+        )
         .route("/v1/events", get(sse_stream))
         .layer(from_fn(crate::metrics::request_metrics))
         .layer(from_fn(cors))
@@ -5498,6 +5524,155 @@ async fn user_call_analytics(
     }
     let analytics = state.user_call_analytics(&user.sip_uri);
     Ok(Json(analytics))
+}
+
+// ─── SSO Providers ───
+
+async fn list_sso_providers(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::SsoProvider>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_sso_providers()))
+}
+
+async fn create_sso_provider(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::CreateSsoProviderRequest>,
+) -> Result<Json<crate::SsoProvider>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let provider = state.create_sso_provider(input);
+    state.record_audit_event(&principal, "sso_provider.created", Some(provider.id.to_string()));
+    Ok(Json(provider))
+}
+
+async fn update_sso_provider(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::UpdateSsoProviderRequest>,
+) -> Result<Json<crate::SsoProvider>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let provider = state.update_sso_provider(id, input).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "sso_provider.updated", Some(id.to_string()));
+    Ok(Json(provider))
+}
+
+async fn delete_sso_provider(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if !state.delete_sso_provider(id) {
+        return Err(ApiError::NotFound);
+    }
+    state.record_audit_event(&principal, "sso_provider.deleted", Some(id.to_string()));
+    Ok(Json(json!({ "deleted": true })))
+}
+
+async fn sso_login(
+    State(state): State<SharedState>,
+    Path(provider_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (url, sso_state, nonce) = state
+        .sso_login_url(provider_id)
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(json!({
+        "redirect_url": url,
+        "state": sso_state,
+        "nonce": nonce,
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct SsoCallbackInput {
+    code: String,
+    state: String,
+    #[serde(default)]
+    provider_id: Option<Uuid>,
+}
+
+async fn sso_callback(
+    State(_state): State<SharedState>,
+    Json(input): Json<SsoCallbackInput>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // In a full implementation, exchange code for tokens at the provider's
+    // token endpoint, validate the ID token, and map the subject to a user.
+    // For now, validate the code is present and return a session placeholder.
+    if input.code.is_empty() || input.state.is_empty() {
+        return Err(ApiError::Conflict("missing code or state".into()));
+    }
+    // Placeholder: a production implementation would verify the ID token here
+    Ok(Json(json!({
+        "status": "sso_callback_received",
+        "code": input.code,
+        "state": input.state,
+    })))
+}
+
+// ─── Encryption (BYOK) ───
+
+async fn encryption_status(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.encryption_status()))
+}
+
+async fn rotate_encryption_key(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::RotateEncryptionKeyRequest>,
+) -> Result<Json<crate::EncryptionConfig>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let config = state.rotate_encryption_key(input);
+    state.record_audit_event(&principal, "encryption.key_rotated", Some(config.key_id.clone()));
+    Ok(Json(config))
+}
+
+// ─── Privileged Access Management ───
+
+async fn list_admin_elevations(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::AdminElevation>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    // Auto-expire before listing
+    state.expire_admin_elevations();
+    Ok(Json(state.active_admin_elevations()))
+}
+
+async fn create_admin_elevation(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::CreateAdminElevationRequest>,
+) -> Result<Json<crate::AdminElevation>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let elevation = state.create_admin_elevation(input, &principal);
+    state.record_audit_event(
+        &principal,
+        "admin.elevation_granted",
+        Some(elevation.id.to_string()),
+    );
+    Ok(Json(elevation))
+}
+
+async fn revoke_admin_elevation(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::AdminElevation>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let elevation = state.revoke_admin_elevation(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(
+        &principal,
+        "admin.elevation_revoked",
+        Some(id.to_string()),
+    );
+    Ok(Json(elevation))
 }
 
 // ─── Server-Sent Events ───
