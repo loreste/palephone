@@ -117,35 +117,122 @@ VERDICT ON THE PRIOR REVIEWER'S CLAIM: verified on every substantive clause; I c
   - File: /Users/loreste/palephone/src-tauri/crates/pale-server/src/storage.rs:167-215 (no mod tests in file); /Users/loreste/palephone/src-tauri/crates/pale-server/src/pg_store.rs (no tests)
   - Fix: First test: in storage.rs add `mod tests` with `fn encrypt_decrypt_roundtrip()` (construct the store with a fixed key, assert decrypt(encrypt(s)) == s) and `fn decrypt_rejects_tampered_ciphertext()` (flip one byte, assert Err not panic/garbage). For pg_store, add a #[ignore]-by-default tokio test gated on PALE_TEST_PG_URL that roundtrips upsert_registration, runnable in CI against the compose post
 
-## 4. Teams Enterprise Parity — Admin/Governance (LANDED 2026-07-03)
+## 4. Microsoft Teams Enterprise Parity Gaps
 
-- [x] **Information barriers** — `information_barriers` table (migration 024), CRUD endpoints (POST/GET/PUT/DELETE /v1/admin/barriers), enforcement check function (GET /v1/admin/barriers/check), "Barriers" tab in AdminView.tsx
-- [x] **Sensitivity labels** — `sensitivity_labels` table (migration 025), `sensitivity_label_id` added to files and room_messages, CRUD endpoints (/v1/admin/labels), "Labels" tab in AdminView.tsx with color swatches and property toggles
-- [x] **Custom RBAC roles** — `custom_roles` table (migration 026), `role_id` on users, CRUD endpoints (/v1/admin/roles), 14 permission constants, GET /v1/admin/roles/permissions, "Roles" tab with permission checkboxes
-- [x] **Policy packages** — `policy_packages` table (migration 027), CRUD endpoints (/v1/admin/policy-packages), POST /v1/admin/policy-packages/{id}/assign, "Packages" tab in AdminView.tsx
-- [x] **Bulk user operations** — POST /v1/admin/users/import (CSV), GET /v1/admin/users/export (CSV download), import/export buttons in Analytics tab
-- [x] **Usage analytics dashboard** — GET /v1/admin/analytics (active users, messages, calls, meetings, files, storage), "Analytics" tab with metric cards
-- [x] **Meeting attendance CSV export** — GET `/v1/conferences/{id}/attendance/export?format=csv`, "Export CSV" button in MeetingPanel attendance section
-- [x] **Meeting templates** — Admin-configurable meeting defaults (migration 024), CRUD at `/v1/admin/meeting-templates`, "Meeting Templates" tab in AdminView
-- [x] **Spotlight** — Organizer pins a participant's video for all via POST `/v1/conferences/{id}/spotlight`, SSE `spotlight_changed`, spotlight star button on participants
-- [x] **Live animated reactions** — POST `/v1/conferences/{id}/reactions`, SSE `meeting_reaction`, reaction bar with 8 emoji buttons + floating reaction overlay
-- [x] **Persistent meeting chat** — `chat_room_id` on conferences (migration 025), auto-created chat room linked to meeting, "Chat" tab in MeetingPanel
-- [x] **Green room / presenter staging** — `green_room_enabled` on conferences, join/ready endpoints, SSE `green_room_updated`, "Green Room" tab in MeetingPanel
-- [x] **Out-of-office auto-reply** — `out_of_office_message`/`out_of_office_until` on users (migration 025), GET/PUT `/v1/users/out-of-office`, "Out of Office" tab in Settings
-- [x] **File versioning** — Track version history for uploaded files (2026-07-03)
-- [x] **Folder structure per channel** — Organize files in directories (2026-07-03)
-- [x] **File locking / checkout** — Prevent concurrent edits (2026-07-03)
-- [x] **Approvals workflow** — Request and track approvals (2026-07-03)
-- [x] **Policy-based compliance recording** — Auto-record based on policies (2026-07-03)
-- [x] **Configurable music on hold** — Custom hold music (2026-07-03)
-- [x] **Per-user call analytics dashboard** — Individual call quality view (2026-07-03)
-- [x] **User-configurable personal call groups** — Ring multiple devices/numbers (2026-07-03)
-- [x] **Chat density toggle** — Compact vs comfortable vs spacious view (2026-07-03)
+Categorized list of enterprise features Teams offers that Pale does not yet
+implement. Use this as a roadmap for closing the gap.
 
-## 5. Microsoft Teams enterprise parity — Chat/Messaging
+> **Convention:** Mark items `[x]` with the date and commit when done.
+> Example: `- [x] Feature name — done 2026-07-03 (abc1234)`
 
-- [x] **Scheduled send** (2026-07-03) — `scheduled_at`/`delivered` columns on `room_messages`, `POST /v1/rooms/{id}/messages/schedule` endpoint, background task every 30s delivers due messages, SSE `scheduled_message_delivered` event, datetime picker + clock button in ChatView compose bar.
-- [x] **Message delivery/failure status** (2026-07-03) — `delivery_status` column on `room_messages` (pending/sent/delivered/failed), status indicators (checkmarks, clock, warning) in message bubbles, SSE events carry delivery_status field.
-- [x] **Tags for targeted communication** (2026-07-03) — `tags` table (id, team_id, name, members), CRUD endpoints at `/v1/teams/{id}/tags`, `@tag` mention resolution in messages that notifies all tag members, tag suggestions in mention autocomplete dropdown.
-- [x] **GIF integration** (2026-07-03) — `GET /v1/gif/search?q=...` proxy endpoint (Tenor/Giphy, key via `PALE_TENOR_API_KEY` or `PALE_GIPHY_API_KEY`), GIF picker panel in ChatView compose bar with search + grid selection, sends as markdown image.
-- [x] **Per-channel notification granularity** (2026-07-03) — `notification_preferences` table (room_id, user_uri, notification_level), `GET/PUT /v1/rooms/{id}/notifications` endpoints, notification level dropdown (all/mentions-only/muted) in ChatView room header.
+### 4.1 Calling & Telephony
+- [ ] Speech-enabled auto-attendant / natural language IVR (Pale has DTMF-only)
+- [ ] Emergency calling (E911/dynamic) with location policies
+- [ ] PSTN Calling Plans / Operator Connect / Direct Routing SBC integration
+- [ ] Shared line appearance / boss-secretary delegation
+- [x] User-configurable personal call groups — done 2026-07-03
+- [x] Policy-based compliance recording (auto-trigger, third-party recorder integration) — done 2026-07-03
+- [x] Configurable music on hold (per queue/tenant custom audio upload) — done 2026-07-03
+- [x] Per-user call analytics dashboard (data exists server-side, no UI) — done 2026-07-03
+- [ ] Reverse number lookup / CNAM caller ID enrichment
+- [ ] SIP gateway / analog device (ATA) management
+- [ ] Common area phone profiles
+- [ ] Location-based PSTN routing
+- [ ] Bandwidth management / call admission control
+
+### 4.2 Meetings & Webinars
+- [ ] Webinar registration, attendee management, waitlist
+- [ ] Town hall / large broadcast (10,000+ viewers)
+- [ ] Virtual backgrounds and background blur
+- [ ] Together mode / gallery views / large gallery layouts
+- [ ] AI-based noise suppression engine
+- [ ] NDI / RTMP streaming output for broadcast/production
+- [x] Meeting templates and admin-configurable options policies — done 2026-07-03
+- [ ] Auto-transcription with speaker attribution and AI meeting summaries
+- [ ] Whiteboard
+- [ ] Screen share annotation
+- [x] Spotlight (organizer pins video for all viewers) — done 2026-07-03
+- [x] Live animated reaction overlays (beyond raise hand) — done 2026-07-03
+- [x] Green room / presenter staging — done 2026-07-03
+- [x] Meeting attendance CSV/Excel export (currently JSON only) — done 2026-07-03
+- [x] Persistent meeting chat thread (before/during/after) — done 2026-07-03
+- [ ] Caption language selection and real-time translation
+- [ ] PowerPoint Live (presenter-controlled slides)
+- [ ] AI meeting assistant / Copilot (summaries, action items)
+
+### 4.3 Chat & Messaging
+- [x] Scheduled send (future delivery) — done 2026-07-03
+- [ ] Inline message translation
+- [ ] Federated cross-organization chat
+- [ ] Guest access (invite flow, scoped permissions — flag exists but not implemented)
+- [ ] Rich text editor / WYSIWYG (currently markdown only)
+- [ ] Loop components (live collaborative inline content)
+- [ ] Immersive reader (accessibility)
+- [x] Message delivery/failure status and retry — done 2026-07-03
+- [x] Tags for targeted communication (@Managers-style group tags) — done 2026-07-03
+- [ ] Custom emoji / sticker packs
+- [x] GIF integration (Giphy or equivalent) — done 2026-07-03
+- [ ] Adaptive cards / interactive structured messages
+
+### 4.4 Files & Collaboration
+- [ ] Co-authoring / real-time document editing
+- [x] File versioning / version history — done 2026-07-03
+- [ ] Cloud storage integration (SharePoint, OneDrive, Google Drive)
+- [x] Folder structure per channel (currently flat) — done 2026-07-03
+- [x] File locking / checkout — done 2026-07-03
+- [ ] Wiki / knowledge base per team
+- [ ] Task management / Planner boards
+- [x] Approvals workflow — done 2026-07-03
+
+### 4.5 Admin & Governance
+- [x] Information barriers (compliance walls between user groups) — done 2026-07-03
+- [x] Sensitivity labels / data classification — done 2026-07-03
+- [ ] Conditional access policies (device compliance, location, risk)
+- [ ] ML-based communication compliance (beyond pattern-matching DLP)
+- [ ] Multi-geo / data residency controls
+- [x] Usage analytics / adoption dashboards (Prometheus exists, no user-facing UI) — done 2026-07-03
+- [x] Policy packages (bundled policies per role) — done 2026-07-03
+- [x] Bulk user operations UI (CSV import/export) — done 2026-07-03
+- [x] Custom RBAC roles (currently admin/user only) — done 2026-07-03
+- [ ] CLI admin tools for scripting
+
+### 4.6 Security & Compliance
+- [x] MFA / multi-factor authentication — done 2026-07-03
+- [ ] SSO / SAML 2.0 / OIDC federation (currently LDAP only)
+- [ ] Customer Key / BYOK encryption
+- [ ] Application-layer encryption at rest
+- [ ] Advanced threat protection (malware scanning, safe links, URL detonation)
+- [ ] CASB integration
+- [x] Session management (concurrent limits, device trust, cross-device revocation) — done 2026-07-03
+- [x] Certificate-based authentication — done 2026-07-03
+- [ ] Privileged access management (just-in-time admin)
+
+### 4.7 Devices & Rooms
+- [ ] Meeting room device management and room booking
+- [ ] SIP phone provisioning portal / certified device management
+- [ ] USB HID device integration (headset call control)
+- [ ] Digital signage
+- [ ] Room scheduling panel devices
+- [ ] Hot desking (phone login/logout)
+
+### 4.8 Platform & Integration
+- [ ] Low-code automation (Power Platform equivalent)
+- [ ] Public API with OAuth scopes for third-party apps
+- [ ] Bot framework / SDK
+- [ ] Tabs (embedded web apps in channels)
+- [ ] Outbound connectors and connector marketplace
+- [ ] App store / extension catalog
+- [ ] Message extensions / compose-area action commands
+- [ ] Calendar sync (Exchange, Google Calendar)
+- [ ] Contact sync (bi-directional address book)
+
+### 4.9 User Experience
+- [ ] Mobile app (iOS/Android)
+- [ ] Web client (browser-based)
+- [ ] Pop-out multi-window support
+- [ ] Offline mode / message queue
+- [ ] Accessibility / WCAG compliance
+- [ ] Localization / i18n (currently English only)
+- [x] Out-of-office auto-reply — done 2026-07-03
+- [x] Per-channel notification granularity (mentions only, etc.) — done 2026-07-03
+- [x] Chat density toggle (compact/comfortable) — done 2026-07-03
