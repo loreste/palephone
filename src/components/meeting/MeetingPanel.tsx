@@ -9,6 +9,13 @@ import {
   Check,
   X,
   ChevronUp,
+  Download,
+  Lock,
+  Mic,
+  MicOff,
+  Shield,
+  Unlock,
+  UserMinus,
   Users,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -19,6 +26,9 @@ import {
   type MeetingPoll,
   type QaQuestion,
   type BreakoutSession,
+  type ConferenceSummary,
+  type ConferenceParticipant,
+  type ConferenceAttendanceRecord,
 } from "@/store/meetingStore";
 import { useServerStore } from "@/store/serverStore";
 import { paleServerApi } from "@/lib/tauri";
@@ -26,7 +36,7 @@ import { toast } from "@/components/ui/Toast";
 
 function err(title: string) { toast({ type: "error", title }); }
 
-type MeetingTab = "lobby" | "hands" | "polls" | "qa" | "breakout" | "captions";
+type MeetingTab = "people" | "lobby" | "hands" | "polls" | "qa" | "breakout" | "captions";
 
 export function MeetingPanel({ conferenceId }: { conferenceId: string }) {
   const [tab, setTab] = useState<MeetingTab>("lobby");
@@ -34,6 +44,7 @@ export function MeetingPanel({ conferenceId }: { conferenceId: string }) {
   const token = useServerStore((s) => s.token);
 
   const tabs: { id: MeetingTab; icon: typeof Hand; label: string }[] = [
+    { id: "people", icon: Users, label: "People" },
     { id: "lobby", icon: DoorOpen, label: "Lobby" },
     { id: "hands", icon: Hand, label: "Hands" },
     { id: "polls", icon: BarChart3, label: "Polls" },
@@ -60,12 +71,192 @@ export function MeetingPanel({ conferenceId }: { conferenceId: string }) {
         ))}
       </div>
       <div className="flex-1 overflow-y-auto p-3">
+        {tab === "people" && <ParticipantsPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "lobby" && <LobbyPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "hands" && <HandsPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "polls" && <PollsPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "qa" && <QaPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "breakout" && <BreakoutPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "captions" && <CaptionsPanel conferenceId={conferenceId} />}
+      </div>
+    </div>
+  );
+}
+
+// ── Participants Panel ─────────────────────────────────────────────
+
+function ParticipantsPanel({ conferenceId, baseUrl, token }: { conferenceId: string; baseUrl: string | null; token: string | null }) {
+  const conference = useMeetingStore((s) => s.conferences[conferenceId]);
+  const setConference = useMeetingStore((s) => s.setConference);
+  const [attendance, setAttendance] = useState<ConferenceAttendanceRecord[]>([]);
+
+  const load = useCallback(async () => {
+    if (!baseUrl || !token) return;
+    try {
+      const conferences = await paleServerApi<ConferenceSummary[]>(baseUrl, token, "/v1/conferences");
+      const current = conferences.find((item) => item.id === conferenceId);
+      if (current) setConference(current);
+      const report = await paleServerApi<ConferenceAttendanceRecord[]>(baseUrl, token, `/v1/conferences/${conferenceId}/attendance`);
+      setAttendance(report);
+    } catch { /* ignore */ }
+  }, [baseUrl, token, conferenceId, setConference]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const updateParticipant = async (participant: ConferenceParticipant, body: Record<string, unknown>) => {
+    if (!baseUrl || !token) return;
+    try {
+      const next = await paleServerApi<ConferenceSummary>(
+        baseUrl,
+        token,
+        `/v1/conferences/${conferenceId}/participants/${participant.user_id}`,
+        { method: "PUT", body }
+      );
+      setConference(next);
+      await load();
+    } catch {
+      err("Only hosts and moderators can manage participants");
+    }
+  };
+
+  const toggleLock = async () => {
+    if (!baseUrl || !token || !conference) return;
+    try {
+      const next = await paleServerApi<ConferenceSummary>(
+        baseUrl,
+        token,
+        `/v1/conferences/${conferenceId}/lock`,
+        { method: "PUT", body: { locked: !conference.locked } }
+      );
+      setConference(next);
+    } catch {
+      err("Only hosts and moderators can lock meetings");
+    }
+  };
+
+  const participants = conference?.participants ?? [];
+  const active = participants.filter((participant) => !participant.removed);
+  const removed = participants.filter((participant) => participant.removed);
+  const downloadAttendance = () => {
+    const blob = new Blob([JSON.stringify(attendance, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `attendance-${conferenceId}-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium">Participants ({active.length})</span>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={toggleLock}
+            className={cn(
+              "h-7 px-2 rounded-md text-xs inline-flex items-center gap-1",
+              conference?.locked ? "bg-amber-500/15 text-amber-600" : "bg-hover text-secondary hover:text-primary"
+            )}
+            title={conference?.locked ? "Unlock meeting" : "Lock meeting"}
+          >
+            {conference?.locked ? <Lock size={12} /> : <Unlock size={12} />}
+            {conference?.locked ? "Locked" : "Open"}
+          </button>
+          <button onClick={load} className="text-xs text-accent hover:underline">Refresh</button>
+        </div>
+      </div>
+      {active.length === 0 ? (
+        <p className="text-xs text-secondary text-center py-4">No active participants</p>
+      ) : (
+        <div className="space-y-2">
+          {active.map((participant) => (
+            <div key={participant.user_id} className="rounded-md bg-hover p-2 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-sm truncate">{participant.sip_uri.replace(/^sip:/, "")}</div>
+                  <div className="text-[11px] text-secondary capitalize flex items-center gap-1">
+                    <Shield size={11} />
+                    {participant.role}
+                    {participant.muted ? " · muted" : ""}
+                  </div>
+                </div>
+                <button
+                  onClick={() => updateParticipant(participant, { muted: !participant.muted })}
+                  className={cn(
+                    "h-8 w-8 rounded-md inline-flex items-center justify-center hover:bg-elevated",
+                    participant.muted ? "text-amber-500" : "text-secondary"
+                  )}
+                  title={participant.muted ? "Unmute participant" : "Mute participant"}
+                >
+                  {participant.muted ? <MicOff size={15} /> : <Mic size={15} />}
+                </button>
+              </div>
+              <div className="grid grid-cols-[1fr_auto] gap-2">
+                <select
+                  value={participant.role}
+                  onChange={(event) => updateParticipant(participant, { role: event.target.value })}
+                  className="h-8 rounded-md bg-base border border-border-default px-2 text-xs outline-none focus:border-border-focus"
+                >
+                  <option value="member">Member</option>
+                  <option value="moderator">Moderator</option>
+                  <option value="host">Host</option>
+                </select>
+                <button
+                  onClick={() => updateParticipant(participant, { removed: true, removal_reason: "removed_by_moderator" })}
+                  className="h-8 px-2 rounded-md text-xs text-destructive hover:bg-destructive/10 inline-flex items-center gap-1"
+                >
+                  <UserMinus size={14} />
+                  Remove
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {removed.length > 0 && (
+        <div className="pt-2 border-t border-border-subtle space-y-1">
+          <div className="text-xs text-tertiary">Removed</div>
+          {removed.map((participant) => (
+            <div key={participant.user_id} className="flex items-center justify-between gap-2 rounded bg-base px-2 py-1">
+              <span className="text-xs text-secondary truncate">{participant.sip_uri.replace(/^sip:/, "")}</span>
+              <button
+                onClick={() => updateParticipant(participant, { removed: false, muted: false })}
+                className="text-xs text-accent hover:underline"
+              >
+                Restore
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="pt-2 border-t border-border-subtle space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-medium">Attendance ({attendance.length})</span>
+          <button
+            onClick={downloadAttendance}
+            disabled={attendance.length === 0}
+            className="text-xs text-accent hover:underline disabled:text-tertiary disabled:no-underline"
+          >
+            <Download size={12} className="inline mr-1" />
+            JSON
+          </button>
+        </div>
+        {attendance.length === 0 ? (
+          <p className="text-xs text-secondary text-center py-2">No attendance records</p>
+        ) : (
+          <div className="space-y-1 max-h-48 overflow-y-auto">
+            {attendance.slice(-8).reverse().map((record) => (
+              <div key={record.id} className="rounded bg-base px-2 py-1">
+                <div className="text-xs truncate">{record.sip_uri.replace(/^sip:/, "")}</div>
+                <div className="text-[11px] text-secondary">
+                  {record.left_at ? record.leave_reason ?? "left" : "in meeting"}
+                  {record.duration_secs != null ? ` · ${Math.max(0, Math.round(record.duration_secs / 60))} min` : ""}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

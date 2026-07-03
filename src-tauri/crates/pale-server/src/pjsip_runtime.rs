@@ -118,7 +118,10 @@ unsafe fn initialize_pjsip(config: &PjsipRuntimeConfig) -> Result<(), String> {
     media_cfg.no_vad = 1;
     let turn_strings = apply_media_config(&mut media_cfg, &config.media)?;
 
-    status_to_result(pjsip_sys::pjsua_init(&cfg, &log_cfg, &media_cfg), "pjsua_init")?;
+    status_to_result(
+        pjsip_sys::pjsua_init(&cfg, &log_cfg, &media_cfg),
+        "pjsua_init",
+    )?;
     drop(stun_servers);
     drop(turn_strings);
 
@@ -234,7 +237,8 @@ fn push_pj_string(
     value: &str,
     env_name: &str,
 ) -> Result<pjsip_sys::pj_str_t, String> {
-    let value = CString::new(value).map_err(|_| format!("{env_name} contains an interior NUL byte"))?;
+    let value =
+        CString::new(value).map_err(|_| format!("{env_name} contains an interior NUL byte"))?;
     strings.push(value);
     Ok(unsafe { pj_str_from_cstring(strings.last().expect("just pushed")) })
 }
@@ -249,11 +253,7 @@ unsafe fn create_transport(
     transport_cfg.port = port as u32;
 
     status_to_result(
-        pjsip_sys::pjsua_transport_create(
-            transport_type,
-            &transport_cfg,
-            std::ptr::null_mut(),
-        ),
+        pjsip_sys::pjsua_transport_create(transport_type, &transport_cfg, std::ptr::null_mut()),
         &format!("{label} transport on port {port}"),
     )
 }
@@ -292,8 +292,7 @@ unsafe fn create_tls_transport(
     transport_cfg.tls_setting.cert_file = pj_str_from_cstring(&cert_file);
     transport_cfg.tls_setting.privkey_file = pj_str_from_cstring(&privkey_file);
     transport_cfg.tls_setting.verify_client = tls.verify_client as pjsip_sys::pj_bool_t;
-    transport_cfg.tls_setting.require_client_cert =
-        tls.require_client_cert as pjsip_sys::pj_bool_t;
+    transport_cfg.tls_setting.require_client_cert = tls.require_client_cert as pjsip_sys::pj_bool_t;
 
     if let Some(value) = &ca_list_file {
         transport_cfg.tls_setting.ca_list_file = pj_str_from_cstring(value);
@@ -306,11 +305,7 @@ unsafe fn create_tls_transport(
     }
 
     status_to_result(
-        pjsip_sys::pjsua_transport_create(
-            transport_type,
-            &transport_cfg,
-            std::ptr::null_mut(),
-        ),
+        pjsip_sys::pjsua_transport_create(transport_type, &transport_cfg, std::ptr::null_mut()),
         &format!("{label} transport on port {}", tls.port),
     )
 }
@@ -437,7 +432,11 @@ fn parse_sip_identity(identity: &str) -> String {
     let identity = identity.trim();
     identity
         .find('<')
-        .and_then(|start| identity[start..].find('>').map(|end| identity[start + 1..start + end].to_string()))
+        .and_then(|start| {
+            identity[start..]
+                .find('>')
+                .map(|end| identity[start + 1..start + end].to_string())
+        })
         .unwrap_or_else(|| identity.to_string())
 }
 

@@ -12,9 +12,11 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    AdminAuditEvent, CallSession, CollaborationPolicy, Conference, FileRecord, MessageRead, MessageReactionRecord,
-    RetentionPolicy, Room, RoomMessage, RoutingRule, ScheduledMeeting, SipAccount, SipDialog, SipMessage,
-    SipRegistration, SipTransaction, Team, User,
+    AdminAuditEvent, CallQualityReport, CallSession, ChannelWebhook, CollaborationPolicy,
+    Conference, ConferenceAttendanceRecord, DlpPolicy, DlpViolation, FileRecord,
+    MessageReactionRecord, MessageRead, RetentionPolicy, Room, RoomMessage, RoutingRule,
+    ScheduledMeeting, SipAccount, SipDialog, SipMessage, SipRegistration, SipTransaction, Team,
+    User,
 };
 
 const SCHEMA: &str = r#"
@@ -63,11 +65,7 @@ impl Store {
         )
     }
 
-    pub fn delete(
-        &self,
-        collection: &'static str,
-        key: impl AsRef<str>,
-    ) -> rusqlite::Result<()> {
+    pub fn delete(&self, collection: &'static str, key: impl AsRef<str>) -> rusqlite::Result<()> {
         self.conn
             .lock()
             .expect("store connection lock poisoned")
@@ -107,12 +105,7 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    fn put_json(
-        &self,
-        collection: &'static str,
-        key: &str,
-        json: &str,
-    ) -> rusqlite::Result<()> {
+    fn put_json(&self, collection: &'static str, key: &str, json: &str) -> rusqlite::Result<()> {
         self.conn
             .lock()
             .expect("store connection lock poisoned")
@@ -283,9 +276,49 @@ impl StoredObject for Conference {
     }
 }
 
+impl StoredObject for ConferenceAttendanceRecord {
+    fn collection() -> &'static str {
+        "conference_attendance"
+    }
+
+    fn key(&self) -> String {
+        self.id.to_string()
+    }
+}
+
 impl StoredObject for CallSession {
     fn collection() -> &'static str {
         "calls"
+    }
+
+    fn key(&self) -> String {
+        self.id.to_string()
+    }
+}
+
+impl StoredObject for CallQualityReport {
+    fn collection() -> &'static str {
+        "call_quality_reports"
+    }
+
+    fn key(&self) -> String {
+        self.id.to_string()
+    }
+}
+
+impl StoredObject for DlpPolicy {
+    fn collection() -> &'static str {
+        "dlp_policies"
+    }
+
+    fn key(&self) -> String {
+        self.id.to_string()
+    }
+}
+
+impl StoredObject for DlpViolation {
+    fn collection() -> &'static str {
+        "dlp_violations"
     }
 
     fn key(&self) -> String {
@@ -360,6 +393,16 @@ impl StoredObject for CollaborationPolicy {
 
     fn key(&self) -> String {
         self.id.clone()
+    }
+}
+
+impl StoredObject for ChannelWebhook {
+    fn collection() -> &'static str {
+        "channel_webhooks"
+    }
+
+    fn key(&self) -> String {
+        self.id.to_string()
     }
 }
 

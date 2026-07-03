@@ -413,6 +413,11 @@ export interface ConferenceParticipant {
   sip_uri: string;
   role: "host" | "moderator" | "member";
   bridge_slot: number | null;
+  muted?: boolean;
+  removed?: boolean;
+  removed_at?: string | null;
+  removed_by?: string | null;
+  removal_reason?: string | null;
   joined_at: string;
 }
 
@@ -421,6 +426,7 @@ export interface ConferenceSummary {
   title: string;
   mode: "audio" | "video" | "webinar";
   participants: ConferenceParticipant[];
+  locked?: boolean;
   active: boolean;
   created_at: string;
 }
@@ -543,6 +549,9 @@ export interface ServerRoom {
   id: string;
   team_id?: string | null;
   channel_name?: string | null;
+  channel_type?: "standard" | "private" | "shared";
+  channel_owners?: string[];
+  posting_policy?: "members" | "owners";
   name: string;
   description: string;
   is_direct: boolean;
@@ -572,6 +581,14 @@ export interface ServerMeeting {
   participants: string[];
   starts_at: string;
   ends_at: string;
+  recurrence?: {
+    frequency: "daily" | "weekly" | "monthly";
+    interval: number;
+    until?: string | null;
+  } | null;
+  status?: "scheduled" | "cancelled";
+  cancelled_at?: string | null;
+  updated_at?: string | null;
   created_at: string;
 }
 
@@ -611,6 +628,8 @@ export interface ServerRetentionEnforcementResult {
     retain_days?: number | null;
     matched_messages: number;
     deleted_messages: number;
+    matched_files?: number;
+    deleted_files?: number;
     legal_hold: boolean;
   }[];
 }
@@ -621,6 +640,10 @@ export interface ServerCollaborationPolicy {
   broad_mentions_enabled: boolean;
   broad_mentions_allowed_roles: string[];
   broad_mentions_per_minute: number;
+  external_access_enabled: boolean;
+  allowed_external_domains: string[];
+  urgent_messages_enabled: boolean;
+  meeting_recording_enabled: boolean;
   updated_by?: string | null;
   updated_at: string;
 }
@@ -635,8 +658,26 @@ export interface ServerRoomMessage {
   reply_to?: string;
   edited_at?: string;
   pinned?: boolean;
+  priority?: "normal" | "high" | "urgent";
+  saved_by?: string[];
   mentions?: { kind: string; token: string; user_sip_uri?: string | null }[];
   mentioned_user_uris?: string[];
+}
+
+export interface ServerChannelWebhook {
+  id: string;
+  room_id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  created_by: string;
+  created_at: string;
+  last_used_at?: string | null;
+}
+
+export interface ServerCreateChannelWebhookResponse {
+  webhook: ServerChannelWebhook;
+  token: string;
 }
 
 export interface ServerMessageRead {
@@ -700,10 +741,23 @@ export function paleServerCreateTeamChannel(
   name: string,
   description: string,
   members: string[],
+  options: {
+    channel_type?: "standard" | "private" | "shared";
+    channel_owners?: string[];
+    posting_policy?: "members" | "owners";
+  } = {},
 ): Promise<ServerRoom> {
   return serverFetch(baseUrl, token, `/v1/teams/${teamId}/channels`, {
     method: "POST",
-    body: JSON.stringify({ name, description, members, channel_name: name }),
+    body: JSON.stringify({
+      name,
+      description,
+      members,
+      channel_name: name,
+      channel_type: options.channel_type ?? "standard",
+      channel_owners: options.channel_owners ?? [],
+      posting_policy: options.posting_policy ?? "members",
+    }),
   });
 }
 
@@ -722,12 +776,33 @@ export function paleServerCreateMeeting(
     starts_at: string;
     ends_at: string;
     mode?: "audio" | "video";
+    recurrence?: ServerMeeting["recurrence"];
   },
 ): Promise<ServerMeeting> {
   return serverFetch(baseUrl, token, "/v1/meetings", {
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+export function paleServerUpdateMeeting(
+  baseUrl: string,
+  token: string,
+  meetingId: string,
+  input: Partial<Pick<ServerMeeting, "title" | "description" | "participants" | "starts_at" | "ends_at" | "recurrence">>,
+): Promise<ServerMeeting> {
+  return serverFetch(baseUrl, token, `/v1/meetings/${meetingId}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export function paleServerCancelMeeting(
+  baseUrl: string,
+  token: string,
+  meetingId: string,
+): Promise<ServerMeeting> {
+  return serverFetch(baseUrl, token, `/v1/meetings/${meetingId}`, { method: "DELETE" });
 }
 
 export function paleServerStartMeeting(
@@ -786,7 +861,7 @@ export function paleServerDiscoveryExport(
   baseUrl: string,
   token: string,
   roomId?: string,
-): Promise<{ exported_at: string; room_id?: string | null; messages: ServerRoomMessage[] }> {
+): Promise<{ exported_at: string; room_id?: string | null; messages: ServerRoomMessage[]; files: import("@/store/fileStore").ServerFile[] }> {
   const query = roomId ? `?room_id=${encodeURIComponent(roomId)}` : "";
   return serverFetch(baseUrl, token, `/v1/admin/ediscovery/export${query}`);
 }
@@ -807,6 +882,10 @@ export function paleServerUpdateCollaborationPolicy(
     | "broad_mentions_enabled"
     | "broad_mentions_allowed_roles"
     | "broad_mentions_per_minute"
+    | "external_access_enabled"
+    | "allowed_external_domains"
+    | "urgent_messages_enabled"
+    | "meeting_recording_enabled"
   >>,
 ): Promise<ServerCollaborationPolicy> {
   return serverFetch(baseUrl, token, "/v1/admin/collaboration/policy", {
@@ -858,10 +937,55 @@ export function paleServerSendRoomMessage(
   roomId: string,
   body: string,
   replyTo?: string,
+  priority: "normal" | "high" | "urgent" = "normal",
 ): Promise<ServerRoomMessage> {
   return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/messages`, {
     method: "POST",
-    body: JSON.stringify({ body, reply_to: replyTo ?? null }),
+    body: JSON.stringify({ body, reply_to: replyTo ?? null, priority }),
+  });
+}
+
+export function paleServerGetChannelWebhooks(
+  baseUrl: string,
+  token: string,
+  roomId: string,
+): Promise<ServerChannelWebhook[]> {
+  return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/webhooks`);
+}
+
+export function paleServerCreateChannelWebhook(
+  baseUrl: string,
+  token: string,
+  roomId: string,
+  input: { name: string; description?: string },
+): Promise<ServerCreateChannelWebhookResponse> {
+  return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/webhooks`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function paleServerUpdateChannelWebhook(
+  baseUrl: string,
+  token: string,
+  roomId: string,
+  webhookId: string,
+  enabled: boolean,
+): Promise<ServerChannelWebhook> {
+  return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/webhooks/${webhookId}`, {
+    method: "PUT",
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+export function paleServerDeleteChannelWebhook(
+  baseUrl: string,
+  token: string,
+  roomId: string,
+  webhookId: string,
+): Promise<ServerChannelWebhook> {
+  return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/webhooks/${webhookId}`, {
+    method: "DELETE",
   });
 }
 
@@ -921,6 +1045,18 @@ export function paleServerPinMessage(
   return serverFetch(baseUrl, token, `/v1/messages/${messageId}/pin`, {
     method: "PUT",
     body: JSON.stringify({ pinned }),
+  });
+}
+
+export function paleServerSaveMessage(
+  baseUrl: string,
+  token: string,
+  messageId: string,
+  saved: boolean,
+): Promise<ServerRoomMessage> {
+  return serverFetch(baseUrl, token, `/v1/messages/${messageId}/saved`, {
+    method: "PUT",
+    body: JSON.stringify({ saved }),
   });
 }
 

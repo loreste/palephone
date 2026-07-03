@@ -12,9 +12,9 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::{
-    md5_hex, AppState, MediaKind, PresenceStatus, SipDialogStatus, SipRegistration,
-    SipHeaderAction, SipHeaderActionKind, StoreSipMessage, StoreSipNotification, StoreSipTransaction, UpsertSipDialog,
-    UpsertSipSubscription,
+    md5_hex, AppState, MediaKind, PresenceStatus, SipDialogStatus, SipHeaderAction,
+    SipHeaderActionKind, SipRegistration, StoreSipMessage, StoreSipNotification,
+    StoreSipTransaction, UpsertSipDialog, UpsertSipSubscription,
 };
 
 /// Perform the startup half of the UDP SIP server: gate check and socket
@@ -64,7 +64,12 @@ pub async fn serve_udp(
 
 fn allow_insecure_udp_parser() -> bool {
     std::env::var("PALE_ALLOW_INSECURE_SIP_UDP")
-        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -107,9 +112,7 @@ async fn handle_udp_packet(
         // peer addressing (proxied calls). REFERs aimed at the server itself
         // (call park/pickup) stay local.
         "INVITE" | "INFO" | "BYE" | "UPDATE" | "ACK" => {
-            if let Some(outcome) =
-                relay_in_dialog_request(socket, packet, &request, state).await
-            {
+            if let Some(outcome) = relay_in_dialog_request(socket, packet, &request, state).await {
                 record_transaction(&request, peer, Some(outcome.as_str()), state);
                 return Some(outcome);
             }
@@ -175,11 +178,7 @@ fn handle_request(request: &SipRequest, peer: SocketAddr, state: &AppState) -> O
         "PRACK" => handle_prack(request, state),
         "UPDATE" => handle_update(request, state),
         "PUBLISH" => handle_publish(request, state),
-        _ => Some(request.response(
-            501,
-            "Not Implemented",
-            &[("Allow", allowed_methods())],
-        )),
+        _ => Some(request.response(501, "Not Implemented", &[("Allow", allowed_methods())])),
     }
 }
 
@@ -271,9 +270,7 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
                     });
                     return Some(request.response(200, "OK", &[]));
                 }
-                _ => {
-                    return Some(request.response(481, "Call/Transaction Does Not Exist", &[]))
-                }
+                _ => return Some(request.response(481, "Call/Transaction Does Not Exist", &[])),
             }
         }
     }
@@ -297,9 +294,17 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
             peer: Default::default(),
         });
         if let Some(reg) = state.registration_for(target) {
-            Some(request.response(302, "Moved Temporarily", &[("Contact", format!("<{}>", reg.contact))]))
+            Some(request.response(
+                302,
+                "Moved Temporarily",
+                &[("Contact", format!("<{}>", reg.contact))],
+            ))
         } else if target.starts_with("sip:") || target.starts_with("sips:") {
-            Some(request.response(302, "Moved Temporarily", &[("Contact", format!("<{}>", target))]))
+            Some(request.response(
+                302,
+                "Moved Temporarily",
+                &[("Contact", format!("<{}>", target))],
+            ))
         } else {
             None
         }
@@ -309,7 +314,9 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
     let (is_dnd, dnd_forward) = state.check_dnd(&requested_uri);
     if is_dnd {
         if let Some(ref fwd) = dnd_forward {
-            if let Some(resp) = make_redirect(fwd) { return Some(resp); }
+            if let Some(resp) = make_redirect(fwd) {
+                return Some(resp);
+            }
         }
         state.record_cdr_end(&call_id_str, "busy");
         return Some(request.response(486, "Busy Here (Do Not Disturb)", &[]));
@@ -317,14 +324,18 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
 
     // ── Forward-Always ──
     if let Some(fwd) = state.resolve_call_forwarding(&requested_uri, "always") {
-        if let Some(resp) = make_redirect(&fwd) { return Some(resp); }
+        if let Some(resp) = make_redirect(&fwd) {
+            return Some(resp);
+        }
     }
 
     // ── Holiday check ──
     if let Some(holiday) = state.active_holiday_today() {
         if let Some(dest) = &holiday.destination {
             if !dest.is_empty() {
-                if let Some(resp) = make_redirect(dest) { return Some(resp); }
+                if let Some(resp) = make_redirect(dest) {
+                    return Some(resp);
+                }
             }
         }
         // No destination — reject
@@ -336,7 +347,9 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
     let (is_open, after_hours_dest) = state.is_within_business_hours();
     if !is_open {
         if let Some(dest) = after_hours_dest {
-            if let Some(resp) = make_redirect(&dest) { return Some(resp); }
+            if let Some(resp) = make_redirect(&dest) {
+                return Some(resp);
+            }
         }
         state.record_cdr_end(&call_id_str, "no_answer");
         return Some(request.response(480, "Outside Business Hours", &[]));
@@ -345,9 +358,12 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
     // ── Conference routing ──
     if let Some(conference) = state.conference_by_uri(&requested_uri) {
         state.upsert_sip_dialog(UpsertSipDialog {
-            call_id: call_id_str.clone(), from_uri: from_aor.clone(),
-            to_uri: requested_uri.clone(), target_contact: None,
-            status: SipDialogStatus::Ringing, media_types: media.clone(),
+            call_id: call_id_str.clone(),
+            from_uri: from_aor.clone(),
+            to_uri: requested_uri.clone(),
+            target_contact: None,
+            status: SipDialogStatus::Ringing,
+            media_types: media.clone(),
             peer: Default::default(),
         });
         if conference.active {
@@ -365,17 +381,27 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
         if let Some(ref vip_info) = vip {
             if let Some(ref agent_uri) = vip_info.agent_override {
                 if let Some(reg) = state.registration_for(agent_uri) {
-                    let _ = state.transition_agent_state(agent_uri, "on_call", Some("vip_direct".to_string()));
+                    let _ = state.transition_agent_state(
+                        agent_uri,
+                        "on_call",
+                        Some("vip_direct".to_string()),
+                    );
                     let caller = state.enqueue_caller(queue.id, &from_aor, "");
                     state.dequeue_caller(caller.id, agent_uri);
                     state.upsert_sip_dialog(UpsertSipDialog {
-                        call_id: call_id_str.clone(), from_uri: from_aor.clone(),
-                        to_uri: requested_uri.clone(), target_contact: Some(agent_uri.clone()),
-                        status: SipDialogStatus::Ringing, media_types: media.clone(),
+                        call_id: call_id_str.clone(),
+                        from_uri: from_aor.clone(),
+                        to_uri: requested_uri.clone(),
+                        target_contact: Some(agent_uri.clone()),
+                        status: SipDialogStatus::Ringing,
+                        media_types: media.clone(),
                         peer: Default::default(),
                     });
-                    return Some(request.response(302, "Moved Temporarily",
-                        &[("Contact", format!("<{}>", reg.contact))]));
+                    return Some(request.response(
+                        302,
+                        "Moved Temporarily",
+                        &[("Contact", format!("<{}>", reg.contact))],
+                    ));
                 }
             }
         }
@@ -384,7 +410,9 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
         let waiting = state.queue_callers_waiting_count(queue.id);
         if waiting >= queue.max_queue_size as usize {
             if let Some(overflow) = &queue.overflow_destination {
-                if let Some(resp) = make_redirect(overflow) { return Some(resp); }
+                if let Some(resp) = make_redirect(overflow) {
+                    return Some(resp);
+                }
             }
             state.record_cdr_end(&call_id_str, "no_answer");
             return Some(request.response(480, "Queue Full", &[]));
@@ -397,25 +425,38 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
                 let caller = state.enqueue_caller(queue.id, &from_aor, "");
                 state.dequeue_caller(caller.id, &agent_uri);
                 state.upsert_sip_dialog(UpsertSipDialog {
-                    call_id: call_id_str.clone(), from_uri: from_aor.clone(),
-                    to_uri: requested_uri.clone(), target_contact: Some(agent_uri.clone()),
-                    status: SipDialogStatus::Ringing, media_types: media.clone(),
+                    call_id: call_id_str.clone(),
+                    from_uri: from_aor.clone(),
+                    to_uri: requested_uri.clone(),
+                    target_contact: Some(agent_uri.clone()),
+                    status: SipDialogStatus::Ringing,
+                    media_types: media.clone(),
                     peer: Default::default(),
                 });
-                return Some(request.response(302, "Moved Temporarily",
-                    &[("Contact", format!("<{}>", reg.contact))]));
+                return Some(request.response(
+                    302,
+                    "Moved Temporarily",
+                    &[("Contact", format!("<{}>", reg.contact))],
+                ));
             } else {
                 // Agent not registered - release them
-                let _ = state.transition_agent_state(&agent_uri, "available", Some("not_registered".to_string()));
+                let _ = state.transition_agent_state(
+                    &agent_uri,
+                    "available",
+                    Some("not_registered".to_string()),
+                );
             }
         }
 
         // No agent available - enqueue caller and accept the call (hold music)
         let _caller = state.enqueue_caller(queue.id, &from_aor, "");
         state.upsert_sip_dialog(UpsertSipDialog {
-            call_id: call_id_str.clone(), from_uri: from_aor.clone(),
-            to_uri: requested_uri.clone(), target_contact: None,
-            status: SipDialogStatus::Queued, media_types: media.clone(),
+            call_id: call_id_str.clone(),
+            from_uri: from_aor.clone(),
+            to_uri: requested_uri.clone(),
+            target_contact: None,
+            status: SipDialogStatus::Queued,
+            media_types: media.clone(),
             peer: Default::default(),
         });
         // Caller waits in queue (200 OK - server plays hold music)
@@ -425,9 +466,12 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
     // ── Ring group routing (with strategy) ──
     if let Some(group) = state.ring_group_by_extension(&requested_uri) {
         state.upsert_sip_dialog(UpsertSipDialog {
-            call_id: call_id_str.clone(), from_uri: from_aor.clone(),
-            to_uri: requested_uri.clone(), target_contact: None,
-            status: SipDialogStatus::Ringing, media_types: media.clone(),
+            call_id: call_id_str.clone(),
+            from_uri: from_aor.clone(),
+            to_uri: requested_uri.clone(),
+            target_contact: None,
+            status: SipDialogStatus::Ringing,
+            media_types: media.clone(),
             peer: Default::default(),
         });
         let members = match group.strategy {
@@ -441,28 +485,38 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
         };
         if group.strategy == crate::RingStrategy::Simultaneous {
             // Collect all registered contacts for SIP forking
-            let contacts: Vec<String> = members.iter()
+            let contacts: Vec<String> = members
+                .iter()
                 .filter_map(|m| state.registration_for(m))
                 .map(|r| format!("<{}>", r.contact))
                 .collect();
             if !contacts.is_empty() {
-                return Some(request.response(302, "Moved Temporarily",
-                    &[("Contact", contacts.join(", "))]));
+                return Some(request.response(
+                    302,
+                    "Moved Temporarily",
+                    &[("Contact", contacts.join(", "))],
+                ));
             }
         } else {
             // Sequential / Random: find first registered member
             for member in &members {
                 if let Some(reg) = state.registration_for(member) {
-                    return Some(request.response(302, "Moved Temporarily",
-                        &[("Contact", format!("<{}>", reg.contact))]));
+                    return Some(request.response(
+                        302,
+                        "Moved Temporarily",
+                        &[("Contact", format!("<{}>", reg.contact))],
+                    ));
                 }
             }
         }
         // Fallback
         if let Some(fallback) = &group.fallback_uri {
             if let Some(reg) = state.registration_for(fallback) {
-                return Some(request.response(302, "Moved Temporarily",
-                    &[("Contact", format!("<{}>", reg.contact))]));
+                return Some(request.response(
+                    302,
+                    "Moved Temporarily",
+                    &[("Contact", format!("<{}>", reg.contact))],
+                ));
             }
         }
         state.record_cdr_end(&call_id_str, "no_answer");
@@ -472,9 +526,12 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
     // ── IVR routing ──
     if let Some(_ivr) = state.ivr_by_extension(&requested_uri) {
         state.upsert_sip_dialog(UpsertSipDialog {
-            call_id: call_id_str.clone(), from_uri: from_aor.clone(),
-            to_uri: requested_uri.clone(), target_contact: None,
-            status: SipDialogStatus::Ringing, media_types: media.clone(),
+            call_id: call_id_str.clone(),
+            from_uri: from_aor.clone(),
+            to_uri: requested_uri.clone(),
+            target_contact: None,
+            status: SipDialogStatus::Ringing,
+            media_types: media.clone(),
             peer: Default::default(),
         });
         state.record_cdr_end(&call_id_str, "answered");
@@ -492,27 +549,40 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
             }
             _ => {
                 // user, external, or other — redirect to destination
-                if let Some(resp) = make_redirect(&ext.destination) { return Some(resp); }
+                if let Some(resp) = make_redirect(&ext.destination) {
+                    return Some(resp);
+                }
             }
         }
     }
 
     // ── Routing rules ──
     let routed_uri = state
-        .resolve_routing_rule(&from_aor, &requested_uri, "INVITE", &request.headers_for_routing())
+        .resolve_routing_rule(
+            &from_aor,
+            &requested_uri,
+            "INVITE",
+            &request.headers_for_routing(),
+        )
         .map(|rule| rule.target)
         .unwrap_or_else(|| requested_uri.clone());
 
     // ── Direct registration lookup ──
     if let Some(registration) = state.registration_for(&routed_uri) {
         state.upsert_sip_dialog(UpsertSipDialog {
-            call_id: call_id_str.clone(), from_uri: from_aor.clone(),
-            to_uri: requested_uri.clone(), target_contact: Some(registration.contact.clone()),
-            status: SipDialogStatus::Ringing, media_types: media.clone(),
+            call_id: call_id_str.clone(),
+            from_uri: from_aor.clone(),
+            to_uri: requested_uri.clone(),
+            target_contact: Some(registration.contact.clone()),
+            status: SipDialogStatus::Ringing,
+            media_types: media.clone(),
             peer: Default::default(),
         });
-        return Some(request.response(302, "Moved Temporarily",
-            &[("Contact", format!("<{}>", registration.contact))]));
+        return Some(request.response(
+            302,
+            "Moved Temporarily",
+            &[("Contact", format!("<{}>", registration.contact))],
+        ));
     }
 
     // ── Follow-me sequential dialing ──
@@ -521,13 +591,19 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
         for entry in &settings.followme_numbers {
             if let Some(reg) = state.registration_for(&entry.number) {
                 state.upsert_sip_dialog(UpsertSipDialog {
-                    call_id: call_id_str.clone(), from_uri: from_aor.clone(),
-                    to_uri: requested_uri.clone(), target_contact: Some(reg.contact.clone()),
-                    status: SipDialogStatus::Ringing, media_types: media.clone(),
+                    call_id: call_id_str.clone(),
+                    from_uri: from_aor.clone(),
+                    to_uri: requested_uri.clone(),
+                    target_contact: Some(reg.contact.clone()),
+                    status: SipDialogStatus::Ringing,
+                    media_types: media.clone(),
                     peer: Default::default(),
                 });
-                return Some(request.response(302, "Moved Temporarily",
-                    &[("Contact", format!("<{}>", reg.contact))]));
+                return Some(request.response(
+                    302,
+                    "Moved Temporarily",
+                    &[("Contact", format!("<{}>", reg.contact))],
+                ));
             }
         }
         // Follow-me final action
@@ -542,7 +618,9 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
                 return Some(request.response(480, "Temporarily Unavailable", &[]));
             }
             uri if !uri.is_empty() => {
-                if let Some(resp) = make_redirect(uri) { return Some(resp); }
+                if let Some(resp) = make_redirect(uri) {
+                    return Some(resp);
+                }
             }
             _ => {}
         }
@@ -550,7 +628,9 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
 
     // ── Forward-no-answer / voicemail fallback ──
     if let Some(fwd) = state.resolve_call_forwarding(&requested_uri, "no_answer") {
-        if let Some(resp) = make_redirect(&fwd) { return Some(resp); }
+        if let Some(resp) = make_redirect(&fwd) {
+            return Some(resp);
+        }
     }
     if settings.voicemail_enabled {
         state.create_voicemail_for_user(&requested_uri, &from_aor, "", 0, None);
@@ -561,13 +641,19 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
     // ── Forward to external if routing rules resolved a different URI ──
     if routed_uri != requested_uri && routed_uri.starts_with("sip:") {
         state.upsert_sip_dialog(UpsertSipDialog {
-            call_id: call_id_str.clone(), from_uri: from_aor,
-            to_uri: requested_uri, target_contact: Some(routed_uri.clone()),
-            status: SipDialogStatus::Routing, media_types: media,
+            call_id: call_id_str.clone(),
+            from_uri: from_aor,
+            to_uri: requested_uri,
+            target_contact: Some(routed_uri.clone()),
+            status: SipDialogStatus::Routing,
+            media_types: media,
             peer: Default::default(),
         });
-        return Some(request.response(302, "Moved Temporarily",
-            &[("Contact", format!("<{}>", routed_uri))]));
+        return Some(request.response(
+            302,
+            "Moved Temporarily",
+            &[("Contact", format!("<{}>", routed_uri))],
+        ));
     }
 
     // ── 480 Unavailable ──
@@ -591,11 +677,12 @@ fn handle_bye(request: &SipRequest, state: &AppState) -> Option<String> {
     if !request.is_authorized(state, &realm) {
         return Some(request.digest_challenge(&realm, state.issue_sip_nonce()));
     }
-    match request.call_id().map(|call_id| state.dialog_exists(call_id)) {
+    match request
+        .call_id()
+        .map(|call_id| state.dialog_exists(call_id))
+    {
         Some(true) => bye_bookkeeping(request, state),
-        Some(false) => {
-            return Some(request.response(481, "Call/Transaction Does Not Exist", &[]))
-        }
+        Some(false) => return Some(request.response(481, "Call/Transaction Does Not Exist", &[])),
         None => {}
     }
     Some(request.response(200, "OK", &[]))
@@ -808,7 +895,11 @@ fn handle_refer(request: &SipRequest, state: &AppState) -> Option<String> {
     let replaces_call_id = if is_attended {
         refer_to_raw
             .as_deref()
-            .and_then(|v| v.split("Replaces=").nth(1).or_else(|| v.split("replaces=").nth(1)))
+            .and_then(|v| {
+                v.split("Replaces=")
+                    .nth(1)
+                    .or_else(|| v.split("replaces=").nth(1))
+            })
             .map(|v| v.split('%').next().unwrap_or(v))
             .map(|v| v.split(';').next().unwrap_or(v))
             .map(|v| v.split('>').next().unwrap_or(v))
@@ -829,7 +920,11 @@ fn handle_refer(request: &SipRequest, state: &AppState) -> Option<String> {
         .and_then(extract_sip_uri)
         .unwrap_or_default();
 
-    let transfer_type = if is_attended { "call.attended_transfer" } else { "call.blind_transfer" };
+    let transfer_type = if is_attended {
+        "call.attended_transfer"
+    } else {
+        "call.blind_transfer"
+    };
     state.record_audit_event(&from_uri, transfer_type, Some(target.clone()));
 
     Some(request.response(202, "Accepted", &[]))
@@ -837,11 +932,7 @@ fn handle_refer(request: &SipRequest, state: &AppState) -> Option<String> {
 
 const SUPPORTED_EVENTS: &[&str] = &["presence", "dialog", "message-summary", "conference"];
 
-fn handle_subscribe(
-    request: &SipRequest,
-    _peer: SocketAddr,
-    state: &AppState,
-) -> Option<String> {
+fn handle_subscribe(request: &SipRequest, _peer: SocketAddr, state: &AppState) -> Option<String> {
     let Some(subscriber) = request.header("from").and_then(extract_sip_uri) else {
         return Some(request.response(400, "Bad Request", &[]));
     };
@@ -852,7 +943,10 @@ fn handle_subscribe(
         return Some(request.digest_challenge(&realm, state.issue_sip_nonce()));
     }
 
-    let Some(event) = request.header("event").map(|v| v.split(';').next().unwrap_or(v).trim()) else {
+    let Some(event) = request
+        .header("event")
+        .map(|v| v.split(';').next().unwrap_or(v).trim())
+    else {
         return Some(request.response(
             489,
             "Bad Event",
@@ -878,11 +972,7 @@ fn handle_subscribe(
         .and_then(|h| h.split("tag=").nth(1))
         .map(|t| t.split(';').next().unwrap_or(t))
         .unwrap_or("notag");
-    let subscription_id = format!(
-        "{}:{}",
-        request.call_id().unwrap_or("unknown"),
-        from_tag
-    );
+    let subscription_id = format!("{}:{}", request.call_id().unwrap_or("unknown"), from_tag);
 
     if expires == 0 {
         let _ = state.remove_sip_subscription(&subscription_id);
@@ -904,10 +994,7 @@ fn handle_subscribe(
         &[
             ("Expires", expires.to_string()),
             ("Event", event_str),
-            (
-                "Subscription-State",
-                format!("active;expires={}", expires),
-            ),
+            ("Subscription-State", format!("active;expires={}", expires)),
         ],
     ))
 }
@@ -924,9 +1011,7 @@ fn handle_notify(request: &SipRequest, state: &AppState) -> Option<String> {
     }
 
     let event = request.header("event").map(ToOwned::to_owned);
-    let subscription_state = request
-        .header("subscription-state")
-        .map(ToOwned::to_owned);
+    let subscription_state = request.header("subscription-state").map(ToOwned::to_owned);
     let content_type = request
         .header("content-type")
         .unwrap_or("application/pidf+xml")
@@ -1057,7 +1142,15 @@ async fn proxy_invite(
     state: &AppState,
 ) -> Option<String> {
     let received_branch = top_via_branch(request);
-    let result = proxy_invite_inner(server_socket, packet, request, peer, state, &received_branch).await;
+    let result = proxy_invite_inner(
+        server_socket,
+        packet,
+        request,
+        peer,
+        state,
+        &received_branch,
+    )
+    .await;
     if let Some(branch) = &received_branch {
         state.remove_pending_invite(branch);
     }
@@ -1113,7 +1206,8 @@ async fn proxy_invite_inner(
         .as_ref()
         .map(|rule| rule.header_actions.as_slice())
         .unwrap_or(&[]);
-    let Some(forwarded) = rewrite_request_for_proxy(packet, &target_contact, local_addr, &branch, header_actions)
+    let Some(forwarded) =
+        rewrite_request_for_proxy(packet, &target_contact, local_addr, &branch, header_actions)
     else {
         return Some(request.response(400, "Bad Request", &[]));
     };
@@ -1277,8 +1371,7 @@ async fn relay_in_dialog_request(
     }
 
     let mut buf = vec![0_u8; 16 * 1024];
-    let relayed = match timeout(StdDuration::from_secs(5), proxy_socket.recv_from(&mut buf)).await
-    {
+    let relayed = match timeout(StdDuration::from_secs(5), proxy_socket.recv_from(&mut buf)).await {
         Ok(Ok((len, _))) => {
             let text = String::from_utf8_lossy(&buf[..len]).to_string();
             strip_proxy_via(&text, &branch).unwrap_or(text)
@@ -1295,7 +1388,11 @@ async fn relay_in_dialog_request(
             } else {
                 "call.blind_transfer"
             };
-            state.record_audit_event(&from_uri, transfer_type, request.header("refer-to").map(ToOwned::to_owned));
+            state.record_audit_event(
+                &from_uri,
+                transfer_type,
+                request.header("refer-to").map(ToOwned::to_owned),
+            );
         }
         _ => {}
     }
@@ -1318,7 +1415,11 @@ fn bye_bookkeeping(request: &SipRequest, state: &AppState) {
     if let Some(from_uri) = request.header("from").and_then(extract_sip_uri) {
         if let Some(profile) = state.agent_profile(&from_uri) {
             if profile.state == "on_call" {
-                let _ = state.transition_agent_state(&from_uri, "wrap_up", Some("call_ended".to_string()));
+                let _ = state.transition_agent_state(
+                    &from_uri,
+                    "wrap_up",
+                    Some("call_ended".to_string()),
+                );
             }
         }
     }
@@ -1446,9 +1547,7 @@ async fn send_refer_notify(
 
 /// True when a REFER's Refer-To targets the server's own park/pickup logic.
 fn refer_targets_server(request: &SipRequest) -> bool {
-    let refer_to = request
-        .header("refer-to")
-        .map(|v| v.trim().to_string());
+    let refer_to = request.header("refer-to").map(|v| v.trim().to_string());
     let target = refer_to
         .as_deref()
         .and_then(extract_sip_uri)
@@ -1558,10 +1657,14 @@ fn rewrite_request_for_proxy(
                 }
                 for action in header_actions {
                     match action.kind {
-                        SipHeaderActionKind::Add | SipHeaderActionKind::Set if !action.value.is_empty() => {
+                        SipHeaderActionKind::Add | SipHeaderActionKind::Set
+                            if !action.value.is_empty() =>
+                        {
                             out.push_str(&format!("{}: {}\r\n", action.name, action.value));
                         }
-                        SipHeaderActionKind::Add | SipHeaderActionKind::Set | SipHeaderActionKind::Remove => {}
+                        SipHeaderActionKind::Add
+                        | SipHeaderActionKind::Set
+                        | SipHeaderActionKind::Remove => {}
                     }
                 }
                 in_headers = false;
@@ -1581,8 +1684,10 @@ fn rewrite_request_for_proxy(
             }
             if let Some((name, _)) = line.split_once(':') {
                 if header_actions.iter().any(|action| {
-                    matches!(action.kind, SipHeaderActionKind::Remove | SipHeaderActionKind::Set)
-                        && name.trim().eq_ignore_ascii_case(&action.name)
+                    matches!(
+                        action.kind,
+                        SipHeaderActionKind::Remove | SipHeaderActionKind::Set
+                    ) && name.trim().eq_ignore_ascii_case(&action.name)
                 }) {
                     continue;
                 }
@@ -1598,9 +1703,7 @@ fn strip_proxy_via(response: &str, branch: &str) -> Option<String> {
     let mut out = String::new();
     for line in response.split_inclusive("\r\n") {
         if !removed
-            && line
-                .to_ascii_lowercase()
-                .starts_with("via: sip/2.0/udp ")
+            && line.to_ascii_lowercase().starts_with("via: sip/2.0/udp ")
             && line.contains(branch)
         {
             removed = true;
@@ -1624,7 +1727,10 @@ fn sip_uri_socket_addr(uri: &str) -> Option<SocketAddr> {
         .strip_prefix("sip:")
         .or_else(|| uri.strip_prefix("sips:"))?;
     let authority = uri.split(';').next()?.split('?').next()?;
-    let host_port = authority.rsplit_once('@').map(|(_, value)| value).unwrap_or(authority);
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, value)| value)
+        .unwrap_or(authority);
     if host_port.starts_with('[') {
         return host_port.parse().ok();
     }
@@ -1757,7 +1863,9 @@ impl SipRequest {
             headers.push(response_header(name, value.clone()));
         }
         headers.push(Header::Server(rsip::headers::Server::new("Pale SIP")));
-        headers.push(Header::ContentLength(rsip::headers::ContentLength::new("0")));
+        headers.push(Header::ContentLength(rsip::headers::ContentLength::new(
+            "0",
+        )));
         Response {
             status_code: status_code(code, reason),
             version: Version::V2,
@@ -1877,9 +1985,7 @@ fn response_header(name: &str, value: String) -> Header {
         "to" => Header::To(rsip::headers::To::new(value)),
         "user-agent" => Header::UserAgent(rsip::headers::UserAgent::new(value)),
         "via" => Header::Via(rsip::headers::Via::new(value)),
-        "www-authenticate" => {
-            Header::WwwAuthenticate(rsip::headers::WwwAuthenticate::new(value))
-        }
+        "www-authenticate" => Header::WwwAuthenticate(rsip::headers::WwwAuthenticate::new(value)),
         other => Header::Other(display_header_name(other).to_string(), value),
     }
 }
@@ -2020,11 +2126,7 @@ impl DigestAuth {
         let ha2 = md5_hex(format!("{}:{}", method, self.uri).as_bytes());
         let expected = match (&self.qop, &self.nc, &self.cnonce) {
             (Some(qop), Some(nc), Some(cnonce)) => md5_hex(
-                format!(
-                    "{}:{}:{}:{}:{}:{}",
-                    ha1, self.nonce, nc, cnonce, qop, ha2
-                )
-                .as_bytes(),
+                format!("{}:{}:{}:{}:{}:{}", ha1, self.nonce, nc, cnonce, qop, ha2).as_bytes(),
             ),
             _ => md5_hex(format!("{}:{}:{}", ha1, self.nonce, ha2).as_bytes()),
         };
@@ -2204,13 +2306,11 @@ Authorization: {}\r\n\r\n",
         downstream_task.await.unwrap();
         // The provisional was relayed to the caller out-of-band...
         let mut buf = vec![0_u8; 8192];
-        let (len, _) = tokio::time::timeout(
-            StdDuration::from_secs(2),
-            caller_socket.recv_from(&mut buf),
-        )
-        .await
-        .expect("provisional relayed to caller")
-        .unwrap();
+        let (len, _) =
+            tokio::time::timeout(StdDuration::from_secs(2), caller_socket.recv_from(&mut buf))
+                .await
+                .expect("provisional relayed to caller")
+                .unwrap();
         let provisional = String::from_utf8_lossy(&buf[..len]).to_string();
         assert!(provisional.starts_with("SIP/2.0 180 Ringing"));
         assert!(!provisional.contains("z9hG4bK-pale-"));
@@ -2222,7 +2322,10 @@ Authorization: {}\r\n\r\n",
         // Peer addressing was captured for in-dialog relays.
         let dialog = state.dialog_for("invite-proxy").unwrap();
         assert!(dialog.to_source.is_some());
-        assert_eq!(dialog.from_source.as_deref(), Some(peer.to_string().as_str()));
+        assert_eq!(
+            dialog.from_source.as_deref(),
+            Some(peer.to_string().as_str())
+        );
     }
 
     #[test]
@@ -2248,11 +2351,14 @@ Authorization: {}\r\n\r\n",
             "sip:bob@example.com",
             &nonce,
         );
-        let cancel = format!("CANCEL sip:bob@example.com SIP/2.0\r\n\
+        let cancel = format!(
+            "CANCEL sip:bob@example.com SIP/2.0\r\n\
 From: <sip:alice@example.com>;tag=1\r\n\
 Call-ID: call-1\r\n\
 CSeq: 2 CANCEL\r\n\
-Authorization: {}\r\n\r\n", auth);
+Authorization: {}\r\n\r\n",
+            auth
+        );
         let response = handle_packet(&cancel, peer, &state).unwrap();
 
         assert!(response.starts_with("SIP/2.0 200 OK"));
@@ -2267,11 +2373,14 @@ Authorization: {}\r\n\r\n", auth);
             "sip:bob@example.com",
             &nonce,
         );
-        let bye = format!("BYE sip:bob@example.com SIP/2.0\r\n\
+        let bye = format!(
+            "BYE sip:bob@example.com SIP/2.0\r\n\
 From: <sip:alice@example.com>;tag=1\r\n\
 Call-ID: call-1\r\n\
 CSeq: 3 BYE\r\n\
-Authorization: {}\r\n\r\n", auth);
+Authorization: {}\r\n\r\n",
+            auth
+        );
         let response = handle_packet(&bye, peer, &state).unwrap();
 
         assert!(response.starts_with("SIP/2.0 200 OK"));
@@ -2524,7 +2633,14 @@ Authorization: {}\r\n\r\n",
 
         // First create a subscription
         let nonce = state.issue_sip_nonce();
-        let auth = authorization("alice", "example.com", "secret", "SUBSCRIBE", "sip:bob@example.com", &nonce);
+        let auth = authorization(
+            "alice",
+            "example.com",
+            "secret",
+            "SUBSCRIBE",
+            "sip:bob@example.com",
+            &nonce,
+        );
         let packet = format!(
             "SUBSCRIBE sip:bob@example.com SIP/2.0\r\n\
 From: <sip:alice@example.com>;tag=1\r\n\
@@ -2532,13 +2648,22 @@ Call-ID: sub-4\r\n\
 CSeq: 1 SUBSCRIBE\r\n\
 Event: presence\r\n\
 Expires: 600\r\n\
-Authorization: {}\r\n\r\n", auth);
+Authorization: {}\r\n\r\n",
+            auth
+        );
         handle_packet(&packet, peer, &state);
         assert_eq!(state.sip_subscriptions().len(), 1);
 
         // Now unsubscribe
         let nonce = state.issue_sip_nonce();
-        let auth = authorization("alice", "example.com", "secret", "SUBSCRIBE", "sip:bob@example.com", &nonce);
+        let auth = authorization(
+            "alice",
+            "example.com",
+            "secret",
+            "SUBSCRIBE",
+            "sip:bob@example.com",
+            &nonce,
+        );
         let packet = format!(
             "SUBSCRIBE sip:bob@example.com SIP/2.0\r\n\
 From: <sip:alice@example.com>;tag=1\r\n\
@@ -2546,7 +2671,9 @@ Call-ID: sub-4\r\n\
 CSeq: 2 SUBSCRIBE\r\n\
 Event: presence\r\n\
 Expires: 0\r\n\
-Authorization: {}\r\n\r\n", auth);
+Authorization: {}\r\n\r\n",
+            auth
+        );
         let response = handle_packet(&packet, peer, &state).unwrap();
 
         assert!(response.starts_with("SIP/2.0 200 OK"));
@@ -2715,7 +2842,10 @@ Authorization: {}\r\n\r\n{}",
 
         let response = handle_packet(&update, peer, &state).unwrap();
         assert!(response.starts_with("SIP/2.0 200 OK"));
-        assert_eq!(state.dialog_for("update-dialog").unwrap().status, SipDialogStatus::Held);
+        assert_eq!(
+            state.dialog_for("update-dialog").unwrap().status,
+            SipDialogStatus::Held
+        );
     }
 
     #[test]
@@ -2724,8 +2854,14 @@ Authorization: {}\r\n\r\n{}",
         let audio_video = "v=0\r\nm=audio 5004 RTP/AVP 0\r\nm=video 5006 RTP/AVP 96\r\n";
         let empty = "";
 
-        assert_eq!(extract_media_types(audio_only), vec![crate::MediaKind::Audio]);
-        assert_eq!(extract_media_types(audio_video), vec![crate::MediaKind::Audio, crate::MediaKind::Video]);
+        assert_eq!(
+            extract_media_types(audio_only),
+            vec![crate::MediaKind::Audio]
+        );
+        assert_eq!(
+            extract_media_types(audio_video),
+            vec![crate::MediaKind::Audio, crate::MediaKind::Video]
+        );
         assert!(extract_media_types(empty).is_empty());
     }
 
@@ -2752,14 +2888,23 @@ Authorization: {}\r\n\r\n{}",
         });
         let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
         let nonce = state.issue_sip_nonce();
-        let auth = authorization("alice", "example.com", "secret", "INVITE", "sip:bob@example.com", &nonce);
+        let auth = authorization(
+            "alice",
+            "example.com",
+            "secret",
+            "INVITE",
+            "sip:bob@example.com",
+            &nonce,
+        );
         let packet = format!(
             "INVITE sip:bob@example.com SIP/2.0\r\n\
 From: <sip:alice@example.com>;tag=1\r\n\
 To: <sip:bob@example.com>;tag=2\r\n\
 Call-ID: reinvite-1\r\n\
 CSeq: 2 INVITE\r\n\
-Authorization: {}\r\n\r\nv=0\r\nm=audio 5004 RTP/AVP 0\r\na=sendonly\r\n", auth);
+Authorization: {}\r\n\r\nv=0\r\nm=audio 5004 RTP/AVP 0\r\na=sendonly\r\n",
+            auth
+        );
 
         let response = handle_packet(&packet, peer, &state).unwrap();
         assert!(response.starts_with("SIP/2.0 200 OK"));
@@ -2781,14 +2926,23 @@ Authorization: {}\r\n\r\nv=0\r\nm=audio 5004 RTP/AVP 0\r\na=sendonly\r\n", auth)
         });
         let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
         let nonce = state.issue_sip_nonce();
-        let auth = authorization("alice", "example.com", "secret", "INVITE", "sip:bob@example.com", &nonce);
+        let auth = authorization(
+            "alice",
+            "example.com",
+            "secret",
+            "INVITE",
+            "sip:bob@example.com",
+            &nonce,
+        );
         let packet = format!(
             "INVITE sip:bob@example.com SIP/2.0\r\n\
 From: <sip:alice@example.com>;tag=1\r\n\
 To: <sip:bob@example.com>\r\n\
 Call-ID: stale-1\r\n\
 CSeq: 1 INVITE\r\n\
-Authorization: {}\r\n\r\n", auth);
+Authorization: {}\r\n\r\n",
+            auth
+        );
 
         let _response = handle_packet(&packet, peer, &state).unwrap();
         // Takes the initial-INVITE routing path: the re-INVITE shortcut would
@@ -2806,14 +2960,23 @@ Authorization: {}\r\n\r\n", auth);
         let state = test_state();
         let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
         let nonce = state.issue_sip_nonce();
-        let auth = authorization("alice", "example.com", "secret", "INVITE", "sip:bob@example.com", &nonce);
+        let auth = authorization(
+            "alice",
+            "example.com",
+            "secret",
+            "INVITE",
+            "sip:bob@example.com",
+            &nonce,
+        );
         let packet = format!(
             "INVITE sip:bob@example.com SIP/2.0\r\n\
 From: <sip:alice@example.com>;tag=1\r\n\
 To: <sip:bob@example.com>;tag=2\r\n\
 Call-ID: unknown-dialog\r\n\
 CSeq: 2 INVITE\r\n\
-Authorization: {}\r\n\r\n", auth);
+Authorization: {}\r\n\r\n",
+            auth
+        );
 
         let response = handle_packet(&packet, peer, &state).unwrap();
         assert!(response.starts_with("SIP/2.0 481"));
@@ -2833,7 +2996,14 @@ Authorization: {}\r\n\r\n", auth);
         });
         let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
         let nonce = state.issue_sip_nonce();
-        let auth = authorization("alice", "example.com", "secret", "REFER", "sip:bob@example.com", &nonce);
+        let auth = authorization(
+            "alice",
+            "example.com",
+            "secret",
+            "REFER",
+            "sip:bob@example.com",
+            &nonce,
+        );
         let packet = format!(
             "REFER sip:bob@example.com SIP/2.0\r\n\
 From: <sip:alice@example.com>;tag=1\r\n\
@@ -2841,7 +3011,9 @@ To: <sip:bob@example.com>\r\n\
 Call-ID: refer-1\r\n\
 CSeq: 3 REFER\r\n\
 Refer-To: <sip:charlie@example.com>\r\n\
-Authorization: {}\r\n\r\n", auth);
+Authorization: {}\r\n\r\n",
+            auth
+        );
 
         let response = handle_packet(&packet, peer, &state).unwrap();
         assert!(response.starts_with("SIP/2.0 202 Accepted"));
@@ -2881,14 +3053,23 @@ CSeq: 1 CANCEL\r\n\r\n";
         let state = test_state();
         let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
         let nonce = state.issue_sip_nonce();
-        let auth = authorization("alice", "example.com", "secret", "BYE", "sip:bob@example.com", &nonce);
+        let auth = authorization(
+            "alice",
+            "example.com",
+            "secret",
+            "BYE",
+            "sip:bob@example.com",
+            &nonce,
+        );
         let packet = format!(
             "BYE sip:bob@example.com SIP/2.0\r\n\
 From: <sip:alice@example.com>;tag=1\r\n\
 To: <sip:bob@example.com>;tag=2\r\n\
 Call-ID: nonexistent\r\n\
 CSeq: 2 BYE\r\n\
-Authorization: {}\r\n\r\n", auth);
+Authorization: {}\r\n\r\n",
+            auth
+        );
 
         let response = handle_packet(&packet, peer, &state).unwrap();
         assert!(response.starts_with("SIP/2.0 481"));
@@ -2954,7 +3135,10 @@ CSeq: 1 REGISTER\r\n\r\n";
                 "SIP/2.0 200 OK\r\n{}\r\nFrom: <sip:alice@example.com>;tag=1\r\nTo: <sip:bob@example.com>;tag=2\r\nCall-ID: dtmf-1\r\nCSeq: 2 INFO\r\nContent-Length: 0\r\n\r\n",
                 top_via
             );
-            callee.send_to(response.as_bytes(), proxy_addr).await.unwrap();
+            callee
+                .send_to(response.as_bytes(), proxy_addr)
+                .await
+                .unwrap();
         });
 
         let server_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -3064,14 +3248,23 @@ Content-Length: 0\r\n\r\n";
         let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
         let nonce = state.issue_sip_nonce();
         let conf_uri = format!("sip:conf-{}@example.com", conference.id);
-        let auth = authorization("alice", "example.com", "secret", "INVITE", &conf_uri, &nonce);
+        let auth = authorization(
+            "alice",
+            "example.com",
+            "secret",
+            "INVITE",
+            &conf_uri,
+            &nonce,
+        );
         let packet = format!(
             "INVITE {} SIP/2.0\r\n\
 From: <sip:alice@example.com>;tag=1\r\n\
 To: <{}>\r\n\
 Call-ID: conf-call\r\n\
 CSeq: 1 INVITE\r\n\
-Authorization: {}\r\n\r\n", conf_uri, conf_uri, auth);
+Authorization: {}\r\n\r\n",
+            conf_uri, conf_uri, auth
+        );
 
         let response = handle_packet(&packet, peer, &state).unwrap();
         assert!(response.starts_with("SIP/2.0 200 OK"));
@@ -3084,7 +3277,9 @@ Authorization: {}\r\n\r\n", conf_uri, conf_uri, auth);
             "012345678901234567890123".to_string(),
             crate::sha256_hex("admin-password".as_bytes()),
         );
-        let session = state.authenticate_admin("admin", "admin-password", "test").unwrap();
+        let session = state
+            .authenticate_admin("admin", "admin-password", "test")
+            .unwrap();
         assert!(state.principal_for_bearer(&session.token).is_some());
 
         let new_session = state.refresh_admin_session(&session.token).unwrap();
@@ -3100,24 +3295,30 @@ Authorization: {}\r\n\r\n", conf_uri, conf_uri, auth);
             "012345678901234567890123".to_string(),
             crate::sha256_hex("admin-password".as_bytes()),
         );
-        let entries = vec![
-            crate::CallHistoryInput {
-                direction: "outbound".to_string(),
-                remote_uri: "sip:bob@example.com".to_string(),
-                remote_name: "Bob".to_string(),
-                start_time: "2026-06-05T12:00:00Z".parse::<chrono::DateTime<chrono::Utc>>().unwrap(),
-                duration_secs: 120,
-                answered: true,
-            },
-        ];
+        let entries = vec![crate::CallHistoryInput {
+            direction: "outbound".to_string(),
+            remote_uri: "sip:bob@example.com".to_string(),
+            remote_name: "Bob".to_string(),
+            start_time: "2026-06-05T12:00:00Z"
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .unwrap(),
+            duration_secs: 120,
+            answered: true,
+        }];
         let merged = state.merge_call_history("sip:alice@example.com", entries.clone());
         assert_eq!(merged, 1);
-        assert_eq!(state.call_history_for_user("sip:alice@example.com").len(), 1);
+        assert_eq!(
+            state.call_history_for_user("sip:alice@example.com").len(),
+            1
+        );
 
         // Re-sync same entries — should not duplicate
         let merged = state.merge_call_history("sip:alice@example.com", entries);
         assert_eq!(merged, 0);
-        assert_eq!(state.call_history_for_user("sip:alice@example.com").len(), 1);
+        assert_eq!(
+            state.call_history_for_user("sip:alice@example.com").len(),
+            1
+        );
     }
 
     fn test_state() -> AppState {

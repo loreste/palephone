@@ -164,7 +164,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     std::process::exit(1);
                 }
             };
-            log::info!("Pale SIP parser UDP server listening on {}", config.sip_addr);
+            log::info!(
+                "Pale SIP parser UDP server listening on {}",
+                config.sip_addr
+            );
             let sip_state = state.clone();
             tokio::spawn(async move {
                 if let Err(err) = sip::serve_udp(socket, sip_state).await {
@@ -273,7 +276,9 @@ fn run_retention_enforcement(state: &AppState) {
 }
 
 fn retention_enforcement_interval_from_env() -> Option<Duration> {
-    retention_enforcement_interval(optional_env("PALE_RETENTION_ENFORCEMENT_INTERVAL_SECS").as_deref())
+    retention_enforcement_interval(
+        optional_env("PALE_RETENTION_ENFORCEMENT_INTERVAL_SECS").as_deref(),
+    )
 }
 
 fn retention_enforcement_interval(value: Option<&str>) -> Option<Duration> {
@@ -389,16 +394,22 @@ fn checked_secret(name: &str, errors: &mut Vec<String>) -> Option<String> {
     }
 }
 
-fn tls_config_from_env(sip_port: u16) -> Result<Option<TlsConfig>, Box<dyn std::error::Error + Send + Sync>> {
+fn tls_config_from_env(
+    sip_port: u16,
+) -> Result<Option<TlsConfig>, Box<dyn std::error::Error + Send + Sync>> {
     // Explicit PALE_SIP_TLS=true/false wins. When unset, TLS is enabled
     // exactly when a cert and key are provided.
     let certs_present =
         optional_env("PALE_SIP_TLS_CERT").is_some() && optional_env("PALE_SIP_TLS_KEY").is_some();
     if !env_bool("PALE_SIP_TLS", certs_present) {
         if certs_present {
-            log::warn!("PALE_SIP_TLS_CERT/KEY are set but PALE_SIP_TLS=false; SIP TLS stays disabled");
+            log::warn!(
+                "PALE_SIP_TLS_CERT/KEY are set but PALE_SIP_TLS=false; SIP TLS stays disabled"
+            );
         } else {
-            log::info!("SIP TLS disabled — set PALE_SIP_TLS_CERT and PALE_SIP_TLS_KEY to enable it");
+            log::info!(
+                "SIP TLS disabled — set PALE_SIP_TLS_CERT and PALE_SIP_TLS_KEY to enable it"
+            );
         }
         return Ok(None);
     }
@@ -446,7 +457,12 @@ fn onoff(value: bool) -> &'static str {
 
 fn env_bool(name: &str, default: bool) -> bool {
     std::env::var(name)
-        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(default)
 }
 

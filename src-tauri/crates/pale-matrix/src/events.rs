@@ -13,9 +13,7 @@ pub enum MatrixEvent {
         display_name: Option<String>,
     },
     /// Room list updated
-    RoomListUpdated {
-        rooms: Vec<RoomSummary>,
-    },
+    RoomListUpdated { rooms: Vec<RoomSummary> },
     /// New message received
     Message(ChatMessage),
     /// Typing indicator
@@ -26,12 +24,7 @@ pub enum MatrixEvent {
     /// File transfer progress
     TransferProgress(TransferProgress),
     /// Sync error
-    SyncError {
-        message: String,
-    },
+    SyncError { message: String },
     /// Verification request
-    VerificationRequest {
-        sender: String,
-        flow_id: String,
-    },
+    VerificationRequest { sender: String, flow_id: String },
 }

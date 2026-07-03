@@ -5,6 +5,9 @@ export interface RoomSummary {
   name: string;
   team_id?: string | null;
   channel_name?: string | null;
+  channel_type?: "standard" | "private" | "shared";
+  channel_owners?: string[];
+  posting_policy?: "members" | "owners";
   is_direct: boolean;
   is_encrypted: boolean;
   created_by?: string;
@@ -38,6 +41,8 @@ export interface ChatMessage {
   reply_preview?: { sender: string; body: string };
   edited_at?: number;
   pinned?: boolean;
+  priority?: "normal" | "high" | "urgent";
+  saved_by?: string[];
   mentions?: { kind: string; token: string; user_sip_uri?: string | null }[];
   mentioned_user_uris?: string[];
   reactions?: Record<string, string[]>; // emoji -> [user_uri, ...]

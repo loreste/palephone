@@ -149,12 +149,15 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
             timestamp: Math.floor(new Date(msg.created_at).getTime() / 1000),
             is_encrypted: false,
             is_own: isOwn,
+            priority: msg.priority ?? "normal",
+            saved_by: msg.saved_by ?? [],
             mentions: msg.mentions ?? [],
             mentioned_user_uris: msg.mentioned_user_uris ?? [],
           });
           if (!isOwn) {
             const senderLabel = msg.sender_uri?.replace(/^sip:/, "") ?? "Someone";
             const preview = msg.body?.length > 50 ? msg.body.slice(0, 50) + "..." : msg.body;
+            const priorityPrefix = msg.priority === "urgent" ? "Urgent: " : msg.priority === "high" ? "High priority: " : "";
 
             // Increment unread count if the message is not for the active room
             const activeRoomId = useChatStore.getState().activeRoomId;
@@ -183,8 +186,8 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
 
             shouldNotify(msg.room_id).then((ok) => {
               if (ok) {
-                toast({ type: "info", title: senderLabel, description: preview });
-                desktopNotify(senderLabel, preview);
+                toast({ type: msg.priority === "urgent" ? "warning" : "info", title: `${priorityPrefix}${senderLabel}`, description: preview });
+                desktopNotify(`${priorityPrefix}${senderLabel}`, preview);
               }
             });
             shouldPlaySound().then((ok) => {
@@ -210,6 +213,13 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
         try {
           const msg = JSON.parse(e.data);
           updateMessage(msg.room_id, msg.id, { pinned: msg.pinned });
+        } catch { /* ignore */ }
+      });
+
+      es.addEventListener("message_saved", (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          updateMessage(msg.room_id, msg.id, { saved_by: msg.saved_by ?? [] });
         } catch { /* ignore */ }
       });
 
@@ -254,7 +264,24 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
       es.addEventListener("meeting_scheduled", (e) => {
         try {
           const meeting = JSON.parse(e.data);
+          useMeetingStore.getState().upsertMeeting(meeting);
           window.dispatchEvent(new CustomEvent("pale:meeting-scheduled", { detail: meeting }));
+        } catch { /* ignore */ }
+      });
+
+      es.addEventListener("meeting_updated", (e) => {
+        try {
+          const meeting = JSON.parse(e.data);
+          useMeetingStore.getState().upsertMeeting(meeting);
+          window.dispatchEvent(new CustomEvent("pale:meeting-updated", { detail: meeting }));
+        } catch { /* ignore */ }
+      });
+
+      es.addEventListener("meeting_cancelled", (e) => {
+        try {
+          const meeting = JSON.parse(e.data);
+          useMeetingStore.getState().upsertMeeting(meeting);
+          window.dispatchEvent(new CustomEvent("pale:meeting-cancelled", { detail: meeting }));
         } catch { /* ignore */ }
       });
 
@@ -321,6 +348,12 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
       es.addEventListener("lobby_updated", (e) => {
         try {
           useMeetingStore.getState().setLobby(JSON.parse(e.data));
+        } catch { /* ignore */ }
+      });
+
+      es.addEventListener("conference_participant_updated", (e) => {
+        try {
+          useMeetingStore.getState().setConference(JSON.parse(e.data));
         } catch { /* ignore */ }
       });
 

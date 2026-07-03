@@ -352,9 +352,22 @@ function ServerFileList({
               <Icon size={18} className="text-accent" />
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-primary truncate">{file.filename}</p>
+              <div className="flex items-center gap-2 min-w-0">
+                <p className="text-sm font-medium text-primary truncate">{file.filename}</p>
+                {file.legal_hold && (
+                  <span className="shrink-0 rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-500">
+                    Hold
+                  </span>
+                )}
+                {file.dlp_violation_count ? (
+                  <span className="shrink-0 rounded bg-red-500/10 px-1.5 py-0.5 text-[10px] text-red-500">
+                    DLP
+                  </span>
+                ) : null}
+              </div>
               <p className="text-[10px] text-tertiary">
                 {file.owner} &middot; {time}
+                {file.dlp_status ? ` · ${file.dlp_status}` : ""}
               </p>
             </div>
             <div className="flex items-center gap-1 shrink-0">

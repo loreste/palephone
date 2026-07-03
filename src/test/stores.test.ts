@@ -6,6 +6,7 @@ import { useChatStore } from "@/store/chatStore";
 import { usePresenceStore } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
 import { useFileStore } from "@/store/fileStore";
+import { useMeetingStore, type ScheduledMeeting } from "@/store/meetingStore";
 import type { CallSession } from "@/types";
 
 describe("callStore", () => {
@@ -263,5 +264,37 @@ describe("fileStore server files", () => {
     store.removeServerFile("f1");
     expect(useFileStore.getState().serverFiles).toHaveLength(1);
     expect(useFileStore.getState().serverFiles[0].id).toBe("f2");
+  });
+});
+
+describe("meetingStore", () => {
+  const meeting: ScheduledMeeting = {
+    id: "meeting-1",
+    title: "Planning",
+    description: "",
+    organizer_uri: "sip:alice@example.com",
+    room_id: null,
+    conference_id: "conference-1",
+    participants: ["sip:alice@example.com"],
+    starts_at: "2026-07-06T14:00:00.000Z",
+    ends_at: "2026-07-06T15:00:00.000Z",
+    recurrence: null,
+    status: "scheduled",
+    cancelled_at: null,
+    updated_at: null,
+    created_at: "2026-07-01T12:00:00.000Z",
+  };
+
+  beforeEach(() => {
+    useMeetingStore.getState().setMeetings([]);
+  });
+
+  it("upserts meetings without duplicating real-time events", () => {
+    const store = useMeetingStore.getState();
+    store.upsertMeeting(meeting);
+    store.upsertMeeting({ ...meeting, title: "Updated planning" });
+
+    expect(useMeetingStore.getState().meetings).toHaveLength(1);
+    expect(useMeetingStore.getState().meetings[0].title).toBe("Updated planning");
   });
 });

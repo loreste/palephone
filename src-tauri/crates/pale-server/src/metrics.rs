@@ -30,15 +30,14 @@ pub async fn request_metrics(request: Request<Body>, next: Next) -> Response {
     let duration = start.elapsed().as_secs_f64();
 
     counter!("http_requests_total", "method" => method.clone(), "path" => path.clone(), "status" => status.clone()).increment(1);
-    histogram!("http_request_duration_seconds", "method" => method, "path" => path).record(duration);
+    histogram!("http_request_duration_seconds", "method" => method, "path" => path)
+        .record(duration);
 
     response
 }
 
 /// Handler for GET /metrics — returns Prometheus text format.
-pub async fn metrics_handler(
-    State(handle): State<Arc<PrometheusHandle>>,
-) -> impl IntoResponse {
+pub async fn metrics_handler(State(handle): State<Arc<PrometheusHandle>>) -> impl IntoResponse {
     handle.render()
 }
 

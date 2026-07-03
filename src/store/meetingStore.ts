@@ -14,6 +14,42 @@ export interface ConferenceLobby {
   participants: LobbyParticipant[];
 }
 
+export interface ConferenceParticipant {
+  user_id: string;
+  sip_uri: string;
+  role: "host" | "moderator" | "member";
+  bridge_slot?: number | null;
+  muted?: boolean;
+  removed?: boolean;
+  removed_at?: string | null;
+  removed_by?: string | null;
+  removal_reason?: string | null;
+  joined_at: string;
+}
+
+export interface ConferenceSummary {
+  id: string;
+  title: string;
+  mode: "audio" | "video" | "webinar";
+  participants: ConferenceParticipant[];
+  locked?: boolean;
+  active: boolean;
+  created_at: string;
+}
+
+export interface ConferenceAttendanceRecord {
+  id: string;
+  conference_id: string;
+  user_id: string;
+  sip_uri: string;
+  role: "host" | "moderator" | "member";
+  joined_at: string;
+  left_at?: string | null;
+  duration_secs?: number | null;
+  leave_reason?: "left" | "removed" | "ended" | null;
+  removed_by?: string | null;
+}
+
 export interface HandRaise {
   user_id: string;
   sip_uri: string;
@@ -84,10 +120,21 @@ export interface ScheduledMeeting {
   participants: string[];
   starts_at: string;
   ends_at: string;
+  recurrence?: {
+    frequency: "daily" | "weekly" | "monthly";
+    interval: number;
+    until?: string | null;
+  } | null;
+  status?: "scheduled" | "cancelled";
+  cancelled_at?: string | null;
+  updated_at?: string | null;
   created_at: string;
 }
 
 interface MeetingStoreState {
+  conferences: Record<string, ConferenceSummary>;
+  setConference: (conference: ConferenceSummary) => void;
+
   // Lobby
   lobby: ConferenceLobby | null;
   setLobby: (lobby: ConferenceLobby) => void;
@@ -122,6 +169,7 @@ interface MeetingStoreState {
   meetings: ScheduledMeeting[];
   setMeetings: (meetings: ScheduledMeeting[]) => void;
   addMeeting: (meeting: ScheduledMeeting) => void;
+  upsertMeeting: (meeting: ScheduledMeeting) => void;
 
   // Active conference ID for the current meeting
   activeConferenceId: string | null;
@@ -129,6 +177,11 @@ interface MeetingStoreState {
 }
 
 export const useMeetingStore = create<MeetingStoreState>((set) => ({
+  conferences: {},
+  setConference: (conference) => set((state) => ({
+    conferences: { ...state.conferences, [conference.id]: conference },
+  })),
+
   lobby: null,
   setLobby: (lobby) => set({ lobby }),
 
@@ -175,7 +228,15 @@ export const useMeetingStore = create<MeetingStoreState>((set) => ({
   setMeetings: (meetings) => set({ meetings }),
   addMeeting: (meeting) =>
     set((state) => ({
-      meetings: [...state.meetings, meeting],
+      meetings: state.meetings.some((m) => m.id === meeting.id)
+        ? state.meetings.map((m) => (m.id === meeting.id ? meeting : m))
+        : [...state.meetings, meeting],
+    })),
+  upsertMeeting: (meeting) =>
+    set((state) => ({
+      meetings: state.meetings.some((m) => m.id === meeting.id)
+        ? state.meetings.map((m) => (m.id === meeting.id ? meeting : m))
+        : [...state.meetings, meeting],
     })),
 
   activeConferenceId: null,

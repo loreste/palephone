@@ -4,13 +4,12 @@ use std::time::Duration;
 use matrix_sdk::{
     config::SyncSettings,
     ruma::{
+        api::client::room::create_room::v3::Request as CreateRoomRequest,
         api::client::typing::create_typing_event::v3::{
             Request as TypingRequest, Typing, TypingInfo,
         },
-        api::client::room::create_room::v3::Request as CreateRoomRequest,
         events::room::message::{
-            MessageType as RumaMessageType, OriginalSyncRoomMessageEvent,
-            RoomMessageEventContent,
+            MessageType as RumaMessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
         },
         events::typing::SyncTypingEvent,
         OwnedUserId, RoomId,
@@ -106,37 +105,33 @@ impl MatrixClient {
 
         // Register message handler
         let tx_msg = tx.clone();
-        client.add_event_handler(
-            move |event: OriginalSyncRoomMessageEvent, room: Room| {
-                let tx = tx_msg.clone();
-                async move {
-                    let msg = convert_message(&event, &room).await;
-                    let _ = tx.send(MatrixEvent::Message(msg));
-                }
-            },
-        );
+        client.add_event_handler(move |event: OriginalSyncRoomMessageEvent, room: Room| {
+            let tx = tx_msg.clone();
+            async move {
+                let msg = convert_message(&event, &room).await;
+                let _ = tx.send(MatrixEvent::Message(msg));
+            }
+        });
 
         let tx_typing = tx.clone();
         let own_user_id = client.user_id().map(|id| id.to_owned());
-        client.add_event_handler(
-            move |event: SyncTypingEvent, room: Room| {
-                let tx = tx_typing.clone();
-                let own_user_id = own_user_id.clone();
-                async move {
-                    let user_ids = event
-                        .content
-                        .user_ids
-                        .into_iter()
-                        .filter(|id| own_user_id.as_ref() != Some(id))
-                        .map(|id| id.to_string())
-                        .collect();
-                    let _ = tx.send(MatrixEvent::Typing {
-                        room_id: room.room_id().to_string(),
-                        user_ids,
-                    });
-                }
-            },
-        );
+        client.add_event_handler(move |event: SyncTypingEvent, room: Room| {
+            let tx = tx_typing.clone();
+            let own_user_id = own_user_id.clone();
+            async move {
+                let user_ids = event
+                    .content
+                    .user_ids
+                    .into_iter()
+                    .filter(|id| own_user_id.as_ref() != Some(id))
+                    .map(|id| id.to_string())
+                    .collect();
+                let _ = tx.send(MatrixEvent::Typing {
+                    room_id: room.room_id().to_string(),
+                    user_ids,
+                });
+            }
+        });
 
         let settings = SyncSettings::default();
 

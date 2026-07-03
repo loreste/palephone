@@ -7,8 +7,15 @@ import {
   Users,
   Video,
   Phone,
+  Pencil,
+  Trash2,
+  Download,
+  Repeat,
+  LogIn,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { occurrencesForDay, type CalendarMeetingOccurrence } from "@/lib/calendarOccurrences";
+import { joinScheduledMeeting, meetingCanJoin } from "@/lib/meetingJoin";
 import { useMeetingStore, type ScheduledMeeting } from "@/store/meetingStore";
 import { useServerStore } from "@/store/serverStore";
 import { paleServerApi } from "@/lib/tauri";
@@ -57,6 +64,11 @@ export function CalendarView() {
   const [startTime, setStartTime] = useState("09:00");
   const [endTime, setEndTime] = useState("10:00");
   const [participants, setParticipants] = useState("");
+  const [editingMeeting, setEditingMeeting] = useState<ScheduledMeeting | null>(null);
+  const [recurrenceFrequency, setRecurrenceFrequency] = useState<"none" | "daily" | "weekly" | "monthly">("none");
+  const [recurrenceInterval, setRecurrenceInterval] = useState("1");
+  const [recurrenceUntil, setRecurrenceUntil] = useState("");
+  const [preJoinMeeting, setPreJoinMeeting] = useState<CalendarMeetingOccurrence | null>(null);
 
   const loadMeetings = useCallback(async () => {
     if (!baseUrl || !token) return;
@@ -68,7 +80,35 @@ export function CalendarView() {
 
   useEffect(() => { loadMeetings(); }, [loadMeetings]);
 
-  const handleCreate = async () => {
+  const resetForm = () => {
+    setShowCreate(false);
+    setEditingMeeting(null);
+    setTitle("");
+    setDescription("");
+    setParticipants("");
+    setStartDate("");
+    setStartTime("09:00");
+    setEndTime("10:00");
+    setRecurrenceFrequency("none");
+    setRecurrenceInterval("1");
+    setRecurrenceUntil("");
+  };
+
+  const openEditor = (meeting: ScheduledMeeting) => {
+    setEditingMeeting(meeting);
+    setTitle(meeting.title);
+    setDescription(meeting.description || "");
+    setStartDate(new Date(meeting.starts_at).toISOString().slice(0, 10));
+    setStartTime(new Date(meeting.starts_at).toTimeString().slice(0, 5));
+    setEndTime(new Date(meeting.ends_at).toTimeString().slice(0, 5));
+    setParticipants(meeting.participants.filter((p) => p !== meeting.organizer_uri).join(", "));
+    setRecurrenceFrequency(meeting.recurrence?.frequency ?? "none");
+    setRecurrenceInterval(String(meeting.recurrence?.interval ?? 1));
+    setRecurrenceUntil(meeting.recurrence?.until ? meeting.recurrence.until.slice(0, 10) : "");
+    setShowCreate(true);
+  };
+
+  const handleSave = async () => {
     if (!baseUrl || !token || !title || !startDate) return;
     const startsAt = new Date(`${startDate}T${startTime}`).toISOString();
     const endsAt = new Date(`${startDate}T${endTime}`).toISOString();
@@ -76,25 +116,84 @@ export function CalendarView() {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
+    const recurrence = recurrenceFrequency === "none"
+      ? null
+      : {
+          frequency: recurrenceFrequency,
+          interval: Math.max(1, Number.parseInt(recurrenceInterval, 10) || 1),
+          until: recurrenceUntil ? new Date(`${recurrenceUntil}T23:59:59`).toISOString() : null,
+        };
     try {
-      const meeting = await paleServerApi<ScheduledMeeting>(baseUrl, token, "/v1/meetings", {
-        method: "POST",
-        body: {
-          title,
-          description: description || undefined,
-          participants: parts,
-          starts_at: startsAt,
-          ends_at: endsAt,
-        },
-      });
-      addMeeting(meeting);
-      setShowCreate(false);
-      setTitle("");
-      setDescription("");
-      setParticipants("");
-      toast({ type: "info", title: "Meeting scheduled" });
+      const payload = {
+        title,
+        description: description || undefined,
+        participants: parts,
+        starts_at: startsAt,
+        ends_at: endsAt,
+        recurrence,
+      };
+      if (editingMeeting) {
+        const meeting = await paleServerApi<ScheduledMeeting>(baseUrl, token, `/v1/meetings/${editingMeeting.id}`, {
+          method: "PUT",
+          body: payload,
+        });
+        setMeetings(meetings.map((item) => item.id === meeting.id ? meeting : item));
+        toast({ type: "success", title: "Meeting updated" });
+      } else {
+        const meeting = await paleServerApi<ScheduledMeeting>(baseUrl, token, "/v1/meetings", {
+          method: "POST",
+          body: payload,
+        });
+        addMeeting(meeting);
+        toast({ type: "info", title: "Meeting scheduled" });
+      }
+      resetForm();
     } catch {
-      toast({ type: "error", title: "Failed to create meeting" });
+      toast({ type: "error", title: editingMeeting ? "Failed to update meeting" : "Failed to create meeting" });
+    }
+  };
+
+  const cancelMeeting = async (meeting: ScheduledMeeting) => {
+    if (!baseUrl || !token) return;
+    try {
+      const cancelled = await paleServerApi<ScheduledMeeting>(baseUrl, token, `/v1/meetings/${meeting.id}`, {
+        method: "DELETE",
+        body: {},
+      });
+      setMeetings(meetings.map((item) => item.id === cancelled.id ? cancelled : item));
+      toast({ type: "info", title: "Meeting cancelled" });
+    } catch {
+      toast({ type: "error", title: "Failed to cancel meeting" });
+    }
+  };
+
+  const downloadIcs = async (meeting: ScheduledMeeting) => {
+    if (!baseUrl || !token) return;
+    try {
+      const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/meetings/${meeting.id}/ics`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) throw new Error("download failed");
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${meeting.title.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "") || "meeting"}.ics`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      toast({ type: "error", title: "Failed to download calendar invite" });
+    }
+  };
+
+  const joinMeeting = async (meeting: ScheduledMeeting) => {
+    if (!baseUrl || !token) return;
+    try {
+      await joinScheduledMeeting(baseUrl, token, meeting);
+      toast({ type: "success", title: "Joining meeting" });
+      setPreJoinMeeting(null);
+    } catch (err) {
+      toast({ type: "error", title: "Failed to join meeting", description: String(err) });
     }
   };
 
@@ -130,8 +229,7 @@ export function CalendarView() {
     return days;
   }, [year, month, firstDay, totalDays]);
 
-  const meetingsOnDay = (day: Date) =>
-    meetings.filter((m) => sameDay(new Date(m.starts_at), day));
+  const meetingsOnDay = (day: Date) => occurrencesForDay(meetings, day);
 
   // Week view days
   const weekDays = useMemo(() => {
@@ -146,12 +244,7 @@ export function CalendarView() {
 
   const viewMeetings = mode === "day"
     ? meetingsOnDay(currentDate)
-    : mode === "week"
-      ? meetings.filter((m) => {
-          const d = new Date(m.starts_at);
-          return d >= weekDays[0] && d <= weekDays[6];
-        })
-      : [];
+    : [];
 
   const dayDetail = selectedDay ? meetingsOnDay(selectedDay) : [];
 
@@ -189,6 +282,7 @@ export function CalendarView() {
           </div>
           <button
             onClick={() => {
+              resetForm();
               setShowCreate(true);
               setStartDate(
                 (selectedDay ?? today).toISOString().slice(0, 10)
@@ -262,10 +356,14 @@ export function CalendarView() {
                   {DAY_NAMES[day.getDay()]} {day.getDate()}
                 </div>
                 {meetingsOnDay(day).map((m) => (
-                  <div key={m.id} className="text-xs p-2 bg-accent/10 rounded border border-accent/20">
-                    <div className="font-medium truncate">{m.title}</div>
-                    <div className="text-secondary">{formatTime(m.starts_at)} - {formatTime(m.ends_at)}</div>
-                  </div>
+                  <WeekMeetingCard
+                    key={m.occurrence_key}
+                    meeting={m}
+                    onPreJoin={setPreJoinMeeting}
+                    onEdit={openEditor}
+                    onCancel={cancelMeeting}
+                    onDownloadIcs={downloadIcs}
+                  />
                 ))}
               </div>
             ))}
@@ -278,7 +376,7 @@ export function CalendarView() {
               <p className="text-sm text-secondary py-8 text-center">No meetings scheduled for this day</p>
             )}
             {viewMeetings.map((m) => (
-              <MeetingCard key={m.id} meeting={m} />
+              <MeetingCard key={m.occurrence_key} meeting={m} onPreJoin={setPreJoinMeeting} onEdit={openEditor} onCancel={cancelMeeting} onDownloadIcs={downloadIcs} />
             ))}
           </div>
         )}
@@ -299,7 +397,7 @@ export function CalendarView() {
             ) : (
               <div className="space-y-2">
                 {dayDetail.map((m) => (
-                  <MeetingCard key={m.id} meeting={m} />
+                  <MeetingCard key={m.occurrence_key} meeting={m} onPreJoin={setPreJoinMeeting} onEdit={openEditor} onCancel={cancelMeeting} onDownloadIcs={downloadIcs} />
                 ))}
               </div>
             )}
@@ -311,7 +409,7 @@ export function CalendarView() {
       {showCreate && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-surface border border-border-subtle rounded-lg p-4 w-[400px] max-w-[90vw] space-y-3">
-            <h3 className="font-semibold text-lg">Schedule Meeting</h3>
+            <h3 className="font-semibold text-lg">{editingMeeting ? "Edit Meeting" : "Schedule Meeting"}</h3>
             <input
               className="w-full rounded-md border border-border-subtle bg-input px-3 py-2 text-sm"
               placeholder="Meeting title"
@@ -351,40 +449,123 @@ export function CalendarView() {
               value={participants}
               onChange={(e) => setParticipants(e.target.value)}
             />
+            <div className="grid grid-cols-3 gap-2">
+              <select
+                className="rounded-md border border-border-subtle bg-input px-2 py-2 text-sm"
+                value={recurrenceFrequency}
+                onChange={(e) => setRecurrenceFrequency(e.target.value as typeof recurrenceFrequency)}
+              >
+                <option value="none">No repeat</option>
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+              </select>
+              <input
+                type="number"
+                min={1}
+                className="rounded-md border border-border-subtle bg-input px-2 py-2 text-sm"
+                value={recurrenceInterval}
+                onChange={(e) => setRecurrenceInterval(e.target.value)}
+                disabled={recurrenceFrequency === "none"}
+                aria-label="Repeat interval"
+              />
+              <input
+                type="date"
+                className="rounded-md border border-border-subtle bg-input px-2 py-2 text-sm"
+                value={recurrenceUntil}
+                onChange={(e) => setRecurrenceUntil(e.target.value)}
+                disabled={recurrenceFrequency === "none"}
+                aria-label="Repeat until"
+              />
+            </div>
             <div className="flex justify-end gap-2 pt-2">
               <button
-                onClick={() => setShowCreate(false)}
+                onClick={resetForm}
                 className="px-4 py-2 text-sm rounded-md hover:bg-hover"
               >
                 Cancel
               </button>
               <button
-                onClick={handleCreate}
+                onClick={handleSave}
                 disabled={!title || !startDate}
                 className="px-4 py-2 text-sm bg-accent text-white rounded-md hover:bg-accent/90 disabled:opacity-50"
               >
-                Schedule
+                {editingMeeting ? "Save" : "Schedule"}
               </button>
             </div>
           </div>
         </div>
       )}
+
+      {preJoinMeeting && (
+        <PreJoinDialog
+          meeting={preJoinMeeting}
+          onClose={() => setPreJoinMeeting(null)}
+          onJoin={() => joinMeeting(preJoinMeeting)}
+        />
+      )}
     </div>
   );
 }
 
-function MeetingCard({ meeting }: { meeting: ScheduledMeeting }) {
+function MeetingCard({
+  meeting,
+  onPreJoin,
+  onEdit,
+  onCancel,
+  onDownloadIcs,
+}: {
+  meeting: CalendarMeetingOccurrence;
+  onPreJoin: (meeting: CalendarMeetingOccurrence) => void;
+  onEdit: (meeting: ScheduledMeeting) => void;
+  onCancel: (meeting: ScheduledMeeting) => void;
+  onDownloadIcs: (meeting: ScheduledMeeting) => void;
+}) {
+  const cancelled = meeting.status === "cancelled";
+  const canJoin = meetingCanJoin(meeting);
   return (
-    <div className="p-3 rounded-md border border-border-subtle bg-surface hover:bg-hover transition-colors">
+    <div className={cn(
+      "p-3 rounded-md border border-border-subtle bg-surface hover:bg-hover transition-colors",
+      cancelled && "opacity-60"
+    )}>
       <div className="flex items-start justify-between">
         <div className="flex-1 min-w-0">
-          <h4 className="font-medium text-sm truncate">{meeting.title}</h4>
+          <div className="flex items-center gap-2 min-w-0">
+            <h4 className={cn("font-medium text-sm truncate", cancelled && "line-through")}>{meeting.title}</h4>
+            {meeting.recurrence && (
+              <Repeat size={12} className="text-accent shrink-0" />
+            )}
+            {meeting.is_recurring_occurrence && (
+              <span className="rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">Series</span>
+            )}
+            {cancelled && (
+              <span className="rounded bg-red-500/10 px-1.5 py-0.5 text-[10px] text-red-500">Cancelled</span>
+            )}
+          </div>
           {meeting.description && (
             <p className="text-xs text-secondary mt-0.5 truncate">{meeting.description}</p>
           )}
         </div>
         <div className="flex items-center gap-1 ml-2 text-secondary">
           {meeting.conference_id ? <Video size={14} /> : <Phone size={14} />}
+          {canJoin && (
+            <button onClick={() => onPreJoin(meeting)} className="p-1 hover:text-accent" title="Join meeting">
+              <LogIn size={13} />
+            </button>
+          )}
+          <button onClick={() => onDownloadIcs(meeting)} className="p-1 hover:text-accent" title="Download invite">
+            <Download size={13} />
+          </button>
+          {!cancelled && (
+            <>
+              <button onClick={() => onEdit(meeting)} className="p-1 hover:text-accent" title="Edit meeting">
+                <Pencil size={13} />
+              </button>
+              <button onClick={() => onCancel(meeting)} className="p-1 hover:text-destructive" title="Cancel meeting">
+                <Trash2 size={13} />
+              </button>
+            </>
+          )}
         </div>
       </div>
       <div className="flex items-center gap-3 mt-2 text-xs text-secondary">
@@ -398,6 +579,96 @@ function MeetingCard({ meeting }: { meeting: ScheduledMeeting }) {
             {meeting.participants.length}
           </span>
         )}
+      </div>
+    </div>
+  );
+}
+
+function WeekMeetingCard({
+  meeting,
+  onPreJoin,
+  onEdit,
+  onCancel,
+  onDownloadIcs,
+}: {
+  meeting: CalendarMeetingOccurrence;
+  onPreJoin: (meeting: CalendarMeetingOccurrence) => void;
+  onEdit: (meeting: ScheduledMeeting) => void;
+  onCancel: (meeting: ScheduledMeeting) => void;
+  onDownloadIcs: (meeting: ScheduledMeeting) => void;
+}) {
+  const cancelled = meeting.status === "cancelled";
+  const canJoin = meetingCanJoin(meeting);
+  return (
+    <div className={cn(
+      "text-xs p-2 bg-accent/10 rounded border border-accent/20",
+      cancelled && "opacity-60"
+    )}>
+      <div className="flex items-start justify-between gap-1">
+        <div className="min-w-0">
+          <div className={cn("font-medium truncate", cancelled && "line-through")}>{meeting.title}</div>
+          <div className="text-secondary">{formatTime(meeting.starts_at)} - {formatTime(meeting.ends_at)}</div>
+        </div>
+        <div className="flex items-center gap-0.5 text-secondary shrink-0">
+          {meeting.recurrence && <Repeat size={11} className="text-accent" />}
+          {canJoin && (
+            <button onClick={() => onPreJoin(meeting)} className="p-0.5 hover:text-accent" title="Join meeting">
+              <LogIn size={11} />
+            </button>
+          )}
+          <button onClick={() => onDownloadIcs(meeting)} className="p-0.5 hover:text-accent" title="Download invite">
+            <Download size={11} />
+          </button>
+          {!cancelled && (
+            <>
+              <button onClick={() => onEdit(meeting)} className="p-0.5 hover:text-accent" title="Edit meeting">
+                <Pencil size={11} />
+              </button>
+              <button onClick={() => onCancel(meeting)} className="p-0.5 hover:text-destructive" title="Cancel meeting">
+                <Trash2 size={11} />
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PreJoinDialog({
+  meeting,
+  onClose,
+  onJoin,
+}: {
+  meeting: CalendarMeetingOccurrence;
+  onClose: () => void;
+  onJoin: () => void;
+}) {
+  const participantCount = meeting.participants.length;
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <div className="bg-surface border border-border-subtle rounded-lg p-4 w-[380px] max-w-[90vw] space-y-4">
+        <div>
+          <h3 className="font-semibold text-lg truncate">{meeting.title}</h3>
+          <p className="text-sm text-secondary mt-1">
+            {formatTime(meeting.starts_at)} - {formatTime(meeting.ends_at)}
+            {participantCount > 0 ? ` · ${participantCount} attendees` : ""}
+          </p>
+        </div>
+        {meeting.description && (
+          <p className="text-sm text-secondary line-clamp-3">{meeting.description}</p>
+        )}
+        <div className="rounded-md border border-border-subtle bg-hover/40 p-3 text-xs text-secondary">
+          Joining will start the meeting call and open the meeting controls for lobby, hands, polls, rooms, Q&A, and captions.
+        </div>
+        <div className="flex justify-end gap-2">
+          <button onClick={onClose} className="px-4 py-2 text-sm rounded-md hover:bg-hover">
+            Cancel
+          </button>
+          <button onClick={onJoin} className="px-4 py-2 text-sm bg-accent text-white rounded-md hover:bg-accent/90">
+            Join now
+          </button>
+        </div>
       </div>
     </div>
   );

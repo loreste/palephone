@@ -5,17 +5,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LdapConfig {
     pub enabled: bool,
-    pub server_url: String,          // ldap://dc.company.com:389 or ldaps://dc.company.com:636
-    pub bind_dn: String,             // CN=svc-pale,OU=Service Accounts,DC=company,DC=com
+    pub server_url: String, // ldap://dc.company.com:389 or ldaps://dc.company.com:636
+    pub bind_dn: String,    // CN=svc-pale,OU=Service Accounts,DC=company,DC=com
     pub bind_password: String,
-    pub base_dn: String,             // DC=company,DC=com
-    pub user_search_filter: String,  // (&(objectClass=user)(sAMAccountName={username}))
-    pub user_dn_attribute: String,   // sAMAccountName
+    pub base_dn: String,                // DC=company,DC=com
+    pub user_search_filter: String,     // (&(objectClass=user)(sAMAccountName={username}))
+    pub user_dn_attribute: String,      // sAMAccountName
     pub display_name_attribute: String, // displayName
-    pub email_attribute: String,     // mail
-    pub group_attribute: String,     // memberOf
-    pub admin_group: String,         // CN=PaleAdmins,OU=Groups,DC=company,DC=com
-    pub sip_domain: String,          // company.com — used to construct SIP URIs
+    pub email_attribute: String,        // mail
+    pub group_attribute: String,        // memberOf
+    pub admin_group: String,            // CN=PaleAdmins,OU=Groups,DC=company,DC=com
+    pub sip_domain: String,             // company.com — used to construct SIP URIs
 }
 
 impl Default for LdapConfig {
@@ -72,9 +72,7 @@ pub async fn ldap_authenticate(
         .map_err(|e| format!("LDAP bind rejected: {}", e))?;
 
     // Search for the user
-    let filter = config
-        .user_search_filter
-        .replace("{username}", username);
+    let filter = config.user_search_filter.replace("{username}", username);
 
     let (entries, _) = ldap
         .search(
@@ -137,7 +135,10 @@ pub async fn ldap_authenticate(
         .unwrap_or_default();
 
     let is_admin = !config.admin_group.is_empty()
-        && groups.iter().any(|g| g.to_lowercase().contains(&config.admin_group.to_lowercase()));
+        && groups.iter().any(|g| {
+            g.to_lowercase()
+                .contains(&config.admin_group.to_lowercase())
+        });
 
     let sip_uri = format!("sip:{}@{}", username, config.sip_domain);
 

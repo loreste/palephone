@@ -52,10 +52,28 @@ pub struct ChatMessage {
 #[serde(rename_all = "snake_case")]
 pub enum MessageType {
     Text,
-    Image { url: String, thumbnail_url: Option<String>, width: Option<u32>, height: Option<u32> },
-    File { url: String, filename: String, size: Option<u64>, mimetype: Option<String> },
-    Audio { url: String, duration_ms: Option<u64> },
-    Video { url: String, duration_ms: Option<u64>, width: Option<u32>, height: Option<u32> },
+    Image {
+        url: String,
+        thumbnail_url: Option<String>,
+        width: Option<u32>,
+        height: Option<u32>,
+    },
+    File {
+        url: String,
+        filename: String,
+        size: Option<u64>,
+        mimetype: Option<String>,
+    },
+    Audio {
+        url: String,
+        duration_ms: Option<u64>,
+    },
+    Video {
+        url: String,
+        duration_ms: Option<u64>,
+        width: Option<u32>,
+        height: Option<u32>,
+    },
     Emote,
     Notice,
 }

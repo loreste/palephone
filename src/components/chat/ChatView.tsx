@@ -1,12 +1,13 @@
 import { useState, useRef, useEffect, useCallback, type ReactNode } from "react";
-import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Video, Users, Reply, Pencil, Pin, Forward, Check, CheckCheck, Search, Radio, Hash, CalendarClock } from "lucide-react";
+import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Video, Users, Reply, Pencil, Pin, Forward, Check, CheckCheck, Search, Radio, Hash, CalendarClock, Star, AlertTriangle, Plug, Copy, Trash2 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useChatStore, type ChatMessage, type RoomSummary } from "@/store/chatStore";
 import { useMatrixStore } from "@/store/matrixStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
-import { matrixSendMessage, matrixSetTyping, matrixCreateDm, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerEndRoomCall, paleServerGetConferences, paleServerGetMeetings, paleServerCreateMeeting, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerStartMeeting, paleServerGetRoomMessages, paleServerGetRoomMessageState, paleServerSendRoomMessage, paleServerEditMessage, paleServerDeleteMessage, type ServerRoom, type ServerUser, type ServerRoomMessage, type ServerRoomMessageState, type ServerMeeting, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult } from "@/lib/tauri";
+import { matrixSendMessage, matrixSetTyping, matrixCreateDm, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerSaveMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerEndRoomCall, paleServerGetConferences, paleServerGetMeetings, paleServerCreateMeeting, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerGetRoomMessages, paleServerGetRoomMessageState, paleServerSendRoomMessage, paleServerGetChannelWebhooks, paleServerCreateChannelWebhook, paleServerUpdateChannelWebhook, paleServerDeleteChannelWebhook, paleServerEditMessage, paleServerDeleteMessage, type ServerRoom, type ServerUser, type ServerRoomMessage, type ServerRoomMessageState, type ServerMeeting, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult, type ServerChannelWebhook } from "@/lib/tauri";
+import { joinScheduledMeeting } from "@/lib/meetingJoin";
 import { toast } from "@/components/ui/Toast";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
 import { EncryptionBadge } from "@/components/encryption/EncryptionBadge";
@@ -45,6 +46,8 @@ function mapServerRoomMessages(
       reply_to: msg.reply_to,
       edited_at: msg.edited_at ? Math.floor(new Date(msg.edited_at).getTime() / 1000) : undefined,
       pinned: msg.pinned,
+      priority: msg.priority ?? "normal",
+      saved_by: msg.saved_by ?? [],
       mentions: msg.mentions ?? [],
       mentioned_user_uris: msg.mentioned_user_uris ?? [],
       reactions,
@@ -70,6 +73,9 @@ function serverRoomToSummary(room: ServerRoom, currentSipUri?: string | null, na
     room_id: room.id,
     team_id: room.team_id ?? null,
     channel_name: room.channel_name ?? null,
+    channel_type: room.channel_type ?? "standard",
+    channel_owners: room.channel_owners ?? [],
+    posting_policy: room.posting_policy ?? "members",
     name: nameOverride ?? directRoomName(room, currentSipUri),
     is_direct: room.is_direct,
     is_encrypted: false,
@@ -409,8 +415,7 @@ function ConversationList({
   const joinMeeting = async (meeting: ServerMeeting) => {
     if (!connected || !baseUrl || !token) return;
     try {
-      const target = await paleServerStartMeeting(baseUrl, token, meeting.id);
-      await ipcMakeCall(target.call_uri);
+      await joinScheduledMeeting(baseUrl, token, meeting);
     } catch (err) {
       toast({ type: "error", title: "Failed to join meeting", description: String(err) });
     }
@@ -466,8 +471,7 @@ function ConversationList({
     if (result.kind === "meeting") {
       if (!connected || !baseUrl || !token) return;
       try {
-        const target = await paleServerStartMeeting(baseUrl, token, result.id);
-        await ipcMakeCall(target.call_uri);
+        await joinScheduledMeeting(baseUrl, token, { id: result.id });
       } catch (err) {
         toast({ type: "error", title: "Failed to start meeting", description: String(err) });
       }
@@ -568,6 +572,15 @@ function ConversationList({
                       <div className="flex items-center gap-1">
                         {room.is_encrypted && <EncryptionBadge level="encrypted" />}
                         <span className="text-sm font-medium text-primary truncate">{room.name}</span>
+                        {room.channel_type === "private" && (
+                          <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-500">Private</span>
+                        )}
+                        {room.channel_type === "shared" && (
+                          <span className="rounded bg-blue-500/10 px-1.5 py-0.5 text-[10px] text-blue-500">Shared</span>
+                        )}
+                        {room.posting_policy === "owners" && (
+                          <span className="rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">Moderated</span>
+                        )}
                       </div>
                       {room.last_message && (
                         <p className="text-xs text-tertiary truncate">{room.last_message}</p>
@@ -740,6 +753,163 @@ function GroupResultButton({
   );
 }
 
+function ConnectorDialog({
+  baseUrl,
+  token,
+  roomId,
+  roomName,
+  onClose,
+}: {
+  baseUrl: string;
+  token: string;
+  roomId: string;
+  roomName: string;
+  onClose: () => void;
+}) {
+  const [webhooks, setWebhooks] = useState<ServerChannelWebhook[]>([]);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [createdUrl, setCreatedUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      setWebhooks(await paleServerGetChannelWebhooks(baseUrl, token, roomId));
+    } catch (error) {
+      toast({ type: "error", title: "Unable to load connectors", description: String(error) });
+    }
+  }, [baseUrl, token, roomId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const createWebhook = async () => {
+    if (!name.trim()) return;
+    setLoading(true);
+    try {
+      const response = await paleServerCreateChannelWebhook(baseUrl, token, roomId, {
+        name: name.trim(),
+        description: description.trim() || undefined,
+      });
+      setCreatedUrl(`${baseUrl.replace(/\/$/, "")}/v1/webhooks/${response.token}`);
+      setName("");
+      setDescription("");
+      await load();
+    } catch (error) {
+      toast({ type: "error", title: "Unable to create connector", description: String(error) });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const copyUrl = async (value: string) => {
+    await navigator.clipboard?.writeText(value);
+    toast({ type: "success", title: "Copied" });
+  };
+
+  const setEnabled = async (webhook: ServerChannelWebhook, enabled: boolean) => {
+    try {
+      await paleServerUpdateChannelWebhook(baseUrl, token, roomId, webhook.id, enabled);
+      await load();
+    } catch (error) {
+      toast({ type: "error", title: "Unable to update connector", description: String(error) });
+    }
+  };
+
+  const remove = async (webhook: ServerChannelWebhook) => {
+    try {
+      await paleServerDeleteChannelWebhook(baseUrl, token, roomId, webhook.id);
+      await load();
+    } catch (error) {
+      toast({ type: "error", title: "Unable to delete connector", description: String(error) });
+    }
+  };
+
+  return (
+    <div className="absolute inset-0 z-40 flex items-center justify-center bg-base/70 backdrop-blur-sm px-4">
+      <div className="w-full max-w-lg rounded-lg border border-border-default bg-surface shadow-xl">
+        <div className="flex items-center justify-between gap-3 border-b border-border-subtle px-4 py-3">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold truncate">Connectors</div>
+            <div className="text-xs text-tertiary truncate">{roomName}</div>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-md text-tertiary hover:text-primary hover:bg-elevated">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="p-4 space-y-4">
+          <div className="grid gap-2">
+            <input
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="Connector name"
+              className="h-9 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+            />
+            <input
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+              placeholder="Description"
+              className="h-9 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+            />
+            <button
+              onClick={createWebhook}
+              disabled={!name.trim() || loading}
+              className="h-9 rounded-md bg-accent text-white text-sm font-medium disabled:opacity-50"
+            >
+              {loading ? "Creating..." : "Create"}
+            </button>
+          </div>
+
+          {createdUrl && (
+            <div className="rounded-md border border-border-subtle bg-base p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-medium">Webhook URL</span>
+                <button onClick={() => copyUrl(createdUrl)} className="text-xs text-accent inline-flex items-center gap-1">
+                  <Copy size={12} />
+                  Copy
+                </button>
+              </div>
+              <div className="break-all text-xs text-secondary">{createdUrl}</div>
+            </div>
+          )}
+
+          <div className="space-y-2 max-h-64 overflow-y-auto">
+            {webhooks.length === 0 ? (
+              <div className="py-6 text-center text-sm text-tertiary">No connectors</div>
+            ) : (
+              webhooks.map((webhook) => (
+                <div key={webhook.id} className="flex items-center gap-3 rounded-md bg-base p-3">
+                  <div className="h-8 w-8 rounded-md bg-accent-muted text-accent flex items-center justify-center shrink-0">
+                    <Plug size={15} />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium truncate">{webhook.name}</div>
+                    <div className="text-xs text-tertiary truncate">
+                      {webhook.enabled ? "Enabled" : "Disabled"}
+                      {webhook.last_used_at ? ` · Used ${new Date(webhook.last_used_at).toLocaleString()}` : ""}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setEnabled(webhook, !webhook.enabled)}
+                    className="h-8 px-2 rounded-md text-xs bg-hover text-secondary hover:text-primary"
+                  >
+                    {webhook.enabled ? "Disable" : "Enable"}
+                  </button>
+                  <button
+                    onClick={() => remove(webhook)}
+                    className="h-8 w-8 rounded-md text-destructive hover:bg-destructive/10 inline-flex items-center justify-center"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ChatRoom({
   room,
   messages,
@@ -756,9 +926,11 @@ function ChatRoom({
   const [hasMore, setHasMore] = useState(true);
   const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
   const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
+  const [messagePriority, setMessagePriority] = useState<"normal" | "high" | "urgent">("normal");
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionUsers, setMentionUsers] = useState<ServerUser[]>([]);
   const [allUsers, setAllUsers] = useState<ServerUser[]>([]);
+  const [showConnectors, setShowConnectors] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -774,6 +946,10 @@ function ChatRoom({
   const localMemberUri = currentSipUri ?? room.created_by;
   const otherDirectMember = room.members?.find((member) => member !== localMemberUri);
   const canStartRoomCall = isServerRoom && (!room.is_direct || Boolean(otherDirectMember));
+  const canManageConnectors = isServerRoom && !room.is_direct && (
+    room.created_by === currentSipUri
+    || room.channel_owners?.includes(currentSipUri ?? "")
+  );
   const hasActiveRoomCall = isServerRoom && !room.is_direct && Boolean(room.call_uri);
 
   // Load server users for mentions
@@ -964,6 +1140,8 @@ function ChatRoom({
           timestamp: Math.floor(new Date(msg.created_at).getTime() / 1000),
           is_encrypted: false,
           is_own: true,
+          priority: msg.priority ?? "normal",
+          saved_by: msg.saved_by ?? [],
           mentions: msg.mentions ?? [],
           mentioned_user_uris: msg.mentioned_user_uris ?? [],
         });
@@ -1002,7 +1180,7 @@ function ChatRoom({
     // Handle reply or normal send
     try {
       if (isServerRoom && connected && baseUrl && token) {
-        const msg = await paleServerSendRoomMessage(baseUrl, token, room.room_id, body, replyingTo?.event_id);
+        const msg = await paleServerSendRoomMessage(baseUrl, token, room.room_id, body, replyingTo?.event_id, messagePriority);
         addMessage({
           event_id: msg.id,
           room_id: room.room_id,
@@ -1015,12 +1193,15 @@ function ChatRoom({
           is_own: true,
           reply_to: replyingTo?.event_id,
           reply_preview: replyingTo ? { sender: replyingTo.sender_name ?? replyingTo.sender, body: replyingTo.body } : undefined,
+          priority: msg.priority ?? messagePriority,
+          saved_by: msg.saved_by ?? [],
           mentions: msg.mentions ?? [],
           mentioned_user_uris: msg.mentioned_user_uris ?? [],
         });
       } else {
         await matrixSendMessage(room.room_id, body);
       }
+      setMessagePriority("normal");
     } catch (err) {
       toast({ type: "error", title: "Send failed", description: String(err) });
     }
@@ -1046,7 +1227,7 @@ function ChatRoom({
     const senderLabel = msg.sender_name ?? msg.sender;
     const body = `Forwarded from ${senderLabel}:\n${msg.body}`;
     try {
-      await paleServerSendRoomMessage(baseUrl, token, target, body);
+      await paleServerSendRoomMessage(baseUrl, token, target, body, undefined, "normal");
       toast({ type: "success", title: "Message forwarded" });
     } catch (err) {
       toast({ type: "error", title: "Forward failed", description: String(err) });
@@ -1061,6 +1242,18 @@ function ChatRoom({
       updateMessage(room.room_id, msg.event_id, { pinned: newPinned });
     } catch (err) {
       toast({ type: "error", title: "Pin failed", description: String(err) });
+    }
+  };
+
+  const handleSave = async (msg: ChatMessage) => {
+    if (!connected || !baseUrl || !token || !currentSipUri) return;
+    const savedBy = msg.saved_by ?? [];
+    const shouldSave = !savedBy.includes(currentSipUri);
+    try {
+      const updated = await paleServerSaveMessage(baseUrl, token, msg.event_id, shouldSave);
+      updateMessage(room.room_id, msg.event_id, { saved_by: updated.saved_by ?? [] });
+    } catch (err) {
+      toast({ type: "error", title: "Save failed", description: String(err) });
     }
   };
 
@@ -1150,6 +1343,16 @@ function ChatRoom({
           </div>
           <PresenceLabel name={room.name} isDirect={room.is_direct} isEncrypted={room.is_encrypted} />
         </div>
+        {canManageConnectors && (
+          <button
+            onClick={() => setShowConnectors(true)}
+            className="p-2 rounded-md text-tertiary hover:text-accent hover:bg-elevated transition-colors"
+            title="Channel connectors"
+            aria-label="Channel connectors"
+          >
+            <Plug size={17} />
+          </button>
+        )}
         <button
           onClick={() => startRoomCall("audio")}
           disabled={!canStartRoomCall}
@@ -1179,6 +1382,16 @@ function ChatRoom({
           <Video size={17} />
         </button>
       </div>
+
+      {showConnectors && baseUrl && token && (
+        <ConnectorDialog
+          baseUrl={baseUrl}
+          token={token}
+          roomId={room.room_id}
+          roomName={room.name}
+          onClose={() => setShowConnectors(false)}
+        />
+      )}
 
       {hasActiveRoomCall && (
         <div className="flex items-center justify-between gap-3 px-4 py-2 border-b border-border-subtle bg-success/10 text-sm">
@@ -1228,6 +1441,7 @@ function ChatRoom({
             onEdit={handleEdit}
             onForward={handleForward}
             onPin={handlePin}
+            onSave={handleSave}
           />
         ))}
         <div ref={messagesEndRef} />
@@ -1288,6 +1502,18 @@ function ChatRoom({
         >
           <Paperclip size={18} />
         </button>
+        {!editingMessage && (
+          <select
+            value={messagePriority}
+            onChange={(event) => setMessagePriority(event.target.value as typeof messagePriority)}
+            className="h-9 rounded-md bg-surface border border-border-subtle px-2 text-xs text-primary focus:outline-none focus:border-border-focus"
+            aria-label="Message priority"
+          >
+            <option value="normal">Normal</option>
+            <option value="high">High</option>
+            <option value="urgent">Urgent</option>
+          </select>
+        )}
         <input
           ref={inputRef}
           type="text"
@@ -1775,12 +2001,14 @@ function MessageBubble({
   onEdit,
   onForward,
   onPin,
+  onSave,
 }: {
   message: ChatMessage;
   onReply?: (msg: ChatMessage) => void;
   onEdit?: (msg: ChatMessage) => void;
   onForward?: (msg: ChatMessage) => void;
   onPin?: (msg: ChatMessage) => void;
+  onSave?: (msg: ChatMessage) => void;
 }) {
   const time = new Date(message.timestamp * 1000).toLocaleTimeString([], {
     hour: "numeric",
@@ -1795,6 +2023,7 @@ function MessageBubble({
       ? currentSipUri
       : `sip:${currentSipUri}`
     : "";
+  const saved = currentUserUri ? (message.saved_by ?? []).includes(currentUserUri) : false;
   const readCount = (message.read_by ?? []).filter((uri) => uri !== currentUserUri).length;
 
   const handleDelete = async () => {
@@ -1864,6 +2093,13 @@ function MessageBubble({
           >
             <Pin size={12} />
           </button>
+          <button
+            onClick={() => onSave?.(message)}
+            className={cn("p-0.5 rounded", saved ? "text-warning" : "text-tertiary hover:text-warning")}
+            title={saved ? "Unsave" : "Save"}
+          >
+            <Star size={12} />
+          </button>
           {/* Forward */}
           <button
             onClick={() => onForward?.(message)}
@@ -1911,6 +2147,19 @@ function MessageBubble({
           {message.pinned && (
             <div className="flex items-center gap-1 text-[9px] text-accent mb-1">
               <Pin size={9} /> Pinned
+            </div>
+          )}
+          {saved && (
+            <div className="flex items-center gap-1 text-[9px] text-warning mb-1">
+              <Star size={9} /> Saved
+            </div>
+          )}
+          {message.priority && message.priority !== "normal" && (
+            <div className={cn(
+              "flex items-center gap-1 text-[9px] mb-1",
+              message.priority === "urgent" ? "text-destructive" : "text-warning"
+            )}>
+              <AlertTriangle size={9} /> {message.priority === "urgent" ? "Urgent" : "High priority"}
             </div>
           )}
 

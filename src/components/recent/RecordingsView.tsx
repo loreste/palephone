@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Mic, Play, Trash2, Download } from "lucide-react";
 import { useServerStore } from "@/store/serverStore";
 import { toast } from "@/components/ui/Toast";
+import { Badge } from "@/components/ui/Badge";
 
 interface RecordingEntry {
   id: string;
@@ -11,6 +12,11 @@ interface RecordingEntry {
   duration_secs: number;
   file_id: string | null;
   recorded_by: string;
+  conference_id?: string | null;
+  transcript_segment_count?: number;
+  legal_hold?: boolean;
+  deleted_at?: string | null;
+  deleted_by?: string | null;
   created_at: string;
 }
 
@@ -88,6 +94,11 @@ export function RecordingsView() {
                 {rec.duration_secs}s &middot;{" "}
                 {new Date(rec.created_at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
               </p>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {rec.legal_hold && <Badge variant="warning">Legal hold</Badge>}
+                {rec.transcript_segment_count ? <Badge variant="accent">{rec.transcript_segment_count} transcript lines</Badge> : null}
+                {rec.conference_id && <Badge variant="success">Meeting</Badge>}
+              </div>
             </div>
             <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
               {rec.file_id && (

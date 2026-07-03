@@ -8,11 +8,11 @@ use tokio_postgres::NoTls;
 use uuid::Uuid;
 
 use crate::{
-    AdminAuditEvent, AdminSession, BusinessHours, CallDetailRecord, CallHistoryEntry, CallRecording,
-    CallSession, Conference, FileRecord, Holiday, MessageRead, MessageReaction, MessageReactionRecord, QueueCallback, QueueCallerEntry, RoutingRule,
-    Room, RoomMember, RoomMessage, SipAccount, SipDialog, SipMessage, SipNotification,
-    SipRegistration, SipSubscription, SipTransaction, User, UserCallSettings, UserPresence,
-    VipCaller, Voicemail,
+    AdminAuditEvent, AdminSession, BusinessHours, CallDetailRecord, CallHistoryEntry,
+    CallRecording, CallSession, Conference, FileRecord, Holiday, MessageReaction,
+    MessageReactionRecord, MessageRead, QueueCallback, QueueCallerEntry, Room, RoomMember,
+    RoomMessage, RoutingRule, SipAccount, SipDialog, SipMessage, SipNotification, SipRegistration,
+    SipSubscription, SipTransaction, User, UserCallSettings, UserPresence, VipCaller, Voicemail,
 };
 
 pub type PgError = Box<dyn std::error::Error + Send + Sync>;
@@ -26,23 +26,35 @@ pub struct PgStore {
 }
 
 impl PgStore {
-    pub async fn connect(database_url: &str, max_connections: usize) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn connect(
+        database_url: &str,
+        max_connections: usize,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let pg_config = tokio_postgres::Config::from_str(database_url)?;
         let mut cfg = Config::new();
         cfg.dbname = pg_config.get_dbname().map(String::from);
         cfg.host = pg_config.get_hosts().first().map(|h| {
             let debug = format!("{:?}", h);
-            debug.trim_matches('"').trim_start_matches("Tcp(\"").trim_end_matches("\")").to_string()
+            debug
+                .trim_matches('"')
+                .trim_start_matches("Tcp(\"")
+                .trim_end_matches("\")")
+                .to_string()
         });
         cfg.port = pg_config.get_ports().first().copied();
         cfg.user = pg_config.get_user().map(String::from);
-        cfg.password = pg_config.get_password().map(|p| String::from_utf8_lossy(p).to_string());
+        cfg.password = pg_config
+            .get_password()
+            .map(|p| String::from_utf8_lossy(p).to_string());
 
         let pool = cfg.create_pool(Some(Runtime::Tokio1), NoTls)?;
 
         // Test connection
         let _conn = pool.get().await?;
-        log::info!("PostgreSQL connection pool established (max {})", max_connections);
+        log::info!(
+            "PostgreSQL connection pool established (max {})",
+            max_connections
+        );
 
         Ok(Self { pool })
     }
@@ -68,6 +80,13 @@ impl PgStore {
             include_str!("../migrations/014_room_call_metadata.sql"),
             include_str!("../migrations/015_business_collaboration.sql"),
             include_str!("../migrations/016_room_message_mentions.sql"),
+            include_str!("../migrations/017_file_governance.sql"),
+            include_str!("../migrations/018_meeting_lifecycle.sql"),
+            include_str!("../migrations/019_recording_governance.sql"),
+            include_str!("../migrations/020_channel_governance.sql"),
+            include_str!("../migrations/021_message_priority_saved.sql"),
+            include_str!("../migrations/022_identity_lifecycle.sql"),
+            include_str!("../migrations/023_call_policy.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {
@@ -83,50 +102,68 @@ impl PgStore {
     pub async fn insert_user(&self, user: &User) -> Result<(), PgError> {
         let client = self.pool.get().await?;
         client.execute(
-            "INSERT INTO users (id, display_name, sip_uri, matrix_user_id, password_hash, role, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (id) DO UPDATE SET display_name = $2, sip_uri = $3, matrix_user_id = $4, password_hash = $5, role = $6",
-            &[&user.id, &user.display_name, &user.sip_uri, &user.matrix_user_id, &user.password_hash, &user.role, &user.created_at],
+            "INSERT INTO users (id, display_name, sip_uri, matrix_user_id, password_hash, role, created_at, active, deactivated_at, deactivated_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (id) DO UPDATE SET
+                display_name = EXCLUDED.display_name,
+                sip_uri = EXCLUDED.sip_uri,
+                matrix_user_id = EXCLUDED.matrix_user_id,
+                password_hash = EXCLUDED.password_hash,
+                role = EXCLUDED.role,
+                active = EXCLUDED.active,
+                deactivated_at = EXCLUDED.deactivated_at,
+                deactivated_by = EXCLUDED.deactivated_by",
+            &[&user.id, &user.display_name, &user.sip_uri, &user.matrix_user_id, &user.password_hash, &user.role, &user.created_at, &user.active, &user.deactivated_at, &user.deactivated_by],
         ).await?;
         Ok(())
     }
 
     pub async fn delete_user(&self, id: Uuid) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM users WHERE id = $1", &[&id]).await?;
+        client
+            .execute("DELETE FROM users WHERE id = $1", &[&id])
+            .await?;
         Ok(())
     }
 
     pub async fn update_user_password(&self, id: Uuid, password_hash: &str) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute(
-            "UPDATE users SET password_hash = $2 WHERE id = $1",
-            &[&id, &password_hash],
-        ).await?;
+        client
+            .execute(
+                "UPDATE users SET password_hash = $2 WHERE id = $1",
+                &[&id, &password_hash],
+            )
+            .await?;
         Ok(())
     }
 
     pub async fn load_users(&self) -> Result<Vec<User>, PgError> {
         let client = self.pool.get().await?;
         let rows = client.query(
-            "SELECT id, display_name, sip_uri, matrix_user_id, password_hash, role, created_at FROM users ORDER BY created_at",
+            "SELECT id, display_name, sip_uri, matrix_user_id, password_hash, role, created_at, active, deactivated_at, deactivated_by, email, title, department, phone_number, status_message FROM users ORDER BY created_at",
             &[],
         ).await?;
 
-        Ok(rows.iter().map(|r| User {
-            id: r.get("id"),
-            display_name: r.get("display_name"),
-            sip_uri: r.get("sip_uri"),
-            matrix_user_id: r.get("matrix_user_id"),
-            password_hash: r.get("password_hash"),
-            role: r.try_get("role").unwrap_or_else(|_| "user".to_string()),
-            created_at: r.get("created_at"),
-            email: r.try_get("email").ok().flatten(),
-            title: r.try_get("title").ok().flatten(),
-            department: r.try_get("department").ok().flatten(),
-            phone_number: r.try_get("phone_number").ok().flatten(),
-            status_message: r.try_get("status_message").ok().flatten(),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| User {
+                id: r.get("id"),
+                display_name: r.get("display_name"),
+                sip_uri: r.get("sip_uri"),
+                matrix_user_id: r.get("matrix_user_id"),
+                password_hash: r.get("password_hash"),
+                role: r.try_get("role").unwrap_or_else(|_| "user".to_string()),
+                created_at: r.get("created_at"),
+                active: r.try_get("active").unwrap_or(true),
+                deactivated_at: r.try_get("deactivated_at").ok().flatten(),
+                deactivated_by: r.try_get("deactivated_by").ok().flatten(),
+                email: r.try_get("email").ok().flatten(),
+                title: r.try_get("title").ok().flatten(),
+                department: r.try_get("department").ok().flatten(),
+                phone_number: r.try_get("phone_number").ok().flatten(),
+                status_message: r.try_get("status_message").ok().flatten(),
+            })
+            .collect())
     }
 
     // ─── SIP Accounts ───
@@ -149,14 +186,17 @@ impl PgStore {
             &[],
         ).await?;
 
-        Ok(rows.iter().map(|r| SipAccount {
-            username: r.get("username"),
-            domain: r.get("domain"),
-            display_name: r.get("display_name"),
-            password_ha1: r.get("password_ha1"),
-            enabled: r.get("enabled"),
-            created_at: r.get("created_at"),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| SipAccount {
+                username: r.get("username"),
+                domain: r.get("domain"),
+                display_name: r.get("display_name"),
+                password_ha1: r.get("password_ha1"),
+                enabled: r.get("enabled"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
     }
 
     // ─── Registrations ───
@@ -174,7 +214,9 @@ impl PgStore {
 
     pub async fn delete_registration(&self, aor: &str) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM sip_registrations WHERE aor = $1", &[&aor]).await?;
+        client
+            .execute("DELETE FROM sip_registrations WHERE aor = $1", &[&aor])
+            .await?;
         Ok(())
     }
 
@@ -185,14 +227,17 @@ impl PgStore {
             &[],
         ).await?;
 
-        Ok(rows.iter().map(|r| SipRegistration {
-            aor: r.get("aor"),
-            contact: r.get("contact"),
-            source: r.get("source"),
-            user_agent: r.get("user_agent"),
-            expires_at: r.get("expires_at"),
-            updated_at: r.get("updated_at"),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| SipRegistration {
+                aor: r.get("aor"),
+                contact: r.get("contact"),
+                source: r.get("source"),
+                user_agent: r.get("user_agent"),
+                expires_at: r.get("expires_at"),
+                updated_at: r.get("updated_at"),
+            })
+            .collect())
     }
 
     // ─── Dialogs ───
@@ -252,7 +297,12 @@ impl PgStore {
 
     pub async fn delete_subscription(&self, subscription_id: &str) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM sip_subscriptions WHERE subscription_id = $1", &[&subscription_id]).await?;
+        client
+            .execute(
+                "DELETE FROM sip_subscriptions WHERE subscription_id = $1",
+                &[&subscription_id],
+            )
+            .await?;
         Ok(())
     }
 
@@ -276,11 +326,18 @@ impl PgStore {
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "offline".to_string());
 
-        client.execute(
-            "INSERT INTO presence (sip_uri, status, note, updated_at) VALUES ($1, $2, $3, $4)
+        client
+            .execute(
+                "INSERT INTO presence (sip_uri, status, note, updated_at) VALUES ($1, $2, $3, $4)
              ON CONFLICT (sip_uri) DO UPDATE SET status = $2, note = $3, updated_at = $4",
-            &[&presence.sip_uri, &status_str, &presence.note, &presence.updated_at],
-        ).await?;
+                &[
+                    &presence.sip_uri,
+                    &status_str,
+                    &presence.note,
+                    &presence.updated_at,
+                ],
+            )
+            .await?;
         Ok(())
     }
 
@@ -326,15 +383,41 @@ impl PgStore {
         let client = self.pool.get().await?;
         let size = file.size as i64;
         client.execute(
-            "INSERT INTO files (id, owner, filename, content_type, size, sha256, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING",
-            &[&file.id, &file.owner, &file.filename, &file.content_type, &size, &file.sha256, &file.created_at],
+            "INSERT INTO files (id, owner, filename, content_type, size, sha256, created_at, dlp_status, dlp_violation_count, legal_hold, deleted_at, deleted_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+             ON CONFLICT (id) DO UPDATE SET
+                filename=$3,
+                content_type=$4,
+                size=$5,
+                sha256=$6,
+                dlp_status=$8,
+                dlp_violation_count=$9,
+                legal_hold=$10,
+                deleted_at=$11,
+                deleted_by=$12",
+            &[
+                &file.id,
+                &file.owner,
+                &file.filename,
+                &file.content_type,
+                &size,
+                &file.sha256,
+                &file.created_at,
+                &file.dlp_status,
+                &(file.dlp_violation_count as i32),
+                &file.legal_hold,
+                &file.deleted_at,
+                &file.deleted_by,
+            ],
         ).await?;
         Ok(())
     }
 
     pub async fn delete_file(&self, id: Uuid) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM files WHERE id = $1", &[&id]).await?;
+        client
+            .execute("DELETE FROM files WHERE id = $1", &[&id])
+            .await?;
         Ok(())
     }
 
@@ -342,8 +425,9 @@ impl PgStore {
 
     pub async fn upsert_routing_rule(&self, rule: &RoutingRule) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute(
-            "INSERT INTO routing_rules (
+        client
+            .execute(
+                "INSERT INTO routing_rules (
                 id, name, source_pattern, destination_pattern, target, destination_type,
                 method_pattern, header_conditions, header_actions, stop_processing,
                 priority, enabled, created_at, updated_at
@@ -362,36 +446,40 @@ impl PgStore {
                 priority = $11,
                 enabled = $12,
                 updated_at = $14",
-            &[
-                &rule.id,
-                &rule.name,
-                &rule.source_pattern,
-                &rule.destination_pattern,
-                &rule.target,
-                &rule.destination_type,
-                &rule.method_pattern,
-                &Json(&rule.header_conditions),
-                &Json(&rule.header_actions),
-                &rule.stop_processing,
-                &rule.priority,
-                &rule.enabled,
-                &rule.created_at,
-                &rule.updated_at,
-            ],
-        ).await?;
+                &[
+                    &rule.id,
+                    &rule.name,
+                    &rule.source_pattern,
+                    &rule.destination_pattern,
+                    &rule.target,
+                    &rule.destination_type,
+                    &rule.method_pattern,
+                    &Json(&rule.header_conditions),
+                    &Json(&rule.header_actions),
+                    &rule.stop_processing,
+                    &rule.priority,
+                    &rule.enabled,
+                    &rule.created_at,
+                    &rule.updated_at,
+                ],
+            )
+            .await?;
         Ok(())
     }
 
     pub async fn delete_routing_rule(&self, id: Uuid) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM routing_rules WHERE id = $1", &[&id]).await?;
+        client
+            .execute("DELETE FROM routing_rules WHERE id = $1", &[&id])
+            .await?;
         Ok(())
     }
 
     pub async fn load_routing_rules(&self) -> Result<Vec<RoutingRule>, PgError> {
         let client = self.pool.get().await?;
-        let rows = client.query(
-            "SELECT id, name, source_pattern, destination_pattern, target,
+        let rows = client
+            .query(
+                "SELECT id, name, source_pattern, destination_pattern, target,
                     COALESCE(destination_type, 'user') AS destination_type,
                     COALESCE(method_pattern, '*') AS method_pattern,
                     COALESCE(header_conditions, '[]'::jsonb) AS header_conditions,
@@ -400,25 +488,29 @@ impl PgStore {
                     priority, enabled, created_at, updated_at
              FROM routing_rules
              ORDER BY priority ASC",
-            &[],
-        ).await?;
+                &[],
+            )
+            .await?;
 
-        Ok(rows.iter().map(|r| RoutingRule {
-            id: r.get("id"),
-            name: r.get("name"),
-            source_pattern: r.get("source_pattern"),
-            destination_pattern: r.get("destination_pattern"),
-            target: r.get("target"),
-            destination_type: r.get("destination_type"),
-            method_pattern: r.get("method_pattern"),
-            header_conditions: r.get::<_, Json<_>>("header_conditions").0,
-            header_actions: r.get::<_, Json<_>>("header_actions").0,
-            stop_processing: r.get("stop_processing"),
-            priority: r.get("priority"),
-            enabled: r.get("enabled"),
-            created_at: r.get("created_at"),
-            updated_at: r.get("updated_at"),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| RoutingRule {
+                id: r.get("id"),
+                name: r.get("name"),
+                source_pattern: r.get("source_pattern"),
+                destination_pattern: r.get("destination_pattern"),
+                target: r.get("target"),
+                destination_type: r.get("destination_type"),
+                method_pattern: r.get("method_pattern"),
+                header_conditions: r.get::<_, Json<_>>("header_conditions").0,
+                header_actions: r.get::<_, Json<_>>("header_actions").0,
+                stop_processing: r.get("stop_processing"),
+                priority: r.get("priority"),
+                enabled: r.get("enabled"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+            })
+            .collect())
     }
 
     // ─── Audit Events ───
@@ -449,17 +541,21 @@ impl PgStore {
 
     pub async fn insert_session(&self, session: &AdminSession) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute(
-            "INSERT INTO admin_sessions (token, principal, expires_at) VALUES ($1, $2, $3)
+        client
+            .execute(
+                "INSERT INTO admin_sessions (token, principal, expires_at) VALUES ($1, $2, $3)
              ON CONFLICT (token) DO UPDATE SET expires_at = $3",
-            &[&session.token, &session.principal, &session.expires_at],
-        ).await?;
+                &[&session.token, &session.principal, &session.expires_at],
+            )
+            .await?;
         Ok(())
     }
 
     pub async fn delete_session(&self, token: &str) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM admin_sessions WHERE token = $1", &[&token]).await?;
+        client
+            .execute("DELETE FROM admin_sessions WHERE token = $1", &[&token])
+            .await?;
         Ok(())
     }
 
@@ -500,23 +596,30 @@ impl PgStore {
             &[],
         ).await?;
 
-        Ok(rows.iter().filter_map(|r| {
-            Some(CallDetailRecord {
-                id: r.try_get("id").ok()?,
-                call_id: r.try_get("call_id").ok().flatten(),
-                caller_uri: r.try_get("caller_uri").ok()?,
-                callee_uri: r.try_get("callee_uri").ok()?,
-                direction: r.try_get("direction").unwrap_or_else(|_| "inbound".to_string()),
-                start_time: r.try_get("start_time").ok()?,
-                answer_time: r.try_get("answer_time").ok().flatten(),
-                end_time: r.try_get("end_time").ok().flatten(),
-                duration_secs: r.try_get("duration_secs").unwrap_or(0),
-                disposition: r.try_get("disposition").unwrap_or_else(|_| "no_answer".to_string()),
-                queue_name: r.try_get("queue_name").ok().flatten(),
-                queue_wait_secs: r.try_get("queue_wait_secs").ok().flatten(),
-                recorded: r.try_get("recorded").unwrap_or(false),
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                Some(CallDetailRecord {
+                    id: r.try_get("id").ok()?,
+                    call_id: r.try_get("call_id").ok().flatten(),
+                    caller_uri: r.try_get("caller_uri").ok()?,
+                    callee_uri: r.try_get("callee_uri").ok()?,
+                    direction: r
+                        .try_get("direction")
+                        .unwrap_or_else(|_| "inbound".to_string()),
+                    start_time: r.try_get("start_time").ok()?,
+                    answer_time: r.try_get("answer_time").ok().flatten(),
+                    end_time: r.try_get("end_time").ok().flatten(),
+                    duration_secs: r.try_get("duration_secs").unwrap_or(0),
+                    disposition: r
+                        .try_get("disposition")
+                        .unwrap_or_else(|_| "no_answer".to_string()),
+                    queue_name: r.try_get("queue_name").ok().flatten(),
+                    queue_wait_secs: r.try_get("queue_wait_secs").ok().flatten(),
+                    recorded: r.try_get("recorded").unwrap_or(false),
+                })
             })
-        }).collect())
+            .collect())
     }
 
     // ─── Voicemails ───
@@ -538,36 +641,53 @@ impl PgStore {
         let client = self.pool.get().await?;
         let followme_json = serde_json::to_value(&s.followme_numbers).unwrap_or_default();
         client.execute(
-            "INSERT INTO user_call_settings (user_sip_uri, voicemail_enabled, voicemail_greeting_file_id, voicemail_greeting_text, voicemail_timeout, followme_enabled, followme_numbers, followme_final, forward_always, forward_busy, forward_no_answer, dnd_enabled, dnd_forward_to)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-             ON CONFLICT (user_sip_uri) DO UPDATE SET voicemail_enabled=$2, voicemail_greeting_file_id=$3, voicemail_greeting_text=$4, voicemail_timeout=$5, followme_enabled=$6, followme_numbers=$7, followme_final=$8, forward_always=$9, forward_busy=$10, forward_no_answer=$11, dnd_enabled=$12, dnd_forward_to=$13",
-            &[&s.user_sip_uri, &s.voicemail_enabled, &s.voicemail_greeting_file_id, &s.voicemail_greeting_text, &s.voicemail_timeout, &s.followme_enabled, &followme_json, &s.followme_final, &s.forward_always, &s.forward_busy, &s.forward_no_answer, &s.dnd_enabled, &s.dnd_forward_to],
+            "INSERT INTO user_call_settings (user_sip_uri, allow_private_calls, allow_external_calls, allow_call_forwarding, allow_call_recording, voicemail_enabled, voicemail_greeting_file_id, voicemail_greeting_text, voicemail_timeout, followme_enabled, followme_numbers, followme_final, forward_always, forward_busy, forward_no_answer, dnd_enabled, dnd_forward_to)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+             ON CONFLICT (user_sip_uri) DO UPDATE SET allow_private_calls=$2, allow_external_calls=$3, allow_call_forwarding=$4, allow_call_recording=$5, voicemail_enabled=$6, voicemail_greeting_file_id=$7, voicemail_greeting_text=$8, voicemail_timeout=$9, followme_enabled=$10, followme_numbers=$11, followme_final=$12, forward_always=$13, forward_busy=$14, forward_no_answer=$15, dnd_enabled=$16, dnd_forward_to=$17",
+            &[&s.user_sip_uri, &s.allow_private_calls, &s.allow_external_calls, &s.allow_call_forwarding, &s.allow_call_recording, &s.voicemail_enabled, &s.voicemail_greeting_file_id, &s.voicemail_greeting_text, &s.voicemail_timeout, &s.followme_enabled, &followme_json, &s.followme_final, &s.forward_always, &s.forward_busy, &s.forward_no_answer, &s.dnd_enabled, &s.dnd_forward_to],
         ).await?;
         Ok(())
     }
 
     pub async fn load_user_call_settings(&self) -> Result<Vec<UserCallSettings>, PgError> {
         let client = self.pool.get().await?;
-        let rows = client.query("SELECT * FROM user_call_settings", &[]).await?;
+        let rows = client
+            .query("SELECT * FROM user_call_settings", &[])
+            .await?;
 
-        Ok(rows.iter().filter_map(|r| {
-            let followme_json: serde_json::Value = r.try_get("followme_numbers").unwrap_or_default();
-            Some(UserCallSettings {
-                user_sip_uri: r.try_get("user_sip_uri").ok()?,
-                voicemail_enabled: r.try_get("voicemail_enabled").unwrap_or(false),
-                voicemail_greeting_file_id: r.try_get("voicemail_greeting_file_id").ok().flatten(),
-                voicemail_greeting_text: r.try_get("voicemail_greeting_text").unwrap_or_default(),
-                voicemail_timeout: r.try_get("voicemail_timeout").unwrap_or(30),
-                followme_enabled: r.try_get("followme_enabled").unwrap_or(false),
-                followme_numbers: serde_json::from_value(followme_json).unwrap_or_default(),
-                followme_final: r.try_get("followme_final").unwrap_or_else(|_| "voicemail".to_string()),
-                forward_always: r.try_get("forward_always").ok().flatten(),
-                forward_busy: r.try_get("forward_busy").ok().flatten(),
-                forward_no_answer: r.try_get("forward_no_answer").ok().flatten(),
-                dnd_enabled: r.try_get("dnd_enabled").unwrap_or(false),
-                dnd_forward_to: r.try_get("dnd_forward_to").ok().flatten(),
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                let followme_json: serde_json::Value =
+                    r.try_get("followme_numbers").unwrap_or_default();
+                Some(UserCallSettings {
+                    user_sip_uri: r.try_get("user_sip_uri").ok()?,
+                    allow_private_calls: r.try_get("allow_private_calls").unwrap_or(true),
+                    allow_external_calls: r.try_get("allow_external_calls").unwrap_or(true),
+                    allow_call_forwarding: r.try_get("allow_call_forwarding").unwrap_or(true),
+                    allow_call_recording: r.try_get("allow_call_recording").unwrap_or(true),
+                    voicemail_enabled: r.try_get("voicemail_enabled").unwrap_or(false),
+                    voicemail_greeting_file_id: r
+                        .try_get("voicemail_greeting_file_id")
+                        .ok()
+                        .flatten(),
+                    voicemail_greeting_text: r
+                        .try_get("voicemail_greeting_text")
+                        .unwrap_or_default(),
+                    voicemail_timeout: r.try_get("voicemail_timeout").unwrap_or(30),
+                    followme_enabled: r.try_get("followme_enabled").unwrap_or(false),
+                    followme_numbers: serde_json::from_value(followme_json).unwrap_or_default(),
+                    followme_final: r
+                        .try_get("followme_final")
+                        .unwrap_or_else(|_| "voicemail".to_string()),
+                    forward_always: r.try_get("forward_always").ok().flatten(),
+                    forward_busy: r.try_get("forward_busy").ok().flatten(),
+                    forward_no_answer: r.try_get("forward_no_answer").ok().flatten(),
+                    dnd_enabled: r.try_get("dnd_enabled").unwrap_or(false),
+                    dnd_forward_to: r.try_get("dnd_forward_to").ok().flatten(),
+                })
             })
-        }).collect())
+            .collect())
     }
 
     // ─── Business Hours ───
@@ -585,7 +705,9 @@ impl PgStore {
 
     pub async fn delete_business_hours(&self, id: Uuid) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM business_hours WHERE id = $1", &[&id]).await?;
+        client
+            .execute("DELETE FROM business_hours WHERE id = $1", &[&id])
+            .await?;
         Ok(())
     }
 
@@ -596,33 +718,47 @@ impl PgStore {
             &[],
         ).await?;
 
-        Ok(rows.iter().map(|r| BusinessHours {
-            id: r.get("id"),
-            name: r.get("name"),
-            timezone: r.get("timezone"),
-            schedule: r.get("schedule"),
-            after_hours_destination: r.get("after_hours_destination"),
-            enabled: r.get("enabled"),
-            created_at: r.get("created_at"),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| BusinessHours {
+                id: r.get("id"),
+                name: r.get("name"),
+                timezone: r.get("timezone"),
+                schedule: r.get("schedule"),
+                after_hours_destination: r.get("after_hours_destination"),
+                enabled: r.get("enabled"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
     }
 
     // ─── Holidays ───
 
     pub async fn upsert_holiday(&self, h: &Holiday) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute(
-            "INSERT INTO holidays (id, name, date, recurring, destination, created_at)
+        client
+            .execute(
+                "INSERT INTO holidays (id, name, date, recurring, destination, created_at)
              VALUES ($1,$2,$3,$4,$5,$6)
              ON CONFLICT (id) DO UPDATE SET name=$2, date=$3, recurring=$4, destination=$5",
-            &[&h.id, &h.name, &h.date, &h.recurring, &h.destination, &h.created_at],
-        ).await?;
+                &[
+                    &h.id,
+                    &h.name,
+                    &h.date,
+                    &h.recurring,
+                    &h.destination,
+                    &h.created_at,
+                ],
+            )
+            .await?;
         Ok(())
     }
 
     pub async fn delete_holiday(&self, id: Uuid) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM holidays WHERE id = $1", &[&id]).await?;
+        client
+            .execute("DELETE FROM holidays WHERE id = $1", &[&id])
+            .await?;
         Ok(())
     }
 
@@ -633,14 +769,17 @@ impl PgStore {
             &[],
         ).await?;
 
-        Ok(rows.iter().map(|r| Holiday {
-            id: r.get("id"),
-            name: r.get("name"),
-            date: r.get("date"),
-            recurring: r.get("recurring"),
-            destination: r.get("destination"),
-            created_at: r.get("created_at"),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| Holiday {
+                id: r.get("id"),
+                name: r.get("name"),
+                date: r.get("date"),
+                recurring: r.get("recurring"),
+                destination: r.get("destination"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
     }
 
     // ─── Call Recordings ───
@@ -648,10 +787,15 @@ impl PgStore {
     pub async fn insert_recording(&self, rec: &CallRecording) -> Result<(), PgError> {
         let client = self.pool.get().await?;
         client.execute(
-            "INSERT INTO call_recordings (id, call_id, caller_uri, callee_uri, duration_secs, file_id, recorded_by, created_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-             ON CONFLICT (id) DO NOTHING",
-            &[&rec.id, &rec.call_id, &rec.caller_uri, &rec.callee_uri, &rec.duration_secs, &rec.file_id, &rec.recorded_by, &rec.created_at],
+            "INSERT INTO call_recordings (id, call_id, caller_uri, callee_uri, duration_secs, file_id, recorded_by, created_at, conference_id, transcript_segment_count, legal_hold, deleted_at, deleted_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+             ON CONFLICT (id) DO UPDATE SET
+                conference_id = EXCLUDED.conference_id,
+                transcript_segment_count = EXCLUDED.transcript_segment_count,
+                legal_hold = EXCLUDED.legal_hold,
+                deleted_at = EXCLUDED.deleted_at,
+                deleted_by = EXCLUDED.deleted_by",
+            &[&rec.id, &rec.call_id, &rec.caller_uri, &rec.callee_uri, &rec.duration_secs, &rec.file_id, &rec.recorded_by, &rec.created_at, &rec.conference_id, &(rec.transcript_segment_count as i32), &rec.legal_hold, &rec.deleted_at, &rec.deleted_by],
         ).await?;
         Ok(())
     }
@@ -659,22 +803,33 @@ impl PgStore {
     pub async fn load_recordings(&self) -> Result<Vec<CallRecording>, PgError> {
         let client = self.pool.get().await?;
         let rows = client.query(
-            "SELECT id, call_id, caller_uri, callee_uri, duration_secs, file_id, recorded_by, created_at FROM call_recordings ORDER BY created_at DESC LIMIT 1000",
+            "SELECT id, call_id, caller_uri, callee_uri, duration_secs, file_id, recorded_by, created_at, conference_id, transcript_segment_count, legal_hold, deleted_at, deleted_by FROM call_recordings ORDER BY created_at DESC LIMIT 1000",
             &[],
         ).await?;
 
-        Ok(rows.iter().filter_map(|r| {
-            Some(CallRecording {
-                id: r.try_get("id").ok()?,
-                call_id: r.try_get("call_id").ok().flatten(),
-                caller_uri: r.try_get("caller_uri").ok()?,
-                callee_uri: r.try_get("callee_uri").ok()?,
-                duration_secs: r.try_get("duration_secs").unwrap_or(0),
-                file_id: r.try_get("file_id").ok().flatten(),
-                recorded_by: r.try_get("recorded_by").ok()?,
-                created_at: r.try_get("created_at").ok()?,
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                Some(CallRecording {
+                    id: r.try_get("id").ok()?,
+                    call_id: r.try_get("call_id").ok().flatten(),
+                    caller_uri: r.try_get("caller_uri").ok()?,
+                    callee_uri: r.try_get("callee_uri").ok()?,
+                    duration_secs: r.try_get("duration_secs").unwrap_or(0),
+                    file_id: r.try_get("file_id").ok().flatten(),
+                    recorded_by: r.try_get("recorded_by").ok()?,
+                    created_at: r.try_get("created_at").ok()?,
+                    conference_id: r.try_get("conference_id").ok().flatten(),
+                    transcript_segment_count: r
+                        .try_get::<_, i32>("transcript_segment_count")
+                        .unwrap_or(0)
+                        .max(0) as usize,
+                    legal_hold: r.try_get("legal_hold").unwrap_or(false),
+                    deleted_at: r.try_get("deleted_at").ok().flatten(),
+                    deleted_by: r.try_get("deleted_by").ok().flatten(),
+                })
             })
-        }).collect())
+            .collect())
     }
 
     // ─── Extensions ───
@@ -692,7 +847,9 @@ impl PgStore {
 
     pub async fn delete_pg_extension(&self, ext: &str) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM extensions WHERE extension = $1", &[&ext]).await?;
+        client
+            .execute("DELETE FROM extensions WHERE extension = $1", &[&ext])
+            .await?;
         Ok(())
     }
 
@@ -702,22 +859,34 @@ impl PgStore {
             "SELECT e.extension, e.destination, e.destination_type, e.label, e.user_id, COALESCE(e.is_did, false) AS is_did, u.display_name as user_display_name FROM extensions e LEFT JOIN users u ON e.user_id = u.id ORDER BY e.extension",
             &[],
         ).await?;
-        Ok(rows.iter().filter_map(|r| {
-            Some(crate::Extension {
-                extension: r.try_get("extension").ok()?,
-                destination: r.try_get("destination").ok()?,
-                destination_type: r.try_get("destination_type").unwrap_or_else(|_| "user".to_string()),
-                label: r.try_get("label").unwrap_or_default(),
-                user_id: r.try_get("user_id").ok().flatten(),
-                user_display_name: r.try_get("user_display_name").ok().flatten(),
-                is_did: r.try_get("is_did").unwrap_or(false),
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                Some(crate::Extension {
+                    extension: r.try_get("extension").ok()?,
+                    destination: r.try_get("destination").ok()?,
+                    destination_type: r
+                        .try_get("destination_type")
+                        .unwrap_or_else(|_| "user".to_string()),
+                    label: r.try_get("label").unwrap_or_default(),
+                    user_id: r.try_get("user_id").ok().flatten(),
+                    user_display_name: r.try_get("user_display_name").ok().flatten(),
+                    is_did: r.try_get("is_did").unwrap_or(false),
+                })
             })
-        }).collect())
+            .collect())
     }
 
     // ─── Agent State Log ───
 
-    pub async fn insert_agent_state_log(&self, agent_uri: &str, prev: &str, new_state: &str, reason: Option<&str>, duration_secs: i32) -> Result<(), PgError> {
+    pub async fn insert_agent_state_log(
+        &self,
+        agent_uri: &str,
+        prev: &str,
+        new_state: &str,
+        reason: Option<&str>,
+        duration_secs: i32,
+    ) -> Result<(), PgError> {
         let client = self.pool.get().await?;
         client.execute(
             "INSERT INTO agent_state_log (id, agent_uri, previous_state, new_state, reason, duration_secs)
@@ -727,13 +896,19 @@ impl PgStore {
         Ok(())
     }
 
-    pub async fn list_agent_state_log(&self, agent_uri: &str, limit: i64) -> Result<Vec<serde_json::Value>, PgError> {
+    pub async fn list_agent_state_log(
+        &self,
+        agent_uri: &str,
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>, PgError> {
         let client = self.pool.get().await?;
-        let rows = client.query(
-            "SELECT id, agent_uri, previous_state, new_state, reason, duration_secs, created_at
+        let rows = client
+            .query(
+                "SELECT id, agent_uri, previous_state, new_state, reason, duration_secs, created_at
              FROM agent_state_log WHERE agent_uri = $1 ORDER BY created_at DESC LIMIT $2",
-            &[&agent_uri, &limit],
-        ).await?;
+                &[&agent_uri, &limit],
+            )
+            .await?;
         Ok(rows.iter().map(|r| {
             serde_json::json!({
                 "id": r.get::<_, Uuid>("id").to_string(),
@@ -789,23 +964,28 @@ impl PgStore {
              FROM queue_callbacks WHERE status = 'pending' ORDER BY requested_at",
             &[],
         ).await?;
-        Ok(rows.iter().filter_map(|r| {
-            Some(QueueCallback {
-                id: r.try_get("id").ok()?,
-                queue_id: r.try_get("queue_id").ok()?,
-                caller_uri: r.try_get("caller_uri").ok()?,
-                caller_name: r.try_get("caller_name").unwrap_or_default(),
-                callback_number: r.try_get("callback_number").ok()?,
-                position: r.try_get("position").unwrap_or(0),
-                status: r.try_get("status").unwrap_or_else(|_| "pending".to_string()),
-                requested_at: r.try_get("requested_at").ok()?,
-                scheduled_at: r.try_get("scheduled_at").ok().flatten(),
-                attempted_at: r.try_get("attempted_at").ok().flatten(),
-                completed_at: r.try_get("completed_at").ok().flatten(),
-                attempts: r.try_get("attempts").unwrap_or(0),
-                max_attempts: r.try_get("max_attempts").unwrap_or(3),
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                Some(QueueCallback {
+                    id: r.try_get("id").ok()?,
+                    queue_id: r.try_get("queue_id").ok()?,
+                    caller_uri: r.try_get("caller_uri").ok()?,
+                    caller_name: r.try_get("caller_name").unwrap_or_default(),
+                    callback_number: r.try_get("callback_number").ok()?,
+                    position: r.try_get("position").unwrap_or(0),
+                    status: r
+                        .try_get("status")
+                        .unwrap_or_else(|_| "pending".to_string()),
+                    requested_at: r.try_get("requested_at").ok()?,
+                    scheduled_at: r.try_get("scheduled_at").ok().flatten(),
+                    attempted_at: r.try_get("attempted_at").ok().flatten(),
+                    completed_at: r.try_get("completed_at").ok().flatten(),
+                    attempts: r.try_get("attempts").unwrap_or(0),
+                    max_attempts: r.try_get("max_attempts").unwrap_or(3),
+                })
             })
-        }).collect())
+            .collect())
     }
 
     // ─── VIP Callers ───
@@ -823,7 +1003,9 @@ impl PgStore {
 
     pub async fn delete_vip_caller(&self, id: Uuid) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM vip_callers WHERE id = $1", &[&id]).await?;
+        client
+            .execute("DELETE FROM vip_callers WHERE id = $1", &[&id])
+            .await?;
         Ok(())
     }
 
@@ -833,17 +1015,20 @@ impl PgStore {
             "SELECT id, caller_pattern, priority, label, queue_override, agent_override, created_at FROM vip_callers ORDER BY priority DESC",
             &[],
         ).await?;
-        Ok(rows.iter().filter_map(|r| {
-            Some(VipCaller {
-                id: r.try_get("id").ok()?,
-                caller_pattern: r.try_get("caller_pattern").ok()?,
-                priority: r.try_get("priority").unwrap_or(10),
-                label: r.try_get("label").unwrap_or_default(),
-                queue_override: r.try_get("queue_override").ok().flatten(),
-                agent_override: r.try_get("agent_override").ok().flatten(),
-                created_at: r.try_get("created_at").ok()?,
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                Some(VipCaller {
+                    id: r.try_get("id").ok()?,
+                    caller_pattern: r.try_get("caller_pattern").ok()?,
+                    priority: r.try_get("priority").unwrap_or(10),
+                    label: r.try_get("label").unwrap_or_default(),
+                    queue_override: r.try_get("queue_override").ok().flatten(),
+                    agent_override: r.try_get("agent_override").ok().flatten(),
+                    created_at: r.try_get("created_at").ok()?,
+                })
             })
-        }).collect())
+            .collect())
     }
 
     // ─── Room Messages (Enterprise) ───
@@ -852,8 +1037,8 @@ impl PgStore {
         let mut client = self.pool.get().await?;
         let transaction = client.transaction().await?;
         transaction.execute(
-            "INSERT INTO rooms (id, name, description, is_direct, created_by, conference_id, call_uri, team_id, channel_name, created_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            "INSERT INTO rooms (id, name, description, is_direct, created_by, conference_id, call_uri, team_id, channel_name, created_at, channel_type, channel_owners, posting_policy)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
              ON CONFLICT (id) DO UPDATE SET
                 name = $2,
                 description = $3,
@@ -862,7 +1047,10 @@ impl PgStore {
                 conference_id = $6,
                 call_uri = $7,
                 team_id = $8,
-                channel_name = $9",
+                channel_name = $9,
+                channel_type = $11,
+                channel_owners = $12,
+                posting_policy = $13",
             &[
                 &room.id,
                 &room.name,
@@ -874,16 +1062,28 @@ impl PgStore {
                 &room.team_id,
                 &room.channel_name,
                 &room.created_at,
+                &room.channel_type,
+                &room.channel_owners,
+                &room.posting_policy,
             ],
         ).await?;
-        transaction.execute("DELETE FROM room_members WHERE room_id = $1", &[&room.id]).await?;
+        transaction
+            .execute("DELETE FROM room_members WHERE room_id = $1", &[&room.id])
+            .await?;
         for member in &room.members {
-            transaction.execute(
-                "INSERT INTO room_members (room_id, user_sip_uri, role, joined_at)
+            transaction
+                .execute(
+                    "INSERT INTO room_members (room_id, user_sip_uri, role, joined_at)
                  VALUES ($1,$2,$3,$4)
                  ON CONFLICT (room_id, user_sip_uri) DO UPDATE SET role = $3",
-                &[&room.id, &member.user_sip_uri, &member.role, &member.joined_at],
-            ).await?;
+                    &[
+                        &room.id,
+                        &member.user_sip_uri,
+                        &member.role,
+                        &member.joined_at,
+                    ],
+                )
+                .await?;
         }
         transaction.commit().await?;
         Ok(())
@@ -892,7 +1092,7 @@ impl PgStore {
     pub async fn load_rooms(&self) -> Result<Vec<Room>, PgError> {
         let client = self.pool.get().await?;
         let room_rows = client.query(
-            "SELECT id, name, description, is_direct, created_by, conference_id, call_uri, team_id, channel_name, created_at FROM rooms ORDER BY created_at",
+            "SELECT id, name, description, is_direct, created_by, conference_id, call_uri, team_id, channel_name, created_at, channel_type, channel_owners, posting_policy FROM rooms ORDER BY created_at",
             &[],
         ).await?;
         let mut rooms = Vec::with_capacity(room_rows.len());
@@ -914,6 +1114,13 @@ impl PgStore {
                 id: room_id,
                 team_id: row.try_get("team_id").ok().flatten(),
                 channel_name: row.try_get("channel_name").ok().flatten(),
+                channel_type: row
+                    .try_get("channel_type")
+                    .unwrap_or_else(|_| "standard".to_string()),
+                channel_owners: row.try_get("channel_owners").unwrap_or_default(),
+                posting_policy: row
+                    .try_get("posting_policy")
+                    .unwrap_or_else(|_| "members".to_string()),
                 name: row.get("name"),
                 description: row.get("description"),
                 is_direct: row.get("is_direct"),
@@ -932,10 +1139,10 @@ impl PgStore {
         let mentions = serde_json::to_value(&msg.mentions)?;
         let mentioned_user_uris = serde_json::to_value(&msg.mentioned_user_uris)?;
         client.execute(
-            "INSERT INTO room_messages (id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned, mentions, mentioned_user_uris)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-             ON CONFLICT (id) DO UPDATE SET body = $4, edited_at = $8, pinned = $9, mentions = $10, mentioned_user_uris = $11",
-            &[&msg.id, &msg.room_id, &msg.sender_uri, &msg.body, &msg.content_type, &msg.created_at, &msg.reply_to, &msg.edited_at, &msg.pinned, &Json(mentions), &Json(mentioned_user_uris)],
+            "INSERT INTO room_messages (id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned, mentions, mentioned_user_uris, priority, saved_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+             ON CONFLICT (id) DO UPDATE SET body = $4, edited_at = $8, pinned = $9, mentions = $10, mentioned_user_uris = $11, priority = $12, saved_by = $13",
+            &[&msg.id, &msg.room_id, &msg.sender_uri, &msg.body, &msg.content_type, &msg.created_at, &msg.reply_to, &msg.edited_at, &msg.pinned, &Json(mentions), &Json(mentioned_user_uris), &msg.priority, &msg.saved_by],
         ).await?;
         Ok(())
     }
@@ -943,52 +1150,67 @@ impl PgStore {
     pub async fn load_room_messages(&self) -> Result<Vec<RoomMessage>, PgError> {
         let client = self.pool.get().await?;
         let rows = client.query(
-            "SELECT id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned, mentions, mentioned_user_uris FROM room_messages ORDER BY created_at",
+            "SELECT id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned, mentions, mentioned_user_uris, priority, saved_by FROM room_messages ORDER BY created_at",
             &[],
         ).await?;
-        Ok(rows.iter().map(|r| RoomMessage {
-            id: r.get("id"),
-            room_id: r.get("room_id"),
-            sender_uri: r.get("sender_uri"),
-            body: r.get("body"),
-            content_type: r.get("content_type"),
-            created_at: r.get("created_at"),
-            reply_to: r.try_get("reply_to").ok().flatten(),
-            edited_at: r.try_get("edited_at").ok().flatten(),
-            pinned: r.try_get("pinned").unwrap_or(false),
-            mentions: r
-                .try_get::<_, Json<Vec<crate::MessageMention>>>("mentions")
-                .map(|Json(mentions)| mentions)
-                .unwrap_or_default(),
-            mentioned_user_uris: r
-                .try_get::<_, Json<Vec<String>>>("mentioned_user_uris")
-                .map(|Json(uris)| uris)
-                .unwrap_or_default(),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| RoomMessage {
+                id: r.get("id"),
+                room_id: r.get("room_id"),
+                sender_uri: r.get("sender_uri"),
+                body: r.get("body"),
+                content_type: r.get("content_type"),
+                created_at: r.get("created_at"),
+                reply_to: r.try_get("reply_to").ok().flatten(),
+                edited_at: r.try_get("edited_at").ok().flatten(),
+                pinned: r.try_get("pinned").unwrap_or(false),
+                mentions: r
+                    .try_get::<_, Json<Vec<crate::MessageMention>>>("mentions")
+                    .map(|Json(mentions)| mentions)
+                    .unwrap_or_default(),
+                mentioned_user_uris: r
+                    .try_get::<_, Json<Vec<String>>>("mentioned_user_uris")
+                    .map(|Json(uris)| uris)
+                    .unwrap_or_default(),
+                priority: r
+                    .try_get("priority")
+                    .unwrap_or_else(|_| "normal".to_string()),
+                saved_by: r.try_get("saved_by").unwrap_or_default(),
+            })
+            .collect())
     }
 
     pub async fn update_room_message_body(&self, id: Uuid, body: &str) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute(
-            "UPDATE room_messages SET body = $2, edited_at = now() WHERE id = $1",
-            &[&id, &body],
-        ).await?;
+        client
+            .execute(
+                "UPDATE room_messages SET body = $2, edited_at = now() WHERE id = $1",
+                &[&id, &body],
+            )
+            .await?;
         Ok(())
     }
 
     pub async fn toggle_pin(&self, id: Uuid, pinned: bool) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute(
-            "UPDATE room_messages SET pinned = $2 WHERE id = $1",
-            &[&id, &pinned],
-        ).await?;
+        client
+            .execute(
+                "UPDATE room_messages SET pinned = $2 WHERE id = $1",
+                &[&id, &pinned],
+            )
+            .await?;
         Ok(())
     }
 
     pub async fn delete_room_message(&self, id: Uuid) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM message_reads WHERE message_id = $1", &[&id]).await?;
-        client.execute("DELETE FROM room_messages WHERE id = $1", &[&id]).await?;
+        client
+            .execute("DELETE FROM message_reads WHERE message_id = $1", &[&id])
+            .await?;
+        client
+            .execute("DELETE FROM room_messages WHERE id = $1", &[&id])
+            .await?;
         Ok(())
     }
 
@@ -1000,7 +1222,12 @@ impl PgStore {
                  VALUES ($1, $2, 'room', $3, $4)
                  ON CONFLICT (message_id, reader_uri) DO UPDATE
                  SET message_source = 'room', read_at = EXCLUDED.read_at",
-                &[&Uuid::new_v4(), &read.message_id, &read.reader_uri, &read.read_at],
+                &[
+                    &Uuid::new_v4(),
+                    &read.message_id,
+                    &read.reader_uri,
+                    &read.read_at,
+                ],
             )
             .await?;
         Ok(())
@@ -1046,7 +1273,10 @@ impl PgStore {
         Ok(())
     }
 
-    pub async fn load_business_objects<T>(&self, collection: &'static str) -> Result<Vec<T>, PgError>
+    pub async fn load_business_objects<T>(
+        &self,
+        collection: &'static str,
+    ) -> Result<Vec<T>, PgError>
     where
         T: DeserializeOwned,
     {
@@ -1067,7 +1297,12 @@ impl PgStore {
 
     // ─── Reactions ───
 
-    pub async fn insert_reaction(&self, message_id: Uuid, user_uri: &str, emoji: &str) -> Result<(), PgError> {
+    pub async fn insert_reaction(
+        &self,
+        message_id: Uuid,
+        user_uri: &str,
+        emoji: &str,
+    ) -> Result<(), PgError> {
         let client = self.pool.get().await?;
         client.execute(
             "INSERT INTO message_reactions (id, message_id, user_uri, emoji) VALUES ($1, $2, $3, $4)
@@ -1098,7 +1333,12 @@ impl PgStore {
             .collect())
     }
 
-    pub async fn delete_reaction(&self, message_id: Uuid, user_uri: &str, emoji: &str) -> Result<(), PgError> {
+    pub async fn delete_reaction(
+        &self,
+        message_id: Uuid,
+        user_uri: &str,
+        emoji: &str,
+    ) -> Result<(), PgError> {
         let client = self.pool.get().await?;
         client.execute(
             "DELETE FROM message_reactions WHERE message_id = $1 AND user_uri = $2 AND emoji = $3",
@@ -1111,29 +1351,35 @@ impl PgStore {
 
     pub async fn insert_favorite(&self, user_uri: &str, favorite_uri: &str) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute(
-            "INSERT INTO user_favorites (id, user_uri, favorite_uri) VALUES ($1, $2, $3)
+        client
+            .execute(
+                "INSERT INTO user_favorites (id, user_uri, favorite_uri) VALUES ($1, $2, $3)
              ON CONFLICT (user_uri, favorite_uri) DO NOTHING",
-            &[&Uuid::new_v4(), &user_uri, &favorite_uri],
-        ).await?;
+                &[&Uuid::new_v4(), &user_uri, &favorite_uri],
+            )
+            .await?;
         Ok(())
     }
 
     pub async fn delete_favorite(&self, user_uri: &str, favorite_uri: &str) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute(
-            "DELETE FROM user_favorites WHERE user_uri = $1 AND favorite_uri = $2",
-            &[&user_uri, &favorite_uri],
-        ).await?;
+        client
+            .execute(
+                "DELETE FROM user_favorites WHERE user_uri = $1 AND favorite_uri = $2",
+                &[&user_uri, &favorite_uri],
+            )
+            .await?;
         Ok(())
     }
 
     pub async fn load_favorites(&self, user_uri: &str) -> Result<Vec<String>, PgError> {
         let client = self.pool.get().await?;
-        let rows = client.query(
-            "SELECT favorite_uri FROM user_favorites WHERE user_uri = $1 ORDER BY created_at",
-            &[&user_uri],
-        ).await?;
+        let rows = client
+            .query(
+                "SELECT favorite_uri FROM user_favorites WHERE user_uri = $1 ORDER BY created_at",
+                &[&user_uri],
+            )
+            .await?;
         Ok(rows.iter().map(|r| r.get("favorite_uri")).collect())
     }
 

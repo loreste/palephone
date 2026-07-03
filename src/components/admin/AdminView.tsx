@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import {
   Activity,
   BarChart3,
@@ -37,6 +37,7 @@ import {
   deleteFile,
   deleteRoutingRule,
   loadAdminSnapshot,
+  setAdminUserActive,
   setAdminSipAccountEnabled,
   updateRoutingRule,
   type AdminSnapshot,
@@ -45,13 +46,14 @@ import { toast } from "@/components/ui/Toast";
 import { useServerStore } from "@/store/serverStore";
 import { disconnectServer } from "@/lib/session";
 import { paleServerApi, paleServerUploadFile } from "@/lib/tauri";
+import type { ServerCollaborationPolicy } from "@/lib/tauri";
 
 // Helper: all server calls go through Tauri invoke (not webview fetch)
 async function api<T = any>(baseUrl: string, token: string, path: string, opts?: { method?: string; body?: unknown }): Promise<T> {
   return paleServerApi<T>(baseUrl, token, path, opts);
 }
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "retention" | "dlp";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -78,6 +80,7 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "directory", label: "Directory", icon: Users },
   { id: "audit", label: "Audit", icon: ClipboardList },
   { id: "cqd", label: "Call Quality", icon: BarChart3 },
+  { id: "policy", label: "Policy", icon: Shield },
   { id: "retention", label: "Retention", icon: Archive },
   { id: "dlp", label: "DLP", icon: Shield },
 ];
@@ -290,8 +293,9 @@ export function AdminView() {
         {activeTab === "conferences" && <ConferencesPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
         {activeTab === "files" && <FilesPanel baseUrl={baseUrl} token={token} snapshot={snapshot} onChange={refresh} />}
         {activeTab === "directory" && <DirectoryPanel baseUrl={baseUrl} token={token} />}
-        {activeTab === "audit" && <AuditPanel snapshot={snapshot} />}
+        {activeTab === "audit" && <AuditPanel baseUrl={baseUrl} token={token} snapshot={snapshot} />}
         {activeTab === "cqd" && <CqdPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "policy" && <CollaborationPolicyPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "retention" && <RetentionPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "dlp" && <DlpPanel baseUrl={baseUrl} token={token} />}
       </div>
@@ -419,10 +423,20 @@ function UsersPanel({
   const remove = async (id: string) => {
     try {
       await deleteAdminUser(baseUrl, token, id);
-      toast({ type: "success", title: "User deleted" });
+      toast({ type: "success", title: "User deactivated" });
       onChange();
     } catch (err) {
-      toast({ type: "error", title: err instanceof Error ? err.message : "Failed to delete user" });
+      toast({ type: "error", title: err instanceof Error ? err.message : "Failed to deactivate user" });
+    }
+  };
+
+  const activate = async (id: string) => {
+    try {
+      await setAdminUserActive(baseUrl, token, id, true);
+      toast({ type: "success", title: "User activated" });
+      onChange();
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Failed to activate user" });
     }
   };
 
@@ -523,7 +537,7 @@ function UsersPanel({
         <table className="w-full text-sm">
           <thead className="text-tertiary">
             <tr className="border-b border-border-subtle">
-              {["Name", "Ext", "SIP URI", "Role", ""].map((header) => (
+              {["Name", "Ext", "SIP URI", "Role", "Status", ""].map((header) => (
                 <th key={header} className="text-left py-2 px-2 font-medium">{header}</th>
               ))}
             </tr>
@@ -542,17 +556,35 @@ function UsersPanel({
                     {(user as any).role || "user"}
                   </span>
                 </td>
+                <td className="py-2 px-2">
+                  <span className={cn(
+                    "px-2 py-0.5 rounded-full text-xs font-medium",
+                    user.active === false ? "bg-destructive/10 text-destructive" : "bg-emerald-500/10 text-emerald-500"
+                  )}>
+                    {user.active === false ? "Inactive" : "Active"}
+                  </span>
+                </td>
                 <td className="py-2 px-2 text-right">
                   <div className="inline-flex items-center gap-1">
                     <button
                       onClick={() => toggleRole(user, (user as any).role || "user")}
+                      disabled={user.active === false}
                       className="h-8 px-2 rounded-md hover:bg-elevated text-xs text-secondary hover:text-primary"
                     >
                       {(user as any).role === "admin" ? "Demote" : "Promote"}
                     </button>
-                    <IconButton label="Delete user" tone="danger" onClick={() => remove(user.id)}>
-                      <Trash2 size={16} />
-                    </IconButton>
+                    {user.active === false ? (
+                      <button
+                        onClick={() => activate(user.id)}
+                        className="h-8 px-2 rounded-md hover:bg-elevated text-xs text-secondary hover:text-primary"
+                      >
+                        Activate
+                      </button>
+                    ) : (
+                      <IconButton label="Deactivate user" tone="danger" onClick={() => remove(user.id)}>
+                        <Trash2 size={16} />
+                      </IconButton>
+                    )}
                   </div>
                 </td>
               </tr>
@@ -1047,18 +1079,114 @@ function MediaPanel({ snapshot }: { snapshot: AdminSnapshot | null }) {
   );
 }
 
-function AuditPanel({ snapshot }: { snapshot: AdminSnapshot | null }) {
+function AuditPanel({ baseUrl, token, snapshot }: { baseUrl: string; token: string; snapshot: AdminSnapshot | null }) {
+  const [events, setEvents] = useState<AdminSnapshot["auditEvents"]>([]);
+  const [principal, setPrincipal] = useState("");
+  const [action, setAction] = useState("");
+  const [target, setTarget] = useState("");
+  const [limit, setLimit] = useState("250");
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    setEvents(snapshot?.auditEvents ?? []);
+  }, [snapshot?.auditEvents]);
+
+  const queryString = useCallback(() => {
+    const params = new URLSearchParams();
+    if (principal.trim()) params.set("principal", principal.trim());
+    if (action.trim()) params.set("action", action.trim());
+    if (target.trim()) params.set("target", target.trim());
+    if (limit.trim()) params.set("limit", limit.trim());
+    const query = params.toString();
+    return query ? `?${query}` : "";
+  }, [action, limit, principal, target]);
+
+  const load = useCallback(async () => {
+    if (!token) return;
+    setLoading(true);
+    try {
+      setEvents(await api<AdminSnapshot["auditEvents"]>(baseUrl, token, `/v1/admin/audit${queryString()}`));
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Unable to load audit events" });
+    } finally {
+      setLoading(false);
+    }
+  }, [baseUrl, queryString, token]);
+
+  const downloadCsv = async () => {
+    try {
+      const response = await fetch(`${baseUrl.replace(/\/$/, "")}/v1/admin/audit/export.csv${queryString()}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) throw new Error(`Export failed (${response.status})`);
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `audit-log-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Unable to export audit log" });
+    }
+  };
+
   return (
-    <Table
-      title="Audit log"
-      columns={["Time", "Principal", "Action", "Target"]}
-      rows={(snapshot?.auditEvents ?? []).slice(0, 100).map((event) => [
-        shortDate(event.created_at),
-        event.principal,
-        event.action,
-        event.target ?? "-",
-      ])}
-    />
+    <div className="space-y-3">
+      <div className="rounded-md border border-border-subtle bg-surface p-3">
+        <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_1fr_100px_auto_auto] gap-2">
+          <input
+            value={principal}
+            onChange={(event) => setPrincipal(event.target.value)}
+            placeholder="Principal"
+            className="h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+          />
+          <input
+            value={action}
+            onChange={(event) => setAction(event.target.value)}
+            placeholder="Action"
+            className="h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+          />
+          <input
+            value={target}
+            onChange={(event) => setTarget(event.target.value)}
+            placeholder="Target"
+            className="h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+          />
+          <input
+            value={limit}
+            onChange={(event) => setLimit(event.target.value)}
+            inputMode="numeric"
+            placeholder="Limit"
+            className="h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+          />
+          <button
+            onClick={() => load()}
+            disabled={loading}
+            className="h-10 px-3 rounded-md border border-border-default hover:bg-elevated text-sm disabled:opacity-60"
+          >
+            {loading ? "Loading" : "Refresh"}
+          </button>
+          <button
+            onClick={downloadCsv}
+            className="h-10 px-3 rounded-md bg-accent hover:bg-accent-hover text-white text-sm inline-flex items-center justify-center gap-2"
+          >
+            <Download size={15} />
+            CSV
+          </button>
+        </div>
+      </div>
+      <Table
+        title="Audit log"
+        columns={["Time", "Principal", "Action", "Target"]}
+        rows={events.map((event) => [
+          shortDate(event.created_at),
+          event.principal,
+          event.action,
+          event.target ?? "-",
+        ])}
+      />
+    </div>
   );
 }
 
@@ -2829,7 +2957,7 @@ function Table({
 }: {
   title?: string;
   columns: string[];
-  rows: string[][];
+  rows: ReactNode[][];
 }) {
   return (
     <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
@@ -2852,7 +2980,7 @@ function Table({
               rows.map((row, index) => (
                 <tr key={index} className="border-b border-border-subtle last:border-b-0">
                   {row.map((cell, cellIndex) => (
-                    <td key={cellIndex} className="py-2 px-2 max-w-[260px] truncate">{cell}</td>
+                    <td key={cellIndex} className="py-2 px-2 max-w-[260px] align-top break-words">{cell}</td>
                   ))}
                 </tr>
               ))
@@ -2866,21 +2994,105 @@ function Table({
 
 // ── Call Quality Dashboard ─────────────────────────────────────────
 
+type CallQualityRating = "good" | "warning" | "poor";
+
+interface CallQualitySummary {
+  total_reports: number;
+  avg_mos: number;
+  avg_jitter_ms: number;
+  avg_packet_loss_pct: number;
+  avg_round_trip_ms: number;
+  poor_quality_calls: number;
+  warning_quality_calls?: number;
+  worst_mos?: number;
+}
+
+interface CallQualityReport {
+  id: string;
+  user_sip_uri?: string;
+  codec?: string;
+  mos_score?: number;
+  jitter_ms?: number;
+  packet_loss_pct?: number;
+  round_trip_ms?: number;
+  rating?: CallQualityRating;
+  issues?: string[];
+  recommended_action?: string | null;
+  reported_at: string;
+}
+
+function qualityClass(rating: CallQualityRating | undefined) {
+  if (rating === "poor") return "bg-destructive/10 text-destructive border-destructive/20";
+  if (rating === "warning") return "bg-warning/10 text-warning border-warning/20";
+  return "bg-success/10 text-success border-success/20";
+}
+
+function issueLabel(issue: string) {
+  return issue.split("_").join(" ");
+}
+
 function CqdPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
-  const [summary, setSummary] = useState<any>(null);
-  const [reports, setReports] = useState<any[]>([]);
+  const [summary, setSummary] = useState<CallQualitySummary | null>(null);
+  const [reports, setReports] = useState<CallQualityReport[]>([]);
+  const [userFilter, setUserFilter] = useState("");
+  const [callFilter, setCallFilter] = useState("");
+  const [ratingFilter, setRatingFilter] = useState<"all" | CallQualityRating>("all");
+  const [limit, setLimit] = useState("100");
+  const [loading, setLoading] = useState(false);
+
+  const queryString = useCallback(() => {
+    const params = new URLSearchParams();
+    if (userFilter.trim()) params.set("user_sip_uri", userFilter.trim());
+    if (callFilter.trim()) params.set("call_id", callFilter.trim());
+    if (ratingFilter !== "all") params.set("rating", ratingFilter);
+    if (limit.trim()) params.set("limit", limit.trim());
+    const query = params.toString();
+    return query ? `?${query}` : "";
+  }, [callFilter, limit, ratingFilter, userFilter]);
+
+  const load = useCallback(async () => {
+    if (!token) return;
+    setLoading(true);
+    try {
+      const [nextSummary, nextReports] = await Promise.all([
+        api<CallQualitySummary>(baseUrl, token, "/v1/call-quality/summary"),
+        api<CallQualityReport[]>(baseUrl, token, `/v1/call-quality${queryString()}`),
+      ]);
+      setSummary(nextSummary);
+      setReports(nextReports);
+    } finally {
+      setLoading(false);
+    }
+  }, [baseUrl, queryString, token]);
 
   useEffect(() => {
-    if (!token) return;
-    api(baseUrl, token, "/v1/call-quality/summary").then(setSummary).catch(() => {});
-    api(baseUrl, token, "/v1/call-quality").then(setReports).catch(() => {});
-  }, [baseUrl, token]);
+    load().catch(() => {});
+  }, [load]);
+
+  const downloadCsv = async () => {
+    try {
+      const response = await fetch(`${baseUrl.replace(/\/$/, "")}/v1/call-quality/export.csv${queryString()}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) throw new Error(`Export failed (${response.status})`);
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `call-quality-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Unable to export CQD data" });
+    }
+  };
 
   return (
     <div className="space-y-4">
       {summary && (
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3">
           <Metric label="Total Reports" value={summary.total_reports} />
+          <Metric label="Warning Calls" value={summary.warning_quality_calls ?? 0} />
           <div className="rounded-md border border-border-subtle bg-surface p-3">
             <div className="text-xl font-semibold tabular-nums">{summary.avg_mos?.toFixed(2)}</div>
             <div className="text-xs text-secondary">Avg MOS Score</div>
@@ -2894,22 +3106,271 @@ function CqdPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
             <div className="text-xs text-secondary">Avg Packet Loss</div>
           </div>
           <Metric label="Poor Quality Calls" value={summary.poor_quality_calls} />
+          <div className="rounded-md border border-border-subtle bg-surface p-3">
+            <div className="text-xl font-semibold tabular-nums">{summary.worst_mos?.toFixed(2) ?? "0.00"}</div>
+            <div className="text-xs text-secondary">Worst MOS</div>
+          </div>
         </div>
       )}
+      <div className="rounded-md border border-border-subtle bg-surface p-3">
+        <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_140px_100px_auto_auto] gap-2">
+          <input
+            value={userFilter}
+            onChange={(event) => setUserFilter(event.target.value)}
+            placeholder="User"
+            className="h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+          />
+          <input
+            value={callFilter}
+            onChange={(event) => setCallFilter(event.target.value)}
+            placeholder="Call ID"
+            className="h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+          />
+          <select
+            value={ratingFilter}
+            onChange={(event) => setRatingFilter(event.target.value as "all" | CallQualityRating)}
+            className="h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+          >
+            <option value="all">All ratings</option>
+            <option value="good">Good</option>
+            <option value="warning">Warning</option>
+            <option value="poor">Poor</option>
+          </select>
+          <input
+            value={limit}
+            onChange={(event) => setLimit(event.target.value)}
+            inputMode="numeric"
+            placeholder="Limit"
+            className="h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+          />
+          <button
+            onClick={() => load().catch(() => {})}
+            disabled={loading}
+            className="h-10 px-3 rounded-md border border-border-default hover:bg-elevated text-sm disabled:opacity-60"
+          >
+            {loading ? "Loading" : "Refresh"}
+          </button>
+          <button
+            onClick={downloadCsv}
+            className="h-10 px-3 rounded-md bg-accent hover:bg-accent-hover text-white text-sm inline-flex items-center justify-center gap-2"
+          >
+            <Download size={15} />
+            CSV
+          </button>
+        </div>
+      </div>
       <Table
         title="Recent Quality Reports"
-        columns={["User", "Codec", "MOS", "Jitter", "Loss", "RTT", "Reported"]}
-        rows={reports.slice(-50).reverse().map((r: any) => [
+        columns={["User", "Rating", "Codec", "MOS", "Jitter", "Loss", "RTT", "Issues", "Action", "Reported"]}
+        rows={reports.slice(-50).reverse().map((r) => [
           r.user_sip_uri?.replace(/^sip:/, "") ?? "",
+          <span className={cn("inline-flex rounded-full border px-2 py-0.5 text-[11px] font-medium capitalize", qualityClass(r.rating))}>
+            {r.rating ?? "good"}
+          </span>,
           r.codec ?? "",
           r.mos_score?.toFixed(2) ?? "",
           `${r.jitter_ms?.toFixed(1)}ms`,
           `${r.packet_loss_pct?.toFixed(2)}%`,
           `${r.round_trip_ms?.toFixed(0)}ms`,
+          r.issues && r.issues.length > 0 ? (
+            <span className="whitespace-normal text-secondary">{r.issues.map(issueLabel).join(", ")}</span>
+          ) : (
+            <span className="text-tertiary">None</span>
+          ),
+          r.recommended_action ? (
+            <span className="whitespace-normal text-secondary">{r.recommended_action}</span>
+          ) : (
+            <span className="text-tertiary">No action</span>
+          ),
           shortDate(r.reported_at),
         ])}
       />
     </div>
+  );
+}
+
+// ── Collaboration Policy Panel ────────────────────────────────────
+
+function CollaborationPolicyPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [policy, setPolicy] = useState<ServerCollaborationPolicy | null>(null);
+  const [domains, setDomains] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!token) return;
+    setLoading(true);
+    try {
+      const nextPolicy = await api<ServerCollaborationPolicy>(baseUrl, token, "/v1/admin/collaboration/policy");
+      setPolicy(nextPolicy);
+      setDomains(nextPolicy.allowed_external_domains.join(", "));
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Unable to load policy" });
+    } finally {
+      setLoading(false);
+    }
+  }, [baseUrl, token]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const updatePolicy = <K extends keyof ServerCollaborationPolicy>(key: K, value: ServerCollaborationPolicy[K]) => {
+    setPolicy((current) => current ? { ...current, [key]: value } : current);
+  };
+
+  const save = async () => {
+    if (!policy) return;
+    const allowed_external_domains = domains
+      .split(",")
+      .map((domain) => domain.trim().replace(/^@/, "").toLowerCase())
+      .filter(Boolean);
+    setSaving(true);
+    try {
+      const saved = await api<ServerCollaborationPolicy>(baseUrl, token, "/v1/admin/collaboration/policy", {
+        method: "PUT",
+        body: {
+          structured_mentions_enabled: policy.structured_mentions_enabled,
+          broad_mentions_enabled: policy.broad_mentions_enabled,
+          broad_mentions_allowed_roles: policy.broad_mentions_allowed_roles,
+          broad_mentions_per_minute: Math.max(1, Number(policy.broad_mentions_per_minute) || 1),
+          external_access_enabled: policy.external_access_enabled,
+          allowed_external_domains,
+          urgent_messages_enabled: policy.urgent_messages_enabled,
+          meeting_recording_enabled: policy.meeting_recording_enabled,
+        },
+      });
+      setPolicy(saved);
+      setDomains(saved.allowed_external_domains.join(", "));
+      toast({ type: "success", title: "Policy saved" });
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Unable to save policy" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading && !policy) {
+    return <section className="border border-border-subtle bg-surface rounded-md p-4 text-sm text-secondary">Loading policy...</section>;
+  }
+
+  if (!policy) {
+    return (
+      <section className="border border-border-subtle bg-surface rounded-md p-4">
+        <button onClick={load} className="h-9 px-3 rounded-md border border-border-default hover:bg-elevated text-sm inline-flex items-center gap-2">
+          <RefreshCw size={16} />
+          Retry
+        </button>
+      </section>
+    );
+  }
+
+  const roles = policy.broad_mentions_allowed_roles.join(", ");
+
+  return (
+    <div className="space-y-4">
+      <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+        <div className="p-3 border-b border-border-subtle flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Shield size={17} className="text-accent" />
+            <h2 className="font-medium">Collaboration policy</h2>
+          </div>
+          <button
+            onClick={save}
+            disabled={saving}
+            className="h-9 px-3 rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium inline-flex items-center gap-2 disabled:opacity-60"
+          >
+            <Save size={16} />
+            {saving ? "Saving..." : "Save"}
+          </button>
+        </div>
+        <div className="p-3 grid lg:grid-cols-2 gap-4">
+          <div className="space-y-3">
+            <PolicyToggle
+              label="External access"
+              checked={policy.external_access_enabled}
+              onChange={(checked) => updatePolicy("external_access_enabled", checked)}
+            />
+            <label className="block">
+              <span className="block text-xs text-tertiary mb-1">Allowed external domains</span>
+              <textarea
+                value={domains}
+                onChange={(event) => setDomains(event.target.value)}
+                rows={3}
+                className="w-full rounded-md bg-base border border-border-default px-3 py-2 text-sm outline-none focus:border-border-focus"
+                placeholder="partner.example, vendor.example"
+              />
+            </label>
+            <PolicyToggle
+              label="Meeting recording"
+              checked={policy.meeting_recording_enabled}
+              onChange={(checked) => updatePolicy("meeting_recording_enabled", checked)}
+            />
+            <PolicyToggle
+              label="Urgent messages"
+              checked={policy.urgent_messages_enabled}
+              onChange={(checked) => updatePolicy("urgent_messages_enabled", checked)}
+            />
+          </div>
+          <div className="space-y-3">
+            <PolicyToggle
+              label="Structured mentions"
+              checked={policy.structured_mentions_enabled}
+              onChange={(checked) => updatePolicy("structured_mentions_enabled", checked)}
+            />
+            <PolicyToggle
+              label="Broad mentions"
+              checked={policy.broad_mentions_enabled}
+              onChange={(checked) => updatePolicy("broad_mentions_enabled", checked)}
+            />
+            <label className="block">
+              <span className="block text-xs text-tertiary mb-1">Broad mention roles</span>
+              <input
+                value={roles}
+                onChange={(event) => updatePolicy("broad_mentions_allowed_roles", event.target.value.split(",").map((role) => role.trim()).filter(Boolean))}
+                className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+              />
+            </label>
+            <label className="block">
+              <span className="block text-xs text-tertiary mb-1">Broad mentions per minute</span>
+              <input
+                type="number"
+                min={1}
+                value={policy.broad_mentions_per_minute}
+                onChange={(event) => updatePolicy("broad_mentions_per_minute", Math.max(1, Number(event.target.value) || 1))}
+                className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+              />
+            </label>
+          </div>
+        </div>
+      </section>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+        <Metric label="External domains" value={domains.split(",").map((domain) => domain.trim()).filter(Boolean).length} />
+        <Metric label="Mention roles" value={policy.broad_mentions_allowed_roles.length} />
+        <Metric label="Mention rate" value={policy.broad_mentions_per_minute} />
+        <Metric label="Enabled controls" value={[
+          policy.external_access_enabled,
+          policy.meeting_recording_enabled,
+          policy.urgent_messages_enabled,
+          policy.structured_mentions_enabled,
+          policy.broad_mentions_enabled,
+        ].filter(Boolean).length} />
+      </div>
+    </div>
+  );
+}
+
+function PolicyToggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <label className="flex items-center justify-between gap-3 rounded-md border border-border-subtle bg-base px-3 py-2">
+      <span className="text-sm">{label}</span>
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+        className="h-4 w-4 accent-accent"
+      />
+    </label>
   );
 }
 
@@ -2933,14 +3394,18 @@ function RetentionPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
     matched_messages: number;
     deleted_messages: number;
     skipped_legal_hold_policies: string[];
-    policy_results: {
-      policy_id: string;
-      room_id?: string | null;
-      retain_days?: number | null;
-      matched_messages: number;
-      deleted_messages: number;
-      legal_hold: boolean;
-    }[];
+      policy_results: {
+        policy_id: string;
+        room_id?: string | null;
+        retain_days?: number | null;
+        matched_messages: number;
+        deleted_messages: number;
+        matched_files?: number;
+        deleted_files?: number;
+        matched_recordings?: number;
+        deleted_recordings?: number;
+        legal_hold: boolean;
+      }[];
   };
   type RoomOption = { id: string; name: string; team_id?: string | null; channel_name?: string | null };
 
@@ -2957,7 +3422,13 @@ function RetentionPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
   const [running, setRunning] = useState<"preview" | "apply" | null>(null);
   const [lastResult, setLastResult] = useState<RetentionResult | null>(null);
   const [exportRoomId, setExportRoomId] = useState("");
+  const [exportQuery, setExportQuery] = useState("");
+  const [exportUser, setExportUser] = useState("");
+  const [exportFrom, setExportFrom] = useState("");
+  const [exportTo, setExportTo] = useState("");
+  const [exportLimit, setExportLimit] = useState("250");
   const [exportSummary, setExportSummary] = useState<{ exported_at: string; count: number; room_id?: string | null } | null>(null);
+  const [searchingDiscovery, setSearchingDiscovery] = useState(false);
 
   const load = () => {
     if (!token) return;
@@ -3014,6 +3485,17 @@ function RetentionPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
     }
   };
 
+  const deletePolicy = async (policy: RetentionPolicyRow) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/governance/retention/${policy.id}`, { method: "DELETE" });
+      if (selectedPolicyId === policy.id) resetForm();
+      load();
+      toast({ type: "success", title: "Retention policy deleted" });
+    } catch {
+      toast({ type: "error", title: "Policy delete failed" });
+    }
+  };
+
   const enforce = async (dryRun: boolean) => {
     setRunning(dryRun ? "preview" : "apply");
     try {
@@ -3024,8 +3506,8 @@ function RetentionPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
       toast({
         type: dryRun ? "info" : "success",
         title: dryRun
-          ? `${result.deleted_messages} messages would be removed`
-          : `${result.deleted_messages} messages removed`,
+          ? `${result.deleted_messages} items would be removed`
+          : `${result.deleted_messages} items removed`,
       });
       if (!dryRun) load();
     } catch {
@@ -3035,23 +3517,56 @@ function RetentionPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
     }
   };
 
+  const discoveryParams = () => {
+    const params = new URLSearchParams();
+    if (exportRoomId.trim()) params.set("room_id", exportRoomId.trim());
+    if (exportQuery.trim()) params.set("q", exportQuery.trim());
+    if (exportUser.trim()) params.set("user_uri", exportUser.trim());
+    if (exportFrom) params.set("from", new Date(exportFrom).toISOString());
+    if (exportTo) params.set("to", new Date(exportTo).toISOString());
+    if (exportLimit.trim()) params.set("limit", String(Math.max(1, Number.parseInt(exportLimit, 10) || 250)));
+    return params;
+  };
+
+  const fetchDiscovery = async (exporting = false) => {
+    const params = discoveryParams();
+    if (exporting) params.set("export", "true");
+    const hasFilters = Array.from(params.keys()).some((key) => key !== "limit" && key !== "export");
+    const query = params.toString();
+    return api<{ exported_at: string; room_id?: string | null; messages: any[]; files?: any[]; recordings?: any[] }>(
+      baseUrl,
+      token,
+      hasFilters ? `/v1/admin/ediscovery/search?${query}` : `/v1/admin/ediscovery/export${exportRoomId ? `?room_id=${encodeURIComponent(exportRoomId)}` : ""}`
+    );
+  };
+
+  const previewDiscovery = async () => {
+    setSearchingDiscovery(true);
+    try {
+      const data = await fetchDiscovery();
+      const count = data.messages.length + (data.files?.length ?? 0) + (data.recordings?.length ?? 0);
+      setExportSummary({ exported_at: data.exported_at, count, room_id: data.room_id });
+      toast({ type: "info", title: `${count} items matched` });
+    } catch {
+      toast({ type: "error", title: "Search failed" });
+    } finally {
+      setSearchingDiscovery(false);
+    }
+  };
+
   const exportDiscovery = async () => {
     try {
-      const query = exportRoomId ? `?room_id=${encodeURIComponent(exportRoomId)}` : "";
-      const data = await api<{ exported_at: string; room_id?: string | null; messages: any[] }>(
-        baseUrl,
-        token,
-        `/v1/admin/ediscovery/export${query}`
-      );
+      const data = await fetchDiscovery(true);
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `ediscovery-${exportRoomId || "all"}-${new Date().toISOString().slice(0, 10)}.json`;
+      a.download = `ediscovery-${exportRoomId || exportQuery || exportUser || "all"}-${new Date().toISOString().slice(0, 10)}.json`;
       a.click();
       URL.revokeObjectURL(url);
-      setExportSummary({ exported_at: data.exported_at, count: data.messages.length, room_id: data.room_id });
-      toast({ type: "success", title: `Exported ${data.messages.length} messages` });
+      const exportedCount = data.messages.length + (data.files?.length ?? 0) + (data.recordings?.length ?? 0);
+      setExportSummary({ exported_at: data.exported_at, count: exportedCount, room_id: data.room_id });
+      toast({ type: "success", title: `Exported ${exportedCount} items` });
     } catch {
       toast({ type: "error", title: "Export failed" });
     }
@@ -3060,8 +3575,9 @@ function RetentionPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
   const stats = useMemo(() => {
     const legalHolds = policies.filter((policy) => policy.legal_hold).length;
     const finiteRetention = policies.filter((policy) => policy.retain_days != null && !policy.legal_hold).length;
-    const exportable = policies.filter((policy) => policy.export_enabled).length;
-    return { policies: policies.length, legalHolds, finiteRetention, exportable };
+    const filePolicies = policies.filter((policy) => matchesFilePolicy(policy.scope)).length;
+    const recordingPolicies = policies.filter((policy) => matchesRecordingPolicy(policy.scope)).length;
+    return { policies: policies.length, legalHolds, finiteRetention, filePolicies, recordingPolicies };
   }, [policies]);
 
   const roomName = (id?: string | null) => {
@@ -3076,7 +3592,7 @@ function RetentionPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
         <Metric label="Policies" value={stats.policies} />
         <Metric label="Legal holds" value={stats.legalHolds} />
         <Metric label="Retention rules" value={stats.finiteRetention} />
-        <Metric label="Export enabled" value={stats.exportable} />
+        <Metric label="Media policies" value={stats.filePolicies + stats.recordingPolicies} />
       </div>
 
       <div className="grid xl:grid-cols-[1fr_380px] gap-4">
@@ -3115,6 +3631,8 @@ function RetentionPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
               >
                 <option value="global">Global</option>
                 <option value="room">Room or channel</option>
+                <option value="files">Files</option>
+                <option value="recordings">Recordings</option>
               </select>
             </label>
             <label className="block">
@@ -3208,12 +3726,21 @@ function RetentionPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
                     </td>
                     <td className="py-2 px-3">{shortDate(policy.updated_at)}</td>
                     <td className="py-2 px-3 text-right">
+                      <div className="inline-flex items-center gap-2">
                       <button
                         onClick={() => editPolicy(policy)}
                         className="h-8 px-3 rounded-md border border-border-default hover:bg-elevated text-sm"
                       >
                         Edit
                       </button>
+                      <button
+                        onClick={() => deletePolicy(policy)}
+                        className="h-8 w-8 rounded-md text-destructive hover:bg-destructive/10 inline-flex items-center justify-center"
+                        title="Delete policy"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -3250,8 +3777,8 @@ function RetentionPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
               {lastResult ? (
                 <div className="rounded-md border border-border-subtle bg-base p-3 space-y-3">
                   <div className="grid grid-cols-2 gap-2">
-                    <Metric label="Matched" value={lastResult.matched_messages} />
-                    <Metric label={lastResult.dry_run ? "Would delete" : "Deleted"} value={lastResult.deleted_messages} />
+                    <Metric label="Matched items" value={lastResult.matched_messages} />
+                    <Metric label={lastResult.dry_run ? "Would remove" : "Removed"} value={lastResult.deleted_messages} />
                   </div>
                   <div className="text-xs text-secondary">
                     Evaluated {shortDate(lastResult.evaluated_at)}
@@ -3264,7 +3791,7 @@ function RetentionPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
                       <div key={result.policy_id} className="rounded border border-border-subtle p-2 text-xs">
                         <div className="font-medium">{roomName(result.room_id)}</div>
                         <div className="text-secondary">
-                          {result.matched_messages} matched, {result.deleted_messages} {lastResult.dry_run ? "would delete" : "deleted"}
+                          {result.matched_messages} messages, {result.matched_files ?? 0} files, and {result.matched_recordings ?? 0} recordings matched; {result.deleted_messages + (result.deleted_files ?? 0) + (result.deleted_recordings ?? 0)} {lastResult.dry_run ? "would be removed" : "removed"}
                         </div>
                       </div>
                     ))}
@@ -3282,6 +3809,24 @@ function RetentionPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
               <h2 className="font-medium">eDiscovery export</h2>
             </div>
             <div className="p-3 space-y-3">
+              <label className="block">
+                <span className="block text-xs text-tertiary mb-1">Keyword</span>
+                <input
+                  value={exportQuery}
+                  onChange={(event) => setExportQuery(event.target.value)}
+                  className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+                  placeholder="Message, filename, transcript, call ID"
+                />
+              </label>
+              <label className="block">
+                <span className="block text-xs text-tertiary mb-1">User filter</span>
+                <input
+                  value={exportUser}
+                  onChange={(event) => setExportUser(event.target.value)}
+                  className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+                  placeholder="sip:user@example.com"
+                />
+              </label>
               {rooms.length > 0 && (
                 <label className="block">
                   <span className="block text-xs text-tertiary mb-1">Known room filter</span>
@@ -3306,6 +3851,45 @@ function RetentionPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
                   placeholder="Blank exports all rooms"
                 />
               </label>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="block">
+                  <span className="block text-xs text-tertiary mb-1">From</span>
+                  <input
+                    type="datetime-local"
+                    value={exportFrom}
+                    onChange={(event) => setExportFrom(event.target.value)}
+                    className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+                  />
+                </label>
+                <label className="block">
+                  <span className="block text-xs text-tertiary mb-1">To</span>
+                  <input
+                    type="datetime-local"
+                    value={exportTo}
+                    onChange={(event) => setExportTo(event.target.value)}
+                    className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+                  />
+                </label>
+              </div>
+              <label className="block">
+                <span className="block text-xs text-tertiary mb-1">Result limit</span>
+                <input
+                  value={exportLimit}
+                  onChange={(event) => setExportLimit(event.target.value)}
+                  className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+                  type="number"
+                  min={1}
+                  max={1000}
+                />
+              </label>
+              <button
+                onClick={previewDiscovery}
+                disabled={searchingDiscovery}
+                className="w-full h-10 rounded-md border border-border-default hover:bg-elevated text-sm inline-flex items-center justify-center gap-2 disabled:opacity-60"
+              >
+                <Search size={16} />
+                {searchingDiscovery ? "Searching..." : "Preview matches"}
+              </button>
               <button
                 onClick={exportDiscovery}
                 className="w-full h-10 rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium inline-flex items-center justify-center gap-2"
@@ -3315,7 +3899,7 @@ function RetentionPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
               </button>
               {exportSummary && (
                 <div className="rounded-md border border-border-subtle bg-base p-3 text-sm">
-                  <div className="font-medium">{exportSummary.count} messages exported</div>
+                  <div className="font-medium">{exportSummary.count} items exported</div>
                   <div className="text-xs text-secondary">{roomName(exportSummary.room_id)} - {shortDate(exportSummary.exported_at)}</div>
                 </div>
               )}
@@ -3342,37 +3926,147 @@ function Badge({ children, tone }: { children: React.ReactNode; tone: "ok" | "wa
   );
 }
 
+function matchesFilePolicy(scope: string) {
+  return scope === "global" || scope === "files" || scope === "file";
+}
+
+function matchesRecordingPolicy(scope: string) {
+  return scope === "global" || scope === "recordings" || scope === "recording";
+}
+
 // ── DLP Panel ─────────────────────────────────────────────────────
 
 function DlpPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
   const [policies, setPolicies] = useState<any[]>([]);
   const [violations, setViolations] = useState<any[]>([]);
   const [creating, setCreating] = useState(false);
+  const [selectedPolicyId, setSelectedPolicyId] = useState<string | null>(null);
   const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
   const [pattern, setPattern] = useState("");
   const [action, setAction] = useState("block");
+  const [enabled, setEnabled] = useState(true);
   const [tab, setTab] = useState<"policies" | "violations">("policies");
+  const [violationPolicy, setViolationPolicy] = useState("");
+  const [violationUser, setViolationUser] = useState("");
+  const [violationAction, setViolationAction] = useState<"all" | "block" | "warn" | "audit">("all");
+  const [violationLimit, setViolationLimit] = useState("250");
+  const [loadingViolations, setLoadingViolations] = useState(false);
+  const [scanContent, setScanContent] = useState("");
+  const [scanResult, setScanResult] = useState<any | null>(null);
+  const [scanning, setScanning] = useState(false);
+
+  const violationQuery = useCallback(() => {
+    const params = new URLSearchParams();
+    if (violationPolicy.trim()) params.set("policy", violationPolicy.trim());
+    if (violationUser.trim()) params.set("user_uri", violationUser.trim());
+    if (violationAction !== "all") params.set("action", violationAction);
+    if (violationLimit.trim()) params.set("limit", violationLimit.trim());
+    const query = params.toString();
+    return query ? `?${query}` : "";
+  }, [violationAction, violationLimit, violationPolicy, violationUser]);
 
   const load = () => {
     if (!token) return;
     api(baseUrl, token, "/v1/admin/dlp/policies").then(setPolicies).catch(() => {});
-    api(baseUrl, token, "/v1/admin/dlp/violations").then(setViolations).catch(() => {});
+    api(baseUrl, token, `/v1/admin/dlp/violations${violationQuery()}`).then(setViolations).catch(() => {});
   };
 
-  useEffect(load, [baseUrl, token]);
+  useEffect(load, [baseUrl, token, violationQuery]);
 
-  const create = async () => {
+  const refreshViolations = async () => {
+    if (!token) return;
+    setLoadingViolations(true);
+    try {
+      setViolations(await api<any[]>(baseUrl, token, `/v1/admin/dlp/violations${violationQuery()}`));
+    } catch {
+      toast({ type: "error", title: "Unable to load DLP violations" });
+    } finally {
+      setLoadingViolations(false);
+    }
+  };
+
+  const exportViolations = async () => {
+    try {
+      const response = await fetch(`${baseUrl.replace(/\/$/, "")}/v1/admin/dlp/violations/export.csv${violationQuery()}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) throw new Error(`Export failed (${response.status})`);
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `dlp-violations-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Unable to export DLP violations" });
+    }
+  };
+
+  const testDlpContent = async () => {
+    if (!scanContent.trim()) return;
+    setScanning(true);
+    try {
+      const result = await api<any>(baseUrl, token, "/v1/admin/dlp/scan", {
+        method: "POST",
+        body: { content: scanContent },
+      });
+      setScanResult(result);
+      toast({
+        type: result.allowed ? "success" : "info",
+        title: result.allowed ? "No DLP policies matched" : `${result.violations?.length ?? 0} DLP policies matched`,
+      });
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "DLP test failed" });
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const resetPolicyForm = () => {
+    setSelectedPolicyId(null);
+    setName("");
+    setDescription("");
+    setPattern("");
+    setAction("block");
+    setEnabled(true);
+    setCreating(false);
+  };
+
+  const editPolicy = (policy: any) => {
+    setSelectedPolicyId(policy.id);
+    setName(policy.name ?? "");
+    setDescription(policy.description ?? "");
+    setPattern(policy.pattern ?? "");
+    setAction(policy.action ?? "block");
+    setEnabled(Boolean(policy.enabled));
+    setCreating(true);
+    setTab("policies");
+  };
+
+  const savePolicy = async () => {
     if (!name || !pattern) return;
     try {
-      await api(baseUrl, token, "/v1/admin/dlp/policies", {
-        method: "POST",
-        body: { name, pattern, action, enabled: true },
+      await api(baseUrl, token, selectedPolicyId ? `/v1/admin/dlp/policies/${selectedPolicyId}` : "/v1/admin/dlp/policies", {
+        method: selectedPolicyId ? "PUT" : "POST",
+        body: { name, description, pattern, action, enabled },
       });
-      setName("");
-      setPattern("");
-      setCreating(false);
+      resetPolicyForm();
       load();
-      toast({ type: "info", title: "DLP policy created" });
+      toast({ type: "info", title: selectedPolicyId ? "DLP policy updated" : "DLP policy created" });
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "DLP policy save failed" });
+    }
+  };
+
+  const togglePolicy = async (policy: any) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/dlp/policies/${policy.id}`, {
+        method: "PUT",
+        body: { enabled: !policy.enabled },
+      });
+      load();
     } catch { toast({ type: "error", title: "Failed" }); }
   };
 
@@ -3398,25 +4092,72 @@ function DlpPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
         >
           Violations ({violations.length})
         </button>
-        <button onClick={() => setCreating(!creating)} className="ml-auto flex items-center gap-1 px-3 py-1.5 bg-accent text-white rounded text-sm">
+        <button onClick={() => creating ? resetPolicyForm() : setCreating(true)} className="ml-auto flex items-center gap-1 px-3 py-1.5 bg-accent text-white rounded text-sm">
           <Plus size={14} /> New Policy
         </button>
       </div>
 
       {creating && (
         <div className="p-3 border border-border-subtle rounded space-y-2">
+          <div className="text-sm font-medium">{selectedPolicyId ? "Edit DLP policy" : "New DLP policy"}</div>
           <input className="w-full rounded border border-border-subtle bg-input px-3 py-2 text-sm" placeholder="Policy name (e.g. Credit Card Numbers)" value={name} onChange={(e) => setName(e.target.value)} />
+          <input className="w-full rounded border border-border-subtle bg-input px-3 py-2 text-sm" placeholder="Description" value={description} onChange={(e) => setDescription(e.target.value)} />
           <input className="w-full rounded border border-border-subtle bg-input px-3 py-2 text-sm font-mono" placeholder="Regex pattern (e.g. \b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b)" value={pattern} onChange={(e) => setPattern(e.target.value)} />
           <select className="w-full rounded border border-border-subtle bg-input px-3 py-2 text-sm" value={action} onChange={(e) => setAction(e.target.value)}>
             <option value="block">Block</option>
             <option value="warn">Warn</option>
             <option value="audit">Audit Only</option>
           </select>
-          <button onClick={create} className="px-4 py-2 bg-accent text-white rounded text-sm">Create</button>
+          <label className="inline-flex items-center gap-2 text-sm text-secondary">
+            <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} className="accent-accent" />
+            Enabled
+          </label>
+          <div className="flex gap-2">
+            <button onClick={savePolicy} className="px-4 py-2 bg-accent text-white rounded text-sm">{selectedPolicyId ? "Update" : "Create"}</button>
+            <button onClick={resetPolicyForm} className="px-4 py-2 border border-border-default rounded text-sm hover:bg-elevated">Cancel</button>
+          </div>
         </div>
       )}
 
       {tab === "policies" && (
+        <div className="space-y-3">
+        <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+          <div className="p-3 border-b border-border-subtle flex items-center justify-between gap-3">
+            <h2 className="font-medium">Policy tester</h2>
+            <button
+              onClick={testDlpContent}
+              disabled={scanning || !scanContent.trim()}
+              className="h-8 px-3 rounded-md bg-accent hover:bg-accent-hover text-white text-sm disabled:opacity-60"
+            >
+              {scanning ? "Testing" : "Test content"}
+            </button>
+          </div>
+          <div className="p-3 grid lg:grid-cols-[1fr_320px] gap-3">
+            <textarea
+              value={scanContent}
+              onChange={(event) => setScanContent(event.target.value)}
+              placeholder="Paste sample content to test against enabled DLP policies"
+              className="min-h-28 rounded-md bg-base border border-border-default px-3 py-2 text-sm outline-none focus:border-border-focus resize-y"
+            />
+            <div className="rounded-md border border-border-subtle bg-base p-3 text-sm">
+              {!scanResult ? (
+                <div className="text-secondary">No test result</div>
+              ) : scanResult.violations?.length ? (
+                <div className="space-y-2">
+                  <div className="font-medium text-destructive">Matched {scanResult.violations.length} policy</div>
+                  {scanResult.violations.map((violation: any) => (
+                    <div key={violation.id} className="rounded border border-border-subtle p-2">
+                      <div className="font-medium">{violation.policy_name}</div>
+                      <div className="text-xs text-secondary capitalize">{violation.action_taken}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-success">No policies matched</div>
+              )}
+            </div>
+          </div>
+        </section>
         <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
           <h2 className="p-3 border-b border-border-subtle font-medium">DLP Policies</h2>
           <table className="w-full text-sm">
@@ -3439,9 +4180,17 @@ function DlpPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
                     <td className="py-2 px-2">{p.enabled ? "Yes" : "No"}</td>
                     <td className="py-2 px-2">{shortDate(p.created_at)}</td>
                     <td className="py-2 px-2">
+                      <div className="flex items-center gap-2">
+                      <button onClick={() => editPolicy(p)} className="text-xs text-accent hover:underline">
+                        Edit
+                      </button>
+                      <button onClick={() => togglePolicy(p)} className="text-xs text-secondary hover:text-primary">
+                        {p.enabled ? "Disable" : "Enable"}
+                      </button>
                       <button onClick={() => handleDeleteDlpPolicy(p.id)} className="text-red-500 hover:text-red-400">
                         <Trash2 size={14} />
                       </button>
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -3449,20 +4198,70 @@ function DlpPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
             </tbody>
           </table>
         </section>
+        </div>
       )}
 
       {tab === "violations" && (
-        <Table
-          title="DLP Violations"
-          columns={["Policy", "User", "Action", "Snippet", "Detected"]}
-          rows={violations.slice(-100).reverse().map((v: any) => [
-            v.policy_name,
-            v.user_uri?.replace(/^sip:/, "") ?? "",
-            v.action_taken,
-            v.content_snippet?.slice(0, 50) ?? "",
-            shortDate(v.detected_at),
-          ])}
-        />
+        <div className="space-y-3">
+          <div className="rounded-md border border-border-subtle bg-surface p-3">
+            <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_130px_100px_auto_auto] gap-2">
+              <input
+                value={violationPolicy}
+                onChange={(event) => setViolationPolicy(event.target.value)}
+                placeholder="Policy"
+                className="h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+              />
+              <input
+                value={violationUser}
+                onChange={(event) => setViolationUser(event.target.value)}
+                placeholder="User"
+                className="h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+              />
+              <select
+                value={violationAction}
+                onChange={(event) => setViolationAction(event.target.value as "all" | "block" | "warn" | "audit")}
+                className="h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+              >
+                <option value="all">All actions</option>
+                <option value="block">Block</option>
+                <option value="warn">Warn</option>
+                <option value="audit">Audit</option>
+              </select>
+              <input
+                value={violationLimit}
+                onChange={(event) => setViolationLimit(event.target.value)}
+                inputMode="numeric"
+                placeholder="Limit"
+                className="h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus"
+              />
+              <button
+                onClick={refreshViolations}
+                disabled={loadingViolations}
+                className="h-10 px-3 rounded-md border border-border-default hover:bg-elevated text-sm disabled:opacity-60"
+              >
+                {loadingViolations ? "Loading" : "Refresh"}
+              </button>
+              <button
+                onClick={exportViolations}
+                className="h-10 px-3 rounded-md bg-accent hover:bg-accent-hover text-white text-sm inline-flex items-center justify-center gap-2"
+              >
+                <Download size={15} />
+                CSV
+              </button>
+            </div>
+          </div>
+          <Table
+            title="DLP Violations"
+            columns={["Policy", "User", "Action", "Snippet", "Detected"]}
+            rows={violations.map((v: any) => [
+              v.policy_name,
+              v.user_uri?.replace(/^sip:/, "") ?? "",
+              v.action_taken,
+              v.content_snippet?.slice(0, 80) ?? "",
+              shortDate(v.detected_at),
+            ])}
+          />
+        </div>
       )}
     </div>
   );

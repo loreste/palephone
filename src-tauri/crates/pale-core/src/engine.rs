@@ -16,8 +16,9 @@ use crate::types::*;
 static EVENT_TX: OnceLock<broadcast::Sender<PaleEvent>> = OnceLock::new();
 
 /// Active recorders: call_id → (recorder_id, file_path)
-static ACTIVE_RECORDERS: std::sync::LazyLock<Mutex<std::collections::HashMap<CallId, (pjsip_sys::pjsua_recorder_id, String)>>> =
-    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+static ACTIVE_RECORDERS: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<CallId, (pjsip_sys::pjsua_recorder_id, String)>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// Send an event from PJSIP callbacks
 fn emit_event(event: PaleEvent) {
@@ -266,59 +267,60 @@ impl PjsipEngine {
         // Command loop
         while running.load(Ordering::Relaxed) {
             match cmd_rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                Ok(cmd) => {
-                    match cmd {
-                        EngineCommand::Shutdown => break,
-                        EngineCommand::AddAccount(config) => {
-                            Self::handle_add_account(config, &network);
-                        }
-                        EngineCommand::RemoveAccount(id) => {
-                            Self::handle_remove_account(id);
-                        }
-                        EngineCommand::MakeCall { account_id, uri } => {
-                            Self::handle_make_call(account_id, &uri);
-                        }
-                        EngineCommand::AnswerCall { call_id, code } => {
-                            Self::handle_answer_call(call_id, code);
-                        }
-                        EngineCommand::HangupCall(call_id) => {
-                            Self::handle_hangup(call_id);
-                        }
-                        EngineCommand::HoldCall(call_id) => {
-                            Self::handle_hold(call_id, true);
-                        }
-                        EngineCommand::UnholdCall(call_id) => {
-                            Self::handle_hold(call_id, false);
-                        }
-                        EngineCommand::SetMute { call_id, muted } => {
-                            Self::handle_mute(call_id, muted);
-                        }
-                        EngineCommand::SendDtmf { call_id, digits } => {
-                            Self::handle_dtmf(call_id, &digits);
-                        }
-                        EngineCommand::BlindTransfer { call_id, target } => {
-                            Self::handle_blind_transfer(call_id, &target);
-                        }
-                        EngineCommand::AttendedTransfer { call_id, target_call_id } => {
-                            Self::handle_attended_transfer(call_id, target_call_id);
-                        }
-                        EngineCommand::MakeVideoCall { account_id, uri } => {
-                            Self::handle_make_video_call(account_id, &uri);
-                        }
-                        EngineCommand::ToggleVideo { call_id, enabled } => {
-                            Self::handle_toggle_video(call_id, enabled);
-                        }
-                        EngineCommand::StartRecording { call_id, file_path } => {
-                            Self::handle_start_recording(call_id, &file_path);
-                        }
-                        EngineCommand::StopRecording { call_id } => {
-                            Self::handle_stop_recording(call_id);
-                        }
-                        EngineCommand::ListAudioDevices => {
-                            Self::handle_list_audio_devices();
-                        }
+                Ok(cmd) => match cmd {
+                    EngineCommand::Shutdown => break,
+                    EngineCommand::AddAccount(config) => {
+                        Self::handle_add_account(config, &network);
                     }
-                }
+                    EngineCommand::RemoveAccount(id) => {
+                        Self::handle_remove_account(id);
+                    }
+                    EngineCommand::MakeCall { account_id, uri } => {
+                        Self::handle_make_call(account_id, &uri);
+                    }
+                    EngineCommand::AnswerCall { call_id, code } => {
+                        Self::handle_answer_call(call_id, code);
+                    }
+                    EngineCommand::HangupCall(call_id) => {
+                        Self::handle_hangup(call_id);
+                    }
+                    EngineCommand::HoldCall(call_id) => {
+                        Self::handle_hold(call_id, true);
+                    }
+                    EngineCommand::UnholdCall(call_id) => {
+                        Self::handle_hold(call_id, false);
+                    }
+                    EngineCommand::SetMute { call_id, muted } => {
+                        Self::handle_mute(call_id, muted);
+                    }
+                    EngineCommand::SendDtmf { call_id, digits } => {
+                        Self::handle_dtmf(call_id, &digits);
+                    }
+                    EngineCommand::BlindTransfer { call_id, target } => {
+                        Self::handle_blind_transfer(call_id, &target);
+                    }
+                    EngineCommand::AttendedTransfer {
+                        call_id,
+                        target_call_id,
+                    } => {
+                        Self::handle_attended_transfer(call_id, target_call_id);
+                    }
+                    EngineCommand::MakeVideoCall { account_id, uri } => {
+                        Self::handle_make_video_call(account_id, &uri);
+                    }
+                    EngineCommand::ToggleVideo { call_id, enabled } => {
+                        Self::handle_toggle_video(call_id, enabled);
+                    }
+                    EngineCommand::StartRecording { call_id, file_path } => {
+                        Self::handle_start_recording(call_id, &file_path);
+                    }
+                    EngineCommand::StopRecording { call_id } => {
+                        Self::handle_stop_recording(call_id);
+                    }
+                    EngineCommand::ListAudioDevices => {
+                        Self::handle_list_audio_devices();
+                    }
+                },
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     // No command — continue polling
                 }
@@ -341,19 +343,19 @@ impl PjsipEngine {
             let mut acc_cfg: pjsip_sys::pjsua_acc_config = std::mem::zeroed();
             pjsip_sys::pjsua_acc_config_default(&mut acc_cfg);
 
-            let sip_uri = if config.sip_uri.starts_with("sip:") || config.sip_uri.starts_with("sips:") {
-                config.sip_uri.clone()
-            } else {
-                format!("sip:{}", config.sip_uri)
-            };
-            let id_str = CString::new(format!(
-                "\"{}\" <{}>",
-                config.display_name, sip_uri
-            ))
-            .unwrap();
+            let sip_uri =
+                if config.sip_uri.starts_with("sip:") || config.sip_uri.starts_with("sips:") {
+                    config.sip_uri.clone()
+                } else {
+                    format!("sip:{}", config.sip_uri)
+                };
+            let id_str =
+                CString::new(format!("\"{}\" <{}>", config.display_name, sip_uri)).unwrap();
             acc_cfg.id = pj_str_from_cstring(&id_str);
 
-            let reg_uri_str = if config.registrar_uri.starts_with("sip:") || config.registrar_uri.starts_with("sips:") {
+            let reg_uri_str = if config.registrar_uri.starts_with("sip:")
+                || config.registrar_uri.starts_with("sips:")
+            {
                 config.registrar_uri.clone()
             } else {
                 format!("sip:{}", config.registrar_uri)
@@ -376,22 +378,19 @@ impl PjsipEngine {
             acc_cfg.reg_timeout = config.reg_expiry;
 
             // Set transport based on config — strip existing sip:/sips: prefix first
-            let bare_registrar = config.registrar_uri
+            let bare_registrar = config
+                .registrar_uri
                 .strip_prefix("sips:")
                 .or_else(|| config.registrar_uri.strip_prefix("sip:"))
                 .unwrap_or(&config.registrar_uri);
             match config.transport {
                 Transport::Tls => {
-                    let reg_uri_tls =
-                        CString::new(format!("sips:{}", bare_registrar)).unwrap();
+                    let reg_uri_tls = CString::new(format!("sips:{}", bare_registrar)).unwrap();
                     acc_cfg.reg_uri = pj_str_from_cstring(&reg_uri_tls);
                 }
                 Transport::Tcp => {
-                    let reg_uri_tcp = CString::new(format!(
-                        "sip:{};transport=tcp",
-                        bare_registrar
-                    ))
-                    .unwrap();
+                    let reg_uri_tcp =
+                        CString::new(format!("sip:{};transport=tcp", bare_registrar)).unwrap();
                     acc_cfg.reg_uri = pj_str_from_cstring(&reg_uri_tcp);
                 }
                 Transport::Udp => {
@@ -405,8 +404,10 @@ impl PjsipEngine {
             acc_cfg.rtp_cfg.port_range = rtp_port_range as u32;
             acc_cfg.rtp_cfg.randomize_port = 1;
 
-            let (use_srtp, secure_signaling) =
-                srtp_policy(network.srtp_mode, matches!(config.transport, Transport::Tls));
+            let (use_srtp, secure_signaling) = srtp_policy(
+                network.srtp_mode,
+                matches!(config.transport, Transport::Tls),
+            );
             acc_cfg.use_srtp = use_srtp;
             acc_cfg.srtp_secure_signaling = secure_signaling;
 
@@ -461,14 +462,15 @@ impl PjsipEngine {
 
     fn handle_answer_call(call_id: CallId, code: u16) {
         unsafe {
-            let status =
-                pjsip_sys::pjsua_call_answer(call_id, code as u32, std::ptr::null(), std::ptr::null());
+            let status = pjsip_sys::pjsua_call_answer(
+                call_id,
+                code as u32,
+                std::ptr::null(),
+                std::ptr::null(),
+            );
             if status != 0 {
                 emit_event(PaleEvent::Error {
-                    message: format!(
-                        "Failed to answer call {}: status={}",
-                        call_id, status
-                    ),
+                    message: format!("Failed to answer call {}: status={}", call_id, status),
                 });
             }
         }
@@ -532,14 +534,10 @@ impl PjsipEngine {
         unsafe {
             let target_c = CString::new(target).unwrap();
             let mut target_pj = pj_str_from_cstring(&target_c);
-            let status =
-                pjsip_sys::pjsua_call_xfer(call_id, &mut target_pj, std::ptr::null());
+            let status = pjsip_sys::pjsua_call_xfer(call_id, &mut target_pj, std::ptr::null());
             if status != 0 {
                 emit_event(PaleEvent::Error {
-                    message: format!(
-                        "Transfer failed for call {}: status={}",
-                        call_id, status
-                    ),
+                    message: format!("Transfer failed for call {}: status={}", call_id, status),
                 });
             }
         }
@@ -606,14 +604,14 @@ impl PjsipEngine {
             opt.vid_cnt = if enabled { 1 } else { 0 };
             opt.aud_cnt = 1;
 
-            let status = pjsip_sys::pjsua_call_reinvite2(
-                call_id,
-                &opt,
-                std::ptr::null(),
-            );
+            let status = pjsip_sys::pjsua_call_reinvite2(call_id, &opt, std::ptr::null());
 
             if status != 0 {
-                log::warn!("Failed to toggle video for call {}: status={}", call_id, status);
+                log::warn!(
+                    "Failed to toggle video for call {}: status={}",
+                    call_id,
+                    status
+                );
             }
         }
     }
@@ -647,7 +645,10 @@ impl PjsipEngine {
 
             if status != 0 {
                 emit_event(PaleEvent::Error {
-                    message: format!("Failed to create recorder for call {}: status={}", call_id, status),
+                    message: format!(
+                        "Failed to create recorder for call {}: status={}",
+                        call_id, status
+                    ),
                 });
                 return;
             }
@@ -659,7 +660,10 @@ impl PjsipEngine {
             if call_conf_port < 0 || rec_conf_port < 0 {
                 pjsip_sys::pjsua_recorder_destroy(recorder_id);
                 emit_event(PaleEvent::Error {
-                    message: format!("Failed to get conference ports for recording call {}", call_id),
+                    message: format!(
+                        "Failed to get conference ports for recording call {}",
+                        call_id
+                    ),
                 });
                 return;
             }
@@ -673,7 +677,10 @@ impl PjsipEngine {
             if status1 != 0 || status2 != 0 {
                 pjsip_sys::pjsua_recorder_destroy(recorder_id);
                 emit_event(PaleEvent::Error {
-                    message: format!("Failed to connect audio to recorder: status1={}, status2={}", status1, status2),
+                    message: format!(
+                        "Failed to connect audio to recorder: status1={}, status2={}",
+                        status1, status2
+                    ),
                 });
                 return;
             }
@@ -693,7 +700,10 @@ impl PjsipEngine {
     }
 
     fn handle_stop_recording(call_id: CallId) {
-        let entry = ACTIVE_RECORDERS.lock().ok().and_then(|mut r| r.remove(&call_id));
+        let entry = ACTIVE_RECORDERS
+            .lock()
+            .ok()
+            .and_then(|mut r| r.remove(&call_id));
         if let Some((recorder_id, file_path)) = entry {
             unsafe {
                 pjsip_sys::pjsua_recorder_destroy(recorder_id);
@@ -736,10 +746,7 @@ impl Drop for PjsipEngine {
     }
 }
 
-fn srtp_policy(
-    mode: SrtpMode,
-    using_tls: bool,
-) -> (pjsip_sys::pjmedia_srtp_use, i32) {
+fn srtp_policy(mode: SrtpMode, using_tls: bool) -> (pjsip_sys::pjmedia_srtp_use, i32) {
     match mode {
         SrtpMode::Disabled => (pjsip_sys::pjmedia_srtp_use_PJMEDIA_SRTP_DISABLED, 0),
         SrtpMode::Optional => (
@@ -794,8 +801,7 @@ unsafe fn apply_media_config(
     if !username.is_empty() && !network.turn_password.is_empty() {
         let username = push_pj_string(&mut strings, username, "TURN username")?;
         let password = push_pj_string(&mut strings, &network.turn_password, "TURN password")?;
-        media_cfg.turn_auth_cred.type_ =
-            pjsip_sys::pj_stun_auth_cred_type_PJ_STUN_AUTH_CRED_STATIC;
+        media_cfg.turn_auth_cred.type_ = pjsip_sys::pj_stun_auth_cred_type_PJ_STUN_AUTH_CRED_STATIC;
         media_cfg.turn_auth_cred.data.static_cred =
             pjsip_sys::pj_stun_auth_cred__bindgen_ty_1__bindgen_ty_1 {
                 realm: pjsip_sys::pj_str_t {
@@ -857,10 +863,8 @@ unsafe extern "C" fn on_reg_state2(
         if !cbparam.is_null() {
             let reason_pj = (*cbparam).reason;
             if !reason_pj.ptr.is_null() && reason_pj.slen > 0 {
-                let slice = std::slice::from_raw_parts(
-                    reason_pj.ptr as *const u8,
-                    reason_pj.slen as usize,
-                );
+                let slice =
+                    std::slice::from_raw_parts(reason_pj.ptr as *const u8, reason_pj.slen as usize);
                 String::from_utf8_lossy(slice).to_string()
             } else {
                 String::new()
@@ -986,9 +990,9 @@ fn parse_sip_identity(identity: &str) -> (String, String) {
     let uri = identity
         .find('<')
         .and_then(|start| {
-            identity[start..].find('>').map(|end| {
-                identity[start + 1..start + end].to_string()
-            })
+            identity[start..]
+                .find('>')
+                .map(|end| identity[start + 1..start + end].to_string())
         })
         .unwrap_or_else(|| identity.to_string());
 

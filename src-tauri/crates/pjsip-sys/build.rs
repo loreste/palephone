@@ -6,8 +6,7 @@ use std::process::Command;
 /// Pinned PJSIP version
 const PJSIP_VERSION: &str = "2.14.1";
 const PJSIP_TARBALL: &str = "pjproject-2.14.1.tar.gz";
-const PJSIP_URL: &str =
-    "https://github.com/pjsip/pjproject/archive/refs/tags/2.14.1.tar.gz";
+const PJSIP_URL: &str = "https://github.com/pjsip/pjproject/archive/refs/tags/2.14.1.tar.gz";
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=wrapper.h");
@@ -59,12 +58,7 @@ fn download_pjsip(out_dir: &Path) {
     if !tarball_path.exists() {
         println!("cargo:warning=Downloading PJSIP {}...", PJSIP_VERSION);
         let status = Command::new("curl")
-            .args([
-                "-L",
-                "-o",
-                tarball_path.to_str().unwrap(),
-                PJSIP_URL,
-            ])
+            .args(["-L", "-o", tarball_path.to_str().unwrap(), PJSIP_URL])
             .status()
             .expect("Failed to run curl. Is curl installed?");
         assert!(status.success(), "Failed to download PJSIP tarball");
@@ -206,7 +200,9 @@ fn msvc_lib_dirs(pj_src_dir: &Path) -> Vec<PathBuf> {
 /// Copy versioned MSVC libs to the plain names the link directives use.
 fn normalize_msvc_libs(pj_src_dir: &Path) {
     for dir in msvc_lib_dirs(pj_src_dir) {
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.extension().map_or(false, |e| e == "lib") {
@@ -243,12 +239,21 @@ fn vcpkg_has_lib(installed: &Path, lib: &str) -> bool {
 /// Find msbuild.exe on Windows (VS 2019/2022)
 fn find_msbuild() -> Option<String> {
     // Try vswhere first
-    let vswhere = Command::new("C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe")
-        .args(["-latest", "-requires", "Microsoft.Component.MSBuild", "-find", "MSBuild\\**\\Bin\\MSBuild.exe"])
-        .output()
-        .ok()?;
+    let vswhere =
+        Command::new("C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe")
+            .args([
+                "-latest",
+                "-requires",
+                "Microsoft.Component.MSBuild",
+                "-find",
+                "MSBuild\\**\\Bin\\MSBuild.exe",
+            ])
+            .output()
+            .ok()?;
     let path = String::from_utf8_lossy(&vswhere.stdout).trim().to_string();
-    if !path.is_empty() { return Some(path); }
+    if !path.is_empty() {
+        return Some(path);
+    }
     // Fallback: check PATH
     if Command::new("msbuild").arg("/version").output().is_ok() {
         return Some("msbuild".to_string());
@@ -280,7 +285,8 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
 
     // Windows cross/native compilation
     let is_windows_cross = target_os == "windows" && cfg!(target_os = "linux");
-    let is_windows_msvc = target_os == "windows" && env::var("TARGET").unwrap_or_default().contains("msvc");
+    let is_windows_msvc =
+        target_os == "windows" && env::var("TARGET").unwrap_or_default().contains("msvc");
     if target_os == "windows" && !is_windows_msvc {
         // GNU target: use MinGW
         configure_args.push("--host=x86_64-w64-mingw32".to_string());
@@ -358,17 +364,31 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
             _ => panic!("Unsupported iOS arch: {}", target_arch),
         };
 
-        let sdk = if target_arch == "x86_64" { "iphonesimulator" } else { "iphoneos" };
+        let sdk = if target_arch == "x86_64" {
+            "iphonesimulator"
+        } else {
+            "iphoneos"
+        };
         let sdk_path_output = Command::new("xcrun")
             .args(["--sdk", sdk, "--show-sdk-path"])
             .output()
             .expect("Failed to find iOS SDK path");
-        let sdk_path = String::from_utf8_lossy(&sdk_path_output.stdout).trim().to_string();
+        let sdk_path = String::from_utf8_lossy(&sdk_path_output.stdout)
+            .trim()
+            .to_string();
 
         let min_ios = "15.0";
         configure_args.push(format!("--host={}", ios_target));
-        configure_args.push(format!("CFLAGS=-isysroot {} -miphoneos-version-min={} -arch {} -fembed-bitcode",
-            sdk_path, min_ios, if target_arch == "aarch64" { "arm64" } else { "x86_64" }));
+        configure_args.push(format!(
+            "CFLAGS=-isysroot {} -miphoneos-version-min={} -arch {} -fembed-bitcode",
+            sdk_path,
+            min_ios,
+            if target_arch == "aarch64" {
+                "arm64"
+            } else {
+                "x86_64"
+            }
+        ));
     }
 
     if target_os == "windows" && is_windows_cross {
@@ -402,7 +422,6 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         }
     }
 
-
     // Set CFLAGS
     let android_sysroot = env::var("PALE_ANDROID_SYSROOT").unwrap_or_default();
     let cflags = format!(
@@ -421,19 +440,41 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         // Create CC wrapper script
         let cc_wrapper = wrapper_dir.join("ndk-cc.sh");
         let cc_path = env::var("PALE_ANDROID_CC").unwrap_or_default();
-        fs::write(&cc_wrapper, format!("#!/bin/sh\nexec {} --sysroot={} \"$@\"\n", cc_path, android_sysroot)).ok();
+        fs::write(
+            &cc_wrapper,
+            format!(
+                "#!/bin/sh\nexec {} --sysroot={} \"$@\"\n",
+                cc_path, android_sysroot
+            ),
+        )
+        .ok();
         let _ = Command::new("chmod").arg("+x").arg(&cc_wrapper).status();
         // Replace CC/CXX/CPP in configure args with wrapper
         let cc_w = cc_wrapper.to_string_lossy().to_string();
-        configure_args.retain(|a| !a.starts_with("CC=") && !a.starts_with("CXX=") && !a.starts_with("CPP="));
+        configure_args
+            .retain(|a| !a.starts_with("CC=") && !a.starts_with("CXX=") && !a.starts_with("CPP="));
         configure_args.push(format!("CC={}", cc_w));
         let cxx_wrapper = wrapper_dir.join("ndk-cxx.sh");
         let cxx_path = cc_path.replace("clang", "clang++");
-        fs::write(&cxx_wrapper, format!("#!/bin/sh\nexec {} --sysroot={} \"$@\"\n", cxx_path, android_sysroot)).ok();
+        fs::write(
+            &cxx_wrapper,
+            format!(
+                "#!/bin/sh\nexec {} --sysroot={} \"$@\"\n",
+                cxx_path, android_sysroot
+            ),
+        )
+        .ok();
         let _ = Command::new("chmod").arg("+x").arg(&cxx_wrapper).status();
         configure_args.push(format!("CXX={}", cxx_wrapper.to_string_lossy()));
         let cpp_wrapper = wrapper_dir.join("ndk-cpp.sh");
-        fs::write(&cpp_wrapper, format!("#!/bin/sh\nexec {} -E --sysroot={} \"$@\"\n", cc_path, android_sysroot)).ok();
+        fs::write(
+            &cpp_wrapper,
+            format!(
+                "#!/bin/sh\nexec {} -E --sysroot={} \"$@\"\n",
+                cc_path, android_sysroot
+            ),
+        )
+        .ok();
         let _ = Command::new("chmod").arg("+x").arg(&cpp_wrapper).status();
         configure_args.push(format!("CPP={}", cpp_wrapper.to_string_lossy()));
     }
@@ -455,30 +496,63 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
     if is_windows_msvc {
         // Find msbuild and solution file
         let msbuild = find_msbuild().unwrap_or_else(|| "msbuild".to_string());
-        let sln = ["pjproject-vs16.sln", "pjproject-vs14.sln", "pjproject-vs17.sln"]
-            .iter()
-            .map(|name| pj_src_dir.join(name))
-            .find(|p| p.exists())
-            .unwrap_or_else(|| {
-                panic!("No Visual Studio solution file found in {}", pj_src_dir.display());
-            });
-        println!("cargo:warning=Using solution: {}", sln.file_name().unwrap().to_string_lossy());
+        let sln = [
+            "pjproject-vs16.sln",
+            "pjproject-vs14.sln",
+            "pjproject-vs17.sln",
+        ]
+        .iter()
+        .map(|name| pj_src_dir.join(name))
+        .find(|p| p.exists())
+        .unwrap_or_else(|| {
+            panic!(
+                "No Visual Studio solution file found in {}",
+                pj_src_dir.display()
+            );
+        });
+        println!(
+            "cargo:warning=Using solution: {}",
+            sln.file_name().unwrap().to_string_lossy()
+        );
 
         // Build only the static libraries we link against. The solution's
         // test/sample/app executables are skipped: they are not needed and
         // their nmake link steps cannot see the vcpkg OpenSSL libs.
         let lib_targets = [
-            "pjlib", "pjlib_util", "pjnath", "pjmedia", "pjmedia_audiodev",
-            "pjmedia_codec", "pjmedia_videodev", "pjsip_core", "pjsip_simple",
-            "pjsip_ua", "pjsua_lib", "libbaseclasses", "libg7221codec",
-            "libgsmcodec", "libilbccodec", "libmilenage", "libresample",
-            "libspeex", "libsrtp", "libwebrtc", "libyuv",
+            "pjlib",
+            "pjlib_util",
+            "pjnath",
+            "pjmedia",
+            "pjmedia_audiodev",
+            "pjmedia_codec",
+            "pjmedia_videodev",
+            "pjsip_core",
+            "pjsip_simple",
+            "pjsip_ua",
+            "pjsua_lib",
+            "libbaseclasses",
+            "libg7221codec",
+            "libgsmcodec",
+            "libilbccodec",
+            "libmilenage",
+            "libresample",
+            "libspeex",
+            "libsrtp",
+            "libwebrtc",
+            "libyuv",
         ];
         let mut msbuild_cmd = Command::new(&msbuild);
         msbuild_cmd
             .arg(sln.to_str().unwrap())
             .arg(format!("/t:{}", lib_targets.join(";")))
-            .args(["/p:Configuration=Release", "/p:Platform=x64", "/p:PlatformToolset=v143", "/p:WindowsTargetPlatformVersion=10.0", "/m", "/verbosity:minimal"])
+            .args([
+                "/p:Configuration=Release",
+                "/p:Platform=x64",
+                "/p:PlatformToolset=v143",
+                "/p:WindowsTargetPlatformVersion=10.0",
+                "/m",
+                "/verbosity:minimal",
+            ])
             .current_dir(pj_src_dir);
 
         // Make vcpkg OpenSSL/Opus headers visible to every cl.exe invocation.
@@ -490,12 +564,17 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
             }
             cl.push_str(&format!("/I\"{}\"", vcpkg.join("include").display()));
             msbuild_cmd.env("CL", &cl);
-            println!("cargo:warning=Using vcpkg headers from {}", vcpkg.join("include").display());
+            println!(
+                "cargo:warning=Using vcpkg headers from {}",
+                vcpkg.join("include").display()
+            );
         } else {
             println!("cargo:warning=vcpkg not found: building PJSIP without OpenSSL (no SIP TLS) and without Opus");
         }
 
-        let status = msbuild_cmd.status().expect("Failed to run msbuild for PJSIP");
+        let status = msbuild_cmd
+            .status()
+            .expect("Failed to run msbuild for PJSIP");
         assert!(status.success(), "PJSIP msbuild failed");
 
         println!("cargo:warning=PJSIP build complete (MSVC).");
@@ -518,7 +597,9 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         }
     }
 
-    let status = configure_cmd.status().expect("Failed to run PJSIP configure");
+    let status = configure_cmd
+        .status()
+        .expect("Failed to run PJSIP configure");
     assert!(status.success(), "PJSIP configure failed");
 
     let num_jobs = std::thread::available_parallelism()
@@ -545,7 +626,9 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
 
     // Run make dep
     let mut dep_cmd = Command::new(&make_cmd);
-    dep_cmd.args(["dep", &format!("-j{}", num_jobs)]).current_dir(pj_src_dir);
+    dep_cmd
+        .args(["dep", &format!("-j{}", num_jobs)])
+        .current_dir(pj_src_dir);
     setup_make_env(&mut dep_cmd);
     let status = dep_cmd.status().expect("Failed to run make dep");
     assert!(status.success(), "PJSIP make dep failed");
@@ -554,7 +637,9 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
     // intermittently fails mid-build; a serial retry from where it stopped
     // always converges.
     let mut build_cmd = Command::new(&make_cmd);
-    build_cmd.arg(&format!("-j{}", num_jobs)).current_dir(pj_src_dir);
+    build_cmd
+        .arg(&format!("-j{}", num_jobs))
+        .current_dir(pj_src_dir);
     setup_make_env(&mut build_cmd);
     let status = build_cmd.status().expect("Failed to run make");
     if !status.success() {
@@ -562,7 +647,9 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         let mut retry_cmd = Command::new(&make_cmd);
         retry_cmd.current_dir(pj_src_dir);
         setup_make_env(&mut retry_cmd);
-        let status = retry_cmd.status().expect("Failed to run make (serial retry)");
+        let status = retry_cmd
+            .status()
+            .expect("Failed to run make (serial retry)");
         assert!(status.success(), "PJSIP make failed");
     }
 
@@ -581,11 +668,27 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
         }
         // Link PJSIP libs by their simplified names
         let pjsip_libs = [
-            "pjsua", "pjsip-ua", "pjsip-simple", "pjsip", "pjmedia-codec",
-            "pjmedia", "pjmedia-audiodev", "pjmedia-videodev",
-            "pjnath", "pjlib-util", "pj", "srtp", "resample",
-            "g7221codec", "ilbccodec", "speex", "gsmcodec", "milenage",
-            "baseclasses", "webrtc", "yuv",
+            "pjsua",
+            "pjsip-ua",
+            "pjsip-simple",
+            "pjsip",
+            "pjmedia-codec",
+            "pjmedia",
+            "pjmedia-audiodev",
+            "pjmedia-videodev",
+            "pjnath",
+            "pjlib-util",
+            "pj",
+            "srtp",
+            "resample",
+            "g7221codec",
+            "ilbccodec",
+            "speex",
+            "gsmcodec",
+            "milenage",
+            "baseclasses",
+            "webrtc",
+            "yuv",
         ];
         for lib in &pjsip_libs {
             let found = lib_dirs
@@ -604,70 +707,70 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
     if is_msvc && target_os == "windows" {
         // Already handled above, skip to platform libs
     } else {
+        let lib_dirs = find_pjsip_lib_dirs(pj_src_dir);
 
-    let lib_dirs = find_pjsip_lib_dirs(pj_src_dir);
-
-    // PJSIP names its static libs with the host triple suffix, e.g.:
-    //   libpj-arm-apple-darwin24.6.0.a
-    //   libpjsip-ua-arm-apple-darwin24.6.0.a
-    // Cargo's `rustc-link-lib=static=pj` looks for `libpj.a`.
-    // Detect the suffix from libpj-*.a (which is unambiguous) then strip it from all libs.
-    let platform_suffix = detect_platform_suffix(&lib_dirs);
-    if let Some(ref suffix) = platform_suffix {
-        println!("cargo:warning=Detected PJSIP platform suffix: -{}", suffix);
-        for dir in &lib_dirs {
-            if let Ok(entries) = fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    let suffixed = format!("-{}.a", suffix);
-                    if name.starts_with("lib") && name.ends_with(&suffixed) {
-                        let base = &name[..name.len() - suffixed.len()];
-                        let unsuffixed = format!("{}.a", base);
-                        let dest = dir.join(&unsuffixed);
-                        if !dest.exists() {
-                            let _ = fs::copy(entry.path(), &dest);
+        // PJSIP names its static libs with the host triple suffix, e.g.:
+        //   libpj-arm-apple-darwin24.6.0.a
+        //   libpjsip-ua-arm-apple-darwin24.6.0.a
+        // Cargo's `rustc-link-lib=static=pj` looks for `libpj.a`.
+        // Detect the suffix from libpj-*.a (which is unambiguous) then strip it from all libs.
+        let platform_suffix = detect_platform_suffix(&lib_dirs);
+        if let Some(ref suffix) = platform_suffix {
+            println!("cargo:warning=Detected PJSIP platform suffix: -{}", suffix);
+            for dir in &lib_dirs {
+                if let Ok(entries) = fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        let suffixed = format!("-{}.a", suffix);
+                        if name.starts_with("lib") && name.ends_with(&suffixed) {
+                            let base = &name[..name.len() - suffixed.len()];
+                            let unsuffixed = format!("{}.a", base);
+                            let dest = dir.join(&unsuffixed);
+                            if !dest.exists() {
+                                let _ = fs::copy(entry.path(), &dest);
+                            }
                         }
                     }
                 }
             }
         }
-    }
 
-    for dir in &lib_dirs {
-        println!("cargo:rustc-link-search=native={}", dir.display());
-    }
-
-    // Link PJSIP static libraries — ORDER MATTERS (highest-level first)
-    let pjsip_libs = [
-        "pjsua",
-        "pjsip-ua",
-        "pjsip-simple",
-        "pjsip",
-        "pjmedia-codec",
-        "pjmedia",
-        "pjmedia-audiodev",
-        "pjmedia-videodev",
-        "pjsdp",
-        "pjnath",
-        "pjlib-util",
-        "pj",
-        "srtp",
-        "resample",
-        "g7221codec",
-        "ilbccodec",
-        "speex",
-        "gsmcodec",
-        "webrtc",
-        "yuv",
-    ];
-
-    for lib in &pjsip_libs {
-        let found = lib_dirs.iter().any(|dir| dir.join(format!("lib{}.a", lib)).exists());
-        if found {
-            println!("cargo:rustc-link-lib=static={}", lib);
+        for dir in &lib_dirs {
+            println!("cargo:rustc-link-search=native={}", dir.display());
         }
-    }
 
+        // Link PJSIP static libraries — ORDER MATTERS (highest-level first)
+        let pjsip_libs = [
+            "pjsua",
+            "pjsip-ua",
+            "pjsip-simple",
+            "pjsip",
+            "pjmedia-codec",
+            "pjmedia",
+            "pjmedia-audiodev",
+            "pjmedia-videodev",
+            "pjsdp",
+            "pjnath",
+            "pjlib-util",
+            "pj",
+            "srtp",
+            "resample",
+            "g7221codec",
+            "ilbccodec",
+            "speex",
+            "gsmcodec",
+            "webrtc",
+            "yuv",
+        ];
+
+        for lib in &pjsip_libs {
+            let found = lib_dirs
+                .iter()
+                .any(|dir| dir.join(format!("lib{}.a", lib)).exists());
+            if found {
+                println!("cargo:rustc-link-lib=static={}", lib);
+            }
+        }
     } // close else block for non-MSVC path
 
     // Platform system libraries
@@ -724,7 +827,10 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
                 // PJSIP was only built against them if vcpkg was present when
                 // config_site.h was written, so missing vcpkg just means no TLS/Opus.
                 if let Some(vcpkg) = vcpkg_installed_dir() {
-                    println!("cargo:rustc-link-search=native={}", vcpkg.join("lib").display());
+                    println!(
+                        "cargo:rustc-link-search=native={}",
+                        vcpkg.join("lib").display()
+                    );
                     if vcpkg_has_lib(&vcpkg, "libssl") && vcpkg_has_lib(&vcpkg, "libcrypto") {
                         println!("cargo:rustc-link-lib=static=libssl");
                         println!("cargo:rustc-link-lib=static=libcrypto");
@@ -752,8 +858,10 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
                 if cfg!(target_os = "linux") {
                     // Cross-compiling from Linux
                     let home = env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-                    let ssl_dir = env::var("OPENSSL_DIR").unwrap_or_else(|_| format!("{}/openssl-win64", home));
-                    let opus_dir = env::var("OPUS_DIR").unwrap_or_else(|_| format!("{}/opus-win64", home));
+                    let ssl_dir = env::var("OPENSSL_DIR")
+                        .unwrap_or_else(|_| format!("{}/openssl-win64", home));
+                    let opus_dir =
+                        env::var("OPUS_DIR").unwrap_or_else(|_| format!("{}/opus-win64", home));
                     println!("cargo:rustc-link-search=native={}/lib", ssl_dir);
                     println!("cargo:rustc-link-search=native={}/lib", opus_dir);
                 } else {
@@ -974,10 +1082,7 @@ fn find_opus_prefix(target_os: &str) -> Option<String> {
 
     // Homebrew paths on macOS
     if target_os == "macos" {
-        for path in &[
-            "/opt/homebrew/opt/opus",
-            "/usr/local/opt/opus",
-        ] {
+        for path in &["/opt/homebrew/opt/opus", "/usr/local/opt/opus"] {
             if Path::new(path).exists() {
                 return Some(path.to_string());
             }

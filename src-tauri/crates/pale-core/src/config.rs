@@ -86,12 +86,7 @@ impl Default for AudioPersist {
             echo_cancel: true,
             noise_suppression: true,
             auto_gain: false,
-            codec_priority: vec![
-                "opus".into(),
-                "g722".into(),
-                "pcmu".into(),
-                "pcma".into(),
-            ],
+            codec_priority: vec!["opus".into(), "g722".into(), "pcmu".into(), "pcma".into()],
         }
     }
 }
@@ -164,8 +159,8 @@ pub struct NotificationPersist {
     pub enabled: bool,
     pub sound_enabled: bool,
     pub dnd_enabled: bool,
-    pub dnd_start: String,    // HH:MM format, e.g. "22:00"
-    pub dnd_end: String,      // HH:MM format, e.g. "07:00"
+    pub dnd_start: String, // HH:MM format, e.g. "22:00"
+    pub dnd_end: String,   // HH:MM format, e.g. "07:00"
     pub muted_rooms: Vec<String>,
 }
 

@@ -622,6 +622,27 @@ function CallSettingsPanel() {
 
   return (
     <div className="space-y-5">
+      <SectionHeader title="Calling Policy" />
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {[
+          ["allow_private_calls", "Private calls"],
+          ["allow_external_calls", "External calls"],
+          ["allow_call_forwarding", "Call forwarding"],
+          ["allow_call_recording", "Call recording"],
+        ].map(([key, label]) => (
+          <label key={key} className="flex items-center justify-between gap-3 rounded-md border border-border-subtle px-3 py-2">
+            <span className="text-sm text-primary">{label}</span>
+            <input
+              type="checkbox"
+              checked={settings[key] !== false}
+              onChange={(event) => setSettings({ ...settings, [key]: event.target.checked })}
+              className="w-4 h-4 accent-accent"
+            />
+          </label>
+        ))}
+      </div>
+
       <SectionHeader title="Voicemail" />
 
       <div className="flex items-center justify-between py-1">

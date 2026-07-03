@@ -33,6 +33,11 @@ export interface ServerFile {
   size: number;
   sha256: string;
   created_at: string;
+  dlp_status?: string;
+  dlp_violation_count?: number;
+  legal_hold?: boolean;
+  deleted_at?: string | null;
+  deleted_by?: string | null;
 }
 
 interface FileStoreState {

@@ -114,10 +114,7 @@ where
     }
 
     fn with_write<R>(&self, key: &K, action: impl FnOnce(&mut HashMap<K, V>) -> R) -> R {
-        let mut shard = self
-            .shard(key)
-            .write()
-            .expect("sharded map lock poisoned");
+        let mut shard = self.shard(key).write().expect("sharded map lock poisoned");
         action(&mut shard)
     }
 
@@ -162,7 +159,10 @@ where
 
 /// Extract user part from SIP URI: "sip:300@example.com" -> "300", "300" -> "300"
 pub fn sip_user_part(uri: &str) -> &str {
-    let stripped = uri.strip_prefix("sips:").or_else(|| uri.strip_prefix("sip:")).unwrap_or(uri);
+    let stripped = uri
+        .strip_prefix("sips:")
+        .or_else(|| uri.strip_prefix("sip:"))
+        .unwrap_or(uri);
     stripped.split('@').next().unwrap_or(stripped)
 }
 
@@ -211,6 +211,7 @@ pub struct AppState {
     sip_subscriptions: ShardedMap<String, SipSubscription>,
     sip_notifications: RwLock<Vec<SipNotification>>,
     conferences: ShardedMap<Uuid, Conference>,
+    conference_attendance: RwLock<Vec<ConferenceAttendanceRecord>>,
     calls: ShardedMap<Uuid, CallSession>,
     files: ShardedMap<Uuid, FileRecord>,
     routing_rules: ShardedMap<Uuid, RoutingRule>,
@@ -221,6 +222,7 @@ pub struct AppState {
     scheduled_meetings: ShardedMap<Uuid, ScheduledMeeting>,
     retention_policies: ShardedMap<Uuid, RetentionPolicy>,
     collaboration_policy: RwLock<CollaborationPolicy>,
+    channel_webhooks: ShardedMap<Uuid, ChannelWebhook>,
     mention_rate_limits: ShardedMap<String, RateLimitBucket>,
     rooms: ShardedMap<Uuid, Room>,
     room_messages: RwLock<Vec<RoomMessage>>,
@@ -371,6 +373,7 @@ impl AppState {
             sip_subscriptions: ShardedMap::new(),
             sip_notifications: RwLock::new(Vec::new()),
             conferences: ShardedMap::new(),
+            conference_attendance: RwLock::new(Vec::new()),
             calls: ShardedMap::new(),
             files: ShardedMap::new(),
             routing_rules: ShardedMap::new(),
@@ -381,6 +384,7 @@ impl AppState {
             scheduled_meetings: ShardedMap::new(),
             retention_policies: ShardedMap::new(),
             collaboration_policy: RwLock::new(CollaborationPolicy::default()),
+            channel_webhooks: ShardedMap::new(),
             mention_rate_limits: ShardedMap::new(),
             rooms: ShardedMap::new(),
             room_messages: RwLock::new(Vec::new()),
@@ -419,7 +423,9 @@ impl AppState {
             user_create_lock: std::sync::Mutex::new(()),
             agent_assignment_lock: std::sync::Mutex::new(()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
-            nats_url: std::env::var("NATS_URL").ok().filter(|value| !value.trim().is_empty()),
+            nats_url: std::env::var("NATS_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
             rate_limits: ShardedMap::new(),
             rate_limit_rps: 100,
             sip_registrar: None,
@@ -460,10 +466,12 @@ impl AppState {
         let key = principal.to_string();
 
         self.rate_limits.with_write(&key, |buckets| {
-            let bucket = buckets.entry(key.clone()).or_insert_with(|| RateLimitBucket {
-                tokens: max_tokens,
-                last_refill: now,
-            });
+            let bucket = buckets
+                .entry(key.clone())
+                .or_insert_with(|| RateLimitBucket {
+                    tokens: max_tokens,
+                    last_refill: now,
+                });
 
             // Refill tokens based on elapsed time
             let elapsed = (now - bucket.last_refill).num_milliseconds().max(0) as f64 / 1000.0;
@@ -584,24 +592,31 @@ impl AppState {
         }
         match pg.load_room_messages().await {
             Ok(messages) => {
-                *self.room_messages.write().expect("room messages lock poisoned") = messages;
+                *self
+                    .room_messages
+                    .write()
+                    .expect("room messages lock poisoned") = messages;
             }
             Err(e) => log::warn!("Failed to load room messages from Postgres: {}", e),
         }
         match pg.load_message_reads().await {
             Ok(reads) => {
-                *self.message_reads.write().expect("message reads lock poisoned") = reads;
+                *self
+                    .message_reads
+                    .write()
+                    .expect("message reads lock poisoned") = reads;
             }
             Err(e) => log::warn!("Failed to load message reads from Postgres: {}", e),
         }
         match pg.load_message_reactions().await {
             Ok(records) => {
                 for record in records {
-                    self.message_reactions.with_write(&record.message_id, |map| {
-                        map.entry(record.message_id)
-                            .or_insert_with(Vec::new)
-                            .push(record.reaction);
-                    });
+                    self.message_reactions
+                        .with_write(&record.message_id, |map| {
+                            map.entry(record.message_id)
+                                .or_insert_with(Vec::new)
+                                .push(record.reaction);
+                        });
                 }
             }
             Err(e) => log::warn!("Failed to load message reactions from Postgres: {}", e),
@@ -690,8 +705,7 @@ impl AppState {
             return Err(AuthError::Locked);
         }
 
-        if username != self.admin_username
-            || !verify_password(password, &self.admin_password_hash)
+        if username != self.admin_username || !verify_password(password, &self.admin_password_hash)
         {
             self.record_login_failure(source);
             self.record_audit_event(username, "admin.login.failed", Some(source.to_string()));
@@ -769,9 +783,15 @@ impl AppState {
 
         self.admin_sessions
             .retain(|_, session| session.expires_at > Utc::now());
-        self.admin_sessions
-            .get(&bearer.to_string())
-            .map(|session| (session.principal, session.role))
+        let session = self.admin_sessions.get(&bearer.to_string())?;
+        if self
+            .user_by_sip_uri(&session.principal)
+            .is_some_and(|user| !user.active)
+        {
+            self.admin_sessions.remove(&bearer.to_string());
+            return None;
+        }
+        Some((session.principal, session.role))
     }
 
     pub fn refresh_admin_session(&self, old_token: &str) -> Result<AdminSession, AuthError> {
@@ -815,7 +835,10 @@ impl AppState {
             target,
             created_at: Utc::now(),
         };
-        let mut events = self.audit_events.write().expect("audit events lock poisoned");
+        let mut events = self
+            .audit_events
+            .write()
+            .expect("audit events lock poisoned");
         events.push(event.clone());
         if events.len() > MAX_AUDIT_EVENTS {
             let overflow = events.len() - MAX_AUDIT_EVENTS;
@@ -836,6 +859,69 @@ impl AppState {
             .take(500)
             .cloned()
             .collect()
+    }
+
+    pub fn search_audit_events(&self, query: AdminAuditQuery) -> Vec<AdminAuditEvent> {
+        let principal = query
+            .principal
+            .as_ref()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
+        let action = query
+            .action
+            .as_ref()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
+        let target = query
+            .target
+            .as_ref()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
+        let mut events: Vec<_> = self
+            .audit_events
+            .read()
+            .expect("audit events lock poisoned")
+            .iter()
+            .filter(|event| {
+                if let Some(from) = query.from {
+                    if event.created_at < from {
+                        return false;
+                    }
+                }
+                if let Some(to) = query.to {
+                    if event.created_at > to {
+                        return false;
+                    }
+                }
+                if let Some(principal) = &principal {
+                    if !event.principal.to_ascii_lowercase().contains(principal) {
+                        return false;
+                    }
+                }
+                if let Some(action) = &action {
+                    if !event.action.to_ascii_lowercase().contains(action) {
+                        return false;
+                    }
+                }
+                if let Some(target) = &target {
+                    if !event
+                        .target
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                        .contains(target)
+                    {
+                        return false;
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect();
+        events.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        let limit = query.limit.unwrap_or(500).clamp(1, 5000);
+        events.truncate(limit);
+        events
     }
 
     pub fn files_dir(&self) -> PathBuf {
@@ -865,6 +951,7 @@ impl AppState {
         self.load_vec_collection::<SipMessage>(&self.sip_messages);
         self.load_vec_collection::<SipTransaction>(&self.sip_transactions);
         self.load_collection::<Conference>(&self.conferences);
+        self.load_vec_collection::<ConferenceAttendanceRecord>(&self.conference_attendance);
         self.load_collection::<CallSession>(&self.calls);
         self.load_collection::<FileRecord>(&self.files);
         self.load_collection::<RoutingRule>(&self.routing_rules);
@@ -872,11 +959,15 @@ impl AppState {
         self.load_collection::<ScheduledMeeting>(&self.scheduled_meetings);
         self.load_collection::<RetentionPolicy>(&self.retention_policies);
         self.load_singleton::<CollaborationPolicy>(&self.collaboration_policy);
+        self.load_collection::<ChannelWebhook>(&self.channel_webhooks);
         self.load_collection::<Room>(&self.rooms);
         self.load_vec_collection::<RoomMessage>(&self.room_messages);
         self.load_vec_collection::<MessageRead>(&self.message_reads);
         self.load_message_reactions();
         self.load_vec_collection::<AdminAuditEvent>(&self.audit_events);
+        self.load_vec_collection::<CallQualityReport>(&self.call_quality_reports);
+        self.load_collection::<DlpPolicy>(&self.dlp_policies);
+        self.load_vec_collection::<DlpViolation>(&self.dlp_violations);
     }
 
     fn load_collection<T>(&self, map: &ShardedMap<<T as PersistedMapObject>::Key, T>)
@@ -918,14 +1009,19 @@ impl AppState {
         match store.load::<MessageReactionRecord>(MessageReactionRecord::collection()) {
             Ok(records) => {
                 for record in records {
-                    self.message_reactions.with_write(&record.message_id, |map| {
-                        map.entry(record.message_id)
-                            .or_insert_with(Vec::new)
-                            .push(record.reaction);
-                    });
+                    self.message_reactions
+                        .with_write(&record.message_id, |map| {
+                            map.entry(record.message_id)
+                                .or_insert_with(Vec::new)
+                                .push(record.reaction);
+                        });
                 }
             }
-            Err(err) => log::warn!("failed to load {} from storage: {}", MessageReactionRecord::collection(), err),
+            Err(err) => log::warn!(
+                "failed to load {} from storage: {}",
+                MessageReactionRecord::collection(),
+                err
+            ),
         }
     }
 
@@ -983,6 +1079,14 @@ impl AppState {
             .any(|u| normalize_sip_uri(&u.sip_uri).as_deref() == Some(normalized.as_str()))
     }
 
+    pub fn user_by_sip_uri(&self, sip_uri: &str) -> Option<User> {
+        let normalized = normalize_sip_uri(sip_uri)?;
+        self.users
+            .values()
+            .into_iter()
+            .find(|user| normalize_sip_uri(&user.sip_uri).as_deref() == Some(normalized.as_str()))
+    }
+
     pub fn create_user(&self, input: CreateUserRequest) -> Result<User, String> {
         let normalized_sip_uri = normalize_sip_uri(&input.sip_uri)
             .ok_or_else(|| format!("Invalid SIP URI {}", input.sip_uri))?;
@@ -992,9 +1096,12 @@ impl AppState {
             .lock()
             .map_err(|_| "user creation lock poisoned".to_string())?;
 
-        if self.users.values().iter().any(|u| {
-            normalize_sip_uri(&u.sip_uri).as_deref() == Some(normalized_sip_uri.as_str())
-        }) {
+        if self
+            .users
+            .values()
+            .iter()
+            .any(|u| normalize_sip_uri(&u.sip_uri).as_deref() == Some(normalized_sip_uri.as_str()))
+        {
             return Err(format!(
                 "User with SIP URI {} already exists",
                 normalized_sip_uri
@@ -1011,6 +1118,9 @@ impl AppState {
             password_hash,
             role: input.role.unwrap_or_else(|| "user".to_string()),
             created_at: Utc::now(),
+            active: true,
+            deactivated_at: None,
+            deactivated_by: None,
             email: None,
             title: None,
             department: None,
@@ -1078,15 +1188,24 @@ impl AppState {
                             sip_uri: ldap_user.sip_uri.clone(),
                             matrix_user_id: None,
                             password: Some(password.to_string()),
-                            role: Some(if ldap_user.is_admin { "admin" } else { "user" }.to_string()),
+                            role: Some(
+                                if ldap_user.is_admin { "admin" } else { "user" }.to_string(),
+                            ),
                         });
-                        log::info!("Auto-provisioned AD user: {} (admin={})", ldap_user.sip_uri, ldap_user.is_admin);
+                        log::info!(
+                            "Auto-provisioned AD user: {} (admin={})",
+                            ldap_user.sip_uri,
+                            ldap_user.is_admin
+                        );
                     }
                     // Update role from AD group membership
                     let normalized_ldap_uri = normalize_sip_uri(&ldap_user.sip_uri);
-                    if let Some(existing) = self.users.values().into_iter().find(|u| {
-                        normalize_sip_uri(&u.sip_uri) == normalized_ldap_uri
-                    }) {
+                    if let Some(existing) = self
+                        .users
+                        .values()
+                        .into_iter()
+                        .find(|u| normalize_sip_uri(&u.sip_uri) == normalized_ldap_uri)
+                    {
                         let new_role = if ldap_user.is_admin { "admin" } else { "user" };
                         if existing.role != new_role {
                             self.update_user_role(existing.id, new_role);
@@ -1105,18 +1224,23 @@ impl AppState {
             .into_iter()
             .find(|u| {
                 normalize_sip_uri(&u.sip_uri) == normalized_login_uri
-                    || split_sip_aor_simple(&u.sip_uri)
-                        .map(|(u, _)| u)
-                        .as_deref()
+                    || split_sip_aor_simple(&u.sip_uri).map(|(u, _)| u).as_deref()
                         == Some(&username)
             })
             .ok_or(AuthError::Unauthorized)?;
+
+        if !user.active {
+            return Err(AuthError::Unauthorized);
+        }
 
         // Verify password locally unless LDAP itself verified it. LDAP being
         // merely *enabled* is not enough — an unreachable or failing
         // directory must not bypass password verification.
         if !ldap_authenticated {
-            let expected_hash = user.password_hash.as_deref().ok_or(AuthError::Unauthorized)?;
+            let expected_hash = user
+                .password_hash
+                .as_deref()
+                .ok_or(AuthError::Unauthorized)?;
             if !verify_password(password, expected_hash) {
                 return Err(AuthError::Unauthorized);
             }
@@ -1134,31 +1258,30 @@ impl AppState {
         self.admin_sessions.trim_to_len(MAX_ADMIN_SESSIONS);
 
         // Get or create SIP credentials
-        let sip_creds = split_sip_aor_simple(&user.sip_uri)
-            .map(|(username, domain)| {
-                // Auto-create SIP account if it doesn't exist
-                if self.sip_account(&username, &domain).is_none() {
-                    self.upsert_sip_account(CreateSipAccountRequest {
-                        username: username.clone(),
-                        domain: domain.clone(),
-                        password_ha1: sip_ha1(&username, &domain, password),
-                        display_name: Some(user.display_name.clone()),
-                    });
-                    log::info!("Auto-created SIP account for {} on login", user.sip_uri);
-                }
-                SipCredentials {
-                    sip_uri: user.sip_uri.clone(),
-                    registrar_uri: self
-                        .sip_registrar
-                        .as_ref()
-                        .map(|registrar| format!("sip:{}", registrar)),
-                    registration_available: self.sip_registrar.is_some(),
+        let sip_creds = split_sip_aor_simple(&user.sip_uri).map(|(username, domain)| {
+            // Auto-create SIP account if it doesn't exist
+            if self.sip_account(&username, &domain).is_none() {
+                self.upsert_sip_account(CreateSipAccountRequest {
                     username: username.clone(),
-                    password: password.to_string(),
-                    transport: "udp".to_string(),
-                    domain,
-                }
-            });
+                    domain: domain.clone(),
+                    password_ha1: sip_ha1(&username, &domain, password),
+                    display_name: Some(user.display_name.clone()),
+                });
+                log::info!("Auto-created SIP account for {} on login", user.sip_uri);
+            }
+            SipCredentials {
+                sip_uri: user.sip_uri.clone(),
+                registrar_uri: self
+                    .sip_registrar
+                    .as_ref()
+                    .map(|registrar| format!("sip:{}", registrar)),
+                registration_available: self.sip_registrar.is_some(),
+                username: username.clone(),
+                password: password.to_string(),
+                transport: "udp".to_string(),
+                domain,
+            }
+        });
 
         // Set presence to online
         self.update_presence(&user.sip_uri, PresenceStatus::Online, None);
@@ -1172,15 +1295,76 @@ impl AppState {
     }
 
     pub fn users(&self) -> Vec<User> {
+        self.users
+            .values()
+            .into_iter()
+            .filter(|user| user.active)
+            .collect()
+    }
+
+    pub fn all_users(&self) -> Vec<User> {
         self.users.values()
     }
 
     pub fn update_user_role(&self, id: Uuid, role: &str) -> Option<User> {
-        self.users.with_write(&id, |users| {
+        let updated = self.users.with_write(&id, |users| {
             let user = users.get_mut(&id)?;
             user.role = role.to_string();
             Some(user.clone())
-        })
+        });
+        if let Some(user) = &updated {
+            self.persist_user(user);
+            self.revoke_sessions_for_principal(&user.sip_uri);
+            self.broadcast_sse(SseEvent {
+                event_type: "user_updated".to_string(),
+                payload: serde_json::to_value(user).unwrap_or_default(),
+            });
+        }
+        updated
+    }
+
+    pub fn set_user_active(&self, id: Uuid, active: bool, actor: &str) -> Option<User> {
+        let updated = self.users.with_write(&id, |users| {
+            let user = users.get_mut(&id)?;
+            user.active = active;
+            if active {
+                user.deactivated_at = None;
+                user.deactivated_by = None;
+            } else {
+                user.deactivated_at = Some(Utc::now());
+                user.deactivated_by = Some(actor.to_string());
+            }
+            Some(user.clone())
+        });
+        if let Some(user) = &updated {
+            self.persist_user(user);
+            if !active {
+                self.revoke_sessions_for_principal(&user.sip_uri);
+                self.update_presence(&user.sip_uri, PresenceStatus::Offline, None);
+            }
+            self.broadcast_sse(SseEvent {
+                event_type: if active {
+                    "user_activated"
+                } else {
+                    "user_deactivated"
+                }
+                .to_string(),
+                payload: serde_json::to_value(user).unwrap_or_default(),
+            });
+        }
+        updated
+    }
+
+    fn persist_user(&self, user: &User) {
+        self.persist(user);
+        let user_for_pg = user.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.insert_user(&user_for_pg).await }));
+    }
+
+    fn revoke_sessions_for_principal(&self, principal: &str) {
+        let principal = principal.to_string();
+        self.admin_sessions
+            .retain(|_, session| session.principal != principal);
     }
 
     /// Change a user's password. Verifies the old password, then updates to the
@@ -1217,7 +1401,12 @@ impl AppState {
         if let Some(ref u) = updated {
             self.persist(u);
             let u2 = u.clone();
-            self.pg_spawn(move |pg| Box::pin(async move { pg.update_user_password(u2.id, u2.password_hash.as_deref().unwrap_or("")).await }));
+            self.pg_spawn(move |pg| {
+                Box::pin(async move {
+                    pg.update_user_password(u2.id, u2.password_hash.as_deref().unwrap_or(""))
+                        .await
+                })
+            });
 
             // Also update the SIP account HA1 digest if one exists
             if let Some((username, domain)) = split_sip_aor_simple(sip_uri) {
@@ -1240,10 +1429,8 @@ impl AppState {
     }
 
     pub fn delete_user(&self, id: Uuid) -> Option<User> {
-        let user = self.users.remove(&id);
+        let user = self.set_user_active(id, false, "delete");
         if user.is_some() {
-            self.delete_persisted(User::collection(), id.to_string());
-            self.pg_spawn(move |pg| Box::pin(async move { pg.delete_user(id).await }));
             // Orphan extensions (mirrors ON DELETE SET NULL in PG)
             for ext in self.extensions_for_user(id) {
                 let mut e = ext;
@@ -1363,8 +1550,7 @@ impl AppState {
         self.registrations
             .retain(|_, registration| registration.expires_at > Utc::now());
         let aor = registration.aor.clone();
-        self.registrations
-            .insert(aor.clone(), registration.clone());
+        self.registrations.insert(aor.clone(), registration.clone());
         self.registrations.trim_to_len(MAX_REGISTRATIONS);
         if self.should_persist_runtime_events() {
             self.persist(&registration);
@@ -1401,40 +1587,40 @@ impl AppState {
         let call_id = input.call_id.clone();
         let dialog = self.sip_dialogs.with_write(&call_id, |dialogs| {
             dialogs
-            .entry(input.call_id.clone())
-            .and_modify(|dialog| {
-                dialog.from_uri = input.from_uri.clone();
-                dialog.to_uri = input.to_uri.clone();
-                dialog.target_contact = input.target_contact.clone();
-                dialog.status = input.status.clone();
-                if !input.media_types.is_empty() {
-                    dialog.media_types = input.media_types.clone();
-                }
-                if input.peer.from_contact.is_some() {
-                    dialog.from_contact = input.peer.from_contact.clone();
-                }
-                if input.peer.from_source.is_some() {
-                    dialog.from_source = input.peer.from_source.clone();
-                }
-                if input.peer.to_source.is_some() {
-                    dialog.to_source = input.peer.to_source.clone();
-                }
-                dialog.updated_at = Utc::now();
-            })
-            .or_insert_with(|| SipDialog {
-                call_id: input.call_id,
-                from_uri: input.from_uri,
-                to_uri: input.to_uri,
-                target_contact: input.target_contact,
-                status: input.status,
-                media_types: input.media_types,
-                from_contact: input.peer.from_contact,
-                from_source: input.peer.from_source,
-                to_source: input.peer.to_source,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
-            .clone()
+                .entry(input.call_id.clone())
+                .and_modify(|dialog| {
+                    dialog.from_uri = input.from_uri.clone();
+                    dialog.to_uri = input.to_uri.clone();
+                    dialog.target_contact = input.target_contact.clone();
+                    dialog.status = input.status.clone();
+                    if !input.media_types.is_empty() {
+                        dialog.media_types = input.media_types.clone();
+                    }
+                    if input.peer.from_contact.is_some() {
+                        dialog.from_contact = input.peer.from_contact.clone();
+                    }
+                    if input.peer.from_source.is_some() {
+                        dialog.from_source = input.peer.from_source.clone();
+                    }
+                    if input.peer.to_source.is_some() {
+                        dialog.to_source = input.peer.to_source.clone();
+                    }
+                    dialog.updated_at = Utc::now();
+                })
+                .or_insert_with(|| SipDialog {
+                    call_id: input.call_id,
+                    from_uri: input.from_uri,
+                    to_uri: input.to_uri,
+                    target_contact: input.target_contact,
+                    status: input.status,
+                    media_types: input.media_types,
+                    from_contact: input.peer.from_contact,
+                    from_source: input.peer.from_source,
+                    to_source: input.peer.to_source,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                })
+                .clone()
         });
         self.sip_dialogs.trim_to_len(MAX_SIP_DIALOGS);
         if self.should_persist_runtime_events() {
@@ -1448,7 +1634,8 @@ impl AppState {
         call_id: &str,
         status: SipDialogStatus,
     ) -> Option<SipDialog> {
-        let dialog = self.sip_dialogs
+        let dialog = self
+            .sip_dialogs
             .with_write(&call_id.to_string(), |dialogs| {
                 let dialog = dialogs.get_mut(call_id)?;
                 dialog.status = status;
@@ -1485,7 +1672,10 @@ impl AppState {
             body: input.body,
             received_at: Utc::now(),
         };
-        let mut messages = self.sip_messages.write().expect("sip messages lock poisoned");
+        let mut messages = self
+            .sip_messages
+            .write()
+            .expect("sip messages lock poisoned");
         messages.push(message.clone());
         if messages.len() > MAX_SIP_MESSAGES {
             let overflow = messages.len() - MAX_SIP_MESSAGES;
@@ -1548,34 +1738,35 @@ impl AppState {
         self.sip_subscriptions
             .retain(|_, subscription| subscription.expires_at > Utc::now());
         let subscription_id = input.subscription_id.clone();
-        let subscription = self.sip_subscriptions.with_write(&subscription_id, |subscriptions| {
-            subscriptions
-            .entry(input.subscription_id.clone())
-            .and_modify(|subscription| {
-                subscription.subscriber = input.subscriber.clone();
-                subscription.target = input.target.clone();
-                subscription.event = input.event.clone();
-                subscription.expires_at = input.expires_at;
-                subscription.updated_at = Utc::now();
-            })
-            .or_insert_with(|| SipSubscription {
-                subscription_id: input.subscription_id,
-                subscriber: input.subscriber,
-                target: input.target,
-                event: input.event,
-                expires_at: input.expires_at,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
-            .clone()
-        });
+        let subscription = self
+            .sip_subscriptions
+            .with_write(&subscription_id, |subscriptions| {
+                subscriptions
+                    .entry(input.subscription_id.clone())
+                    .and_modify(|subscription| {
+                        subscription.subscriber = input.subscriber.clone();
+                        subscription.target = input.target.clone();
+                        subscription.event = input.event.clone();
+                        subscription.expires_at = input.expires_at;
+                        subscription.updated_at = Utc::now();
+                    })
+                    .or_insert_with(|| SipSubscription {
+                        subscription_id: input.subscription_id,
+                        subscriber: input.subscriber,
+                        target: input.target,
+                        event: input.event,
+                        expires_at: input.expires_at,
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                    })
+                    .clone()
+            });
         self.sip_subscriptions.trim_to_len(MAX_SIP_SUBSCRIPTIONS);
         subscription.clone()
     }
 
     pub fn remove_sip_subscription(&self, subscription_id: &str) -> Option<SipSubscription> {
-        self.sip_subscriptions
-            .remove(&subscription_id.to_string())
+        self.sip_subscriptions.remove(&subscription_id.to_string())
     }
 
     pub fn sip_subscriptions(&self) -> Vec<SipSubscription> {
@@ -1627,6 +1818,7 @@ impl AppState {
             title: input.title,
             mode: input.mode,
             participants: Vec::new(),
+            locked: false,
             active: false,
             created_at: Utc::now(),
         };
@@ -1640,36 +1832,278 @@ impl AppState {
         self.conferences.values()
     }
 
-    pub fn join_conference(&self, id: Uuid, input: JoinConferenceRequest) -> Option<Conference> {
+    pub fn join_conference(
+        &self,
+        id: Uuid,
+        input: JoinConferenceRequest,
+        bypass_lock: bool,
+    ) -> Result<Conference, JoinConferenceError> {
+        let mut joined: Option<ConferenceParticipant> = None;
         let conference = self.conferences.with_write(&id, |conferences| {
             let conference = conferences.get_mut(&id)?;
-            if !conference.participants.iter().any(|p| p.user_id == input.user_id) {
-                conference.participants.push(ConferenceParticipant {
+            let existing = conference
+                .participants
+                .iter()
+                .find(|p| p.user_id == input.user_id);
+            if conference.locked
+                && !bypass_lock
+                && !existing.is_some_and(|participant| !participant.removed)
+            {
+                return Some(Err(JoinConferenceError::Locked));
+            }
+            if !conference
+                .participants
+                .iter()
+                .any(|p| p.user_id == input.user_id)
+            {
+                let participant = ConferenceParticipant {
                     user_id: input.user_id,
                     sip_uri: input.sip_uri,
                     role: input.role.unwrap_or(ParticipantRole::Member),
                     bridge_slot: None,
+                    muted: false,
+                    removed: false,
+                    removed_at: None,
+                    removed_by: None,
+                    removal_reason: None,
                     joined_at: Utc::now(),
-                });
+                };
+                joined = Some(participant.clone());
+                conference.participants.push(participant);
+            }
+            Some(Ok(conference.clone()))
+        });
+        let conference = conference.ok_or(JoinConferenceError::NotFound)??;
+        self.persist(&conference);
+        if let Some(participant) = joined {
+            self.open_attendance_record(id, &participant);
+        }
+        Ok(conference)
+    }
+
+    pub fn can_moderate_conference(
+        &self,
+        conference_id: Uuid,
+        principal: &str,
+        is_admin: bool,
+    ) -> bool {
+        if is_admin || self.is_admin_principal(principal) {
+            return true;
+        }
+        self.conferences
+            .get(&conference_id)
+            .is_some_and(|conference| {
+                conference.participants.iter().any(|participant| {
+                    participant.sip_uri == principal
+                        && matches!(
+                            participant.role,
+                            ParticipantRole::Host | ParticipantRole::Moderator
+                        )
+                        && !participant.removed
+                })
+            })
+    }
+
+    pub fn update_conference_participant(
+        &self,
+        conference_id: Uuid,
+        user_id: Uuid,
+        input: UpdateConferenceParticipantRequest,
+        actor: &str,
+    ) -> Option<Conference> {
+        let conference = self.conferences.with_write(&conference_id, |conferences| {
+            let conference = conferences.get_mut(&conference_id)?;
+            let participant = conference
+                .participants
+                .iter_mut()
+                .find(|participant| participant.user_id == user_id)?;
+            if let Some(role) = input.role {
+                participant.role = role;
+            }
+            if let Some(muted) = input.muted {
+                participant.muted = muted;
+            }
+            if let Some(removed) = input.removed {
+                participant.removed = removed;
+                if removed {
+                    participant.removed_at = Some(Utc::now());
+                    participant.removed_by = Some(actor.to_string());
+                    participant.removal_reason = input.removal_reason;
+                    participant.muted = true;
+                    self.close_attendance_record(
+                        conference_id,
+                        user_id,
+                        AttendanceLeaveReason::Removed,
+                        participant.removed_by.clone(),
+                    );
+                } else {
+                    participant.removed_at = None;
+                    participant.removed_by = None;
+                    participant.removal_reason = None;
+                    self.reopen_attendance_record(conference_id, participant);
+                }
             }
             Some(conference.clone())
         });
         if let Some(conference) = &conference {
             self.persist(conference);
+            self.broadcast_sse(SseEvent {
+                event_type: "conference_participant_updated".to_string(),
+                payload: serde_json::to_value(conference).unwrap_or_default(),
+            });
+        }
+        conference
+    }
+
+    pub fn set_conference_locked(&self, conference_id: Uuid, locked: bool) -> Option<Conference> {
+        let conference = self.conferences.with_write(&conference_id, |conferences| {
+            let conference = conferences.get_mut(&conference_id)?;
+            conference.locked = locked;
+            Some(conference.clone())
+        });
+        if let Some(conference) = &conference {
+            self.persist(conference);
+            self.broadcast_sse(SseEvent {
+                event_type: "conference_participant_updated".to_string(),
+                payload: serde_json::to_value(conference).unwrap_or_default(),
+            });
         }
         conference
     }
 
     pub fn leave_conference(&self, id: Uuid, user_id: Uuid) -> Option<Conference> {
+        let mut left = false;
         let conference = self.conferences.with_write(&id, |conferences| {
             let conference = conferences.get_mut(&id)?;
+            left = conference
+                .participants
+                .iter()
+                .any(|participant| participant.user_id == user_id);
             conference.participants.retain(|p| p.user_id != user_id);
             Some(conference.clone())
         });
         if let Some(conference) = &conference {
             self.persist(conference);
         }
+        if left {
+            self.close_attendance_record(id, user_id, AttendanceLeaveReason::Left, None);
+        }
         conference
+    }
+
+    pub fn conference_attendance(&self, conference_id: Uuid) -> Vec<ConferenceAttendanceRecord> {
+        let mut records: Vec<_> = self
+            .conference_attendance
+            .read()
+            .expect("conference attendance lock")
+            .iter()
+            .filter(|record| record.conference_id == conference_id)
+            .cloned()
+            .collect();
+        records.sort_by(|left, right| left.joined_at.cmp(&right.joined_at));
+        records
+    }
+
+    fn open_attendance_record(&self, conference_id: Uuid, participant: &ConferenceParticipant) {
+        let record = ConferenceAttendanceRecord {
+            id: Uuid::new_v4(),
+            conference_id,
+            user_id: participant.user_id,
+            sip_uri: participant.sip_uri.clone(),
+            role: participant.role.clone(),
+            joined_at: participant.joined_at,
+            left_at: None,
+            duration_secs: None,
+            leave_reason: None,
+            removed_by: None,
+        };
+        self.conference_attendance
+            .write()
+            .expect("conference attendance lock")
+            .push(record.clone());
+        self.persist(&record);
+    }
+
+    fn reopen_attendance_record(&self, conference_id: Uuid, participant: &ConferenceParticipant) {
+        if self
+            .conference_attendance(conference_id)
+            .iter()
+            .any(|record| record.user_id == participant.user_id && record.left_at.is_none())
+        {
+            return;
+        }
+        self.open_attendance_record(conference_id, participant);
+    }
+
+    fn close_attendance_record(
+        &self,
+        conference_id: Uuid,
+        user_id: Uuid,
+        reason: AttendanceLeaveReason,
+        removed_by: Option<String>,
+    ) {
+        let updated = {
+            let mut records = self
+                .conference_attendance
+                .write()
+                .expect("conference attendance lock");
+            let record = records.iter_mut().rev().find(|record| {
+                record.conference_id == conference_id
+                    && record.user_id == user_id
+                    && record.left_at.is_none()
+            });
+            let Some(record) = record else {
+                return;
+            };
+            let left_at = Utc::now();
+            record.left_at = Some(left_at);
+            record.duration_secs = Some((left_at - record.joined_at).num_seconds().max(0));
+            record.leave_reason = Some(reason);
+            record.removed_by = removed_by;
+            record.clone()
+        };
+        self.persist(&updated);
+    }
+
+    fn close_active_attendance_for_conference(
+        &self,
+        conference_id: Uuid,
+        reason: AttendanceLeaveReason,
+    ) {
+        let updated = {
+            let mut records = self
+                .conference_attendance
+                .write()
+                .expect("conference attendance lock");
+            let left_at = Utc::now();
+            let mut updated = Vec::new();
+            for record in records
+                .iter_mut()
+                .filter(|record| record.conference_id == conference_id && record.left_at.is_none())
+            {
+                record.left_at = Some(left_at);
+                record.duration_secs = Some((left_at - record.joined_at).num_seconds().max(0));
+                record.leave_reason = Some(reason.clone());
+                updated.push(record.clone());
+            }
+            updated
+        };
+        for record in updated {
+            self.persist(&record);
+        }
+    }
+
+    pub fn conference_participant(
+        &self,
+        conference_id: Uuid,
+        user_id: Uuid,
+    ) -> Option<ConferenceParticipant> {
+        self.conferences.get(&conference_id).and_then(|conference| {
+            conference
+                .participants
+                .into_iter()
+                .find(|participant| participant.user_id == user_id)
+        })
     }
 
     pub fn activate_conference(&self, id: Uuid) -> Option<Conference> {
@@ -1692,6 +2126,7 @@ impl AppState {
         });
         if let Some(conference) = &conference {
             self.persist(conference);
+            self.close_active_attendance_for_conference(id, AttendanceLeaveReason::Ended);
         }
         conference
     }
@@ -1720,63 +2155,84 @@ impl AppState {
     }
 
     pub fn set_lobby_enabled(&self, conference_id: Uuid, enabled: bool) -> ConferenceLobby {
-        let lobby = self.conference_lobbies.with_write(&conference_id, |lobbies| {
-            let lobby = lobbies.entry(conference_id).or_insert_with(|| ConferenceLobby {
-                conference_id,
-                enabled: false,
-                participants: Vec::new(),
+        let lobby = self
+            .conference_lobbies
+            .with_write(&conference_id, |lobbies| {
+                let lobby = lobbies
+                    .entry(conference_id)
+                    .or_insert_with(|| ConferenceLobby {
+                        conference_id,
+                        enabled: false,
+                        participants: Vec::new(),
+                    });
+                lobby.enabled = enabled;
+                lobby.clone()
             });
-            lobby.enabled = enabled;
-            lobby.clone()
-        });
         lobby
     }
 
-    pub fn join_lobby(&self, conference_id: Uuid, user_id: Uuid, sip_uri: String, display_name: String) -> ConferenceLobby {
-        self.conference_lobbies.with_write(&conference_id, |lobbies| {
-            let lobby = lobbies.entry(conference_id).or_insert_with(|| ConferenceLobby {
-                conference_id,
-                enabled: true,
-                participants: Vec::new(),
-            });
-            if !lobby.participants.iter().any(|p| p.user_id == user_id) {
-                lobby.participants.push(LobbyParticipant {
-                    user_id,
-                    sip_uri,
-                    display_name,
-                    state: LobbyParticipantState::Waiting,
-                    requested_at: Utc::now(),
-                });
-            }
-            lobby.clone()
-        })
+    pub fn join_lobby(
+        &self,
+        conference_id: Uuid,
+        user_id: Uuid,
+        sip_uri: String,
+        display_name: String,
+    ) -> ConferenceLobby {
+        self.conference_lobbies
+            .with_write(&conference_id, |lobbies| {
+                let lobby = lobbies
+                    .entry(conference_id)
+                    .or_insert_with(|| ConferenceLobby {
+                        conference_id,
+                        enabled: true,
+                        participants: Vec::new(),
+                    });
+                if !lobby.participants.iter().any(|p| p.user_id == user_id) {
+                    lobby.participants.push(LobbyParticipant {
+                        user_id,
+                        sip_uri,
+                        display_name,
+                        state: LobbyParticipantState::Waiting,
+                        requested_at: Utc::now(),
+                    });
+                }
+                lobby.clone()
+            })
     }
 
-    pub fn admit_lobby_participant(&self, conference_id: Uuid, user_id: Uuid, admit: bool) -> Option<ConferenceLobby> {
-        let lobby = self.conference_lobbies.with_write(&conference_id, |lobbies| {
-            let lobby = lobbies.get_mut(&conference_id)?;
-            if let Some(p) = lobby.participants.iter_mut().find(|p| p.user_id == user_id) {
-                p.state = if admit {
-                    LobbyParticipantState::Admitted
-                } else {
-                    LobbyParticipantState::Rejected
-                };
-            }
-            Some(lobby.clone())
-        });
+    pub fn admit_lobby_participant(
+        &self,
+        conference_id: Uuid,
+        user_id: Uuid,
+        admit: bool,
+    ) -> Option<ConferenceLobby> {
+        let lobby = self
+            .conference_lobbies
+            .with_write(&conference_id, |lobbies| {
+                let lobby = lobbies.get_mut(&conference_id)?;
+                if let Some(p) = lobby.participants.iter_mut().find(|p| p.user_id == user_id) {
+                    p.state = if admit {
+                        LobbyParticipantState::Admitted
+                    } else {
+                        LobbyParticipantState::Rejected
+                    };
+                }
+                Some(lobby.clone())
+            });
         lobby
     }
 
     pub fn admit_all_lobby(&self, conference_id: Uuid) -> Option<ConferenceLobby> {
-        self.conference_lobbies.with_write(&conference_id, |lobbies| {
-            let lobby = lobbies.get_mut(&conference_id)?;
-            for p in &mut lobby.participants {
-                if p.state == LobbyParticipantState::Waiting {
-                    p.state = LobbyParticipantState::Admitted;
+        self.conference_lobbies
+            .with_write(&conference_id, |lobbies| {
+                let lobby = lobbies.get_mut(&conference_id)?;
+                for p in &mut lobby.participants {
+                    if p.state == LobbyParticipantState::Waiting {
+                        p.state = LobbyParticipantState::Admitted;
+                    }
                 }
-            }
-            Some(lobby.clone())
-        })
+                Some(lobby.clone())
+            })
     }
 
     // ── Raise hand methods ─────────────────────────────────────────
@@ -1785,7 +2241,12 @@ impl AppState {
         self.raised_hands.get(&conference_id).unwrap_or_default()
     }
 
-    pub fn raise_hand(&self, conference_id: Uuid, user_id: Uuid, sip_uri: String) -> Vec<HandRaise> {
+    pub fn raise_hand(
+        &self,
+        conference_id: Uuid,
+        user_id: Uuid,
+        sip_uri: String,
+    ) -> Vec<HandRaise> {
         self.raised_hands.with_write(&conference_id, |hands| {
             let list = hands.entry(conference_id).or_default();
             if !list.iter().any(|h| h.user_id == user_id) {
@@ -1817,16 +2278,25 @@ impl AppState {
 
     // ── Poll methods ───────────────────────────────────────────────
 
-    pub fn create_poll(&self, conference_id: Uuid, principal: &str, input: CreatePollRequest) -> MeetingPoll {
+    pub fn create_poll(
+        &self,
+        conference_id: Uuid,
+        principal: &str,
+        input: CreatePollRequest,
+    ) -> MeetingPoll {
         let poll = MeetingPoll {
             id: Uuid::new_v4(),
             conference_id,
             question: input.question,
-            options: input.options.into_iter().map(|text| PollOption {
-                id: Uuid::new_v4(),
-                text,
-                votes: Vec::new(),
-            }).collect(),
+            options: input
+                .options
+                .into_iter()
+                .map(|text| PollOption {
+                    id: Uuid::new_v4(),
+                    text,
+                    votes: Vec::new(),
+                })
+                .collect(),
             status: PollStatus::Draft,
             anonymous: input.anonymous,
             multi_select: input.multi_select,
@@ -1853,7 +2323,12 @@ impl AppState {
         })
     }
 
-    pub fn cast_vote(&self, poll_id: Uuid, voter_uri: &str, option_ids: Vec<Uuid>) -> Option<MeetingPoll> {
+    pub fn cast_vote(
+        &self,
+        poll_id: Uuid,
+        voter_uri: &str,
+        option_ids: Vec<Uuid>,
+    ) -> Option<MeetingPoll> {
         self.meeting_polls.with_write(&poll_id, |polls| {
             let poll = polls.get_mut(&poll_id)?;
             if poll.status != PollStatus::Active {
@@ -1876,7 +2351,11 @@ impl AppState {
     }
 
     pub fn list_polls(&self, conference_id: Uuid) -> Vec<MeetingPoll> {
-        self.meeting_polls.values().into_iter().filter(|p| p.conference_id == conference_id).collect()
+        self.meeting_polls
+            .values()
+            .into_iter()
+            .filter(|p| p.conference_id == conference_id)
+            .collect()
     }
 
     // ── Q&A methods ────────────────────────────────────────────────
@@ -1916,20 +2395,32 @@ impl AppState {
     }
 
     pub fn list_questions(&self, conference_id: Uuid) -> Vec<QaQuestion> {
-        self.qa_questions.values().into_iter().filter(|q| q.conference_id == conference_id).collect()
+        self.qa_questions
+            .values()
+            .into_iter()
+            .filter(|q| q.conference_id == conference_id)
+            .collect()
     }
 
     // ── Breakout room methods ──────────────────────────────────────
 
-    pub fn create_breakout_session(&self, conference_id: Uuid, input: CreateBreakoutRequest) -> BreakoutSession {
+    pub fn create_breakout_session(
+        &self,
+        conference_id: Uuid,
+        input: CreateBreakoutRequest,
+    ) -> BreakoutSession {
         let session = BreakoutSession {
             id: Uuid::new_v4(),
             conference_id,
-            rooms: input.rooms.into_iter().map(|r| BreakoutRoom {
-                id: Uuid::new_v4(),
-                name: r.name,
-                participants: r.participants,
-            }).collect(),
+            rooms: input
+                .rooms
+                .into_iter()
+                .map(|r| BreakoutRoom {
+                    id: Uuid::new_v4(),
+                    name: r.name,
+                    participants: r.participants,
+                })
+                .collect(),
             status: BreakoutStatus::Pending,
             duration_secs: input.duration_secs,
             created_at: Utc::now(),
@@ -1955,12 +2446,20 @@ impl AppState {
     }
 
     pub fn list_breakouts(&self, conference_id: Uuid) -> Vec<BreakoutSession> {
-        self.breakout_sessions.values().into_iter().filter(|s| s.conference_id == conference_id).collect()
+        self.breakout_sessions
+            .values()
+            .into_iter()
+            .filter(|s| s.conference_id == conference_id)
+            .collect()
     }
 
     // ── Transcript / live captions methods ─────────────────────────
 
-    pub fn post_transcript(&self, conference_id: Uuid, input: PostTranscriptRequest) -> TranscriptSegment {
+    pub fn post_transcript(
+        &self,
+        conference_id: Uuid,
+        input: PostTranscriptRequest,
+    ) -> TranscriptSegment {
         let segment = TranscriptSegment {
             id: Uuid::new_v4(),
             conference_id,
@@ -1994,7 +2493,9 @@ impl AppState {
 
     pub fn export_transcript(&self, conference_id: Uuid) -> TranscriptExport {
         let segments = self.get_transcript(conference_id);
-        let title = self.conferences.get(&conference_id)
+        let title = self
+            .conferences
+            .get(&conference_id)
             .map(|c| c.title)
             .unwrap_or_else(|| format!("Conference {}", conference_id));
         TranscriptExport {
@@ -2007,7 +2508,17 @@ impl AppState {
 
     // ── Call quality methods ───────────────────────────────────────
 
-    pub fn post_call_quality(&self, principal: &str, input: PostCallQualityRequest) -> CallQualityReport {
+    pub fn post_call_quality(
+        &self,
+        principal: &str,
+        input: PostCallQualityRequest,
+    ) -> CallQualityReport {
+        let diagnostics = call_quality_diagnostics(
+            input.mos_score,
+            input.jitter_ms,
+            input.packet_loss_pct,
+            input.round_trip_ms,
+        );
         let report = CallQualityReport {
             id: Uuid::new_v4(),
             call_id: input.call_id,
@@ -2019,6 +2530,9 @@ impl AppState {
             mos_score: input.mos_score,
             bytes_sent: input.bytes_sent,
             bytes_received: input.bytes_received,
+            rating: diagnostics.rating,
+            issues: diagnostics.issues,
+            recommended_action: diagnostics.recommended_action,
             reported_at: Utc::now(),
         };
         {
@@ -2029,11 +2543,65 @@ impl AppState {
                 reports.drain(..drain_count);
             }
         }
+        self.persist(&report);
         report
     }
 
     pub fn list_call_quality(&self) -> Vec<CallQualityReport> {
         self.call_quality_reports.read().expect("cqd lock").clone()
+    }
+
+    pub fn search_call_quality(&self, query: CallQualityQuery) -> Vec<CallQualityReport> {
+        let user_filter = query
+            .user_sip_uri
+            .as_ref()
+            .map(|value| value.trim().trim_start_matches("sip:").to_ascii_lowercase());
+        let mut reports: Vec<_> = self
+            .call_quality_reports
+            .read()
+            .expect("cqd lock")
+            .iter()
+            .filter(|report| {
+                if let Some(call_id) = query.call_id {
+                    if report.call_id != call_id {
+                        return false;
+                    }
+                }
+                if let Some(rating) = query.rating {
+                    if report.rating != rating {
+                        return false;
+                    }
+                }
+                if let Some(from) = query.from {
+                    if report.reported_at < from {
+                        return false;
+                    }
+                }
+                if let Some(to) = query.to {
+                    if report.reported_at > to {
+                        return false;
+                    }
+                }
+                if let Some(user_filter) = &user_filter {
+                    let report_user = report
+                        .user_sip_uri
+                        .trim_start_matches("sip:")
+                        .to_ascii_lowercase();
+                    if !report_user.contains(user_filter) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect();
+        reports.sort_by(|left, right| left.reported_at.cmp(&right.reported_at));
+        if let Some(limit) = query.limit.filter(|limit| *limit > 0) {
+            if reports.len() > limit {
+                reports.drain(0..reports.len() - limit);
+            }
+        }
+        reports
     }
 
     pub fn call_quality_summary(&self) -> CallQualitySummary {
@@ -2047,6 +2615,8 @@ impl AppState {
                 avg_packet_loss_pct: 0.0,
                 avg_round_trip_ms: 0.0,
                 poor_quality_calls: 0,
+                warning_quality_calls: 0,
+                worst_mos: 0.0,
             };
         }
         let n = total as f64;
@@ -2056,13 +2626,29 @@ impl AppState {
             avg_jitter_ms: reports.iter().map(|r| r.jitter_ms).sum::<f64>() / n,
             avg_packet_loss_pct: reports.iter().map(|r| r.packet_loss_pct).sum::<f64>() / n,
             avg_round_trip_ms: reports.iter().map(|r| r.round_trip_ms).sum::<f64>() / n,
-            poor_quality_calls: reports.iter().filter(|r| r.mos_score < 3.0).count(),
+            poor_quality_calls: reports
+                .iter()
+                .filter(|r| r.rating == CallQualityRating::Poor)
+                .count(),
+            warning_quality_calls: reports
+                .iter()
+                .filter(|r| r.rating == CallQualityRating::Warning)
+                .count(),
+            worst_mos: reports
+                .iter()
+                .map(|r| r.mos_score)
+                .fold(f64::INFINITY, f64::min),
         }
     }
 
     // ── DLP methods ────────────────────────────────────────────────
 
-    pub fn create_dlp_policy(&self, principal: &str, input: CreateDlpPolicyRequest) -> DlpPolicy {
+    pub fn create_dlp_policy(
+        &self,
+        principal: &str,
+        input: CreateDlpPolicyRequest,
+    ) -> Result<DlpPolicy, String> {
+        validate_dlp_pattern(&input.pattern)?;
         let policy = DlpPolicy {
             id: Uuid::new_v4(),
             name: input.name,
@@ -2074,11 +2660,50 @@ impl AppState {
             created_at: Utc::now(),
         };
         self.dlp_policies.insert(policy.id, policy.clone());
-        policy
+        self.persist(&policy);
+        Ok(policy)
     }
 
     pub fn delete_dlp_policy(&self, id: Uuid) -> bool {
-        self.dlp_policies.remove(&id).is_some()
+        if self.dlp_policies.remove(&id).is_some() {
+            self.delete_persisted(DlpPolicy::collection(), id.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn update_dlp_policy(
+        &self,
+        id: Uuid,
+        input: UpdateDlpPolicyRequest,
+    ) -> Result<Option<DlpPolicy>, String> {
+        if let Some(pattern) = input.pattern.as_deref() {
+            validate_dlp_pattern(pattern)?;
+        }
+        let updated = self.dlp_policies.with_write(&id, |policies| {
+            let policy = policies.get_mut(&id)?;
+            if let Some(name) = input.name {
+                policy.name = name;
+            }
+            if let Some(description) = input.description {
+                policy.description = description;
+            }
+            if let Some(pattern) = input.pattern {
+                policy.pattern = pattern;
+            }
+            if let Some(action) = input.action {
+                policy.action = action;
+            }
+            if let Some(enabled) = input.enabled {
+                policy.enabled = enabled;
+            }
+            Some(policy.clone())
+        });
+        if let Some(policy) = &updated {
+            self.persist(policy);
+        }
+        Ok(updated)
     }
 
     pub fn list_dlp_policies(&self) -> Vec<DlpPolicy> {
@@ -2086,6 +2711,14 @@ impl AppState {
     }
 
     pub fn scan_content_dlp(&self, user_uri: &str, content: &str) -> DlpScanResult {
+        self.evaluate_dlp_content(user_uri, content, true)
+    }
+
+    pub fn preview_content_dlp(&self, user_uri: &str, content: &str) -> DlpScanResult {
+        self.evaluate_dlp_content(user_uri, content, false)
+    }
+
+    fn evaluate_dlp_content(&self, user_uri: &str, content: &str, record: bool) -> DlpScanResult {
         let policies = self.dlp_policies.values();
         let mut violations = Vec::new();
         for policy in &policies {
@@ -2094,18 +2727,13 @@ impl AppState {
             }
             if let Ok(re) = regex::Regex::new(&policy.pattern) {
                 if re.is_match(content) {
-                    let snippet = if content.len() > 80 {
-                        format!("{}...", &content[..80])
-                    } else {
-                        content.to_string()
-                    };
                     let violation = DlpViolation {
                         id: Uuid::new_v4(),
                         policy_id: policy.id,
                         policy_name: policy.name.clone(),
                         user_uri: user_uri.to_string(),
                         action_taken: policy.action.clone(),
-                        content_snippet: snippet,
+                        content_snippet: dlp_content_snippet(content),
                         detected_at: Utc::now(),
                     };
                     violations.push(violation);
@@ -2113,15 +2741,19 @@ impl AppState {
             }
         }
 
-        let blocked = violations.iter().any(|v| v.action_taken == DlpAction::Block);
+        let blocked = violations
+            .iter()
+            .any(|v| v.action_taken == DlpAction::Block);
 
-        // Record violations
-        if !violations.is_empty() {
+        if record && !violations.is_empty() {
             let mut stored = self.dlp_violations.write().expect("dlp violations lock");
             stored.extend(violations.clone());
             if stored.len() > 50000 {
                 let drain_count = stored.len() - 50000;
                 stored.drain(..drain_count);
+            }
+            for violation in &violations {
+                self.persist(violation);
             }
         }
 
@@ -2132,10 +2764,74 @@ impl AppState {
     }
 
     pub fn list_dlp_violations(&self) -> Vec<DlpViolation> {
-        self.dlp_violations.read().expect("dlp violations lock").clone()
+        self.dlp_violations
+            .read()
+            .expect("dlp violations lock")
+            .clone()
     }
 
-    pub fn create_call(&self, input: CreateCallRequest) -> CallSession {
+    pub fn search_dlp_violations(&self, query: DlpViolationQuery) -> Vec<DlpViolation> {
+        let policy = query
+            .policy
+            .as_ref()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
+        let user_uri = query
+            .user_uri
+            .as_ref()
+            .map(|value| value.trim().trim_start_matches("sip:").to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
+        let action = query.action;
+        let mut violations: Vec<_> = self
+            .dlp_violations
+            .read()
+            .expect("dlp violations lock")
+            .iter()
+            .filter(|violation| {
+                if let Some(from) = query.from {
+                    if violation.detected_at < from {
+                        return false;
+                    }
+                }
+                if let Some(to) = query.to {
+                    if violation.detected_at > to {
+                        return false;
+                    }
+                }
+                if let Some(action) = &action {
+                    if &violation.action_taken != action {
+                        return false;
+                    }
+                }
+                if let Some(policy) = &policy {
+                    let policy_id = violation.policy_id.to_string();
+                    if !violation.policy_name.to_ascii_lowercase().contains(policy)
+                        && !policy_id.contains(policy)
+                    {
+                        return false;
+                    }
+                }
+                if let Some(user_uri) = &user_uri {
+                    let violation_user = violation
+                        .user_uri
+                        .trim_start_matches("sip:")
+                        .to_ascii_lowercase();
+                    if !violation_user.contains(user_uri) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect();
+        violations.sort_by(|left, right| right.detected_at.cmp(&left.detected_at));
+        let limit = query.limit.unwrap_or(500).clamp(1, 5000);
+        violations.truncate(limit);
+        violations
+    }
+
+    pub fn create_call(&self, input: CreateCallRequest) -> Result<CallSession, String> {
+        self.authorize_call_policy(&input)?;
         let call = CallSession {
             id: Uuid::new_v4(),
             conference_id: input.conference_id,
@@ -2149,7 +2845,23 @@ impl AppState {
         self.calls.insert(call.id, call.clone());
         self.calls.trim_to_len(MAX_CALLS);
         self.persist(&call);
-        call
+        Ok(call)
+    }
+
+    fn authorize_call_policy(&self, input: &CreateCallRequest) -> Result<(), String> {
+        let settings = self.get_user_call_settings(&input.caller);
+        if input.conference_id.is_none() && !settings.allow_private_calls {
+            return Err("private calls are disabled by policy".to_string());
+        }
+        if !settings.allow_external_calls
+            && input
+                .callees
+                .iter()
+                .any(|callee| is_external_call_target(&input.caller, callee))
+        {
+            return Err("external calling is disabled by policy".to_string());
+        }
+        Ok(())
     }
 
     pub fn update_call_status(&self, id: Uuid, status: CallStatus) -> Option<CallSession> {
@@ -2173,6 +2885,8 @@ impl AppState {
         self.files.insert(record.id, record.clone());
         self.files.trim_to_len(MAX_FILES);
         self.persist(&record);
+        let file_for_pg = record.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.insert_file(&file_for_pg).await }));
     }
 
     pub fn delete_file_record(&self, id: Uuid) -> Option<FileRecord> {
@@ -2180,7 +2894,21 @@ impl AppState {
         if record.is_some() {
             self.delete_persisted(FileRecord::collection(), id.to_string());
         }
+        self.pg_spawn(move |pg| Box::pin(async move { pg.delete_file(id).await }));
         record
+    }
+
+    pub fn mark_file_deleted(&self, id: Uuid, deleted_by: &str) -> Option<FileRecord> {
+        let record = self.files.with_write(&id, |files| {
+            let file = files.get_mut(&id)?;
+            file.deleted_at = Some(Utc::now());
+            file.deleted_by = Some(deleted_by.to_string());
+            Some(file.clone())
+        })?;
+        self.persist(&record);
+        let file_for_pg = record.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.insert_file(&file_for_pg).await }));
+        Some(record)
     }
 
     pub fn file_record(&self, id: Uuid) -> Option<FileRecord> {
@@ -2188,7 +2916,59 @@ impl AppState {
     }
 
     pub fn file_records(&self) -> Vec<FileRecord> {
-        self.files.values()
+        self.files
+            .values()
+            .into_iter()
+            .filter(|file| file.deleted_at.is_none())
+            .collect()
+    }
+
+    pub fn discovery_file_records(&self) -> Vec<FileDiscoveryRecord> {
+        self.files
+            .values()
+            .into_iter()
+            .map(|file| FileDiscoveryRecord {
+                id: file.id,
+                owner: file.owner,
+                filename: file.filename,
+                content_type: file.content_type,
+                size: file.size,
+                sha256: file.sha256,
+                created_at: file.created_at,
+                dlp_status: file.dlp_status,
+                dlp_violation_count: file.dlp_violation_count,
+                legal_hold: file.legal_hold,
+                deleted_at: file.deleted_at,
+                deleted_by: file.deleted_by,
+            })
+            .collect()
+    }
+
+    pub fn file_governance_for_upload(
+        &self,
+        owner: &str,
+        filename: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> FileGovernanceDecision {
+        let scan_content = if is_textual_content(content_type) {
+            format!("{}\n{}", filename, String::from_utf8_lossy(body))
+        } else {
+            filename.to_string()
+        };
+        let dlp = self.scan_content_dlp(owner, &scan_content);
+        FileGovernanceDecision {
+            allowed: dlp.allowed,
+            dlp_status: if dlp.allowed { "clean" } else { "blocked" }.to_string(),
+            dlp_violation_count: dlp.violations.len(),
+            legal_hold: self.file_on_legal_hold(),
+        }
+    }
+
+    pub fn file_on_legal_hold(&self) -> bool {
+        self.retention_policies().into_iter().any(|policy| {
+            policy.legal_hold && matches!(policy.scope.as_str(), "global" | "files" | "file")
+        })
     }
 
     pub fn create_routing_rule(&self, input: CreateRoutingRuleRequest) -> RoutingRule {
@@ -2198,8 +2978,12 @@ impl AppState {
             source_pattern: input.source_pattern,
             destination_pattern: input.destination_pattern,
             target: input.target,
-            destination_type: input.destination_type.unwrap_or_else(default_route_destination_type),
-            method_pattern: input.method_pattern.unwrap_or_else(default_route_method_pattern),
+            destination_type: input
+                .destination_type
+                .unwrap_or_else(default_route_destination_type),
+            method_pattern: input
+                .method_pattern
+                .unwrap_or_else(default_route_method_pattern),
             header_conditions: input.header_conditions.unwrap_or_default(),
             header_actions: input.header_actions.unwrap_or_default(),
             stop_processing: input.stop_processing.unwrap_or(true),
@@ -2264,8 +3048,12 @@ impl AppState {
             rule.source_pattern = input.source_pattern;
             rule.destination_pattern = input.destination_pattern;
             rule.target = input.target;
-            rule.destination_type = input.destination_type.unwrap_or_else(default_route_destination_type);
-            rule.method_pattern = input.method_pattern.unwrap_or_else(default_route_method_pattern);
+            rule.destination_type = input
+                .destination_type
+                .unwrap_or_else(default_route_destination_type);
+            rule.method_pattern = input
+                .method_pattern
+                .unwrap_or_else(default_route_method_pattern);
             rule.header_conditions = input.header_conditions.unwrap_or_default();
             rule.header_actions = input.header_actions.unwrap_or_default();
             rule.stop_processing = input.stop_processing.unwrap_or(true);
@@ -2295,8 +3083,7 @@ impl AppState {
             updated_at: Utc::now(),
             status_message: None,
         };
-        self.presence
-            .insert(sip_uri.to_string(), presence.clone());
+        self.presence.insert(sip_uri.to_string(), presence.clone());
         self.presence.trim_to_len(MAX_PRESENCE);
         let p = presence.clone();
         self.pg_spawn(move |pg| Box::pin(async move { pg.upsert_presence(&p).await }));
@@ -2345,7 +3132,10 @@ impl AppState {
 
     // ─── Call Center: Agent Management ───
 
-    pub fn create_agent_profile(&self, input: CreateAgentProfileRequest) -> Result<AgentProfile, String> {
+    pub fn create_agent_profile(
+        &self,
+        input: CreateAgentProfileRequest,
+    ) -> Result<AgentProfile, String> {
         if self.agent_profiles.get(&input.user_sip_uri).is_some() {
             return Err("Agent profile already exists".to_string());
         }
@@ -2364,38 +3154,55 @@ impl AppState {
             total_calls: 0,
             total_talk_secs: 0,
         };
-        self.agent_profiles.insert(input.user_sip_uri, profile.clone());
+        self.agent_profiles
+            .insert(input.user_sip_uri, profile.clone());
         Ok(profile)
     }
 
-    pub fn list_agent_profiles(&self) -> Vec<AgentProfile> { self.agent_profiles.values() }
+    pub fn list_agent_profiles(&self) -> Vec<AgentProfile> {
+        self.agent_profiles.values()
+    }
 
     pub fn agent_profile(&self, uri: &str) -> Option<AgentProfile> {
         self.agent_profiles.get(&uri.to_string())
     }
 
-    pub fn set_agent_state(&self, uri: &str, state: &str, reason: Option<String>) -> Option<AgentProfile> {
-        self.agent_profiles.with_write(&uri.to_string(), |profiles| {
-            let profile = profiles.get_mut(uri)?;
-            profile.state = state.to_string();
-            profile.state_reason = reason;
-            profile.state_since = Utc::now();
-            Some(profile.clone())
-        })
+    pub fn set_agent_state(
+        &self,
+        uri: &str,
+        state: &str,
+        reason: Option<String>,
+    ) -> Option<AgentProfile> {
+        self.agent_profiles
+            .with_write(&uri.to_string(), |profiles| {
+                let profile = profiles.get_mut(uri)?;
+                profile.state = state.to_string();
+                profile.state_reason = reason;
+                profile.state_since = Utc::now();
+                Some(profile.clone())
+            })
     }
 
     pub fn delete_agent_profile(&self, uri: &str) -> Option<AgentProfile> {
         self.agent_profiles.remove(&uri.to_string())
     }
 
-    pub fn transition_agent_state(&self, uri: &str, new_state: &str, reason: Option<String>) -> Result<AgentProfile, String> {
+    pub fn transition_agent_state(
+        &self,
+        uri: &str,
+        new_state: &str,
+        reason: Option<String>,
+    ) -> Result<AgentProfile, String> {
         let profile = self.agent_profile(uri).ok_or("Agent not found")?;
         let old_state = profile.state.clone();
 
         let valid = match (old_state.as_str(), new_state) {
             ("offline", "available") => true,
-            ("available", "on_call") | ("available", "break") | ("available", "training") |
-            ("available", "meeting") | ("available", "offline") => true,
+            ("available", "on_call")
+            | ("available", "break")
+            | ("available", "training")
+            | ("available", "meeting")
+            | ("available", "offline") => true,
             ("on_call", "wrap_up") | ("on_call", "available") => true,
             ("wrap_up", "available") | ("wrap_up", "break") | ("wrap_up", "offline") => true,
             ("break", "available") | ("break", "offline") => true,
@@ -2405,7 +3212,10 @@ impl AppState {
             _ => false,
         };
         if !valid {
-            return Err(format!("Invalid state transition: {} -> {}", old_state, new_state));
+            return Err(format!(
+                "Invalid state transition: {} -> {}",
+                old_state, new_state
+            ));
         }
 
         let duration = (Utc::now() - profile.state_since).num_seconds() as i32;
@@ -2415,11 +3225,15 @@ impl AppState {
         let old = old_state.clone();
         let new_s = new_state.to_string();
         let r = reason.clone();
-        self.pg_spawn(move |pg| Box::pin(async move {
-            pg.insert_agent_state_log(&uri_owned, &old, &new_s, r.as_deref(), duration).await
-        }));
+        self.pg_spawn(move |pg| {
+            Box::pin(async move {
+                pg.insert_agent_state_log(&uri_owned, &old, &new_s, r.as_deref(), duration)
+                    .await
+            })
+        });
 
-        let updated = self.set_agent_state(uri, new_state, reason)
+        let updated = self
+            .set_agent_state(uri, new_state, reason)
             .ok_or("Failed to update agent state")?;
 
         self.broadcast_sse(SseEvent {
@@ -2437,10 +3251,19 @@ impl AppState {
 
     // ─── Queue Caller Tracking ───
 
-    pub fn enqueue_caller(&self, queue_id: Uuid, caller_uri: &str, caller_name: &str) -> QueueCallerEntry {
-        let position = self.queue_callers.values().into_iter()
+    pub fn enqueue_caller(
+        &self,
+        queue_id: Uuid,
+        caller_uri: &str,
+        caller_name: &str,
+    ) -> QueueCallerEntry {
+        let position = self
+            .queue_callers
+            .values()
+            .into_iter()
             .filter(|c| c.queue_id == queue_id && c.status == "waiting")
-            .count() as i32 + 1;
+            .count() as i32
+            + 1;
         let caller = QueueCallerEntry {
             id: Uuid::new_v4(),
             queue_id,
@@ -2483,13 +3306,17 @@ impl AppState {
     }
 
     pub fn queue_callers_waiting(&self, queue_id: Uuid) -> Vec<QueueCallerEntry> {
-        self.queue_callers.values().into_iter()
+        self.queue_callers
+            .values()
+            .into_iter()
             .filter(|c| c.queue_id == queue_id && c.status == "waiting")
             .collect()
     }
 
     pub fn queue_callers_waiting_count(&self, queue_id: Uuid) -> usize {
-        self.queue_callers.values().into_iter()
+        self.queue_callers
+            .values()
+            .into_iter()
             .filter(|c| c.queue_id == queue_id && c.status == "waiting")
             .count()
     }
@@ -2497,8 +3324,11 @@ impl AppState {
     // ─── VIP Caller Management ───
 
     pub fn check_vip(&self, caller_uri: &str) -> Option<VipCaller> {
-        self.vip_callers.values().into_iter()
-            .find(|v| caller_uri.contains(&v.caller_pattern) || v.caller_pattern == caller_uri || caller_uri.ends_with(&v.caller_pattern))
+        self.vip_callers.values().into_iter().find(|v| {
+            caller_uri.contains(&v.caller_pattern)
+                || v.caller_pattern == caller_uri
+                || caller_uri.ends_with(&v.caller_pattern)
+        })
     }
 
     pub fn create_vip_caller(&self, input: CreateVipCallerRequest) -> VipCaller {
@@ -2559,13 +3389,18 @@ impl AppState {
     }
 
     pub fn list_queue_callbacks(&self, queue_id: Uuid) -> Vec<QueueCallback> {
-        self.queue_callbacks.values().into_iter()
+        self.queue_callbacks
+            .values()
+            .into_iter()
             .filter(|cb| cb.queue_id == queue_id)
             .collect()
     }
 
     pub fn pending_callbacks(&self, queue_id: Uuid) -> Vec<QueueCallback> {
-        let mut cbs: Vec<_> = self.queue_callbacks.values().into_iter()
+        let mut cbs: Vec<_> = self
+            .queue_callbacks
+            .values()
+            .into_iter()
             .filter(|cb| cb.queue_id == queue_id && cb.status == "pending")
             .collect();
         cbs.sort_by_key(|cb| cb.position);
@@ -2577,91 +3412,118 @@ impl AppState {
         let cdrs = self.cdrs.read().expect("cdrs lock");
         let now = Utc::now();
 
-        self.list_queues().into_iter().map(|q| {
-            let agent_uris: Vec<&str> = q.agents.iter().map(|a| a.agent_uri.as_str()).collect();
+        self.list_queues()
+            .into_iter()
+            .map(|q| {
+                let agent_uris: Vec<&str> = q.agents.iter().map(|a| a.agent_uri.as_str()).collect();
 
-            // Use agent profiles for real-time state where available,
-            // falling back to the queue-level agent state.
-            let mut available = 0i32;
-            let mut busy = 0i32;
-            let mut paused = 0i32;
-            for qa in &q.agents {
-                let state = self.agent_profiles.get(&qa.agent_uri)
-                    .map(|p| p.state.clone())
-                    .unwrap_or_else(|| qa.state.clone());
-                match state.as_str() {
-                    "available" => available += 1,
-                    "busy" | "on_call" => busy += 1,
-                    "paused" | "break" => paused += 1,
-                    _ => {}
+                // Use agent profiles for real-time state where available,
+                // falling back to the queue-level agent state.
+                let mut available = 0i32;
+                let mut busy = 0i32;
+                let mut paused = 0i32;
+                for qa in &q.agents {
+                    let state = self
+                        .agent_profiles
+                        .get(&qa.agent_uri)
+                        .map(|p| p.state.clone())
+                        .unwrap_or_else(|| qa.state.clone());
+                    match state.as_str() {
+                        "available" => available += 1,
+                        "busy" | "on_call" => busy += 1,
+                        "paused" | "break" => paused += 1,
+                        _ => {}
+                    }
                 }
-            }
 
-            // Active calls: dialogs where one side is a queue agent and status is confirmed
-            let calls_active = all_dialogs.iter().filter(|d| {
-                !matches!(d.status, SipDialogStatus::Ended | SipDialogStatus::Cancelled | SipDialogStatus::Failed)
-                    && (agent_uris.contains(&d.from_uri.as_str())
-                        || agent_uris.contains(&d.to_uri.as_str()))
-            }).count() as i32;
+                // Active calls: dialogs where one side is a queue agent and status is confirmed
+                let calls_active = all_dialogs
+                    .iter()
+                    .filter(|d| {
+                        !matches!(
+                            d.status,
+                            SipDialogStatus::Ended
+                                | SipDialogStatus::Cancelled
+                                | SipDialogStatus::Failed
+                        ) && (agent_uris.contains(&d.from_uri.as_str())
+                            || agent_uris.contains(&d.to_uri.as_str()))
+                    })
+                    .count() as i32;
 
-            // CDR stats for this queue
-            let queue_cdrs: Vec<_> = cdrs.iter()
-                .filter(|c| c.queue_name.as_deref() == Some(&q.name))
-                .collect();
-            let answered: Vec<_> = queue_cdrs.iter().filter(|c| c.disposition == "answered").collect();
-            let abandoned = queue_cdrs.iter().filter(|c| c.disposition == "abandoned").count() as i32;
-            let calls_answered = answered.len() as i32;
+                // CDR stats for this queue
+                let queue_cdrs: Vec<_> = cdrs
+                    .iter()
+                    .filter(|c| c.queue_name.as_deref() == Some(&q.name))
+                    .collect();
+                let answered: Vec<_> = queue_cdrs
+                    .iter()
+                    .filter(|c| c.disposition == "answered")
+                    .collect();
+                let abandoned = queue_cdrs
+                    .iter()
+                    .filter(|c| c.disposition == "abandoned")
+                    .count() as i32;
+                let calls_answered = answered.len() as i32;
 
-            // Wait time stats from answered CDRs that have queue_wait_secs
-            let wait_times: Vec<i32> = answered.iter()
-                .filter_map(|c| c.queue_wait_secs)
-                .collect();
-            let avg_wait_secs = if wait_times.is_empty() { 0 } else {
-                wait_times.iter().sum::<i32>() / wait_times.len() as i32
-            };
+                // Wait time stats from answered CDRs that have queue_wait_secs
+                let wait_times: Vec<i32> =
+                    answered.iter().filter_map(|c| c.queue_wait_secs).collect();
+                let avg_wait_secs = if wait_times.is_empty() {
+                    0
+                } else {
+                    wait_times.iter().sum::<i32>() / wait_times.len() as i32
+                };
 
-            // Average talk time from answered CDRs
-            let talk_times: Vec<i32> = answered.iter()
-                .map(|c| c.duration_secs)
-                .filter(|&d| d > 0)
-                .collect();
-            let avg_talk_secs = if talk_times.is_empty() { 0 } else {
-                talk_times.iter().sum::<i32>() / talk_times.len() as i32
-            };
+                // Average talk time from answered CDRs
+                let talk_times: Vec<i32> = answered
+                    .iter()
+                    .map(|c| c.duration_secs)
+                    .filter(|&d| d > 0)
+                    .collect();
+                let avg_talk_secs = if talk_times.is_empty() {
+                    0
+                } else {
+                    talk_times.iter().sum::<i32>() / talk_times.len() as i32
+                };
 
-            // Longest waiting: unanswered CDRs still in progress for this queue
-            let longest_wait_secs = queue_cdrs.iter()
-                .filter(|c| c.end_time.is_none() && c.disposition == "no_answer")
-                .map(|c| (now - c.start_time).num_seconds() as i32)
-                .max()
-                .unwrap_or(0);
+                // Longest waiting: unanswered CDRs still in progress for this queue
+                let longest_wait_secs = queue_cdrs
+                    .iter()
+                    .filter(|c| c.end_time.is_none() && c.disposition == "no_answer")
+                    .map(|c| (now - c.start_time).num_seconds() as i32)
+                    .max()
+                    .unwrap_or(0);
 
-            // Calls waiting: CDRs with no end_time and no_answer disposition
-            let calls_waiting = queue_cdrs.iter()
-                .filter(|c| c.end_time.is_none() && c.disposition == "no_answer")
-                .count() as i32;
+                // Calls waiting: CDRs with no end_time and no_answer disposition
+                let calls_waiting = queue_cdrs
+                    .iter()
+                    .filter(|c| c.end_time.is_none() && c.disposition == "no_answer")
+                    .count() as i32;
 
-            let total = calls_answered + abandoned;
-            let sla_percentage = if total == 0 { 100.0 } else {
-                (calls_answered as f32 / total as f32) * 100.0
-            };
+                let total = calls_answered + abandoned;
+                let sla_percentage = if total == 0 {
+                    100.0
+                } else {
+                    (calls_answered as f32 / total as f32) * 100.0
+                };
 
-            QueueMetricsSnapshot {
-                queue_id: q.id,
-                queue_name: q.name,
-                calls_waiting,
-                calls_active,
-                agents_available: available,
-                agents_busy: busy,
-                agents_paused: paused,
-                longest_wait_secs,
-                avg_wait_secs,
-                avg_talk_secs,
-                calls_answered,
-                calls_abandoned: abandoned,
-                sla_percentage,
-            }
-        }).collect()
+                QueueMetricsSnapshot {
+                    queue_id: q.id,
+                    queue_name: q.name,
+                    calls_waiting,
+                    calls_active,
+                    agents_available: available,
+                    agents_busy: busy,
+                    agents_paused: paused,
+                    longest_wait_secs,
+                    avg_wait_secs,
+                    avg_talk_secs,
+                    calls_answered,
+                    calls_abandoned: abandoned,
+                    sla_percentage,
+                }
+            })
+            .collect()
     }
 
     // ─── Monitor Sessions ───
@@ -2679,7 +3541,9 @@ impl AppState {
         session
     }
 
-    pub fn list_monitor_sessions(&self) -> Vec<MonitorSession> { self.monitor_sessions.values() }
+    pub fn list_monitor_sessions(&self) -> Vec<MonitorSession> {
+        self.monitor_sessions.values()
+    }
 
     pub fn end_monitor(&self, id: Uuid) -> Option<MonitorSession> {
         self.monitor_sessions.remove(&id)
@@ -2700,7 +3564,10 @@ impl AppState {
             comments: input.comments.unwrap_or_default(),
             created_at: Utc::now(),
         };
-        self.qa_scorecards.write().expect("qa lock").push(sc.clone());
+        self.qa_scorecards
+            .write()
+            .expect("qa lock")
+            .push(sc.clone());
         sc
     }
 
@@ -2722,8 +3589,12 @@ impl AppState {
         cr
     }
 
-    pub fn list_canned_responses(&self) -> Vec<CannedResponse> { self.canned_responses.values() }
-    pub fn delete_canned_response(&self, id: Uuid) -> Option<CannedResponse> { self.canned_responses.remove(&id) }
+    pub fn list_canned_responses(&self) -> Vec<CannedResponse> {
+        self.canned_responses.values()
+    }
+    pub fn delete_canned_response(&self, id: Uuid) -> Option<CannedResponse> {
+        self.canned_responses.remove(&id)
+    }
 
     // ─── User Call Settings ───
 
@@ -2757,14 +3628,18 @@ impl AppState {
             announce_interval: 30,
             hold_music_file_id: input.hold_music_file_id,
             overflow_destination: input.overflow_destination,
-            agents: input.agents.into_iter().map(|a| QueueAgent {
-                agent_uri: a.agent_uri,
-                priority: a.priority.unwrap_or(1),
-                skills: a.skills.unwrap_or_default(),
-                state: "available".to_string(),
-                calls_handled: 0,
-                penalty: 0,
-            }).collect(),
+            agents: input
+                .agents
+                .into_iter()
+                .map(|a| QueueAgent {
+                    agent_uri: a.agent_uri,
+                    priority: a.priority.unwrap_or(1),
+                    skills: a.skills.unwrap_or_default(),
+                    state: "available".to_string(),
+                    calls_handled: 0,
+                    penalty: 0,
+                })
+                .collect(),
             enabled: true,
             created_at: Utc::now(),
             callback_enabled: input.callback_enabled.unwrap_or(false),
@@ -2775,15 +3650,22 @@ impl AppState {
         Ok(queue)
     }
 
-    pub fn list_queues(&self) -> Vec<CallQueue> { self.call_queues.values() }
-    pub fn queue(&self, id: Uuid) -> Option<CallQueue> { self.call_queues.get(&id) }
-    pub fn delete_queue(&self, id: Uuid) -> Option<CallQueue> { self.call_queues.remove(&id) }
+    pub fn list_queues(&self) -> Vec<CallQueue> {
+        self.call_queues.values()
+    }
+    pub fn queue(&self, id: Uuid) -> Option<CallQueue> {
+        self.call_queues.get(&id)
+    }
+    pub fn delete_queue(&self, id: Uuid) -> Option<CallQueue> {
+        self.call_queues.remove(&id)
+    }
 
     pub fn queue_by_extension(&self, uri: &str) -> Option<CallQueue> {
         let user = sip_user_part(uri);
-        self.call_queues.values().into_iter().find(|q| {
-            (q.extension == uri || sip_user_part(&q.extension) == user) && q.enabled
-        })
+        self.call_queues
+            .values()
+            .into_iter()
+            .find(|q| (q.extension == uri || sip_user_part(&q.extension) == user) && q.enabled)
     }
 
     // ─── Extensions ───
@@ -2792,9 +3674,9 @@ impl AppState {
         if self.extensions.get(&input.extension).is_some() {
             return Err(format!("Extension {} already exists", input.extension));
         }
-        let user_display_name = input.user_id.and_then(|uid| {
-            self.users.get(&uid).map(|u| u.display_name.clone())
-        });
+        let user_display_name = input
+            .user_id
+            .and_then(|uid| self.users.get(&uid).map(|u| u.display_name.clone()));
         let ext = Extension {
             extension: input.extension.clone(),
             destination: input.destination,
@@ -2821,9 +3703,12 @@ impl AppState {
         })
     }
 
-    pub fn list_extensions(&self) -> Vec<Extension> { self.extensions.values() }
+    pub fn list_extensions(&self) -> Vec<Extension> {
+        self.extensions.values()
+    }
     pub fn list_dids(&self) -> Vec<Extension> {
-        let mut dids: Vec<_> = self.extensions
+        let mut dids: Vec<_> = self
+            .extensions
             .values()
             .into_iter()
             .filter(|ext| ext.is_did)
@@ -2834,25 +3719,33 @@ impl AppState {
 
     pub fn resolve_extension(&self, uri: &str) -> Option<Extension> {
         let user = sip_user_part(uri);
-        self.extensions.get(&uri.to_string())
+        self.extensions
+            .get(&uri.to_string())
             .or_else(|| self.extensions.get(&user.to_string()))
     }
     pub fn delete_extension(&self, ext: &str) -> Option<Extension> {
         let removed = self.extensions.remove(&ext.to_string());
         if removed.is_some() {
             let ext_key = ext.to_string();
-            self.pg_spawn(move |pg| Box::pin(async move { pg.delete_pg_extension(&ext_key).await }));
+            self.pg_spawn(move |pg| {
+                Box::pin(async move { pg.delete_pg_extension(&ext_key).await })
+            });
         }
         removed
     }
 
-    pub fn provision_user(&self, input: ProvisionUserRequest) -> Result<ProvisionUserResponse, String> {
+    pub fn provision_user(
+        &self,
+        input: ProvisionUserRequest,
+    ) -> Result<ProvisionUserResponse, String> {
         let default_username = input.display_name.to_lowercase().replace(' ', ".");
-        let sip_username = input.extension_number.as_deref()
+        let sip_username = input
+            .extension_number
+            .as_deref()
             .unwrap_or(&default_username);
         let sip_uri = format!("sip:{}@{}", sip_username, input.sip_domain);
-        let normalized_sip_uri = normalize_sip_uri(&sip_uri)
-            .ok_or_else(|| format!("Invalid SIP URI {}", sip_uri))?;
+        let normalized_sip_uri =
+            normalize_sip_uri(&sip_uri).ok_or_else(|| format!("Invalid SIP URI {}", sip_uri))?;
 
         // Check uniqueness
         if self.user_exists(&normalized_sip_uri) {
@@ -2888,28 +3781,34 @@ impl AppState {
         };
 
         // Get SIP credentials
-        let sip_creds = split_sip_aor_simple(&sip_uri).map(|(username, domain)| {
-            SipCredentials {
-                sip_uri: sip_uri.clone(),
-                registrar_uri: self
-                    .sip_registrar
-                    .as_ref()
-                    .map(|registrar| format!("sip:{}", registrar)),
-                registration_available: self.sip_registrar.is_some(),
-                username,
-                password: input.password,
-                transport: "udp".to_string(),
-                domain,
-            }
+        let sip_creds = split_sip_aor_simple(&sip_uri).map(|(username, domain)| SipCredentials {
+            sip_uri: sip_uri.clone(),
+            registrar_uri: self
+                .sip_registrar
+                .as_ref()
+                .map(|registrar| format!("sip:{}", registrar)),
+            registration_available: self.sip_registrar.is_some(),
+            username,
+            password: input.password,
+            transport: "udp".to_string(),
+            domain,
         });
 
-        Ok(ProvisionUserResponse { user, extension, sip_credentials: sip_creds })
+        Ok(ProvisionUserResponse {
+            user,
+            extension,
+            sip_credentials: sip_creds,
+        })
     }
 
     pub fn assign_extension(&self, ext: &str, user_id: Uuid) -> Result<Extension, String> {
-        let mut extension = self.extensions.get(&ext.to_string())
+        let mut extension = self
+            .extensions
+            .get(&ext.to_string())
             .ok_or_else(|| format!("Extension {} not found", ext))?;
-        let user = self.users.get(&user_id)
+        let user = self
+            .users
+            .get(&user_id)
             .ok_or_else(|| format!("User {} not found", user_id))?;
         extension.user_id = Some(user_id);
         extension.user_display_name = Some(user.display_name.clone());
@@ -2922,7 +3821,9 @@ impl AppState {
     }
 
     pub fn unassign_extension(&self, ext: &str) -> Result<Extension, String> {
-        let mut extension = self.extensions.get(&ext.to_string())
+        let mut extension = self
+            .extensions
+            .get(&ext.to_string())
             .ok_or_else(|| format!("Extension {} not found", ext))?;
         extension.user_id = None;
         extension.user_display_name = None;
@@ -2933,14 +3834,18 @@ impl AppState {
     }
 
     pub fn extensions_for_user(&self, user_id: Uuid) -> Vec<Extension> {
-        self.extensions.values().into_iter()
+        self.extensions
+            .values()
+            .into_iter()
             .filter(|e| e.user_id == Some(user_id))
             .collect()
     }
 
     pub fn list_extensions_filtered(&self, unassigned_only: bool) -> Vec<Extension> {
         if unassigned_only {
-            self.extensions.values().into_iter()
+            self.extensions
+                .values()
+                .into_iter()
                 .filter(|e| e.user_id.is_none() && e.destination_type == "user")
                 .collect()
         } else {
@@ -2954,7 +3859,9 @@ impl AppState {
         let bh = BusinessHours {
             id: Uuid::new_v4(),
             name: input.name,
-            timezone: input.timezone.unwrap_or_else(|| "America/New_York".to_string()),
+            timezone: input
+                .timezone
+                .unwrap_or_else(|| "America/New_York".to_string()),
             schedule: input.schedule,
             after_hours_destination: input.after_hours_destination,
             enabled: true,
@@ -2964,8 +3871,12 @@ impl AppState {
         bh
     }
 
-    pub fn list_business_hours(&self) -> Vec<BusinessHours> { self.business_hours.values() }
-    pub fn delete_business_hours(&self, id: Uuid) -> Option<BusinessHours> { self.business_hours.remove(&id) }
+    pub fn list_business_hours(&self) -> Vec<BusinessHours> {
+        self.business_hours.values()
+    }
+    pub fn delete_business_hours(&self, id: Uuid) -> Option<BusinessHours> {
+        self.business_hours.remove(&id)
+    }
 
     // ─── Holidays ───
 
@@ -2982,8 +3893,12 @@ impl AppState {
         h
     }
 
-    pub fn list_holidays(&self) -> Vec<Holiday> { self.holidays.values() }
-    pub fn delete_holiday(&self, id: Uuid) -> Option<Holiday> { self.holidays.remove(&id) }
+    pub fn list_holidays(&self) -> Vec<Holiday> {
+        self.holidays.values()
+    }
+    pub fn delete_holiday(&self, id: Uuid) -> Option<Holiday> {
+        self.holidays.remove(&id)
+    }
 
     /// Returns a holiday matching today's date (recurring holidays match on month/day).
     pub fn active_holiday_today(&self) -> Option<Holiday> {
@@ -3005,7 +3920,12 @@ impl AppState {
     /// Returns `(true, None)` when open or no business hours are configured,
     /// or `(false, Some(after_hours_destination))` when closed.
     pub fn is_within_business_hours(&self) -> (bool, Option<String>) {
-        let enabled: Vec<_> = self.business_hours.values().into_iter().filter(|bh| bh.enabled).collect();
+        let enabled: Vec<_> = self
+            .business_hours
+            .values()
+            .into_iter()
+            .filter(|bh| bh.enabled)
+            .collect();
         if enabled.is_empty() {
             return (true, None);
         }
@@ -3040,7 +3960,14 @@ impl AppState {
     pub fn check_dnd(&self, target_uri: &str) -> (bool, Option<String>) {
         let settings = self.get_user_call_settings(target_uri);
         if settings.dnd_enabled {
-            (true, settings.dnd_forward_to.clone())
+            (
+                true,
+                if settings.allow_call_forwarding {
+                    settings.dnd_forward_to.clone()
+                } else {
+                    None
+                },
+            )
         } else {
             (false, None)
         }
@@ -3050,6 +3977,9 @@ impl AppState {
     /// `call_state` should be one of "always", "busy", or "no_answer".
     pub fn resolve_call_forwarding(&self, target_uri: &str, call_state: &str) -> Option<String> {
         let settings = self.get_user_call_settings(target_uri);
+        if !settings.allow_call_forwarding {
+            return None;
+        }
         match call_state {
             "always" => settings.forward_always.clone().filter(|s| !s.is_empty()),
             "busy" => settings.forward_busy.clone().filter(|s| !s.is_empty()),
@@ -3063,29 +3993,46 @@ impl AppState {
         self.claim_next_agent(queue, &[])
     }
 
-    pub fn claim_next_agent(&self, queue: &CallQueue, required_skills: &[String]) -> Option<String> {
+    pub fn claim_next_agent(
+        &self,
+        queue: &CallQueue,
+        required_skills: &[String],
+    ) -> Option<String> {
         let _lock = self.agent_assignment_lock.lock().ok()?;
 
-        let mut candidates: Vec<(usize, &QueueAgent)> = queue.agents.iter().enumerate()
+        let mut candidates: Vec<(usize, &QueueAgent)> = queue
+            .agents
+            .iter()
+            .enumerate()
             .filter(|(_, a)| a.state == "available")
             .filter(|(_, a)| {
                 self.agent_profile(&a.agent_uri)
                     .map_or(false, |p| p.state == "available")
             })
             .filter(|(_, a)| {
-                if required_skills.is_empty() { return true; }
+                if required_skills.is_empty() {
+                    return true;
+                }
                 required_skills.iter().all(|s| a.skills.contains(s))
             })
             .collect();
 
-        if candidates.is_empty() { return None; }
+        if candidates.is_empty() {
+            return None;
+        }
 
         // Sort by strategy
         match queue.strategy.as_str() {
             "longest_idle" => {
                 candidates.sort_by(|(_, a), (_, b)| {
-                    let a_since = self.agent_profile(&a.agent_uri).map(|p| p.state_since).unwrap_or_else(Utc::now);
-                    let b_since = self.agent_profile(&b.agent_uri).map(|p| p.state_since).unwrap_or_else(Utc::now);
+                    let a_since = self
+                        .agent_profile(&a.agent_uri)
+                        .map(|p| p.state_since)
+                        .unwrap_or_else(Utc::now);
+                    let b_since = self
+                        .agent_profile(&b.agent_uri)
+                        .map(|p| p.state_since)
+                        .unwrap_or_else(Utc::now);
                     a_since.cmp(&b_since)
                 });
             }
@@ -3137,7 +4084,13 @@ impl AppState {
     }
 
     /// Start a new CDR, persist it, and return the record.
-    pub fn record_cdr_start(&self, call_id: Option<&str>, caller_uri: &str, callee_uri: &str, direction: &str) -> CallDetailRecord {
+    pub fn record_cdr_start(
+        &self,
+        call_id: Option<&str>,
+        caller_uri: &str,
+        callee_uri: &str,
+        direction: &str,
+    ) -> CallDetailRecord {
         let cdr = CallDetailRecord {
             id: Uuid::new_v4(),
             call_id: call_id.map(String::from),
@@ -3196,7 +4149,14 @@ impl AppState {
 
     // ─── Call Park ───
 
-    pub fn park_call(&self, slot: &str, call_id: &str, parked_by: &str, caller_uri: &str, caller_name: &str) -> ParkedCall {
+    pub fn park_call(
+        &self,
+        slot: &str,
+        call_id: &str,
+        parked_by: &str,
+        caller_uri: &str,
+        caller_name: &str,
+    ) -> ParkedCall {
         let pc = ParkedCall {
             slot: slot.to_string(),
             call_id: call_id.to_string(),
@@ -3213,7 +4173,9 @@ impl AppState {
         self.parked_calls.remove(&slot.to_string())
     }
 
-    pub fn list_parked_calls(&self) -> Vec<ParkedCall> { self.parked_calls.values() }
+    pub fn list_parked_calls(&self) -> Vec<ParkedCall> {
+        self.parked_calls.values()
+    }
 
     // ─── Speed Dial ───
 
@@ -3231,7 +4193,9 @@ impl AppState {
     }
 
     pub fn speed_dials_for_user(&self, owner: &str) -> Vec<SpeedDial> {
-        self.speed_dials.read().expect("speed dials lock")
+        self.speed_dials
+            .read()
+            .expect("speed dials lock")
             .iter()
             .filter(|d| d.owner_uri.as_deref() == Some(owner) || d.owner_uri.is_none())
             .cloned()
@@ -3267,14 +4231,26 @@ impl AppState {
         pg
     }
 
-    pub fn list_paging_groups(&self) -> Vec<PagingGroup> { self.paging_groups.values() }
-    pub fn delete_paging_group(&self, id: Uuid) -> Option<PagingGroup> { self.paging_groups.remove(&id) }
+    pub fn list_paging_groups(&self) -> Vec<PagingGroup> {
+        self.paging_groups.values()
+    }
+    pub fn delete_paging_group(&self, id: Uuid) -> Option<PagingGroup> {
+        self.paging_groups.remove(&id)
+    }
 
     // ─── Ring Groups ───
 
     pub fn create_ring_group(&self, input: CreateRingGroupRequest) -> Result<RingGroup, String> {
-        if self.ring_groups.values().iter().any(|g| g.extension == input.extension) {
-            return Err(format!("Ring group with extension {} already exists", input.extension));
+        if self
+            .ring_groups
+            .values()
+            .iter()
+            .any(|g| g.extension == input.extension)
+        {
+            return Err(format!(
+                "Ring group with extension {} already exists",
+                input.extension
+            ));
         }
         let group = RingGroup {
             id: Uuid::new_v4(),
@@ -3301,9 +4277,10 @@ impl AppState {
 
     pub fn ring_group_by_extension(&self, uri: &str) -> Option<RingGroup> {
         let user = sip_user_part(uri);
-        self.ring_groups.values().into_iter().find(|g| {
-            (g.extension == uri || sip_user_part(&g.extension) == user) && g.enabled
-        })
+        self.ring_groups
+            .values()
+            .into_iter()
+            .find(|g| (g.extension == uri || sip_user_part(&g.extension) == user) && g.enabled)
     }
 
     pub fn delete_ring_group(&self, id: Uuid) -> Option<RingGroup> {
@@ -3313,14 +4290,24 @@ impl AppState {
     // ─── IVR ───
 
     pub fn create_ivr(&self, input: CreateIvrRequest) -> Result<Ivr, String> {
-        if self.ivrs.values().iter().any(|i| i.extension == input.extension) {
-            return Err(format!("IVR with extension {} already exists", input.extension));
+        if self
+            .ivrs
+            .values()
+            .iter()
+            .any(|i| i.extension == input.extension)
+        {
+            return Err(format!(
+                "IVR with extension {} already exists",
+                input.extension
+            ));
         }
         let ivr = Ivr {
             id: Uuid::new_v4(),
             name: input.name,
             extension: input.extension,
-            greeting_text: input.greeting_text.unwrap_or_else(|| "Welcome.".to_string()),
+            greeting_text: input
+                .greeting_text
+                .unwrap_or_else(|| "Welcome.".to_string()),
             greeting_file_id: input.greeting_file_id,
             timeout_secs: input.timeout_secs.unwrap_or(10),
             max_retries: input.max_retries.unwrap_or(3),
@@ -3344,9 +4331,10 @@ impl AppState {
 
     pub fn ivr_by_extension(&self, uri: &str) -> Option<Ivr> {
         let user = sip_user_part(uri);
-        self.ivrs.values().into_iter().find(|i| {
-            (i.extension == uri || sip_user_part(&i.extension) == user) && i.enabled
-        })
+        self.ivrs
+            .values()
+            .into_iter()
+            .find(|i| (i.extension == uri || sip_user_part(&i.extension) == user) && i.enabled)
     }
 
     pub fn delete_ivr(&self, id: Uuid) -> Option<Ivr> {
@@ -3493,7 +4481,20 @@ impl AppState {
 
     // ─── Call Recordings ───
 
-    pub fn store_recording(&self, recording: CallRecording) {
+    pub fn store_recording(&self, recording: CallRecording) -> Result<CallRecording, String> {
+        if !self.collaboration_policy().meeting_recording_enabled {
+            return Err("meeting recording is disabled by policy".to_string());
+        }
+        if !self
+            .get_user_call_settings(&recording.recorded_by)
+            .allow_call_recording
+        {
+            return Err("call recording is disabled by policy".to_string());
+        }
+        let mut recording = recording;
+        if let Some(conference_id) = recording.conference_id {
+            recording.transcript_segment_count = self.get_transcript(conference_id).len();
+        }
         self.recordings.insert(recording.id, recording.clone());
         self.broadcast_sse(SseEvent {
             event_type: "recording".to_string(),
@@ -3501,18 +4502,48 @@ impl AppState {
         });
         let r = recording.clone();
         self.pg_spawn(move |pg| Box::pin(async move { pg.insert_recording(&r).await }));
+        Ok(recording)
     }
 
     pub fn recordings_for_user(&self, sip_uri: &str) -> Vec<CallRecording> {
         self.recordings
             .values()
             .into_iter()
+            .filter(|r| r.deleted_at.is_none())
             .filter(|r| r.caller_uri == sip_uri || r.callee_uri == sip_uri)
             .collect()
     }
 
-    pub fn delete_recording(&self, id: Uuid) -> Option<CallRecording> {
-        self.recordings.remove(&id)
+    pub fn delete_recording(&self, id: Uuid, deleted_by: &str) -> Option<CallRecording> {
+        let recording = self.recordings.get(&id)?;
+        if recording.legal_hold || self.recording_on_legal_hold() {
+            self.mark_recording_deleted(id, deleted_by)
+        } else {
+            self.recordings.remove(&id)
+        }
+    }
+
+    fn mark_recording_deleted(&self, id: Uuid, deleted_by: &str) -> Option<CallRecording> {
+        let mut recording = self.recordings.get(&id)?;
+        recording.deleted_at = Some(Utc::now());
+        recording.deleted_by = Some(deleted_by.to_string());
+        self.recordings.insert(id, recording.clone());
+        let recording_for_pg = recording.clone();
+        self.pg_spawn(move |pg| {
+            Box::pin(async move { pg.insert_recording(&recording_for_pg).await })
+        });
+        Some(recording)
+    }
+
+    fn recording_on_legal_hold(&self) -> bool {
+        self.retention_policies.values().into_iter().any(|policy| {
+            policy.legal_hold
+                && matches!(policy.scope.as_str(), "global" | "recordings" | "recording")
+        })
+    }
+
+    fn discovery_recordings(&self) -> Vec<CallRecording> {
+        self.recordings.values()
     }
 
     // ─── Group Chat Rooms ───
@@ -3544,6 +4575,15 @@ impl AppState {
             id: Uuid::new_v4(),
             team_id: input.team_id,
             channel_name: input.channel_name,
+            channel_type: normalize_channel_type(input.channel_type.as_deref()),
+            channel_owners: normalized_room_members(
+                input
+                    .channel_owners
+                    .into_iter()
+                    .chain(std::iter::once(creator.to_string()))
+                    .collect(),
+            ),
+            posting_policy: normalize_posting_policy(input.posting_policy.as_deref()),
             name: input.name,
             description: input.description.unwrap_or_default(),
             is_direct,
@@ -3614,7 +4654,11 @@ impl AppState {
         self.teams
             .values()
             .into_iter()
-            .filter(|team| team.members.iter().any(|member| member.user_sip_uri == sip_uri))
+            .filter(|team| {
+                team.members
+                    .iter()
+                    .any(|member| member.user_sip_uri == sip_uri)
+            })
             .collect()
     }
 
@@ -3622,10 +4666,19 @@ impl AppState {
         self.teams.get(&id)
     }
 
-    pub fn add_team_member(&self, team_id: Uuid, user_sip_uri: &str, role: Option<String>) -> Option<Team> {
+    pub fn add_team_member(
+        &self,
+        team_id: Uuid,
+        user_sip_uri: &str,
+        role: Option<String>,
+    ) -> Option<Team> {
         let updated = self.teams.with_write(&team_id, |teams| {
             let team = teams.get_mut(&team_id)?;
-            if !team.members.iter().any(|member| member.user_sip_uri == user_sip_uri) {
+            if !team
+                .members
+                .iter()
+                .any(|member| member.user_sip_uri == user_sip_uri)
+            {
                 team.members.push(TeamMember {
                     user_sip_uri: user_sip_uri.to_string(),
                     role: role.unwrap_or_else(|| "member".to_string()),
@@ -3645,17 +4698,32 @@ impl AppState {
         Some(updated)
     }
 
-    pub fn create_team_channel(&self, creator: &str, team_id: Uuid, input: CreateRoomRequest) -> Option<Room> {
+    pub fn create_team_channel(
+        &self,
+        creator: &str,
+        team_id: Uuid,
+        input: CreateRoomRequest,
+    ) -> Option<Room> {
         let team = self.team(team_id)?;
-        if !team.members.iter().any(|member| member.user_sip_uri == creator) {
-            return None;
-        }
-        let mut channel_members: Vec<String> = team
+        if !team
             .members
             .iter()
-            .map(|member| member.user_sip_uri.clone())
-            .chain(input.members)
-            .collect();
+            .any(|member| member.user_sip_uri == creator)
+        {
+            return None;
+        }
+        let channel_type = normalize_channel_type(input.channel_type.as_deref());
+        let mut explicit_members = input.members;
+        explicit_members.push(creator.to_string());
+        let mut channel_members: Vec<String> = if channel_type == "private" {
+            explicit_members
+        } else {
+            team.members
+                .iter()
+                .map(|member| member.user_sip_uri.clone())
+                .chain(explicit_members)
+                .collect()
+        };
         channel_members.sort();
         channel_members.dedup();
         Some(self.create_room(
@@ -3667,6 +4735,9 @@ impl AppState {
                 is_direct: Some(false),
                 team_id: Some(team_id),
                 channel_name: input.channel_name,
+                channel_type: Some(channel_type),
+                channel_owners: input.channel_owners,
+                posting_policy: input.posting_policy,
             },
         ))
     }
@@ -3679,7 +4750,9 @@ impl AppState {
             }
 
             let conference_id = match room.conference_id.and_then(|id| self.conferences.get(&id)) {
-                Some(conference) if matches_room_call_mode(&conference.mode, &mode) => conference.id,
+                Some(conference) if matches_room_call_mode(&conference.mode, &mode) => {
+                    conference.id
+                }
                 _ => {
                     let conference = self.create_conference(CreateConferenceRequest {
                         title: room.name.clone(),
@@ -3732,6 +4805,7 @@ impl AppState {
                 sip_uri: user_sip_uri.to_string(),
                 role: Some(ParticipantRole::Member),
             },
+            true,
         );
         Some(target)
     }
@@ -3771,9 +4845,16 @@ impl AppState {
         if input.ends_at <= input.starts_at {
             return Err("meeting end time must be after start time".to_string());
         }
+        let recurrence = normalize_meeting_recurrence(input.recurrence, input.starts_at)?;
         if let Some(room_id) = input.room_id {
-            let room = self.room(room_id).ok_or_else(|| "room not found".to_string())?;
-            if !room.members.iter().any(|member| member.user_sip_uri == organizer_uri) {
+            let room = self
+                .room(room_id)
+                .ok_or_else(|| "room not found".to_string())?;
+            if !room
+                .members
+                .iter()
+                .any(|member| member.user_sip_uri == organizer_uri)
+            {
                 return Err("organizer is not a room member".to_string());
             }
         }
@@ -3793,10 +4874,23 @@ impl AppState {
             participants: normalized_room_members(participants),
             starts_at: input.starts_at,
             ends_at: input.ends_at,
+            recurrence,
+            status: MeetingStatus::Scheduled,
+            cancelled_at: None,
+            updated_at: Some(Utc::now()),
             created_at: Utc::now(),
         };
+        self.persist_scheduled_meeting(&meeting);
+        self.broadcast_sse(SseEvent {
+            event_type: "meeting_scheduled".to_string(),
+            payload: serde_json::to_value(&meeting).unwrap_or_default(),
+        });
+        Ok(meeting)
+    }
+
+    fn persist_scheduled_meeting(&self, meeting: &ScheduledMeeting) {
         self.scheduled_meetings.insert(meeting.id, meeting.clone());
-        self.persist(&meeting);
+        self.persist(meeting);
         let meeting_for_pg = meeting.clone();
         self.pg_spawn(move |pg| {
             Box::pin(async move {
@@ -3808,11 +4902,90 @@ impl AppState {
                 .await
             })
         });
+    }
+
+    pub fn update_scheduled_meeting(
+        &self,
+        id: Uuid,
+        principal: &str,
+        input: UpdateScheduledMeetingRequest,
+    ) -> Result<ScheduledMeeting, String> {
+        let mut meeting = self
+            .scheduled_meetings
+            .get(&id)
+            .ok_or_else(|| "meeting not found".to_string())?;
+        if meeting.organizer_uri != principal {
+            return Err("only the organizer can update this meeting".to_string());
+        }
+        if meeting.status == MeetingStatus::Cancelled {
+            return Err("cancelled meetings cannot be updated".to_string());
+        }
+        if let Some(title) = input.title {
+            meeting.title = title;
+        }
+        if let Some(description) = input.description {
+            meeting.description = description;
+        }
+        if let Some(participants) = input.participants {
+            let mut participants = participants;
+            participants.push(meeting.organizer_uri.clone());
+            meeting.participants = normalized_room_members(participants);
+        }
+        if let Some(starts_at) = input.starts_at {
+            meeting.starts_at = starts_at;
+        }
+        if let Some(ends_at) = input.ends_at {
+            meeting.ends_at = ends_at;
+        }
+        if meeting.ends_at <= meeting.starts_at {
+            return Err("meeting end time must be after start time".to_string());
+        }
+        if let Some(recurrence) = input.recurrence {
+            meeting.recurrence = normalize_meeting_recurrence(recurrence, meeting.starts_at)?;
+        }
+        meeting.updated_at = Some(Utc::now());
+        self.persist_scheduled_meeting(&meeting);
         self.broadcast_sse(SseEvent {
-            event_type: "meeting_scheduled".to_string(),
+            event_type: "meeting_updated".to_string(),
             payload: serde_json::to_value(&meeting).unwrap_or_default(),
         });
         Ok(meeting)
+    }
+
+    pub fn cancel_scheduled_meeting(
+        &self,
+        id: Uuid,
+        principal: &str,
+    ) -> Result<ScheduledMeeting, String> {
+        let mut meeting = self
+            .scheduled_meetings
+            .get(&id)
+            .ok_or_else(|| "meeting not found".to_string())?;
+        if meeting.organizer_uri != principal {
+            return Err("only the organizer can cancel this meeting".to_string());
+        }
+        meeting.status = MeetingStatus::Cancelled;
+        meeting.cancelled_at = Some(Utc::now());
+        meeting.updated_at = Some(Utc::now());
+        self.persist_scheduled_meeting(&meeting);
+        self.broadcast_sse(SseEvent {
+            event_type: "meeting_cancelled".to_string(),
+            payload: serde_json::to_value(&meeting).unwrap_or_default(),
+        });
+        Ok(meeting)
+    }
+
+    pub fn meeting_ics(&self, id: Uuid, principal: &str) -> Option<String> {
+        let meeting = self.scheduled_meetings.get(&id)?;
+        if meeting.organizer_uri != principal
+            && !meeting
+                .participants
+                .iter()
+                .any(|participant| participant == principal)
+        {
+            return None;
+        }
+        Some(meeting_to_ics(&meeting))
     }
 
     pub fn list_meetings_for_user(&self, sip_uri: &str) -> Vec<ScheduledMeeting> {
@@ -3821,11 +4994,18 @@ impl AppState {
             .into_iter()
             .filter(|meeting| {
                 meeting.organizer_uri == sip_uri
-                    || meeting.participants.iter().any(|participant| participant == sip_uri)
+                    || meeting
+                        .participants
+                        .iter()
+                        .any(|participant| participant == sip_uri)
                     || meeting
                         .room_id
                         .and_then(|room_id| self.room(room_id))
-                        .is_some_and(|room| room.members.iter().any(|member| member.user_sip_uri == sip_uri))
+                        .is_some_and(|room| {
+                            room.members
+                                .iter()
+                                .any(|member| member.user_sip_uri == sip_uri)
+                        })
             })
             .collect()
     }
@@ -3855,7 +5035,11 @@ impl AppState {
                     haystack.push(team.description);
                 }
             }
-            haystack.extend(room.members.iter().map(|member| member.user_sip_uri.clone()));
+            haystack.extend(
+                room.members
+                    .iter()
+                    .map(|member| member.user_sip_uri.clone()),
+            );
             if !collaboration_matches(&haystack, &term) {
                 continue;
             }
@@ -3879,8 +5063,16 @@ impl AppState {
         }
 
         for team in self.list_teams_for_user(sip_uri) {
-            let mut haystack = vec![team.name.clone(), team.description.clone(), team.owner_uri.clone()];
-            haystack.extend(team.members.iter().map(|member| member.user_sip_uri.clone()));
+            let mut haystack = vec![
+                team.name.clone(),
+                team.description.clone(),
+                team.owner_uri.clone(),
+            ];
+            haystack.extend(
+                team.members
+                    .iter()
+                    .map(|member| member.user_sip_uri.clone()),
+            );
             if !collaboration_matches(&haystack, &term) {
                 continue;
             }
@@ -3917,7 +5109,9 @@ impl AppState {
                     .room_id
                     .and_then(|room_id| self.room(room_id).and_then(|room| room.team_id)),
                 conference_id: meeting.conference_id,
-                call_uri: meeting.conference_id.map(|id| format!("sip:conf-{}@pale.local", id)),
+                call_uri: meeting
+                    .conference_id
+                    .map(|id| format!("sip:conf-{}@pale.local", id)),
                 updated_at: meeting.starts_at,
             });
         }
@@ -3964,7 +5158,13 @@ impl AppState {
 
     pub fn start_scheduled_meeting(&self, id: Uuid, user_sip_uri: &str) -> Option<RoomCallTarget> {
         let meeting = self.scheduled_meetings.get(&id)?;
-        if !meeting.participants.iter().any(|participant| participant == user_sip_uri)
+        if meeting.status == MeetingStatus::Cancelled {
+            return None;
+        }
+        if !meeting
+            .participants
+            .iter()
+            .any(|participant| participant == user_sip_uri)
             && meeting.organizer_uri != user_sip_uri
         {
             return None;
@@ -3988,6 +5188,7 @@ impl AppState {
                     sip_uri: user_sip_uri.to_string(),
                     role: Some(ParticipantRole::Member),
                 },
+                true,
             );
             Some(RoomCallTarget {
                 room_id: Uuid::nil(),
@@ -4046,6 +5247,7 @@ impl AppState {
         sender_uri: &str,
         body: &str,
         reply_to: Option<Uuid>,
+        priority: Option<String>,
     ) -> Result<RoomMessage, String> {
         let room = self.room(room_id);
         let (mentions, mentioned_user_uris) = room
@@ -4053,7 +5255,20 @@ impl AppState {
             .map(|room| self.resolve_message_mentions(room, body))
             .unwrap_or_default();
         if let Some(room) = room.as_ref() {
+            if room.posting_policy == "owners"
+                && !room.channel_owners.iter().any(|owner| owner == sender_uri)
+                && !room.members.iter().any(|member| {
+                    member.user_sip_uri == sender_uri
+                        && matches!(member.role.as_str(), "owner" | "admin")
+                })
+            {
+                return Err("only channel owners can post in this channel".to_string());
+            }
             self.authorize_message_mentions(room, sender_uri, &mentions)?;
+        }
+        let priority = normalize_message_priority(priority.as_deref());
+        if priority == "urgent" && !self.collaboration_policy().urgent_messages_enabled {
+            return Err("urgent messages are disabled by policy".to_string());
         }
         let msg = RoomMessage {
             id: Uuid::new_v4(),
@@ -4067,8 +5282,13 @@ impl AppState {
             pinned: false,
             mentions,
             mentioned_user_uris,
+            priority,
+            saved_by: Vec::new(),
         };
-        let mut messages = self.room_messages.write().expect("room messages lock poisoned");
+        let mut messages = self
+            .room_messages
+            .write()
+            .expect("room messages lock poisoned");
         messages.push(msg.clone());
         if messages.len() > MAX_ROOM_MESSAGES {
             let overflow = messages.len() - MAX_ROOM_MESSAGES;
@@ -4084,8 +5304,16 @@ impl AppState {
         Ok(msg)
     }
 
-    pub fn edit_room_message(&self, id: Uuid, editor_uri: &str, new_body: &str) -> Result<RoomMessage, String> {
-        let mut messages = self.room_messages.write().expect("room messages lock poisoned");
+    pub fn edit_room_message(
+        &self,
+        id: Uuid,
+        editor_uri: &str,
+        new_body: &str,
+    ) -> Result<RoomMessage, String> {
+        let mut messages = self
+            .room_messages
+            .write()
+            .expect("room messages lock poisoned");
         let msg = messages
             .iter_mut()
             .find(|m| m.id == id)
@@ -4105,11 +5333,17 @@ impl AppState {
         });
         self.persist(&updated);
         let updated_for_pg = updated.clone();
-        self.pg_spawn(move |pg| Box::pin(async move { pg.insert_room_message(&updated_for_pg).await }));
+        self.pg_spawn(move |pg| {
+            Box::pin(async move { pg.insert_room_message(&updated_for_pg).await })
+        });
         Ok(updated)
     }
 
-    fn resolve_message_mentions(&self, room: &Room, body: &str) -> (Vec<MessageMention>, Vec<String>) {
+    fn resolve_message_mentions(
+        &self,
+        room: &Room,
+        body: &str,
+    ) -> (Vec<MessageMention>, Vec<String>) {
         let policy = self.collaboration_policy();
         if !policy.structured_mentions_enabled {
             return (Vec::new(), Vec::new());
@@ -4124,7 +5358,11 @@ impl AppState {
                 token: "channel".to_string(),
                 user_sip_uri: None,
             });
-            mentioned_user_uris.extend(room.members.iter().map(|member| member.user_sip_uri.clone()));
+            mentioned_user_uris.extend(
+                room.members
+                    .iter()
+                    .map(|member| member.user_sip_uri.clone()),
+            );
         }
 
         if normalized_body.contains("@team") {
@@ -4133,7 +5371,11 @@ impl AppState {
                 token: "team".to_string(),
                 user_sip_uri: None,
             });
-            mentioned_user_uris.extend(room.members.iter().map(|member| member.user_sip_uri.clone()));
+            mentioned_user_uris.extend(
+                room.members
+                    .iter()
+                    .map(|member| member.user_sip_uri.clone()),
+            );
         }
 
         for member in &room.members {
@@ -4147,7 +5389,8 @@ impl AppState {
             };
             let display_token = format!("@{}", user.display_name.to_lowercase());
             let sip_user_token = format!("@{}", sip_user_part(&user.sip_uri).to_lowercase());
-            if normalized_body.contains(&display_token) || normalized_body.contains(&sip_user_token) {
+            if normalized_body.contains(&display_token) || normalized_body.contains(&sip_user_token)
+            {
                 mentions.push(MessageMention {
                     kind: "user".to_string(),
                     token: user.display_name.clone(),
@@ -4160,8 +5403,16 @@ impl AppState {
         mentioned_user_uris.sort();
         mentioned_user_uris.dedup();
         mentions.sort_by(|left, right| {
-            (left.kind.as_str(), left.token.as_str(), left.user_sip_uri.as_deref().unwrap_or(""))
-                .cmp(&(right.kind.as_str(), right.token.as_str(), right.user_sip_uri.as_deref().unwrap_or("")))
+            (
+                left.kind.as_str(),
+                left.token.as_str(),
+                left.user_sip_uri.as_deref().unwrap_or(""),
+            )
+                .cmp(&(
+                    right.kind.as_str(),
+                    right.token.as_str(),
+                    right.user_sip_uri.as_deref().unwrap_or(""),
+                ))
         });
         mentions.dedup();
         (mentions, mentioned_user_uris)
@@ -4210,11 +5461,14 @@ impl AppState {
         let max_tokens = max_per_minute as f64;
         let now = Utc::now();
         self.mention_rate_limits.with_write(&key, |buckets| {
-            let bucket = buckets.entry(key.clone()).or_insert_with(|| RateLimitBucket {
-                tokens: max_tokens,
-                last_refill: now,
-            });
-            let elapsed_minutes = (now - bucket.last_refill).num_milliseconds().max(0) as f64 / 60_000.0;
+            let bucket = buckets
+                .entry(key.clone())
+                .or_insert_with(|| RateLimitBucket {
+                    tokens: max_tokens,
+                    last_refill: now,
+                });
+            let elapsed_minutes =
+                (now - bucket.last_refill).num_milliseconds().max(0) as f64 / 60_000.0;
             bucket.tokens = (bucket.tokens + elapsed_minutes * max_tokens).min(max_tokens);
             bucket.last_refill = now;
             if bucket.tokens >= 1.0 {
@@ -4227,7 +5481,10 @@ impl AppState {
     }
 
     pub fn pin_room_message(&self, id: Uuid) -> Option<RoomMessage> {
-        let mut messages = self.room_messages.write().expect("room messages lock poisoned");
+        let mut messages = self
+            .room_messages
+            .write()
+            .expect("room messages lock poisoned");
         let msg = messages.iter_mut().find(|m| m.id == id)?;
         msg.pinned = !msg.pinned;
         let updated = msg.clone();
@@ -4241,8 +5498,38 @@ impl AppState {
         Some(updated)
     }
 
+    pub fn set_message_saved(&self, id: Uuid, user_uri: &str, saved: bool) -> Option<RoomMessage> {
+        let mut messages = self
+            .room_messages
+            .write()
+            .expect("room messages lock poisoned");
+        let msg = messages.iter_mut().find(|msg| msg.id == id)?;
+        if saved {
+            if !msg.saved_by.iter().any(|user| user == user_uri) {
+                msg.saved_by.push(user_uri.to_string());
+            }
+        } else {
+            msg.saved_by.retain(|user| user != user_uri);
+        }
+        let updated = msg.clone();
+        drop(messages);
+        self.persist(&updated);
+        let updated_for_pg = updated.clone();
+        self.pg_spawn(move |pg| {
+            Box::pin(async move { pg.insert_room_message(&updated_for_pg).await })
+        });
+        self.broadcast_sse(SseEvent {
+            event_type: "message_saved".to_string(),
+            payload: serde_json::to_value(&updated).unwrap_or_default(),
+        });
+        Some(updated)
+    }
+
     pub fn delete_room_message(&self, id: Uuid) -> Option<RoomMessage> {
-        let mut messages = self.room_messages.write().expect("room messages lock poisoned");
+        let mut messages = self
+            .room_messages
+            .write()
+            .expect("room messages lock poisoned");
         let index = messages.iter().position(|m| m.id == id)?;
         let deleted = messages.remove(index);
         self.delete_persisted(RoomMessage::collection(), deleted.key());
@@ -4257,15 +5544,21 @@ impl AppState {
         principal: &str,
         input: UpsertRetentionPolicyRequest,
     ) -> RetentionPolicy {
+        let id = input.id.unwrap_or_else(Uuid::new_v4);
+        let created_by = self
+            .retention_policies
+            .get(&id)
+            .map(|policy| policy.created_by)
+            .unwrap_or_else(|| principal.to_string());
         let policy = RetentionPolicy {
-            id: input.id.unwrap_or_else(Uuid::new_v4),
+            id,
             name: input.name,
             scope: input.scope,
             room_id: input.room_id,
             retain_days: input.retain_days,
             legal_hold: input.legal_hold.unwrap_or(false),
             export_enabled: input.export_enabled.unwrap_or(true),
-            created_by: principal.to_string(),
+            created_by,
             updated_at: Utc::now(),
         };
         self.retention_policies.insert(policy.id, policy.clone());
@@ -4286,6 +5579,15 @@ impl AppState {
 
     pub fn retention_policies(&self) -> Vec<RetentionPolicy> {
         self.retention_policies.values()
+    }
+
+    pub fn delete_retention_policy(&self, id: Uuid) -> bool {
+        if self.retention_policies.remove(&id).is_some() {
+            self.delete_persisted(RetentionPolicy::collection(), id.to_string());
+            true
+        } else {
+            false
+        }
     }
 
     pub fn collaboration_policy(&self) -> CollaborationPolicy {
@@ -4320,6 +5622,18 @@ impl AppState {
         if let Some(limit) = input.broad_mentions_per_minute {
             policy.broad_mentions_per_minute = limit.min(60);
         }
+        if let Some(enabled) = input.external_access_enabled {
+            policy.external_access_enabled = enabled;
+        }
+        if let Some(domains) = input.allowed_external_domains {
+            policy.allowed_external_domains = normalized_policy_domains(domains);
+        }
+        if let Some(enabled) = input.urgent_messages_enabled {
+            policy.urgent_messages_enabled = enabled;
+        }
+        if let Some(enabled) = input.meeting_recording_enabled {
+            policy.meeting_recording_enabled = enabled;
+        }
         policy.updated_by = Some(principal.to_string());
         policy.updated_at = Utc::now();
         let updated = policy.clone();
@@ -4344,6 +5658,214 @@ impl AppState {
         updated
     }
 
+    pub fn list_channel_webhooks(&self, room_id: Uuid) -> Vec<ChannelWebhook> {
+        self.channel_webhooks
+            .values()
+            .into_iter()
+            .filter(|webhook| webhook.room_id == room_id)
+            .collect()
+    }
+
+    pub fn create_channel_webhook(
+        &self,
+        room_id: Uuid,
+        creator_uri: &str,
+        input: CreateChannelWebhookRequest,
+    ) -> Result<CreateChannelWebhookResponse, String> {
+        let room = self
+            .room(room_id)
+            .ok_or_else(|| "room not found".to_string())?;
+        if room.is_direct {
+            return Err("connectors can only be added to rooms and channels".to_string());
+        }
+        let name = input.name.trim();
+        if name.is_empty() {
+            return Err("webhook name is required".to_string());
+        }
+        let token = format!("wh_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let webhook = ChannelWebhook {
+            id: Uuid::new_v4(),
+            room_id,
+            name: name.chars().take(80).collect(),
+            description: input
+                .description
+                .unwrap_or_default()
+                .trim()
+                .chars()
+                .take(240)
+                .collect(),
+            token_hash: sha256_hex(token.as_bytes()),
+            enabled: true,
+            created_by: creator_uri.to_string(),
+            created_at: Utc::now(),
+            last_used_at: None,
+        };
+        self.channel_webhooks.insert(webhook.id, webhook.clone());
+        self.persist(&webhook);
+        self.ensure_webhook_room_principal(&room, &webhook);
+        Ok(CreateChannelWebhookResponse {
+            webhook: webhook.into(),
+            token,
+        })
+    }
+
+    pub fn delete_channel_webhook(
+        &self,
+        room_id: Uuid,
+        webhook_id: Uuid,
+    ) -> Option<ChannelWebhook> {
+        let webhook = self.channel_webhooks.get(&webhook_id)?;
+        if webhook.room_id != room_id {
+            return None;
+        }
+        let deleted = self.channel_webhooks.remove(&webhook_id)?;
+        self.delete_persisted(ChannelWebhook::collection(), deleted.key());
+        self.remove_webhook_room_principal(room_id, &deleted.principal_uri());
+        Some(deleted)
+    }
+
+    pub fn set_channel_webhook_enabled(
+        &self,
+        room_id: Uuid,
+        webhook_id: Uuid,
+        enabled: bool,
+    ) -> Option<ChannelWebhook> {
+        let webhook = self.channel_webhooks.with_write(&webhook_id, |webhooks| {
+            let webhook = webhooks.get_mut(&webhook_id)?;
+            if webhook.room_id != room_id {
+                return None;
+            }
+            webhook.enabled = enabled;
+            Some(webhook.clone())
+        })?;
+        self.persist(&webhook);
+        Some(webhook)
+    }
+
+    pub fn post_channel_webhook(
+        &self,
+        token: &str,
+        input: PostChannelWebhookRequest,
+    ) -> Result<RoomMessage, String> {
+        let token_hash = sha256_hex(token.as_bytes());
+        let mut webhook = self
+            .channel_webhooks
+            .values()
+            .into_iter()
+            .find(|webhook| webhook.token_hash == token_hash)
+            .ok_or_else(|| "webhook not found".to_string())?;
+        if !webhook.enabled {
+            return Err("webhook is disabled".to_string());
+        }
+        let text = input.text.trim();
+        if text.is_empty() {
+            return Err("message text is required".to_string());
+        }
+        if text.chars().count() > 4000 {
+            return Err("message text is too long".to_string());
+        }
+        let body = if let Some(title) = input
+            .title
+            .as_ref()
+            .map(|title| title.trim())
+            .filter(|title| !title.is_empty())
+        {
+            format!(
+                "**{}**\n{}",
+                title.chars().take(120).collect::<String>(),
+                text
+            )
+        } else {
+            text.to_string()
+        };
+        let message = self.send_room_message(
+            webhook.room_id,
+            &webhook.principal_uri(),
+            &body,
+            None,
+            Some("normal".to_string()),
+        )?;
+        webhook.last_used_at = Some(Utc::now());
+        self.channel_webhooks.insert(webhook.id, webhook.clone());
+        self.persist(&webhook);
+        Ok(message)
+    }
+
+    fn ensure_webhook_room_principal(&self, room: &Room, webhook: &ChannelWebhook) {
+        let principal = webhook.principal_uri();
+        let Some(updated) = self.rooms.with_write(&room.id, |rooms| {
+            let room = rooms.get_mut(&room.id)?;
+            if !room
+                .members
+                .iter()
+                .any(|member| member.user_sip_uri == principal)
+            {
+                room.members.push(RoomMember {
+                    user_sip_uri: principal.clone(),
+                    role: "admin".to_string(),
+                    joined_at: Utc::now(),
+                });
+            }
+            if !room.channel_owners.iter().any(|owner| owner == &principal) {
+                room.channel_owners.push(principal);
+                room.channel_owners.sort();
+                room.channel_owners.dedup();
+            }
+            Some(room.clone())
+        }) else {
+            return;
+        };
+        self.persist(&updated);
+        let room_for_pg = updated.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.upsert_room(&room_for_pg).await }));
+    }
+
+    fn remove_webhook_room_principal(&self, room_id: Uuid, principal: &str) {
+        let Some(updated) = self.rooms.with_write(&room_id, |rooms| {
+            let room = rooms.get_mut(&room_id)?;
+            room.members
+                .retain(|member| member.user_sip_uri != principal);
+            room.channel_owners.retain(|owner| owner != principal);
+            Some(room.clone())
+        }) else {
+            return;
+        };
+        self.persist(&updated);
+        let room_for_pg = updated.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.upsert_room(&room_for_pg).await }));
+    }
+
+    pub fn authorize_external_participants(
+        &self,
+        actor_uri: &str,
+        participants: &[String],
+    ) -> Result<(), String> {
+        let Some(actor_domain) = sip_domain(actor_uri) else {
+            return Ok(());
+        };
+        let policy = self.collaboration_policy();
+        for participant in participants {
+            let Some(domain) = sip_domain(participant) else {
+                continue;
+            };
+            if domain == actor_domain {
+                continue;
+            }
+            if !policy.external_access_enabled {
+                return Err("external access is disabled by policy".to_string());
+            }
+            if !policy.allowed_external_domains.is_empty()
+                && !policy
+                    .allowed_external_domains
+                    .iter()
+                    .any(|allowed| allowed == &domain)
+            {
+                return Err(format!("external domain {domain} is not allowed by policy"));
+            }
+        }
+        Ok(())
+    }
+
     pub fn discovery_export(&self, room_id: Option<Uuid>) -> DiscoveryExport {
         let messages = self
             .room_messages
@@ -4357,6 +5879,123 @@ impl AppState {
             exported_at: Utc::now(),
             room_id,
             messages,
+            files: if room_id.is_none() {
+                self.discovery_file_records()
+            } else {
+                Vec::new()
+            },
+            recordings: if room_id.is_none() {
+                self.discovery_recordings()
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    pub fn discovery_search(&self, query: DiscoverySearchQuery) -> DiscoveryExport {
+        let term = query
+            .q
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_ascii_lowercase());
+        let user = query
+            .user_uri
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_ascii_lowercase());
+        let limit = query.limit.unwrap_or(250).clamp(1, 1000);
+
+        let mut messages: Vec<RoomMessage> = self
+            .room_messages
+            .read()
+            .expect("room messages lock poisoned")
+            .iter()
+            .filter(|message| query.room_id.is_none_or(|id| message.room_id == id))
+            .filter(|message| query.from.is_none_or(|from| message.created_at >= from))
+            .filter(|message| query.to.is_none_or(|to| message.created_at <= to))
+            .filter(|message| {
+                user.as_ref()
+                    .is_none_or(|user| message.sender_uri.to_ascii_lowercase().contains(user))
+            })
+            .filter(|message| {
+                term.as_ref()
+                    .is_none_or(|term| message.body.to_ascii_lowercase().contains(term))
+            })
+            .cloned()
+            .collect();
+        messages.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        messages.truncate(limit);
+
+        let files = if query.room_id.is_none() {
+            let mut files: Vec<FileDiscoveryRecord> = self
+                .discovery_file_records()
+                .into_iter()
+                .filter(|file| query.from.is_none_or(|from| file.created_at >= from))
+                .filter(|file| query.to.is_none_or(|to| file.created_at <= to))
+                .filter(|file| {
+                    user.as_ref()
+                        .is_none_or(|user| file.owner.to_ascii_lowercase().contains(user))
+                })
+                .filter(|file| {
+                    term.as_ref().is_none_or(|term| {
+                        file.filename.to_ascii_lowercase().contains(term)
+                            || file.content_type.to_ascii_lowercase().contains(term)
+                            || file.sha256.to_ascii_lowercase().contains(term)
+                            || file.dlp_status.to_ascii_lowercase().contains(term)
+                    })
+                })
+                .collect();
+            files.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+            files.truncate(limit);
+            files
+        } else {
+            Vec::new()
+        };
+
+        let mut recordings: Vec<CallRecording> = self
+            .discovery_recordings()
+            .into_iter()
+            .filter(|recording| query.from.is_none_or(|from| recording.created_at >= from))
+            .filter(|recording| query.to.is_none_or(|to| recording.created_at <= to))
+            .filter(|recording| {
+                user.as_ref().is_none_or(|user| {
+                    recording.caller_uri.to_ascii_lowercase().contains(user)
+                        || recording.callee_uri.to_ascii_lowercase().contains(user)
+                        || recording.recorded_by.to_ascii_lowercase().contains(user)
+                })
+            })
+            .filter(|recording| {
+                term.as_ref().is_none_or(|term| {
+                    recording
+                        .call_id
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                        .contains(term)
+                        || recording.caller_uri.to_ascii_lowercase().contains(term)
+                        || recording.callee_uri.to_ascii_lowercase().contains(term)
+                        || recording.recorded_by.to_ascii_lowercase().contains(term)
+                        || recording.conference_id.is_some_and(|conference_id| {
+                            self.get_transcript(conference_id).iter().any(|segment| {
+                                segment.text.to_ascii_lowercase().contains(term)
+                                    || segment.speaker_uri.to_ascii_lowercase().contains(term)
+                                    || segment.speaker_name.to_ascii_lowercase().contains(term)
+                            })
+                        })
+                })
+            })
+            .collect();
+        recordings.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        recordings.truncate(limit);
+
+        DiscoveryExport {
+            exported_at: Utc::now(),
+            room_id: query.room_id,
+            messages,
+            files,
+            recordings,
         }
     }
 
@@ -4368,9 +6007,13 @@ impl AppState {
             .read()
             .expect("room messages lock poisoned")
             .clone();
+        let files = self.files.values();
+        let recordings = self.recordings.values();
         let mut policy_results = Vec::new();
         let mut skipped_legal_hold_policies = Vec::new();
         let mut ids_to_delete = Vec::new();
+        let mut file_ids_to_delete = Vec::new();
+        let mut recording_ids_to_delete = Vec::new();
 
         for policy in policies {
             if policy.legal_hold {
@@ -4381,6 +6024,10 @@ impl AppState {
                     retain_days: policy.retain_days,
                     matched_messages: 0,
                     deleted_messages: 0,
+                    matched_files: 0,
+                    deleted_files: 0,
+                    matched_recordings: 0,
+                    deleted_recordings: 0,
                     legal_hold: true,
                 });
                 continue;
@@ -4392,37 +6039,105 @@ impl AppState {
                     retain_days: None,
                     matched_messages: 0,
                     deleted_messages: 0,
+                    matched_files: 0,
+                    deleted_files: 0,
+                    matched_recordings: 0,
+                    deleted_recordings: 0,
                     legal_hold: false,
                 });
                 continue;
             };
             let cutoff = evaluated_at - Duration::days(retain_days.max(0));
-            let matched: Vec<Uuid> = messages
-                .iter()
-                .filter(|message| policy.room_id.is_none_or(|room_id| message.room_id == room_id))
-                .filter(|message| message.created_at < cutoff)
-                .map(|message| message.id)
-                .collect();
+            let applies_to_messages = matches!(
+                policy.scope.as_str(),
+                "global" | "messages" | "rooms" | "room"
+            );
+            let applies_to_files = policy.room_id.is_none()
+                && matches!(policy.scope.as_str(), "global" | "files" | "file");
+            let applies_to_recordings = policy.room_id.is_none()
+                && matches!(policy.scope.as_str(), "global" | "recordings" | "recording");
+            let matched: Vec<Uuid> = if applies_to_messages {
+                messages
+                    .iter()
+                    .filter(|message| {
+                        policy
+                            .room_id
+                            .is_none_or(|room_id| message.room_id == room_id)
+                    })
+                    .filter(|message| message.created_at < cutoff)
+                    .map(|message| message.id)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let matched_files: Vec<Uuid> = if applies_to_files {
+                files
+                    .iter()
+                    .filter(|file| file.deleted_at.is_none())
+                    .filter(|file| !file.legal_hold)
+                    .filter(|file| file.created_at < cutoff)
+                    .map(|file| file.id)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let matched_recordings: Vec<Uuid> = if applies_to_recordings {
+                recordings
+                    .iter()
+                    .filter(|recording| recording.deleted_at.is_none())
+                    .filter(|recording| !recording.legal_hold)
+                    .filter(|recording| recording.created_at < cutoff)
+                    .map(|recording| recording.id)
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let deleted_messages = matched.len();
+            let deleted_files = matched_files.len();
+            let deleted_recordings = matched_recordings.len();
             ids_to_delete.extend(matched.iter().copied());
+            file_ids_to_delete.extend(matched_files.iter().copied());
+            recording_ids_to_delete.extend(matched_recordings.iter().copied());
             policy_results.push(RetentionPolicyResult {
                 policy_id: policy.id,
                 room_id: policy.room_id,
                 retain_days: Some(retain_days),
                 matched_messages: deleted_messages,
                 deleted_messages: if dry_run { 0 } else { deleted_messages },
+                matched_files: deleted_files,
+                deleted_files: if dry_run { 0 } else { deleted_files },
+                matched_recordings: deleted_recordings,
+                deleted_recordings: if dry_run { 0 } else { deleted_recordings },
                 legal_hold: false,
             });
         }
 
         ids_to_delete.sort();
         ids_to_delete.dedup();
+        file_ids_to_delete.sort();
+        file_ids_to_delete.dedup();
+        recording_ids_to_delete.sort();
+        recording_ids_to_delete.dedup();
         let matched_messages = ids_to_delete.len();
+        let matched_files = file_ids_to_delete.len();
+        let matched_recordings = recording_ids_to_delete.len();
         let mut deleted_messages = 0;
+        let mut deleted_files = 0;
+        let mut deleted_recordings = 0;
         if !dry_run {
             for id in ids_to_delete {
                 if self.delete_room_message(id).is_some() {
                     deleted_messages += 1;
+                }
+            }
+            for id in file_ids_to_delete {
+                if self.mark_file_deleted(id, "retention").is_some() {
+                    deleted_files += 1;
+                }
+            }
+            for id in recording_ids_to_delete {
+                if self.mark_recording_deleted(id, "retention").is_some() {
+                    deleted_recordings += 1;
                 }
             }
         }
@@ -4430,13 +6145,17 @@ impl AppState {
         let result = RetentionEnforcementResult {
             evaluated_at,
             dry_run,
-            matched_messages,
-            deleted_messages,
+            matched_messages: matched_messages + matched_files + matched_recordings,
+            deleted_messages: deleted_messages + deleted_files + deleted_recordings,
             skipped_legal_hold_policies,
             policy_results,
         };
         self.broadcast_sse(SseEvent {
-            event_type: "retention_enforced".to_string(),
+            event_type: if dry_run {
+                "retention_previewed".to_string()
+            } else {
+                "retention_enforced".to_string()
+            },
             payload: serde_json::to_value(&result).unwrap_or_default(),
         });
         result
@@ -4452,12 +6171,20 @@ impl AppState {
             .collect()
     }
 
-    pub fn toggle_message_reaction(&self, message_id: Uuid, user_uri: &str, emoji: &str) -> Option<MessageReactionToggle> {
+    pub fn toggle_message_reaction(
+        &self,
+        message_id: Uuid,
+        user_uri: &str,
+        emoji: &str,
+    ) -> Option<MessageReactionToggle> {
         let room_id = self.room_message(message_id)?.room_id;
         let created_at = Utc::now();
         let added = self.message_reactions.with_write(&message_id, |map| {
             let reactions = map.entry(message_id).or_insert_with(Vec::new);
-            if let Some(pos) = reactions.iter().position(|r| r.user_uri == user_uri && r.emoji == emoji) {
+            if let Some(pos) = reactions
+                .iter()
+                .position(|r| r.user_uri == user_uri && r.emoji == emoji)
+            {
                 reactions.remove(pos);
                 false
             } else {
@@ -4506,9 +6233,11 @@ impl AppState {
         self.pg_spawn(move |pg| {
             Box::pin(async move {
                 if added {
-                    pg.insert_reaction(message_id, &pg_user_uri, &pg_emoji).await
+                    pg.insert_reaction(message_id, &pg_user_uri, &pg_emoji)
+                        .await
                 } else {
-                    pg.delete_reaction(message_id, &pg_user_uri, &pg_emoji).await
+                    pg.delete_reaction(message_id, &pg_user_uri, &pg_emoji)
+                        .await
                 }
             })
         });
@@ -4530,7 +6259,11 @@ impl AppState {
             .collect()
     }
 
-    pub fn mark_room_message_read(&self, message_id: Uuid, reader_uri: &str) -> Option<MessageRead> {
+    pub fn mark_room_message_read(
+        &self,
+        message_id: Uuid,
+        reader_uri: &str,
+    ) -> Option<MessageRead> {
         let room_id = self.room_message(message_id)?.room_id;
         let read = MessageRead {
             message_id,
@@ -4538,11 +6271,13 @@ impl AppState {
             read_at: Utc::now(),
         };
         {
-            let mut reads = self.message_reads.write().expect("message reads lock poisoned");
-            if let Some(existing) = reads
-                .iter_mut()
-                .find(|existing| existing.message_id == message_id && existing.reader_uri == reader_uri)
-            {
+            let mut reads = self
+                .message_reads
+                .write()
+                .expect("message reads lock poisoned");
+            if let Some(existing) = reads.iter_mut().find(|existing| {
+                existing.message_id == message_id && existing.reader_uri == reader_uri
+            }) {
                 *existing = read.clone();
             } else {
                 reads.push(read.clone());
@@ -4550,7 +6285,9 @@ impl AppState {
         }
         self.persist(&read);
         let read_for_pg = read.clone();
-        self.pg_spawn(move |pg| Box::pin(async move { pg.upsert_message_read(&read_for_pg).await }));
+        self.pg_spawn(move |pg| {
+            Box::pin(async move { pg.upsert_message_read(&read_for_pg).await })
+        });
         self.broadcast_sse(SseEvent {
             event_type: "read_receipt".to_string(),
             payload: serde_json::json!({
@@ -4578,7 +6315,10 @@ impl AppState {
 
     fn delete_message_reads_for_message(&self, message_id: Uuid) {
         let deleted_keys = {
-            let mut reads = self.message_reads.write().expect("message reads lock poisoned");
+            let mut reads = self
+                .message_reads
+                .write()
+                .expect("message reads lock poisoned");
             let mut deleted_keys = Vec::new();
             reads.retain(|read| {
                 if read.message_id == message_id {
@@ -4596,9 +6336,9 @@ impl AppState {
     }
 
     fn delete_message_reactions_for_message(&self, message_id: Uuid) {
-        let deleted = self
-            .message_reactions
-            .with_write(&message_id, |map| map.remove(&message_id).unwrap_or_default());
+        let deleted = self.message_reactions.with_write(&message_id, |map| {
+            map.remove(&message_id).unwrap_or_default()
+        });
         for reaction in deleted {
             self.delete_persisted(
                 MessageReactionRecord::collection(),
@@ -4631,7 +6371,9 @@ impl AppState {
     }
 
     pub fn list_favorites(&self, user_uri: &str) -> Vec<String> {
-        self.user_favorites.get(&user_uri.to_string()).unwrap_or_default()
+        self.user_favorites
+            .get(&user_uri.to_string())
+            .unwrap_or_default()
     }
 
     pub fn update_user_profile(
@@ -4644,10 +6386,18 @@ impl AppState {
     ) -> Option<User> {
         self.users.with_write(&id, |map| {
             let user = map.get_mut(&id)?;
-            if let Some(e) = email { user.email = Some(e); }
-            if let Some(t) = title { user.title = Some(t); }
-            if let Some(d) = department { user.department = Some(d); }
-            if let Some(p) = phone_number { user.phone_number = Some(p); }
+            if let Some(e) = email {
+                user.email = Some(e);
+            }
+            if let Some(t) = title {
+                user.title = Some(t);
+            }
+            if let Some(d) = department {
+                user.department = Some(d);
+            }
+            if let Some(p) = phone_number {
+                user.phone_number = Some(p);
+            }
             Some(user.clone())
         })
     }
@@ -4672,8 +6422,15 @@ impl AppState {
     }
 
     #[cfg(test)]
-    fn set_room_message_created_at_for_test(&self, id: Uuid, created_at: DateTime<Utc>) -> Option<RoomMessage> {
-        let mut messages = self.room_messages.write().expect("room messages lock poisoned");
+    fn set_room_message_created_at_for_test(
+        &self,
+        id: Uuid,
+        created_at: DateTime<Utc>,
+    ) -> Option<RoomMessage> {
+        let mut messages = self
+            .room_messages
+            .write()
+            .expect("room messages lock poisoned");
         let msg = messages.iter_mut().find(|m| m.id == id)?;
         msg.created_at = created_at;
         Some(msg.clone())
@@ -4694,18 +6451,27 @@ impl AppState {
     /// After 10 consecutive failures, stops attempting writes until a success resets the counter.
     pub fn pg_spawn<F>(&self, f: F)
     where
-        F: FnOnce(PgStore) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), pg_store::PgError>> + Send>>
-            + Send
+        F: FnOnce(
+                PgStore,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<(), pg_store::PgError>> + Send>,
+            > + Send
             + 'static,
     {
         if let Some(pg) = self.pg.clone() {
-            let failures = self.pg_failure_count.load(std::sync::atomic::Ordering::Relaxed);
+            let failures = self
+                .pg_failure_count
+                .load(std::sync::atomic::Ordering::Relaxed);
             if failures >= 10 {
                 // Circuit open — skip writes, log periodically
                 if failures % 100 == 10 {
-                    log::warn!("Postgres circuit breaker open ({} consecutive failures), skipping writes", failures);
+                    log::warn!(
+                        "Postgres circuit breaker open ({} consecutive failures), skipping writes",
+                        failures
+                    );
                 }
-                self.pg_failure_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.pg_failure_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return;
             }
             let counter = self.pg_failure_count.clone();
@@ -4725,7 +6491,11 @@ impl AppState {
 
     // ─── Call History ───
 
-    pub fn store_call_history(&self, user_sip_uri: &str, input: CallHistoryInput) -> CallHistoryEntry {
+    pub fn store_call_history(
+        &self,
+        user_sip_uri: &str,
+        input: CallHistoryInput,
+    ) -> CallHistoryEntry {
         let entry = CallHistoryEntry {
             id: Uuid::new_v4(),
             user_sip_uri: user_sip_uri.to_string(),
@@ -4755,11 +6525,21 @@ impl AppState {
         let existing = self.call_history_for_user(user_sip_uri);
         let existing_set: HashSet<(i64, &str, &str)> = existing
             .iter()
-            .map(|e| (e.start_time.timestamp(), e.remote_uri.as_str(), e.direction.as_str()))
+            .map(|e| {
+                (
+                    e.start_time.timestamp(),
+                    e.remote_uri.as_str(),
+                    e.direction.as_str(),
+                )
+            })
             .collect();
         let mut merged = 0;
         for input in entries {
-            let key = (input.start_time.timestamp(), input.remote_uri.as_str(), input.direction.as_str());
+            let key = (
+                input.start_time.timestamp(),
+                input.remote_uri.as_str(),
+                input.direction.as_str(),
+            );
             if !existing_set.contains(&key) {
                 self.store_call_history(user_sip_uri, input);
                 merged += 1;
@@ -4779,6 +6559,10 @@ pub struct User {
     pub password_hash: Option<String>,
     pub role: String, // "admin" or "user"
     pub created_at: DateTime<Utc>,
+    #[serde(default = "default_true")]
+    pub active: bool,
+    pub deactivated_at: Option<DateTime<Utc>>,
+    pub deactivated_by: Option<String>,
     pub email: Option<String>,
     pub title: Option<String>,
     pub department: Option<String>,
@@ -4860,6 +6644,16 @@ pub struct AdminAuditEvent {
     pub action: String,
     pub target: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AdminAuditQuery {
+    pub principal: Option<String>,
+    pub action: Option<String>,
+    pub target: Option<String>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5077,6 +6871,16 @@ pub struct CallRecording {
     pub file_id: Option<Uuid>,
     pub recorded_by: String,
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub conference_id: Option<Uuid>,
+    #[serde(default)]
+    pub transcript_segment_count: usize,
+    #[serde(default)]
+    pub legal_hold: bool,
+    #[serde(default)]
+    pub deleted_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub deleted_by: Option<String>,
 }
 
 // ─── Group Chat Rooms ───
@@ -5118,6 +6922,12 @@ pub struct Room {
     pub team_id: Option<Uuid>,
     #[serde(default)]
     pub channel_name: Option<String>,
+    #[serde(default = "default_channel_type")]
+    pub channel_type: String,
+    #[serde(default)]
+    pub channel_owners: Vec<String>,
+    #[serde(default = "default_posting_policy")]
+    pub posting_policy: String,
     pub name: String,
     pub description: String,
     pub is_direct: bool,
@@ -5147,6 +6957,45 @@ pub struct CreateRoomRequest {
     pub team_id: Option<Uuid>,
     #[serde(default)]
     pub channel_name: Option<String>,
+    #[serde(default)]
+    pub channel_type: Option<String>,
+    #[serde(default)]
+    pub channel_owners: Vec<String>,
+    #[serde(default)]
+    pub posting_policy: Option<String>,
+}
+
+fn default_channel_type() -> String {
+    "standard".to_string()
+}
+
+fn default_posting_policy() -> String {
+    "members".to_string()
+}
+
+fn normalize_channel_type(value: Option<&str>) -> String {
+    match value
+        .unwrap_or("standard")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "private" => "private".to_string(),
+        "shared" => "shared".to_string(),
+        _ => "standard".to_string(),
+    }
+}
+
+fn normalize_posting_policy(value: Option<&str>) -> String {
+    match value
+        .unwrap_or("members")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "owners" | "owners_only" => "owners".to_string(),
+        _ => "members".to_string(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5160,6 +7009,14 @@ pub struct ScheduledMeeting {
     pub participants: Vec<String>,
     pub starts_at: DateTime<Utc>,
     pub ends_at: DateTime<Utc>,
+    #[serde(default)]
+    pub recurrence: Option<MeetingRecurrence>,
+    #[serde(default = "default_meeting_status")]
+    pub status: MeetingStatus,
+    #[serde(default)]
+    pub cancelled_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -5172,6 +7029,43 @@ pub struct CreateScheduledMeetingRequest {
     pub starts_at: DateTime<Utc>,
     pub ends_at: DateTime<Utc>,
     pub mode: Option<RoomCallMode>,
+    pub recurrence: Option<MeetingRecurrence>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateScheduledMeetingRequest {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub participants: Option<Vec<String>>,
+    pub starts_at: Option<DateTime<Utc>>,
+    pub ends_at: Option<DateTime<Utc>>,
+    pub recurrence: Option<Option<MeetingRecurrence>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingStatus {
+    Scheduled,
+    Cancelled,
+}
+
+fn default_meeting_status() -> MeetingStatus {
+    MeetingStatus::Scheduled
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingRecurrenceFrequency {
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MeetingRecurrence {
+    pub frequency: MeetingRecurrenceFrequency,
+    pub interval: u32,
+    pub until: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5205,8 +7099,20 @@ pub struct CollaborationPolicy {
     pub broad_mentions_enabled: bool,
     pub broad_mentions_allowed_roles: Vec<String>,
     pub broad_mentions_per_minute: u32,
+    #[serde(default = "default_true")]
+    pub external_access_enabled: bool,
+    #[serde(default)]
+    pub allowed_external_domains: Vec<String>,
+    #[serde(default = "default_true")]
+    pub urgent_messages_enabled: bool,
+    #[serde(default = "default_true")]
+    pub meeting_recording_enabled: bool,
     pub updated_by: Option<String>,
     pub updated_at: DateTime<Utc>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for CollaborationPolicy {
@@ -5217,6 +7123,10 @@ impl Default for CollaborationPolicy {
             broad_mentions_enabled: true,
             broad_mentions_allowed_roles: vec!["owner".to_string(), "admin".to_string()],
             broad_mentions_per_minute: 3,
+            external_access_enabled: true,
+            allowed_external_domains: Vec::new(),
+            urgent_messages_enabled: true,
+            meeting_recording_enabled: true,
             updated_by: None,
             updated_at: Utc::now(),
         }
@@ -5229,6 +7139,82 @@ pub struct UpdateCollaborationPolicyRequest {
     pub broad_mentions_enabled: Option<bool>,
     pub broad_mentions_allowed_roles: Option<Vec<String>>,
     pub broad_mentions_per_minute: Option<u32>,
+    pub external_access_enabled: Option<bool>,
+    pub allowed_external_domains: Option<Vec<String>>,
+    pub urgent_messages_enabled: Option<bool>,
+    pub meeting_recording_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelWebhook {
+    pub id: Uuid,
+    pub room_id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub token_hash: String,
+    pub enabled: bool,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+impl ChannelWebhook {
+    pub fn principal_uri(&self) -> String {
+        format!("sip:webhook-{}@pale.local", self.id)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChannelWebhookSummary {
+    pub id: Uuid,
+    pub room_id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+impl From<ChannelWebhook> for ChannelWebhookSummary {
+    fn from(webhook: ChannelWebhook) -> Self {
+        Self {
+            id: webhook.id,
+            room_id: webhook.room_id,
+            name: webhook.name,
+            description: webhook.description,
+            enabled: webhook.enabled,
+            created_by: webhook.created_by,
+            created_at: webhook.created_at,
+            last_used_at: webhook.last_used_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateChannelWebhookRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateChannelWebhookResponse {
+    pub webhook: ChannelWebhookSummary,
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateChannelWebhookRequest {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PostChannelWebhookRequest {
+    pub text: String,
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5236,6 +7222,18 @@ pub struct DiscoveryExport {
     pub exported_at: DateTime<Utc>,
     pub room_id: Option<Uuid>,
     pub messages: Vec<RoomMessage>,
+    pub files: Vec<FileDiscoveryRecord>,
+    pub recordings: Vec<CallRecording>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiscoverySearchQuery {
+    pub q: Option<String>,
+    pub user_uri: Option<String>,
+    pub room_id: Option<Uuid>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5255,6 +7253,10 @@ pub struct RetentionPolicyResult {
     pub retain_days: Option<i64>,
     pub matched_messages: usize,
     pub deleted_messages: usize,
+    pub matched_files: usize,
+    pub deleted_files: usize,
+    pub matched_recordings: usize,
+    pub deleted_recordings: usize,
     pub legal_hold: bool,
 }
 
@@ -5317,6 +7319,63 @@ pub struct RoomMessage {
     pub mentions: Vec<MessageMention>,
     #[serde(default)]
     pub mentioned_user_uris: Vec<String>,
+    #[serde(default = "default_message_priority")]
+    pub priority: String,
+    #[serde(default)]
+    pub saved_by: Vec<String>,
+}
+
+fn default_message_priority() -> String {
+    "normal".to_string()
+}
+
+fn normalize_message_priority(value: Option<&str>) -> String {
+    match value
+        .unwrap_or("normal")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "high" => "high".to_string(),
+        "urgent" => "urgent".to_string(),
+        _ => "normal".to_string(),
+    }
+}
+
+fn sip_domain(uri: &str) -> Option<String> {
+    let bare = uri.trim().trim_start_matches("sip:");
+    bare.split('@')
+        .nth(1)
+        .map(|domain| {
+            domain
+                .split(';')
+                .next()
+                .unwrap_or(domain)
+                .to_ascii_lowercase()
+        })
+        .filter(|domain| !domain.is_empty())
+}
+
+fn is_external_call_target(caller: &str, target: &str) -> bool {
+    let target = target.trim();
+    if target.is_empty() {
+        return false;
+    }
+    let Some(caller_domain) = sip_domain(caller) else {
+        return !target.starts_with("sip:");
+    };
+    sip_domain(target).is_none_or(|target_domain| target_domain != caller_domain)
+}
+
+fn normalized_policy_domains(domains: Vec<String>) -> Vec<String> {
+    let mut domains: Vec<String> = domains
+        .into_iter()
+        .map(|domain| domain.trim().trim_start_matches('@').to_ascii_lowercase())
+        .filter(|domain| !domain.is_empty())
+        .collect();
+    domains.sort();
+    domains.dedup();
+    domains
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -5341,7 +7400,10 @@ pub struct MessageReactionRecord {
 
 impl MessageReactionRecord {
     pub fn key(&self) -> String {
-        format!("{}:{}:{}", self.message_id, self.reaction.user_uri, self.reaction.emoji)
+        format!(
+            "{}:{}:{}",
+            self.message_id, self.reaction.user_uri, self.reaction.emoji
+        )
     }
 }
 
@@ -5359,6 +7421,8 @@ pub struct MessageReactionToggle {
 pub struct SendRoomMessageRequest {
     pub body: String,
     pub reply_to: Option<Uuid>,
+    #[serde(default)]
+    pub priority: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -5464,6 +7528,8 @@ pub struct Conference {
     pub mode: ConferenceMode,
     pub participants: Vec<ConferenceParticipant>,
     #[serde(default)]
+    pub locked: bool,
+    #[serde(default)]
     pub active: bool,
     pub created_at: DateTime<Utc>,
 }
@@ -5481,6 +7547,20 @@ pub struct JoinConferenceRequest {
     pub role: Option<ParticipantRole>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JoinConferenceError {
+    NotFound,
+    Locked,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateConferenceParticipantRequest {
+    pub role: Option<ParticipantRole>,
+    pub muted: Option<bool>,
+    pub removed: Option<bool>,
+    pub removal_reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ParticipantRole {
@@ -5496,7 +7576,39 @@ pub struct ConferenceParticipant {
     pub role: ParticipantRole,
     #[serde(default)]
     pub bridge_slot: Option<i32>,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub removed: bool,
+    #[serde(default)]
+    pub removed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub removed_by: Option<String>,
+    #[serde(default)]
+    pub removal_reason: Option<String>,
     pub joined_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttendanceLeaveReason {
+    Left,
+    Removed,
+    Ended,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConferenceAttendanceRecord {
+    pub id: Uuid,
+    pub conference_id: Uuid,
+    pub user_id: Uuid,
+    pub sip_uri: String,
+    pub role: ParticipantRole,
+    pub joined_at: DateTime<Utc>,
+    pub left_at: Option<DateTime<Utc>>,
+    pub duration_secs: Option<i64>,
+    pub leave_reason: Option<AttendanceLeaveReason>,
+    pub removed_by: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5725,10 +7837,6 @@ pub struct PostTranscriptRequest {
     pub is_final: bool,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptExport {
     pub conference_id: Uuid,
@@ -5738,6 +7846,91 @@ pub struct TranscriptExport {
 }
 
 // ── Call quality metrics (CQD) ─────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CallQualityRating {
+    #[default]
+    Good,
+    Warning,
+    Poor,
+}
+
+struct CallQualityDiagnostics {
+    rating: CallQualityRating,
+    issues: Vec<String>,
+    recommended_action: Option<String>,
+}
+
+fn call_quality_diagnostics(
+    mos_score: f64,
+    jitter_ms: f64,
+    packet_loss_pct: f64,
+    round_trip_ms: f64,
+) -> CallQualityDiagnostics {
+    let mut rating = if mos_score < 3.0 {
+        CallQualityRating::Poor
+    } else if mos_score < 3.8 {
+        CallQualityRating::Warning
+    } else {
+        CallQualityRating::Good
+    };
+    let mut issues = Vec::new();
+
+    if jitter_ms > 50.0 {
+        rating = CallQualityRating::Poor;
+        issues.push("high_jitter".to_string());
+    } else if jitter_ms > 30.0 && rating == CallQualityRating::Good {
+        rating = CallQualityRating::Warning;
+        issues.push("elevated_jitter".to_string());
+    } else if jitter_ms > 30.0 {
+        issues.push("elevated_jitter".to_string());
+    }
+
+    if packet_loss_pct > 5.0 {
+        rating = CallQualityRating::Poor;
+        issues.push("high_packet_loss".to_string());
+    } else if packet_loss_pct > 2.0 && rating == CallQualityRating::Good {
+        rating = CallQualityRating::Warning;
+        issues.push("elevated_packet_loss".to_string());
+    } else if packet_loss_pct > 2.0 {
+        issues.push("elevated_packet_loss".to_string());
+    }
+
+    if round_trip_ms > 300.0 {
+        rating = CallQualityRating::Poor;
+        issues.push("high_round_trip_time".to_string());
+    } else if round_trip_ms > 150.0 && rating == CallQualityRating::Good {
+        rating = CallQualityRating::Warning;
+        issues.push("elevated_round_trip_time".to_string());
+    } else if round_trip_ms > 150.0 {
+        issues.push("elevated_round_trip_time".to_string());
+    }
+
+    if mos_score < 3.0 {
+        issues.push("low_mos".to_string());
+    } else if mos_score < 3.8 {
+        issues.push("degraded_mos".to_string());
+    }
+
+    let recommended_action = match rating {
+        CallQualityRating::Good => None,
+        CallQualityRating::Warning => Some(
+            "Review endpoint network stability, Wi-Fi signal, and competing bandwidth usage."
+                .to_string(),
+        ),
+        CallQualityRating::Poor => Some(
+            "Escalate to network diagnostics; check packet loss, latency path, codec, and device health."
+                .to_string(),
+        ),
+    };
+
+    CallQualityDiagnostics {
+        rating,
+        issues,
+        recommended_action,
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallQualityReport {
@@ -5751,6 +7944,12 @@ pub struct CallQualityReport {
     pub mos_score: f64,
     pub bytes_sent: u64,
     pub bytes_received: u64,
+    #[serde(default)]
+    pub rating: CallQualityRating,
+    #[serde(default)]
+    pub issues: Vec<String>,
+    #[serde(default)]
+    pub recommended_action: Option<String>,
     pub reported_at: DateTime<Utc>,
 }
 
@@ -5768,6 +7967,16 @@ pub struct PostCallQualityRequest {
     pub bytes_received: u64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct CallQualityQuery {
+    pub user_sip_uri: Option<String>,
+    pub call_id: Option<Uuid>,
+    pub rating: Option<CallQualityRating>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    pub limit: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CallQualitySummary {
     pub total_reports: usize,
@@ -5776,6 +7985,8 @@ pub struct CallQualitySummary {
     pub avg_packet_loss_pct: f64,
     pub avg_round_trip_ms: f64,
     pub poor_quality_calls: usize, // MOS < 3.0
+    pub warning_quality_calls: usize,
+    pub worst_mos: f64,
 }
 
 // ── DLP (Data Loss Prevention) ─────────────────────────────────────
@@ -5793,7 +8004,7 @@ pub struct DlpPolicy {
     pub id: Uuid,
     pub name: String,
     pub description: String,
-    pub pattern: String,     // regex pattern
+    pub pattern: String, // regex pattern
     pub action: DlpAction,
     pub enabled: bool,
     pub created_by: String,
@@ -5810,6 +8021,30 @@ pub struct CreateDlpPolicyRequest {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateDlpPolicyRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub pattern: Option<String>,
+    pub action: Option<DlpAction>,
+    pub enabled: Option<bool>,
+}
+
+fn validate_dlp_pattern(pattern: &str) -> Result<(), String> {
+    regex::Regex::new(pattern)
+        .map(|_| ())
+        .map_err(|err| format!("invalid DLP pattern: {err}"))
+}
+
+fn dlp_content_snippet(content: &str) -> String {
+    const MAX_CHARS: usize = 80;
+    let mut snippet: String = content.chars().take(MAX_CHARS).collect();
+    if content.chars().count() > MAX_CHARS {
+        snippet.push_str("...");
+    }
+    snippet
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DlpViolation {
     pub id: Uuid,
@@ -5819,6 +8054,16 @@ pub struct DlpViolation {
     pub action_taken: DlpAction,
     pub content_snippet: String,
     pub detected_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DlpViolationQuery {
+    pub policy: Option<String>,
+    pub user_uri: Option<String>,
+    pub action: Option<DlpAction>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5876,6 +8121,129 @@ pub struct FileRecord {
     pub size: u64,
     pub sha256: String,
     pub created_at: DateTime<Utc>,
+    #[serde(default = "default_dlp_status")]
+    pub dlp_status: String,
+    #[serde(default)]
+    pub dlp_violation_count: usize,
+    #[serde(default)]
+    pub legal_hold: bool,
+    #[serde(default)]
+    pub deleted_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub deleted_by: Option<String>,
+}
+
+fn default_dlp_status() -> String {
+    "clean".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileDiscoveryRecord {
+    pub id: Uuid,
+    pub owner: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size: u64,
+    pub sha256: String,
+    pub created_at: DateTime<Utc>,
+    pub dlp_status: String,
+    pub dlp_violation_count: usize,
+    pub legal_hold: bool,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub deleted_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileGovernanceDecision {
+    pub allowed: bool,
+    pub dlp_status: String,
+    pub dlp_violation_count: usize,
+    pub legal_hold: bool,
+}
+
+fn is_textual_content(content_type: &str) -> bool {
+    content_type.starts_with("text/")
+        || content_type.contains("json")
+        || content_type.contains("xml")
+        || content_type.contains("csv")
+        || content_type.contains("javascript")
+        || content_type.contains("typescript")
+        || content_type.contains("x-www-form-urlencoded")
+}
+
+fn meeting_to_ics(meeting: &ScheduledMeeting) -> String {
+    let status = if meeting.status == MeetingStatus::Cancelled {
+        "CANCELLED"
+    } else {
+        "CONFIRMED"
+    };
+    let mut lines = vec![
+        "BEGIN:VCALENDAR".to_string(),
+        "VERSION:2.0".to_string(),
+        "PRODID:-//Palephone//Meetings//EN".to_string(),
+        "CALSCALE:GREGORIAN".to_string(),
+        "METHOD:PUBLISH".to_string(),
+        "BEGIN:VEVENT".to_string(),
+        format!("UID:{}@palephone", meeting.id),
+        format!(
+            "DTSTAMP:{}",
+            ics_timestamp(meeting.updated_at.unwrap_or(meeting.created_at))
+        ),
+        format!("DTSTART:{}", ics_timestamp(meeting.starts_at)),
+        format!("DTEND:{}", ics_timestamp(meeting.ends_at)),
+        format!("SUMMARY:{}", ics_escape(&meeting.title)),
+        format!("DESCRIPTION:{}", ics_escape(&meeting.description)),
+        format!("ORGANIZER:MAILTO:{}", ics_escape(&meeting.organizer_uri)),
+        format!("STATUS:{status}"),
+    ];
+    if let Some(recurrence) = &meeting.recurrence {
+        lines.push(format!("RRULE:{}", recurrence_to_rrule(recurrence)));
+    }
+    for participant in &meeting.participants {
+        lines.push(format!("ATTENDEE:MAILTO:{}", ics_escape(participant)));
+    }
+    lines.push("END:VEVENT".to_string());
+    lines.push("END:VCALENDAR".to_string());
+    lines.join("\r\n")
+}
+
+fn ics_timestamp(value: DateTime<Utc>) -> String {
+    value.format("%Y%m%dT%H%M%SZ").to_string()
+}
+
+fn ics_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace(';', "\\;")
+        .replace(',', "\\,")
+        .replace('\n', "\\n")
+}
+
+fn recurrence_to_rrule(recurrence: &MeetingRecurrence) -> String {
+    let frequency = match recurrence.frequency {
+        MeetingRecurrenceFrequency::Daily => "DAILY",
+        MeetingRecurrenceFrequency::Weekly => "WEEKLY",
+        MeetingRecurrenceFrequency::Monthly => "MONTHLY",
+    };
+    let mut rule = format!("FREQ={frequency};INTERVAL={}", recurrence.interval.max(1));
+    if let Some(until) = recurrence.until {
+        rule.push_str(&format!(";UNTIL={}", ics_timestamp(until)));
+    }
+    rule
+}
+
+fn normalize_meeting_recurrence(
+    recurrence: Option<MeetingRecurrence>,
+    starts_at: DateTime<Utc>,
+) -> Result<Option<MeetingRecurrence>, String> {
+    let Some(mut recurrence) = recurrence else {
+        return Ok(None);
+    };
+    recurrence.interval = recurrence.interval.max(1);
+    if recurrence.until.is_some_and(|until| until <= starts_at) {
+        return Err("recurrence end must be after meeting start".to_string());
+    }
+    Ok(Some(recurrence))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5962,6 +8330,15 @@ fn normalize_did(did: &str) -> String {
 pub struct UserCallSettings {
     pub user_sip_uri: String,
 
+    #[serde(default = "default_true")]
+    pub allow_private_calls: bool,
+    #[serde(default = "default_true")]
+    pub allow_external_calls: bool,
+    #[serde(default = "default_true")]
+    pub allow_call_forwarding: bool,
+    #[serde(default = "default_true")]
+    pub allow_call_recording: bool,
+
     // Voicemail
     pub voicemail_enabled: bool,
     pub voicemail_greeting_file_id: Option<Uuid>,
@@ -5985,15 +8362,19 @@ pub struct UserCallSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FollowMeEntry {
-    pub number: String,      // SIP URI or phone number
-    pub ring_timeout: i32,   // seconds to ring before trying next
-    pub label: String,       // "Office", "Mobile", "Home"
+    pub number: String,    // SIP URI or phone number
+    pub ring_timeout: i32, // seconds to ring before trying next
+    pub label: String,     // "Office", "Mobile", "Home"
 }
 
 impl Default for UserCallSettings {
     fn default() -> Self {
         Self {
             user_sip_uri: String::new(),
+            allow_private_calls: true,
+            allow_external_calls: true,
+            allow_call_forwarding: true,
+            allow_call_recording: true,
             voicemail_enabled: true,
             voicemail_greeting_file_id: None,
             voicemail_greeting_text: "Please leave a message after the tone.".to_string(),
@@ -6087,7 +8468,7 @@ pub struct CreateIvrRequest {
 #[derive(Debug, Clone, Serialize)]
 pub struct ResolvedRoute {
     pub destination_type: String, // user, ring_group, ivr
-    pub destination: String,     // SIP URI or ID
+    pub destination: String,      // SIP URI or ID
     pub ring_group: Option<RingGroup>,
     pub ivr: Option<Ivr>,
 }
@@ -6325,13 +8706,13 @@ pub struct CreatePagingGroupRequest {
 pub struct AgentProfile {
     pub id: Uuid,
     pub user_sip_uri: String,
-    pub role: String,           // agent, supervisor, qa, admin
+    pub role: String, // agent, supervisor, qa, admin
     pub display_name: String,
     pub queues: Vec<Uuid>,
     pub skills: Vec<String>,
     pub max_concurrent: i32,
     pub auto_answer: bool,
-    pub state: String,          // available, on_call, wrap_up, break, training, meeting, offline
+    pub state: String, // available, on_call, wrap_up, break, training, meeting, offline
     pub state_reason: Option<String>,
     pub state_since: DateTime<Utc>,
     pub total_calls: i32,
@@ -6447,7 +8828,7 @@ pub struct MonitorSession {
     pub supervisor_uri: String,
     pub target_call_id: String,
     pub agent_uri: Option<String>,
-    pub mode: String,  // listen, whisper, barge
+    pub mode: String, // listen, whisper, barge
     pub started_at: DateTime<Utc>,
 }
 
@@ -6630,7 +9011,11 @@ pub fn start_wrap_up_timer(state: Arc<AppState>, agent_uri: String, wrap_up_secs
         tokio::time::sleep(std::time::Duration::from_secs(wrap_up_secs.max(1) as u64)).await;
         if let Some(profile) = state.agent_profile(&agent_uri) {
             if profile.state == "wrap_up" {
-                let _ = state.transition_agent_state(&agent_uri, "available", Some("wrap_up_expired".to_string()));
+                let _ = state.transition_agent_state(
+                    &agent_uri,
+                    "available",
+                    Some("wrap_up_expired".to_string()),
+                );
             }
         }
     });
@@ -6717,7 +9102,11 @@ fn route_headers_match(conditions: &[RouteHeaderCondition], headers: &[(String, 
         let matched = headers.iter().any(|(name, value)| {
             name.eq_ignore_ascii_case(&condition.name) && pattern_matches(&condition.pattern, value)
         });
-        if condition.negate { !matched } else { matched }
+        if condition.negate {
+            !matched
+        } else {
+            matched
+        }
     })
 }
 
@@ -6809,6 +9198,22 @@ impl PersistedMapObject for RetentionPolicy {
     }
 }
 
+impl PersistedMapObject for DlpPolicy {
+    type Key = Uuid;
+
+    fn map_key(&self) -> Self::Key {
+        self.id
+    }
+}
+
+impl PersistedMapObject for ChannelWebhook {
+    type Key = Uuid;
+
+    fn map_key(&self) -> Self::Key {
+        self.id
+    }
+}
+
 impl PersistedMapObject for AdminAuditEvent {
     type Key = Uuid;
 
@@ -6854,11 +9259,284 @@ mod tests {
             role: None,
         };
 
-        state.join_conference(conference.id, join.clone()).unwrap();
-        let updated = state.join_conference(conference.id, join).unwrap();
+        state
+            .join_conference(conference.id, join.clone(), false)
+            .unwrap();
+        let updated = state.join_conference(conference.id, join, false).unwrap();
 
         assert_eq!(updated.participants.len(), 1);
         assert_eq!(updated.participants[0].role, ParticipantRole::Member);
+    }
+
+    #[test]
+    fn locked_conference_blocks_new_participants_but_allows_reconnect_and_override() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-locked-conference-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let conference = state.create_conference(CreateConferenceRequest {
+            title: "Security Review".to_string(),
+            mode: ConferenceMode::Video,
+        });
+        let existing_id = Uuid::new_v4();
+        let join = JoinConferenceRequest {
+            user_id: existing_id,
+            sip_uri: "sip:alice@example.com".to_string(),
+            role: Some(ParticipantRole::Member),
+        };
+        state
+            .join_conference(conference.id, join.clone(), false)
+            .unwrap();
+
+        let locked = state.set_conference_locked(conference.id, true).unwrap();
+        assert!(locked.locked);
+        assert_eq!(
+            state
+                .join_conference(conference.id, join, false)
+                .unwrap()
+                .participants
+                .len(),
+            1
+        );
+        let rejected = state.join_conference(
+            conference.id,
+            JoinConferenceRequest {
+                user_id: Uuid::new_v4(),
+                sip_uri: "sip:bob@example.com".to_string(),
+                role: Some(ParticipantRole::Member),
+            },
+            false,
+        );
+        assert!(matches!(rejected, Err(JoinConferenceError::Locked)));
+
+        let admitted = state
+            .join_conference(
+                conference.id,
+                JoinConferenceRequest {
+                    user_id: Uuid::new_v4(),
+                    sip_uri: "sip:moderator-guest@example.com".to_string(),
+                    role: Some(ParticipantRole::Member),
+                },
+                true,
+            )
+            .unwrap();
+        assert_eq!(admitted.participants.len(), 2);
+    }
+
+    #[test]
+    fn call_quality_reports_are_diagnosed_summarized_and_persisted() {
+        let data_dir = std::env::temp_dir().join(format!("pale-cqd-{}", Uuid::new_v4()));
+        let token = "012345678901234567890123".to_string();
+        let admin_hash = sha256_hex("admin-password".as_bytes());
+        let storage_key = "cqd-storage-key".to_string();
+
+        let state = AppState::persistent(
+            data_dir.clone(),
+            token.clone(),
+            "admin".to_string(),
+            admin_hash.clone(),
+            storage_key.clone(),
+            DEFAULT_MAX_UPLOAD_BYTES,
+            MediaConfig::default(),
+        )
+        .unwrap();
+        let good = state.post_call_quality(
+            "sip:alice@example.com",
+            PostCallQualityRequest {
+                call_id: Uuid::new_v4(),
+                codec: "opus".to_string(),
+                jitter_ms: 8.0,
+                packet_loss_pct: 0.1,
+                round_trip_ms: 60.0,
+                mos_score: 4.4,
+                bytes_sent: 1200,
+                bytes_received: 1400,
+            },
+        );
+        let poor = state.post_call_quality(
+            "sip:bob@example.com",
+            PostCallQualityRequest {
+                call_id: Uuid::new_v4(),
+                codec: "opus".to_string(),
+                jitter_ms: 75.0,
+                packet_loss_pct: 7.5,
+                round_trip_ms: 340.0,
+                mos_score: 2.6,
+                bytes_sent: 800,
+                bytes_received: 600,
+            },
+        );
+
+        assert_eq!(good.rating, CallQualityRating::Good);
+        assert!(good.issues.is_empty());
+        assert_eq!(poor.rating, CallQualityRating::Poor);
+        assert!(poor.issues.contains(&"high_jitter".to_string()));
+        assert!(poor.issues.contains(&"high_packet_loss".to_string()));
+        assert!(poor.recommended_action.is_some());
+        let summary = state.call_quality_summary();
+        assert_eq!(summary.total_reports, 2);
+        assert_eq!(summary.poor_quality_calls, 1);
+        assert_eq!(summary.warning_quality_calls, 0);
+        assert_eq!(summary.worst_mos, 2.6);
+        let poor_results = state.search_call_quality(CallQualityQuery {
+            rating: Some(CallQualityRating::Poor),
+            limit: Some(1),
+            ..CallQualityQuery::default()
+        });
+        assert_eq!(poor_results.len(), 1);
+        assert_eq!(poor_results[0].call_id, poor.call_id);
+        let user_results = state.search_call_quality(CallQualityQuery {
+            user_sip_uri: Some("bob@example.com".to_string()),
+            ..CallQualityQuery::default()
+        });
+        assert_eq!(user_results.len(), 1);
+        assert_eq!(user_results[0].rating, CallQualityRating::Poor);
+        drop(state);
+
+        let reloaded = AppState::persistent(
+            data_dir,
+            token,
+            "admin".to_string(),
+            admin_hash,
+            storage_key,
+            DEFAULT_MAX_UPLOAD_BYTES,
+            MediaConfig::default(),
+        )
+        .unwrap();
+        let reports = reloaded.list_call_quality();
+        assert_eq!(reports.len(), 2);
+        assert!(reports
+            .iter()
+            .any(|report| report.rating == CallQualityRating::Poor));
+    }
+
+    #[test]
+    fn conference_participant_moderation_requires_host_or_admin() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-conference-moderation-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let conference = state.create_conference(CreateConferenceRequest {
+            title: "Moderated".to_string(),
+            mode: ConferenceMode::Video,
+        });
+        let host_id = Uuid::new_v4();
+        let member_id = Uuid::new_v4();
+        state
+            .join_conference(
+                conference.id,
+                JoinConferenceRequest {
+                    user_id: host_id,
+                    sip_uri: "sip:host@example.com".to_string(),
+                    role: Some(ParticipantRole::Host),
+                },
+                false,
+            )
+            .unwrap();
+        state
+            .join_conference(
+                conference.id,
+                JoinConferenceRequest {
+                    user_id: member_id,
+                    sip_uri: "sip:member@example.com".to_string(),
+                    role: Some(ParticipantRole::Member),
+                },
+                false,
+            )
+            .unwrap();
+
+        let initial_attendance = state.conference_attendance(conference.id);
+        assert_eq!(initial_attendance.len(), 2);
+        assert_eq!(
+            initial_attendance
+                .iter()
+                .filter(|record| record.left_at.is_none())
+                .count(),
+            2
+        );
+
+        assert!(!state.can_moderate_conference(conference.id, "sip:member@example.com", false));
+        assert!(state.can_moderate_conference(conference.id, "sip:host@example.com", false));
+
+        let updated = state
+            .update_conference_participant(
+                conference.id,
+                member_id,
+                UpdateConferenceParticipantRequest {
+                    role: Some(ParticipantRole::Moderator),
+                    muted: Some(true),
+                    removed: Some(true),
+                    removal_reason: Some("policy".to_string()),
+                },
+                "sip:host@example.com",
+            )
+            .unwrap();
+        let participant = updated
+            .participants
+            .iter()
+            .find(|participant| participant.user_id == member_id)
+            .unwrap();
+        assert_eq!(participant.role, ParticipantRole::Moderator);
+        assert!(participant.muted);
+        assert!(participant.removed);
+        assert_eq!(
+            participant.removed_by.as_deref(),
+            Some("sip:host@example.com")
+        );
+        let removed_attendance = state.conference_attendance(conference.id);
+        let removed_record = removed_attendance
+            .iter()
+            .find(|record| record.user_id == member_id)
+            .unwrap();
+        assert!(removed_record.left_at.is_some());
+        assert_eq!(
+            removed_record.leave_reason,
+            Some(AttendanceLeaveReason::Removed)
+        );
+        assert_eq!(
+            removed_record.removed_by.as_deref(),
+            Some("sip:host@example.com")
+        );
+
+        let restored = state
+            .update_conference_participant(
+                conference.id,
+                member_id,
+                UpdateConferenceParticipantRequest {
+                    role: None,
+                    muted: Some(false),
+                    removed: Some(false),
+                    removal_reason: None,
+                },
+                "sip:host@example.com",
+            )
+            .unwrap();
+        let participant = restored
+            .participants
+            .iter()
+            .find(|participant| participant.user_id == member_id)
+            .unwrap();
+        assert!(!participant.removed);
+        assert!(!participant.muted);
+        assert!(participant.removed_at.is_none());
+        let restored_attendance = state.conference_attendance(conference.id);
+        let member_records: Vec<_> = restored_attendance
+            .iter()
+            .filter(|record| record.user_id == member_id)
+            .collect();
+        assert_eq!(member_records.len(), 2);
+        assert!(member_records.iter().any(|record| record.left_at.is_none()));
+
+        state.deactivate_conference(conference.id).unwrap();
+        let ended_attendance = state.conference_attendance(conference.id);
+        assert!(ended_attendance
+            .iter()
+            .all(|record| record.left_at.is_some()));
+        assert!(ended_attendance.iter().any(|record| {
+            record.user_id == member_id && record.leave_reason == Some(AttendanceLeaveReason::Ended)
+        }));
     }
 
     #[test]
@@ -6887,17 +9565,61 @@ mod tests {
             .authenticate_admin("admin", "admin-password", "test")
             .unwrap();
 
-        assert_eq!(state.principal_for_bearer(&session.token), Some("admin".to_string()));
+        assert_eq!(
+            state.principal_for_bearer(&session.token),
+            Some("admin".to_string())
+        );
         assert!(matches!(
             state.authenticate_admin("admin", "wrong", "test"),
             Err(AuthError::Unauthorized)
         ));
-        assert!(
-            state
-                .audit_events()
-                .iter()
-                .any(|event| event.action == "admin.login.succeeded")
+        assert!(state
+            .audit_events()
+            .iter()
+            .any(|event| event.action == "admin.login.succeeded"));
+    }
+
+    #[test]
+    fn audit_events_are_searchable_by_admin_filters() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-audit-search-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
         );
+
+        state.record_audit_event(
+            "admin",
+            "user.created",
+            Some("sip:alice@example.com".to_string()),
+        );
+        state.record_audit_event(
+            "sip:bob@example.com",
+            "message.deleted",
+            Some("room-1".to_string()),
+        );
+        state.record_audit_event("admin", "audit.exported", Some("records=2".to_string()));
+
+        let admin_user_events = state.search_audit_events(AdminAuditQuery {
+            principal: Some("ADMIN".to_string()),
+            action: Some("user".to_string()),
+            ..AdminAuditQuery::default()
+        });
+        assert_eq!(admin_user_events.len(), 1);
+        assert_eq!(admin_user_events[0].action, "user.created");
+
+        let target_events = state.search_audit_events(AdminAuditQuery {
+            target: Some("ROOM".to_string()),
+            ..AdminAuditQuery::default()
+        });
+        assert_eq!(target_events.len(), 1);
+        assert_eq!(target_events[0].principal, "sip:bob@example.com");
+
+        let limited = state.search_audit_events(AdminAuditQuery {
+            limit: Some(2),
+            ..AdminAuditQuery::default()
+        });
+        assert_eq!(limited.len(), 2);
+        assert_eq!(limited[0].action, "audit.exported");
     }
 
     #[test]
@@ -6972,15 +9694,41 @@ mod tests {
             sha256_hex("admin-password".as_bytes()),
         );
 
-        let user = state.create_user(CreateUserRequest {
-            display_name: "Alice".to_string(),
-            sip_uri: "sip:alice@example.com".to_string(),
-            matrix_user_id: None,
-            password: Some("test123".to_string()),
-            role: None,
-        }).unwrap();
+        let user = state
+            .create_user(CreateUserRequest {
+                display_name: "Alice".to_string(),
+                sip_uri: "sip:alice@example.com".to_string(),
+                matrix_user_id: None,
+                password: Some("test123".to_string()),
+                role: None,
+            })
+            .unwrap();
+        let login = state
+            .authenticate_user("sip:alice@example.com", "test123")
+            .unwrap();
+        assert_eq!(
+            state.principal_for_bearer(&login.token),
+            Some("sip:alice@example.com".to_string())
+        );
         assert_eq!(state.delete_user(user.id).unwrap().display_name, "Alice");
+        assert_eq!(state.principal_for_bearer(&login.token), None);
         assert!(state.users().is_empty());
+        let inactive = state
+            .all_users()
+            .into_iter()
+            .find(|candidate| candidate.id == user.id)
+            .unwrap();
+        assert!(!inactive.active);
+        assert!(inactive.deactivated_at.is_some());
+        assert!(matches!(
+            state.authenticate_user("sip:alice@example.com", "test123"),
+            Err(AuthError::Unauthorized)
+        ));
+        let active = state.set_user_active(user.id, true, "admin").unwrap();
+        assert!(active.active);
+        assert!(state
+            .authenticate_user("sip:alice@example.com", "test123")
+            .is_ok());
 
         state.upsert_sip_account(CreateSipAccountRequest {
             username: "alice".to_string(),
@@ -7049,6 +9797,9 @@ mod tests {
                 is_direct: Some(true),
                 team_id: None,
                 channel_name: None,
+                channel_type: None,
+                channel_owners: Vec::new(),
+                posting_policy: None,
             },
         );
         let second = state.create_room(
@@ -7060,6 +9811,9 @@ mod tests {
                 is_direct: Some(true),
                 team_id: None,
                 channel_name: None,
+                channel_type: None,
+                channel_owners: Vec::new(),
+                posting_policy: None,
             },
         );
 
@@ -7089,13 +9843,22 @@ mod tests {
                 is_direct: Some(false),
                 team_id: None,
                 channel_name: None,
+                channel_type: None,
+                channel_owners: Vec::new(),
+                posting_policy: None,
             },
         );
 
         assert!(!room.is_direct);
         assert_eq!(room.members.len(), 2);
-        assert!(room.members.iter().any(|member| member.user_sip_uri == "sip:alice@example.com"));
-        assert!(room.members.iter().any(|member| member.user_sip_uri == "sip:bob@example.com"));
+        assert!(room
+            .members
+            .iter()
+            .any(|member| member.user_sip_uri == "sip:alice@example.com"));
+        assert!(room
+            .members
+            .iter()
+            .any(|member| member.user_sip_uri == "sip:bob@example.com"));
 
         let target = state
             .join_room_call(room.id, "sip:alice@example.com", RoomCallMode::Video)
@@ -7143,6 +9906,9 @@ mod tests {
                     is_direct: Some(false),
                     team_id: None,
                     channel_name: Some("forecast".to_string()),
+                    channel_type: None,
+                    channel_owners: Vec::new(),
+                    posting_policy: None,
                 },
             )
             .expect("team channel");
@@ -7155,6 +9921,9 @@ mod tests {
                 is_direct: Some(false),
                 team_id: None,
                 channel_name: None,
+                channel_type: None,
+                channel_owners: Vec::new(),
+                posting_policy: None,
             },
         );
         let meeting = state
@@ -7168,6 +9937,7 @@ mod tests {
                     starts_at: Utc::now() + Duration::hours(1),
                     ends_at: Utc::now() + Duration::hours(2),
                     mode: Some(RoomCallMode::Video),
+                    recurrence: None,
                 },
             )
             .expect("meeting");
@@ -7175,14 +9945,17 @@ mod tests {
             title: "Revenue Standup".to_string(),
             mode: ConferenceMode::Audio,
         });
-        state.join_conference(
-            conference.id,
-            JoinConferenceRequest {
-                user_id: Uuid::new_v4(),
-                sip_uri: "sip:alice@example.com".to_string(),
-                role: Some(ParticipantRole::Member),
-            },
-        );
+        state
+            .join_conference(
+                conference.id,
+                JoinConferenceRequest {
+                    user_id: Uuid::new_v4(),
+                    sip_uri: "sip:alice@example.com".to_string(),
+                    role: Some(ParticipantRole::Member),
+                },
+                false,
+            )
+            .unwrap();
 
         let results = state.search_collaboration("sip:alice@example.com", "revenue", 10);
         let kinds: Vec<_> = results.iter().map(|result| result.kind.as_str()).collect();
@@ -7196,7 +9969,9 @@ mod tests {
 
         let limited = state.search_collaboration("sip:alice@example.com", "revenue", 2);
         assert_eq!(limited.len(), 2);
-        assert!(state.search_collaboration("sip:alice@example.com", "   ", 10).is_empty());
+        assert!(state
+            .search_collaboration("sip:alice@example.com", "   ", 10)
+            .is_empty());
     }
 
     #[test]
@@ -7223,13 +9998,16 @@ mod tests {
                 is_direct: Some(false),
                 team_id: None,
                 channel_name: None,
+                channel_type: None,
+                channel_owners: Vec::new(),
+                posting_policy: None,
             },
         );
         let target = state
             .start_room_call(room.id, RoomCallMode::Audio)
             .expect("room call target");
         let message = state
-            .send_room_message(room.id, "sip:alice@example.com", "hello", None)
+            .send_room_message(room.id, "sip:alice@example.com", "hello", None, None)
             .unwrap();
         let edited = state
             .edit_room_message(message.id, "sip:alice@example.com", "hello team")
@@ -7299,10 +10077,13 @@ mod tests {
                 is_direct: Some(false),
                 team_id: None,
                 channel_name: None,
+                channel_type: None,
+                channel_owners: Vec::new(),
+                posting_policy: None,
             },
         );
         let message = state
-            .send_room_message(room.id, "sip:alice@example.com", "please read", None)
+            .send_room_message(room.id, "sip:alice@example.com", "please read", None, None)
             .unwrap();
         let first = state
             .mark_room_message_read(message.id, "sip:bob@example.com")
@@ -7314,7 +10095,9 @@ mod tests {
         assert_eq!(first.message_id, message.id);
         assert_eq!(second.reader_uri, "sip:bob@example.com");
         assert_eq!(state.message_reads(message.id).len(), 1);
-        assert!(state.mark_room_message_read(Uuid::new_v4(), "sip:bob@example.com").is_none());
+        assert!(state
+            .mark_room_message_read(Uuid::new_v4(), "sip:bob@example.com")
+            .is_none());
         drop(state);
 
         let reloaded = AppState::persistent(
@@ -7352,7 +10135,8 @@ mod tests {
 
     #[test]
     fn room_message_reactions_toggle_and_persist() {
-        let data_dir = std::env::temp_dir().join(format!("pale-message-reactions-{}", Uuid::new_v4()));
+        let data_dir =
+            std::env::temp_dir().join(format!("pale-message-reactions-{}", Uuid::new_v4()));
         let storage_key = "01234567890123456789012345678901".to_string();
 
         let state = AppState::persistent(
@@ -7374,10 +10158,13 @@ mod tests {
                 is_direct: Some(false),
                 team_id: None,
                 channel_name: None,
+                channel_type: None,
+                channel_owners: Vec::new(),
+                posting_policy: None,
             },
         );
         let message = state
-            .send_room_message(room.id, "sip:alice@example.com", "react here", None)
+            .send_room_message(room.id, "sip:alice@example.com", "react here", None, None)
             .unwrap();
         let added = state
             .toggle_message_reaction(message.id, "sip:bob@example.com", "👍")
@@ -7417,8 +10204,157 @@ mod tests {
             MediaConfig::default(),
         )
         .unwrap();
-        assert!(reloaded_after_remove.message_reactions(message.id).is_empty());
+        assert!(reloaded_after_remove
+            .message_reactions(message.id)
+            .is_empty());
         drop(reloaded_after_remove);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn room_messages_support_priority_and_saved_state() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-message-priority-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let room = state.create_room(
+            "sip:alice@example.com",
+            CreateRoomRequest {
+                name: "Priority".to_string(),
+                description: None,
+                members: vec!["sip:bob@example.com".to_string()],
+                is_direct: Some(false),
+                team_id: None,
+                channel_name: None,
+                channel_type: None,
+                channel_owners: Vec::new(),
+                posting_policy: None,
+            },
+        );
+        let msg = state
+            .send_room_message(
+                room.id,
+                "sip:alice@example.com",
+                "Please review now",
+                None,
+                Some("urgent".to_string()),
+            )
+            .unwrap();
+        assert_eq!(msg.priority, "urgent");
+
+        let saved = state
+            .set_message_saved(msg.id, "sip:bob@example.com", true)
+            .unwrap();
+        assert_eq!(saved.saved_by, vec!["sip:bob@example.com".to_string()]);
+        let unsaved = state
+            .set_message_saved(msg.id, "sip:bob@example.com", false)
+            .unwrap();
+        assert!(unsaved.saved_by.is_empty());
+    }
+
+    #[test]
+    fn channel_webhooks_post_with_token_and_respect_lifecycle() {
+        let data_dir =
+            std::env::temp_dir().join(format!("pale-channel-webhooks-{}", Uuid::new_v4()));
+        let storage_key = "01234567890123456789012345678901".to_string();
+        let state = AppState::persistent(
+            data_dir.clone(),
+            "012345678901234567890123".to_string(),
+            "admin".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+            storage_key.clone(),
+            DEFAULT_MAX_UPLOAD_BYTES,
+            MediaConfig::default(),
+        )
+        .unwrap();
+        let room = state.create_room(
+            "sip:alice@example.com",
+            CreateRoomRequest {
+                name: "Deployments".to_string(),
+                description: None,
+                members: vec!["sip:bob@example.com".to_string()],
+                is_direct: Some(false),
+                team_id: None,
+                channel_name: Some("deployments".to_string()),
+                channel_type: None,
+                channel_owners: vec!["sip:alice@example.com".to_string()],
+                posting_policy: Some("owners".to_string()),
+            },
+        );
+        assert!(state
+            .send_room_message(room.id, "sip:bob@example.com", "blocked", None, None)
+            .is_err());
+        let created = state
+            .create_channel_webhook(
+                room.id,
+                "sip:alice@example.com",
+                CreateChannelWebhookRequest {
+                    name: "Build pipeline".to_string(),
+                    description: Some("CI deployment notices".to_string()),
+                },
+            )
+            .unwrap();
+        assert!(created.token.starts_with("wh_"));
+        assert_eq!(state.list_channel_webhooks(room.id).len(), 1);
+
+        let posted = state
+            .post_channel_webhook(
+                &created.token,
+                PostChannelWebhookRequest {
+                    title: Some("Deploy".to_string()),
+                    text: "Production deploy succeeded".to_string(),
+                },
+            )
+            .unwrap();
+        assert_eq!(posted.room_id, room.id);
+        assert!(posted.sender_uri.starts_with("sip:webhook-"));
+        assert!(posted.body.contains("Production deploy succeeded"));
+        assert!(state.list_channel_webhooks(room.id)[0]
+            .last_used_at
+            .is_some());
+        drop(state);
+
+        let reloaded = AppState::persistent(
+            data_dir.clone(),
+            "012345678901234567890123".to_string(),
+            "admin".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+            storage_key,
+            DEFAULT_MAX_UPLOAD_BYTES,
+            MediaConfig::default(),
+        )
+        .unwrap();
+        assert!(reloaded.list_channel_webhooks(room.id)[0]
+            .last_used_at
+            .is_some());
+        let disabled = reloaded
+            .set_channel_webhook_enabled(room.id, created.webhook.id, false)
+            .unwrap();
+        assert!(!disabled.enabled);
+        assert!(reloaded
+            .post_channel_webhook(
+                &created.token,
+                PostChannelWebhookRequest {
+                    title: None,
+                    text: "should fail".to_string(),
+                },
+            )
+            .is_err());
+        reloaded
+            .delete_channel_webhook(room.id, created.webhook.id)
+            .unwrap();
+        assert!(reloaded.list_channel_webhooks(room.id).is_empty());
+        assert!(reloaded
+            .post_channel_webhook(
+                &created.token,
+                PostChannelWebhookRequest {
+                    title: None,
+                    text: "still fails".to_string(),
+                },
+            )
+            .is_err());
+        drop(reloaded);
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
@@ -7450,11 +10386,17 @@ mod tests {
                     is_direct: Some(false),
                     team_id: Some(team.id),
                     channel_name: Some("General".to_string()),
+                    channel_type: None,
+                    channel_owners: Vec::new(),
+                    posting_policy: None,
                 },
             )
             .expect("team channel");
         assert_eq!(channel.team_id, Some(team.id));
-        assert!(channel.members.iter().any(|member| member.user_sip_uri == "sip:bob@example.com"));
+        assert!(channel
+            .members
+            .iter()
+            .any(|member| member.user_sip_uri == "sip:bob@example.com"));
 
         let meeting = state
             .create_scheduled_meeting(
@@ -7467,6 +10409,7 @@ mod tests {
                     starts_at: Utc::now(),
                     ends_at: Utc::now() + Duration::minutes(30),
                     mode: Some(RoomCallMode::Video),
+                    recurrence: None,
                 },
             )
             .expect("scheduled meeting");
@@ -7490,6 +10433,66 @@ mod tests {
         );
         assert!(policy.legal_hold);
         assert_eq!(state.retention_policies().len(), 1);
+    }
+
+    #[test]
+    fn private_moderated_channels_restrict_membership_and_posting() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-channel-governance-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let team = state.create_team(
+            "sip:owner@example.com",
+            CreateTeamRequest {
+                name: "Launch".to_string(),
+                description: None,
+                members: vec![
+                    "sip:member@example.com".to_string(),
+                    "sip:outsider@example.com".to_string(),
+                ],
+            },
+        );
+        let channel = state
+            .create_team_channel(
+                "sip:owner@example.com",
+                team.id,
+                CreateRoomRequest {
+                    name: "Leadership".to_string(),
+                    description: None,
+                    members: vec!["sip:member@example.com".to_string()],
+                    is_direct: None,
+                    team_id: None,
+                    channel_name: Some("Leadership".to_string()),
+                    channel_type: Some("private".to_string()),
+                    channel_owners: vec!["sip:owner@example.com".to_string()],
+                    posting_policy: Some("owners".to_string()),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(channel.channel_type, "private");
+        assert_eq!(channel.posting_policy, "owners");
+        assert!(channel
+            .members
+            .iter()
+            .any(|member| member.user_sip_uri == "sip:member@example.com"));
+        assert!(!channel
+            .members
+            .iter()
+            .any(|member| member.user_sip_uri == "sip:outsider@example.com"));
+        assert!(state
+            .send_room_message(channel.id, "sip:member@example.com", "hello", None, None)
+            .is_err());
+        assert!(state
+            .send_room_message(
+                channel.id,
+                "sip:owner@example.com",
+                "approved update",
+                None,
+                None
+            )
+            .is_ok());
     }
 
     #[test]
@@ -7526,29 +10529,39 @@ mod tests {
                 is_direct: Some(false),
                 team_id: None,
                 channel_name: None,
+                channel_type: None,
+                channel_owners: Vec::new(),
+                posting_policy: None,
             },
         );
 
-        let msg = state.send_room_message(
-            room.id,
-            "sip:alice@example.com",
-            "Can @Bob Jones check this? @channel",
-            None,
-        ).unwrap();
-        assert!(msg
-            .mentions
-            .iter()
-            .any(|mention| mention.kind == "user" && mention.user_sip_uri.as_deref() == Some("sip:bob@example.com")));
+        let msg = state
+            .send_room_message(
+                room.id,
+                "sip:alice@example.com",
+                "Can @Bob Jones check this? @channel",
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(msg.mentions.iter().any(|mention| mention.kind == "user"
+            && mention.user_sip_uri.as_deref() == Some("sip:bob@example.com")));
         assert!(msg.mentions.iter().any(|mention| mention.kind == "channel"));
         assert_eq!(
             msg.mentioned_user_uris,
-            vec!["sip:alice@example.com".to_string(), "sip:bob@example.com".to_string()]
+            vec![
+                "sip:alice@example.com".to_string(),
+                "sip:bob@example.com".to_string()
+            ]
         );
 
         let edited = state
             .edit_room_message(msg.id, "sip:alice@example.com", "@alice can own this")
             .expect("edited message");
-        assert_eq!(edited.mentioned_user_uris, vec!["sip:alice@example.com".to_string()]);
+        assert_eq!(
+            edited.mentioned_user_uris,
+            vec!["sip:alice@example.com".to_string()]
+        );
     }
 
     #[test]
@@ -7567,6 +10580,9 @@ mod tests {
                 is_direct: Some(false),
                 team_id: None,
                 channel_name: None,
+                channel_type: None,
+                channel_owners: Vec::new(),
+                posting_policy: None,
             },
         );
 
@@ -7574,6 +10590,7 @@ mod tests {
             room.id,
             "sip:member@example.com",
             "@channel please review",
+            None,
             None,
         );
         assert!(blocked.is_err());
@@ -7585,20 +10602,171 @@ mod tests {
                 broad_mentions_enabled: None,
                 broad_mentions_allowed_roles: Some(vec!["admin".to_string(), "member".to_string()]),
                 broad_mentions_per_minute: Some(1),
+                external_access_enabled: None,
+                allowed_external_domains: None,
+                urgent_messages_enabled: None,
+                meeting_recording_enabled: None,
             },
         );
         assert_eq!(updated.broad_mentions_per_minute, 1);
 
         assert!(state
-            .send_room_message(room.id, "sip:member@example.com", "@channel first", None)
+            .send_room_message(
+                room.id,
+                "sip:member@example.com",
+                "@channel first",
+                None,
+                None
+            )
             .is_ok());
         let rate_limited = state.send_room_message(
             room.id,
             "sip:member@example.com",
             "@channel second",
             None,
+            None,
         );
         assert!(rate_limited.is_err());
+    }
+
+    #[test]
+    fn collaboration_policy_controls_external_access_and_urgent_messages() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-collaboration-policy-depth-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let room = state.create_room(
+            "sip:owner@example.com",
+            CreateRoomRequest {
+                name: "Policy".to_string(),
+                description: None,
+                members: vec!["sip:member@example.com".to_string()],
+                is_direct: Some(false),
+                team_id: None,
+                channel_name: None,
+                channel_type: None,
+                channel_owners: Vec::new(),
+                posting_policy: None,
+            },
+        );
+        state.update_collaboration_policy(
+            "admin",
+            UpdateCollaborationPolicyRequest {
+                structured_mentions_enabled: None,
+                broad_mentions_enabled: None,
+                broad_mentions_allowed_roles: None,
+                broad_mentions_per_minute: None,
+                external_access_enabled: Some(true),
+                allowed_external_domains: Some(vec!["partner.example".to_string()]),
+                urgent_messages_enabled: Some(false),
+                meeting_recording_enabled: Some(false),
+            },
+        );
+
+        assert!(state
+            .authorize_external_participants(
+                "sip:owner@example.com",
+                &["sip:guest@blocked.example".to_string()]
+            )
+            .is_err());
+        assert!(state
+            .authorize_external_participants(
+                "sip:owner@example.com",
+                &["sip:guest@partner.example".to_string()]
+            )
+            .is_ok());
+        assert!(state
+            .store_recording(CallRecording {
+                id: Uuid::new_v4(),
+                call_id: Some("policy-call".to_string()),
+                caller_uri: "sip:owner@example.com".to_string(),
+                callee_uri: "sip:member@example.com".to_string(),
+                duration_secs: 90,
+                file_id: None,
+                recorded_by: "sip:owner@example.com".to_string(),
+                created_at: Utc::now(),
+                conference_id: None,
+                transcript_segment_count: 0,
+                legal_hold: false,
+                deleted_at: None,
+                deleted_by: None,
+            })
+            .is_err());
+        assert!(state
+            .send_room_message(
+                room.id,
+                "sip:owner@example.com",
+                "urgent update",
+                None,
+                Some("urgent".to_string()),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn user_call_policy_controls_private_external_forwarding_and_recording() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-user-call-policy-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let mut settings = state.get_user_call_settings("sip:alice@example.com");
+        settings.allow_private_calls = false;
+        settings.allow_external_calls = false;
+        settings.allow_call_forwarding = false;
+        settings.allow_call_recording = false;
+        settings.forward_always = Some("sip:bob@example.com".to_string());
+        settings.dnd_enabled = true;
+        settings.dnd_forward_to = Some("sip:bob@example.com".to_string());
+        state.set_user_call_settings(settings);
+
+        assert!(state
+            .create_call(CreateCallRequest {
+                conference_id: None,
+                caller: "sip:alice@example.com".to_string(),
+                callees: vec!["sip:bob@example.com".to_string()],
+                media: vec![MediaKind::Audio],
+            })
+            .is_err());
+        assert!(state
+            .create_call(CreateCallRequest {
+                conference_id: Some(Uuid::new_v4()),
+                caller: "sip:alice@example.com".to_string(),
+                callees: vec!["sip:bob@example.com".to_string()],
+                media: vec![MediaKind::Audio],
+            })
+            .is_ok());
+        assert!(state
+            .create_call(CreateCallRequest {
+                conference_id: Some(Uuid::new_v4()),
+                caller: "sip:alice@example.com".to_string(),
+                callees: vec!["sip:carrier@external.example".to_string()],
+                media: vec![MediaKind::Audio],
+            })
+            .is_err());
+        assert_eq!(
+            state.resolve_call_forwarding("sip:alice@example.com", "always"),
+            None
+        );
+        assert_eq!(state.check_dnd("sip:alice@example.com"), (true, None));
+        assert!(state
+            .store_recording(CallRecording {
+                id: Uuid::new_v4(),
+                call_id: Some("blocked-recording".to_string()),
+                caller_uri: "sip:alice@example.com".to_string(),
+                callee_uri: "sip:bob@example.com".to_string(),
+                duration_secs: 30,
+                file_id: None,
+                recorded_by: "sip:alice@example.com".to_string(),
+                created_at: Utc::now(),
+                conference_id: None,
+                transcript_segment_count: 0,
+                legal_hold: false,
+                deleted_at: None,
+                deleted_by: None,
+            })
+            .is_err());
     }
 
     #[test]
@@ -7617,13 +10785,16 @@ mod tests {
                 is_direct: Some(false),
                 team_id: None,
                 channel_name: None,
+                channel_type: None,
+                channel_owners: Vec::new(),
+                posting_policy: None,
             },
         );
         let old = state
-            .send_room_message(room.id, "sip:owner@example.com", "old", None)
+            .send_room_message(room.id, "sip:owner@example.com", "old", None, None)
             .unwrap();
         let fresh = state
-            .send_room_message(room.id, "sip:owner@example.com", "fresh", None)
+            .send_room_message(room.id, "sip:owner@example.com", "fresh", None, None)
             .unwrap();
         state
             .set_room_message_created_at_for_test(old.id, Utc::now() - Duration::days(30))
@@ -7646,8 +10817,8 @@ mod tests {
         assert_eq!(preview_hold.skipped_legal_hold_policies, vec![hold.id]);
         assert!(state.room_message(old.id).is_some());
 
-        state.upsert_retention_policy(
-            "admin",
+        let updated_hold = state.upsert_retention_policy(
+            "compliance-admin",
             UpsertRetentionPolicyRequest {
                 id: Some(hold.id),
                 name: "One day".to_string(),
@@ -7658,6 +10829,7 @@ mod tests {
                 export_enabled: Some(true),
             },
         );
+        assert_eq!(updated_hold.created_by, "admin");
         let preview = state.enforce_retention(true);
         assert_eq!(preview.matched_messages, 1);
         assert_eq!(preview.deleted_messages, 0);
@@ -7667,13 +10839,388 @@ mod tests {
         assert_eq!(applied.deleted_messages, 1);
         assert!(state.room_message(old.id).is_none());
         assert!(state.room_message(fresh.id).is_some());
+        assert!(state.delete_retention_policy(hold.id));
+        assert!(state.retention_policies().is_empty());
+    }
+
+    #[test]
+    fn discovery_search_filters_messages_by_keyword_user_room_and_date() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-discovery-search-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let room = state.create_room(
+            "sip:owner@example.com",
+            CreateRoomRequest {
+                name: "Discovery".to_string(),
+                description: None,
+                members: vec!["sip:member@example.com".to_string()],
+                is_direct: Some(false),
+                team_id: None,
+                channel_name: None,
+                channel_type: None,
+                channel_owners: Vec::new(),
+                posting_policy: None,
+            },
+        );
+        let target = state
+            .send_room_message(
+                room.id,
+                "sip:owner@example.com",
+                "quarterly acquisition review",
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .send_room_message(
+                room.id,
+                "sip:member@example.com",
+                "routine operations",
+                None,
+                None,
+            )
+            .unwrap();
+
+        let searched = state.discovery_search(DiscoverySearchQuery {
+            q: Some("acquisition".to_string()),
+            user_uri: Some("owner@example.com".to_string()),
+            room_id: Some(room.id),
+            from: Some(Utc::now() - Duration::hours(1)),
+            to: Some(Utc::now() + Duration::hours(1)),
+            limit: Some(10),
+        });
+        assert_eq!(searched.messages.len(), 1);
+        assert_eq!(searched.messages[0].id, target.id);
+        assert!(searched.files.is_empty());
+
+        let missed = state.discovery_search(DiscoverySearchQuery {
+            q: Some("acquisition".to_string()),
+            user_uri: Some("member@example.com".to_string()),
+            room_id: Some(room.id),
+            from: None,
+            to: None,
+            limit: Some(10),
+        });
+        assert!(missed.messages.is_empty());
+    }
+
+    #[test]
+    fn dlp_blocks_file_upload_content() {
+        let data_dir = std::env::temp_dir().join(format!("pale-file-dlp-{}", Uuid::new_v4()));
+        let token = "012345678901234567890123".to_string();
+        let admin_hash = sha256_hex("admin-password".as_bytes());
+        let storage_key = "dlp-storage-key".to_string();
+        let state = AppState::persistent(
+            data_dir.clone(),
+            token.clone(),
+            "admin".to_string(),
+            admin_hash.clone(),
+            storage_key.clone(),
+            DEFAULT_MAX_UPLOAD_BYTES,
+            MediaConfig::default(),
+        )
+        .unwrap();
+        let policy = state
+            .create_dlp_policy(
+                "admin",
+                CreateDlpPolicyRequest {
+                    name: "Secrets".to_string(),
+                    description: None,
+                    pattern: "SECRET-[0-9]+".to_string(),
+                    action: DlpAction::Block,
+                    enabled: true,
+                },
+            )
+            .unwrap();
+        assert!(state
+            .create_dlp_policy(
+                "admin",
+                CreateDlpPolicyRequest {
+                    name: "Invalid".to_string(),
+                    description: None,
+                    pattern: "(".to_string(),
+                    action: DlpAction::Block,
+                    enabled: true,
+                },
+            )
+            .is_err());
+        let preview = state.preview_content_dlp("admin", "customer SECRET-000");
+        assert!(!preview.allowed);
+        assert_eq!(preview.violations.len(), 1);
+        assert!(state.list_dlp_violations().is_empty());
+        let unicode_preview =
+            state.preview_content_dlp("admin", &format!("{} SECRET-001", "é".repeat(90)));
+        assert_eq!(unicode_preview.violations.len(), 1);
+        assert!(unicode_preview.violations[0]
+            .content_snippet
+            .ends_with("..."));
+
+        let decision = state.file_governance_for_upload(
+            "sip:alice@example.com",
+            "notes.txt",
+            "text/plain",
+            b"customer SECRET-123",
+        );
+
+        assert!(!decision.allowed);
+        assert_eq!(decision.dlp_status, "blocked");
+        assert_eq!(decision.dlp_violation_count, 1);
+        assert_eq!(state.list_dlp_violations().len(), 1);
+        let filtered = state.search_dlp_violations(DlpViolationQuery {
+            policy: Some("secret".to_string()),
+            user_uri: Some("alice@example.com".to_string()),
+            action: Some(DlpAction::Block),
+            limit: Some(10),
+            ..DlpViolationQuery::default()
+        });
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].policy_name, "Secrets");
+
+        let disabled = state
+            .update_dlp_policy(
+                policy.id,
+                UpdateDlpPolicyRequest {
+                    name: Some("Sensitive tokens".to_string()),
+                    description: Some("Blocks internal secret tokens".to_string()),
+                    pattern: None,
+                    action: None,
+                    enabled: Some(false),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert!(state
+            .update_dlp_policy(
+                policy.id,
+                UpdateDlpPolicyRequest {
+                    name: None,
+                    description: None,
+                    pattern: Some("[".to_string()),
+                    action: None,
+                    enabled: None,
+                },
+            )
+            .is_err());
+        assert_eq!(disabled.name, "Sensitive tokens");
+        assert!(!disabled.enabled);
+        let allowed = state.file_governance_for_upload(
+            "sip:alice@example.com",
+            "notes-2.txt",
+            "text/plain",
+            b"customer SECRET-456",
+        );
+        assert!(allowed.allowed);
+        drop(state);
+
+        let reloaded = AppState::persistent(
+            data_dir,
+            token,
+            "admin".to_string(),
+            admin_hash,
+            storage_key,
+            DEFAULT_MAX_UPLOAD_BYTES,
+            MediaConfig::default(),
+        )
+        .unwrap();
+        let policies = reloaded.list_dlp_policies();
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].name, "Sensitive tokens");
+        assert!(!policies[0].enabled);
+        assert_eq!(reloaded.list_dlp_violations().len(), 1);
+    }
+
+    #[test]
+    fn retention_enforcement_covers_files_and_discovery_exports_them() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-file-retention-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let file = FileRecord {
+            id: Uuid::new_v4(),
+            owner: "sip:alice@example.com".to_string(),
+            filename: "old-plan.txt".to_string(),
+            content_type: "text/plain".to_string(),
+            size: 12,
+            sha256: "abc123".to_string(),
+            created_at: Utc::now() - Duration::days(30),
+            dlp_status: "clean".to_string(),
+            dlp_violation_count: 0,
+            legal_hold: false,
+            deleted_at: None,
+            deleted_by: None,
+        };
+        state.put_file_record(file.clone());
+        state.upsert_retention_policy(
+            "admin",
+            UpsertRetentionPolicyRequest {
+                id: None,
+                name: "Files one day".to_string(),
+                scope: "files".to_string(),
+                room_id: None,
+                retain_days: Some(1),
+                legal_hold: Some(false),
+                export_enabled: Some(true),
+            },
+        );
+
+        let preview = state.enforce_retention(true);
+        assert_eq!(preview.policy_results[0].matched_files, 1);
+        assert!(state.file_record(file.id).unwrap().deleted_at.is_none());
+
+        let applied = state.enforce_retention(false);
+        assert_eq!(applied.policy_results[0].deleted_files, 1);
+        assert!(state.file_records().is_empty());
+
+        let export = state.discovery_export(None);
+        assert_eq!(export.files.len(), 1);
+        assert_eq!(export.files[0].id, file.id);
+        assert_eq!(export.files[0].deleted_by.as_deref(), Some("retention"));
+    }
+
+    #[test]
+    fn retention_enforcement_covers_recordings_and_preserves_legal_hold() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-recording-retention-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let conference_id = Uuid::new_v4();
+        state.post_transcript(
+            conference_id,
+            PostTranscriptRequest {
+                speaker_uri: "sip:alice@example.com".to_string(),
+                speaker_name: "Alice".to_string(),
+                text: "We need to preserve this decision.".to_string(),
+                is_final: true,
+            },
+        );
+        let recording = CallRecording {
+            id: Uuid::new_v4(),
+            call_id: Some("call-1".to_string()),
+            caller_uri: "sip:alice@example.com".to_string(),
+            callee_uri: "sip:bob@example.com".to_string(),
+            duration_secs: 600,
+            file_id: None,
+            recorded_by: "sip:alice@example.com".to_string(),
+            created_at: Utc::now() - Duration::days(30),
+            conference_id: Some(conference_id),
+            transcript_segment_count: 0,
+            legal_hold: false,
+            deleted_at: None,
+            deleted_by: None,
+        };
+        state.store_recording(recording.clone()).unwrap();
+        assert_eq!(
+            state.recordings_for_user("sip:alice@example.com")[0].transcript_segment_count,
+            1
+        );
+
+        state.upsert_retention_policy(
+            "admin",
+            UpsertRetentionPolicyRequest {
+                id: None,
+                name: "Recording hold".to_string(),
+                scope: "recordings".to_string(),
+                room_id: None,
+                retain_days: Some(1),
+                legal_hold: Some(true),
+                export_enabled: Some(true),
+            },
+        );
+        let held = state
+            .delete_recording(recording.id, "sip:admin@example.com")
+            .unwrap();
+        assert!(held.deleted_at.is_some());
+        assert_eq!(held.deleted_by.as_deref(), Some("sip:admin@example.com"));
+        assert!(state
+            .recordings_for_user("sip:alice@example.com")
+            .is_empty());
+        assert_eq!(state.discovery_export(None).recordings.len(), 1);
+
+        let preview = state.enforce_retention(true);
+        assert_eq!(preview.policy_results[0].matched_recordings, 0);
+        assert_eq!(preview.skipped_legal_hold_policies.len(), 1);
+    }
+
+    #[test]
+    fn scheduled_meetings_can_be_updated_cancelled_and_exported_as_ics() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-meeting-lifecycle-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let starts_at = Utc::now() + Duration::days(1);
+        let meeting = state
+            .create_scheduled_meeting(
+                "sip:organizer@example.com",
+                CreateScheduledMeetingRequest {
+                    title: "Planning".to_string(),
+                    description: None,
+                    room_id: None,
+                    participants: vec!["sip:alice@example.com".to_string()],
+                    starts_at,
+                    ends_at: starts_at + Duration::hours(1),
+                    mode: Some(RoomCallMode::Video),
+                    recurrence: Some(MeetingRecurrence {
+                        frequency: MeetingRecurrenceFrequency::Weekly,
+                        interval: 1,
+                        until: Some(starts_at + Duration::days(28)),
+                    }),
+                },
+            )
+            .expect("meeting");
+
+        let updated = state
+            .update_scheduled_meeting(
+                meeting.id,
+                "sip:organizer@example.com",
+                UpdateScheduledMeetingRequest {
+                    title: Some("Planning Updated".to_string()),
+                    description: Some("Agenda".to_string()),
+                    participants: Some(vec!["sip:bob@example.com".to_string()]),
+                    starts_at: None,
+                    ends_at: None,
+                    recurrence: None,
+                },
+            )
+            .expect("updated meeting");
+        assert_eq!(updated.title, "Planning Updated");
+        assert!(updated
+            .participants
+            .contains(&"sip:bob@example.com".to_string()));
+
+        let ics = state
+            .meeting_ics(meeting.id, "sip:bob@example.com")
+            .expect("ics");
+        assert!(ics.contains("BEGIN:VCALENDAR"));
+        assert!(ics.contains("RRULE:FREQ=WEEKLY;INTERVAL=1"));
+
+        let cancelled = state
+            .cancel_scheduled_meeting(meeting.id, "sip:organizer@example.com")
+            .expect("cancelled meeting");
+        assert_eq!(cancelled.status, MeetingStatus::Cancelled);
+        assert!(state
+            .start_scheduled_meeting(meeting.id, "sip:bob@example.com")
+            .is_none());
     }
 
     #[test]
     fn nats_helpers_normalize_subjects_and_addresses() {
-        assert_eq!(nats_subject_token("room.message/created"), "room_message_created");
-        assert_eq!(nats_tcp_address("nats://localhost").unwrap(), "localhost:4222");
-        assert_eq!(nats_tcp_address("nats://localhost:4223").unwrap(), "localhost:4223");
+        assert_eq!(
+            nats_subject_token("room.message/created"),
+            "room_message_created"
+        );
+        assert_eq!(
+            nats_tcp_address("nats://localhost").unwrap(),
+            "localhost:4222"
+        );
+        assert_eq!(
+            nats_tcp_address("nats://localhost:4223").unwrap(),
+            "localhost:4223"
+        );
     }
 
     #[test]

@@ -12,6 +12,10 @@ export interface AdminUser {
   sip_uri: string;
   matrix_user_id?: string | null;
   created_at: string;
+  active: boolean;
+  deactivated_at?: string | null;
+  deactivated_by?: string | null;
+  role?: string;
 }
 
 export interface AdminSipAccount {
@@ -282,6 +286,14 @@ export function deleteAdminUser(baseUrl: string, token: string, id: string) {
   return request<AdminUser>(baseUrl, `/v1/users/${id}`, {
     method: "DELETE",
     headers: authHeaders(token),
+  });
+}
+
+export function setAdminUserActive(baseUrl: string, token: string, id: string, active: boolean) {
+  return request<AdminUser>(baseUrl, `/v1/users/${id}/active`, {
+    method: "PUT",
+    headers: authHeaders(token),
+    body: JSON.stringify({ active }),
   });
 }
 
