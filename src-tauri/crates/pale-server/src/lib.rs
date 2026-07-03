@@ -6701,6 +6701,18 @@ impl AppState {
             .map(|room| self.resolve_message_mentions(room, body))
             .unwrap_or_default();
         if let Some(room) = room.as_ref() {
+            // Enforce information barriers
+            for member in &room.members {
+                if member.user_sip_uri != sender_uri {
+                    let result = self.check_barrier(sender_uri, &member.user_sip_uri, false);
+                    if result.blocked {
+                        return Err(format!(
+                            "communication blocked by information barrier: {}",
+                            result.barrier_name.unwrap_or_default()
+                        ));
+                    }
+                }
+            }
             if room.posting_policy == "owners"
                 && !room.channel_owners.iter().any(|owner| owner == sender_uri)
                 && !room.members.iter().any(|member| {
@@ -6769,6 +6781,18 @@ impl AppState {
             .map(|room| self.resolve_message_mentions(room, body))
             .unwrap_or_default();
         if let Some(room) = room.as_ref() {
+            // Enforce information barriers
+            for member in &room.members {
+                if member.user_sip_uri != sender_uri {
+                    let result = self.check_barrier(sender_uri, &member.user_sip_uri, false);
+                    if result.blocked {
+                        return Err(format!(
+                            "communication blocked by information barrier: {}",
+                            result.barrier_name.unwrap_or_default()
+                        ));
+                    }
+                }
+            }
             if room.posting_policy == "owners"
                 && !room.channel_owners.iter().any(|owner| owner == sender_uri)
                 && !room.members.iter().any(|member| {

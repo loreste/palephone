@@ -5654,6 +5654,11 @@ fn authenticated_principal_role(
         .principal_role_for_bearer(bearer_token(headers))
         .ok_or(ApiError::Unauthorized)?;
 
+    // Reject mfa_pending tokens — user must complete TOTP challenge first
+    if role == "mfa_pending" {
+        return Err(ApiError::Unauthorized);
+    }
+
     // Rate limit per principal
     if !state.check_rate_limit(&principal) {
         return Err(ApiError::TooManyRequests);
