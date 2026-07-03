@@ -285,6 +285,39 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
         } catch { /* ignore */ }
       });
 
+      es.addEventListener("spotlight_changed", (e) => {
+        try {
+          const payload = JSON.parse(e.data);
+          const conferenceId = payload.conference_id;
+          if (!conferenceId) return;
+          const conf = useMeetingStore.getState().conferences[conferenceId];
+          if (conf) {
+            useMeetingStore.getState().setConference({
+              ...conf,
+              spotlight_participant_id: payload.participant_id ?? null,
+            });
+          }
+        } catch { /* ignore */ }
+      });
+
+      es.addEventListener("meeting_reaction", (e) => {
+        try {
+          const payload = JSON.parse(e.data);
+          if (payload.reaction) {
+            useMeetingStore.getState().addReaction(payload.reaction);
+          }
+        } catch { /* ignore */ }
+      });
+
+      es.addEventListener("green_room_updated", (e) => {
+        try {
+          const state = JSON.parse(e.data);
+          if (state.conference_id) {
+            useMeetingStore.getState().setGreenRoom(state);
+          }
+        } catch { /* ignore */ }
+      });
+
       es.addEventListener("reaction", (e) => {
         try {
           const payload = JSON.parse(e.data);

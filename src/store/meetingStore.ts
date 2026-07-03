@@ -35,6 +35,48 @@ export interface ConferenceSummary {
   locked?: boolean;
   active: boolean;
   created_at: string;
+  spotlight_participant_id?: string | null;
+  green_room_enabled?: boolean;
+  chat_room_id?: string | null;
+}
+
+export interface MeetingTemplate {
+  id: string;
+  name: string;
+  description: string;
+  default_lobby: boolean;
+  default_mute_on_join: boolean;
+  default_allow_reactions: boolean;
+  default_recording: boolean;
+  max_participants: number | null;
+  allowed_roles: string[];
+  created_at: string;
+  created_by: string;
+}
+
+export interface MeetingReaction {
+  user_id: string;
+  user_name: string;
+  emoji: string;
+  timestamp: string;
+}
+
+export interface GreenRoomParticipant {
+  user_id: string;
+  sip_uri: string;
+  ready: boolean;
+  joined_at: string;
+}
+
+export interface GreenRoomState {
+  conference_id: string;
+  enabled: boolean;
+  participants: GreenRoomParticipant[];
+}
+
+export interface OutOfOfficeSettings {
+  message: string | null;
+  until: string | null;
 }
 
 export interface ConferenceAttendanceRecord {
@@ -174,6 +216,18 @@ interface MeetingStoreState {
   // Active conference ID for the current meeting
   activeConferenceId: string | null;
   setActiveConferenceId: (id: string | null) => void;
+
+  // Meeting reactions (ephemeral floating reactions)
+  reactions: MeetingReaction[];
+  addReaction: (reaction: MeetingReaction) => void;
+
+  // Green room
+  greenRoom: GreenRoomState | null;
+  setGreenRoom: (state: GreenRoomState) => void;
+
+  // Meeting templates
+  templates: MeetingTemplate[];
+  setTemplates: (templates: MeetingTemplate[]) => void;
 }
 
 export const useMeetingStore = create<MeetingStoreState>((set) => ({
@@ -241,4 +295,16 @@ export const useMeetingStore = create<MeetingStoreState>((set) => ({
 
   activeConferenceId: null,
   setActiveConferenceId: (activeConferenceId) => set({ activeConferenceId }),
+
+  reactions: [],
+  addReaction: (reaction) =>
+    set((state) => ({
+      reactions: [...state.reactions.slice(-50), reaction],
+    })),
+
+  greenRoom: null,
+  setGreenRoom: (greenRoom) => set({ greenRoom }),
+
+  templates: [],
+  setTemplates: (templates) => set({ templates }),
 }));

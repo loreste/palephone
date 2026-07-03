@@ -11,9 +11,13 @@ import {
   ChevronUp,
   Download,
   Lock,
+  MessageCircle,
   Mic,
   MicOff,
   Shield,
+  Smile,
+  Sparkles,
+  Star,
   Unlock,
   UserMinus,
   Users,
@@ -29,6 +33,7 @@ import {
   type ConferenceSummary,
   type ConferenceParticipant,
   type ConferenceAttendanceRecord,
+  type GreenRoomState,
 } from "@/store/meetingStore";
 import { useServerStore } from "@/store/serverStore";
 import { paleServerApi } from "@/lib/tauri";
@@ -36,7 +41,7 @@ import { toast } from "@/components/ui/Toast";
 
 function err(title: string) { toast({ type: "error", title }); }
 
-type MeetingTab = "people" | "lobby" | "hands" | "polls" | "qa" | "breakout" | "captions";
+type MeetingTab = "people" | "lobby" | "hands" | "polls" | "qa" | "breakout" | "captions" | "reactions" | "chat" | "greenroom";
 
 export function MeetingPanel({ conferenceId }: { conferenceId: string }) {
   const [tab, setTab] = useState<MeetingTab>("lobby");
@@ -47,6 +52,9 @@ export function MeetingPanel({ conferenceId }: { conferenceId: string }) {
     { id: "people", icon: Users, label: "People" },
     { id: "lobby", icon: DoorOpen, label: "Lobby" },
     { id: "hands", icon: Hand, label: "Hands" },
+    { id: "reactions", icon: Smile, label: "React" },
+    { id: "chat", icon: MessageCircle, label: "Chat" },
+    { id: "greenroom", icon: Sparkles, label: "Green" },
     { id: "polls", icon: BarChart3, label: "Polls" },
     { id: "qa", icon: MessageCircleQuestion, label: "Q&A" },
     { id: "breakout", icon: LayoutGrid, label: "Rooms" },
@@ -74,6 +82,9 @@ export function MeetingPanel({ conferenceId }: { conferenceId: string }) {
         {tab === "people" && <ParticipantsPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "lobby" && <LobbyPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "hands" && <HandsPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
+        {tab === "reactions" && <ReactionsPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
+        {tab === "chat" && <MeetingChatPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
+        {tab === "greenroom" && <GreenRoomPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "polls" && <PollsPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "qa" && <QaPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "breakout" && <BreakoutPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
@@ -147,6 +158,33 @@ function ParticipantsPanel({ conferenceId, baseUrl, token }: { conferenceId: str
     URL.revokeObjectURL(url);
   };
 
+  const downloadAttendanceCsv = async () => {
+    if (!baseUrl || !token) return;
+    try {
+      const csv = await paleServerApi<string>(baseUrl, token, `/v1/conferences/${conferenceId}/attendance/export?format=csv`);
+      const blob = new Blob([csv], { type: "text/csv" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `attendance-${conferenceId}-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch { err("Failed to export CSV"); }
+  };
+
+  const setSpotlight = async (participantId: string | null) => {
+    if (!baseUrl || !token) return;
+    try {
+      const next = await paleServerApi<ConferenceSummary>(
+        baseUrl,
+        token,
+        `/v1/conferences/${conferenceId}/spotlight`,
+        { method: "POST", body: { participant_id: participantId } }
+      );
+      setConference(next);
+    } catch { err("Failed to set spotlight"); }
+  };
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
@@ -192,7 +230,7 @@ function ParticipantsPanel({ conferenceId, baseUrl, token }: { conferenceId: str
                   {participant.muted ? <MicOff size={15} /> : <Mic size={15} />}
                 </button>
               </div>
-              <div className="grid grid-cols-[1fr_auto] gap-2">
+              <div className="grid grid-cols-[1fr_auto_auto] gap-2">
                 <select
                   value={participant.role}
                   onChange={(event) => updateParticipant(participant, { role: event.target.value })}
@@ -202,6 +240,20 @@ function ParticipantsPanel({ conferenceId, baseUrl, token }: { conferenceId: str
                   <option value="moderator">Moderator</option>
                   <option value="host">Host</option>
                 </select>
+                <button
+                  onClick={() => setSpotlight(
+                    conference?.spotlight_participant_id === participant.user_id ? null : participant.user_id
+                  )}
+                  className={cn(
+                    "h-8 px-2 rounded-md text-xs inline-flex items-center gap-1",
+                    conference?.spotlight_participant_id === participant.user_id
+                      ? "bg-yellow-500/15 text-yellow-600"
+                      : "bg-hover text-secondary hover:text-primary"
+                  )}
+                  title={conference?.spotlight_participant_id === participant.user_id ? "Remove spotlight" : "Spotlight"}
+                >
+                  <Star size={14} />
+                </button>
                 <button
                   onClick={() => updateParticipant(participant, { removed: true, removal_reason: "removed_by_moderator" })}
                   className="h-8 px-2 rounded-md text-xs text-destructive hover:bg-destructive/10 inline-flex items-center gap-1"
@@ -233,14 +285,24 @@ function ParticipantsPanel({ conferenceId, baseUrl, token }: { conferenceId: str
       <div className="pt-2 border-t border-border-subtle space-y-2">
         <div className="flex items-center justify-between">
           <span className="text-sm font-medium">Attendance ({attendance.length})</span>
-          <button
-            onClick={downloadAttendance}
-            disabled={attendance.length === 0}
-            className="text-xs text-accent hover:underline disabled:text-tertiary disabled:no-underline"
-          >
-            <Download size={12} className="inline mr-1" />
-            JSON
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={downloadAttendanceCsv}
+              disabled={attendance.length === 0}
+              className="text-xs text-accent hover:underline disabled:text-tertiary disabled:no-underline"
+            >
+              <Download size={12} className="inline mr-1" />
+              CSV
+            </button>
+            <button
+              onClick={downloadAttendance}
+              disabled={attendance.length === 0}
+              className="text-xs text-accent hover:underline disabled:text-tertiary disabled:no-underline"
+            >
+              <Download size={12} className="inline mr-1" />
+              JSON
+            </button>
+          </div>
         </div>
         {attendance.length === 0 ? (
           <p className="text-xs text-secondary text-center py-2">No attendance records</p>
@@ -793,6 +855,244 @@ function BreakoutPanel({ conferenceId, baseUrl, token }: { conferenceId: string;
           )}
         </div>
       ))}
+    </div>
+  );
+}
+
+// ── Reactions Panel ───────────────────────────────────────────────
+
+const REACTION_EMOJIS = [
+  { emoji: "\u{1F44D}", label: "Thumbs up" },
+  { emoji: "\u{1F44F}", label: "Clap" },
+  { emoji: "\u{2764}\u{FE0F}", label: "Heart" },
+  { emoji: "\u{1F602}", label: "Laugh" },
+  { emoji: "\u{1F914}", label: "Thinking" },
+  { emoji: "\u{1F389}", label: "Party" },
+  { emoji: "\u{1F525}", label: "Fire" },
+  { emoji: "\u{1F680}", label: "Rocket" },
+];
+
+function ReactionsPanel({ conferenceId, baseUrl, token }: { conferenceId: string; baseUrl: string | null; token: string | null }) {
+  const reactions = useMeetingStore((s) => s.reactions);
+  const conferenceReactions = reactions.filter(
+    (_r) => true // All reactions visible since SSE scopes to conference
+  );
+
+  const sendReaction = async (emoji: string) => {
+    if (!baseUrl || !token) return;
+    try {
+      await paleServerApi(baseUrl, token, `/v1/conferences/${conferenceId}/reactions`, {
+        method: "POST",
+        body: { emoji },
+      });
+    } catch { err("Failed to send reaction"); }
+  };
+
+  return (
+    <div className="space-y-3">
+      <span className="text-sm font-medium">Reactions</span>
+      <div className="grid grid-cols-4 gap-2">
+        {REACTION_EMOJIS.map(({ emoji, label }) => (
+          <button
+            key={emoji}
+            onClick={() => sendReaction(emoji)}
+            className="h-12 flex items-center justify-center rounded-lg bg-hover hover:bg-elevated text-2xl transition-transform hover:scale-110"
+            title={label}
+          >
+            {emoji}
+          </button>
+        ))}
+      </div>
+      {conferenceReactions.length > 0 && (
+        <div className="pt-2 border-t border-border-subtle space-y-1">
+          <span className="text-xs text-secondary">Recent reactions</span>
+          <div className="flex flex-wrap gap-1">
+            {conferenceReactions.slice(-12).reverse().map((r, i) => (
+              <div
+                key={`${r.timestamp}-${i}`}
+                className="inline-flex items-center gap-1 px-2 py-1 bg-hover rounded-full text-xs animate-bounce"
+                style={{ animationDuration: "0.6s", animationIterationCount: 1 }}
+              >
+                <span className="text-base">{r.emoji}</span>
+                <span className="text-secondary truncate max-w-[60px]">{r.user_name}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Meeting Chat Panel ───────────────────────────────────────────
+
+function MeetingChatPanel({ conferenceId, baseUrl, token }: { conferenceId: string; baseUrl: string | null; token: string | null }) {
+  const [chatRoomId, setChatRoomId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Array<{ id: string; sender_uri: string; body: string; created_at: string }>>([]);
+  const [text, setText] = useState("");
+
+  const loadChatRoom = useCallback(async () => {
+    if (!baseUrl || !token) return;
+    try {
+      const data = await paleServerApi<{ chat_room_id: string }>(
+        baseUrl, token, `/v1/conferences/${conferenceId}/chat-room`
+      );
+      setChatRoomId(data.chat_room_id);
+    } catch { /* ignore */ }
+  }, [baseUrl, token, conferenceId]);
+
+  const loadMessages = useCallback(async () => {
+    if (!baseUrl || !token || !chatRoomId) return;
+    try {
+      const msgs = await paleServerApi<Array<{ id: string; sender_uri: string; body: string; created_at: string }>>(
+        baseUrl, token, `/v1/rooms/${chatRoomId}/messages`
+      );
+      setMessages(msgs);
+    } catch { /* ignore */ }
+  }, [baseUrl, token, chatRoomId]);
+
+  useEffect(() => { loadChatRoom(); }, [loadChatRoom]);
+  useEffect(() => { loadMessages(); const iv = setInterval(loadMessages, 5000); return () => clearInterval(iv); }, [loadMessages]);
+
+  const send = async () => {
+    if (!baseUrl || !token || !chatRoomId || !text.trim()) return;
+    try {
+      await paleServerApi(baseUrl, token, `/v1/rooms/${chatRoomId}/messages`, {
+        method: "POST",
+        body: { body: text.trim() },
+      });
+      setText("");
+      loadMessages();
+    } catch { err("Failed to send"); }
+  };
+
+  return (
+    <div className="flex flex-col h-full space-y-2">
+      <span className="text-sm font-medium">Meeting Chat</span>
+      {!chatRoomId ? (
+        <p className="text-xs text-secondary text-center py-4">Loading chat room...</p>
+      ) : (
+        <>
+          <div className="flex-1 overflow-y-auto space-y-1 max-h-[400px]">
+            {messages.length === 0 ? (
+              <p className="text-xs text-secondary text-center py-4">No messages yet</p>
+            ) : (
+              messages.map((msg) => (
+                <div key={msg.id} className="rounded bg-hover px-2 py-1">
+                  <div className="text-[11px] text-accent">{msg.sender_uri.replace(/^sip:/, "")}</div>
+                  <div className="text-xs">{msg.body}</div>
+                </div>
+              ))
+            )}
+          </div>
+          <div className="flex gap-2">
+            <input
+              className="flex-1 text-sm rounded border border-border-subtle bg-input px-2 py-1.5"
+              placeholder="Type a message..."
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && send()}
+            />
+            <button onClick={send} className="px-3 py-1.5 bg-accent text-white rounded text-sm">
+              Send
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Green Room Panel ─────────────────────────────────────────────
+
+function GreenRoomPanel({ conferenceId, baseUrl, token }: { conferenceId: string; baseUrl: string | null; token: string | null }) {
+  const greenRoom = useMeetingStore((s) => s.greenRoom);
+  const setGreenRoom = useMeetingStore((s) => s.setGreenRoom);
+  const conference = useMeetingStore((s) => s.conferences[conferenceId]);
+
+  const load = useCallback(async () => {
+    if (!baseUrl || !token) return;
+    try {
+      const data = await paleServerApi<GreenRoomState>(baseUrl, token, `/v1/conferences/${conferenceId}/green-room`);
+      setGreenRoom(data);
+    } catch { /* ignore */ }
+  }, [baseUrl, token, conferenceId, setGreenRoom]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const toggleEnabled = async () => {
+    if (!baseUrl || !token) return;
+    try {
+      await paleServerApi(baseUrl, token, `/v1/conferences/${conferenceId}/green-room`, {
+        method: "PUT",
+        body: { enabled: !conference?.green_room_enabled },
+      });
+      load();
+    } catch { err("Failed to update green room"); }
+  };
+
+  const markReady = async (userId: string) => {
+    if (!baseUrl || !token) return;
+    try {
+      const data = await paleServerApi<GreenRoomState>(baseUrl, token, `/v1/conferences/${conferenceId}/green-room/ready`, {
+        method: "POST",
+        body: { user_id: userId },
+      });
+      setGreenRoom(data);
+    } catch { err("Failed"); }
+  };
+
+  const participants = greenRoom?.participants ?? [];
+  const readyCount = participants.filter((p) => p.ready).length;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium">Green Room</span>
+        <button
+          onClick={toggleEnabled}
+          className={cn(
+            "text-xs px-2 py-1 rounded",
+            conference?.green_room_enabled ? "bg-accent text-white" : "bg-hover text-secondary"
+          )}
+        >
+          {conference?.green_room_enabled ? "Enabled" : "Disabled"}
+        </button>
+      </div>
+      {conference?.green_room_enabled && (
+        <>
+          <div className="text-xs text-secondary">
+            {readyCount}/{participants.length} presenters ready
+          </div>
+          {participants.length === 0 ? (
+            <p className="text-xs text-secondary text-center py-4">No presenters in green room</p>
+          ) : (
+            <div className="space-y-1">
+              {participants.map((p) => (
+                <div key={p.user_id} className="flex items-center justify-between p-2 rounded bg-hover">
+                  <div>
+                    <span className="text-sm truncate">{p.sip_uri.replace(/^sip:/, "")}</span>
+                    <span className={cn(
+                      "ml-2 text-[10px] px-1.5 py-0.5 rounded",
+                      p.ready ? "bg-green-500/20 text-green-500" : "bg-yellow-500/20 text-yellow-500"
+                    )}>
+                      {p.ready ? "Ready" : "Not ready"}
+                    </span>
+                  </div>
+                  {!p.ready && (
+                    <button
+                      onClick={() => markReady(p.user_id)}
+                      className="text-xs text-accent hover:underline"
+                    >
+                      Mark Ready
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

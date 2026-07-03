@@ -1,19 +1,19 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { User, Volume2, Globe, Info, Server, Bell, Phone, LogOut, Sun, Moon, Palette, Shield, Monitor, Smartphone, Laptop, Trash2 } from "lucide-react";
+import { User, Volume2, Globe, Info, Server, Bell, Phone, LogOut, Sun, Moon, Palette, Shield, Monitor, Smartphone, Laptop, Trash2, Clock } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useAccountStore } from "@/store/accountStore";
 import { useServerStore } from "@/store/serverStore";
 import { useUiStore } from "@/store/uiStore";
 import { AudioSettings } from "./AudioSettings";
 import { NetworkSettings } from "./NetworkSettings";
-import { registerAccount, storeSipPassword, getConfig, saveSettings } from "@/lib/tauri";
+import { registerAccount, storeSipPassword, getConfig, saveSettings, paleServerApi } from "@/lib/tauri";
 import { adminLogin, adminLogout, adminBaseUrl, getMfaStatus, setupMfa, verifyMfa, disableMfa, listSessions, revokeSession, revokeAllSessions } from "@/lib/adminApi";
 import type { MfaSetupResponse, SessionInfo } from "@/lib/adminApi";
 import { disconnectServer, signOut } from "@/lib/session";
 import { toast } from "@/components/ui/Toast";
 import type { SipAccount } from "@/types";
 
-type SettingsTab = "account" | "audio" | "network" | "server" | "calls" | "notifications" | "security" | "appearance" | "about";
+type SettingsTab = "account" | "audio" | "network" | "server" | "calls" | "notifications" | "security" | "appearance" | "ooo" | "about";
 
 const settingsTabs: { id: SettingsTab; label: string; icon: typeof User }[] = [
   { id: "account", label: "Account", icon: User },
@@ -24,6 +24,7 @@ const settingsTabs: { id: SettingsTab; label: string; icon: typeof User }[] = [
   { id: "security", label: "Security", icon: Shield },
   { id: "notifications", label: "Notifications", icon: Bell },
   { id: "appearance", label: "Appearance", icon: Palette },
+  { id: "ooo", label: "Out of Office", icon: Clock },
   { id: "about", label: "About", icon: Info },
 ];
 
@@ -67,6 +68,7 @@ export function SettingsView() {
         {activeTab === "security" && <SecuritySettingsPanel />}
         {activeTab === "notifications" && <NotificationSettingsPanel />}
         {activeTab === "appearance" && <AppearancePanel />}
+        {activeTab === "ooo" && <OutOfOfficePanel />}
         {activeTab === "about" && <AboutPanel />}
       </div>
 
@@ -1102,6 +1104,141 @@ function SectionHeader({ title }: { title: string }) {
     <h3 className="text-xs font-semibold text-tertiary uppercase tracking-wider">
       {title}
     </h3>
+  );
+}
+
+// ── Out of Office Panel ──────────────────────────────────────────
+
+function OutOfOfficePanel() {
+  const baseUrl = useServerStore((s) => s.baseUrl);
+  const token = useServerStore((s) => s.token);
+  const [message, setMessage] = useState("");
+  const [until, setUntil] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!baseUrl || !token) return;
+    try {
+      const data = await paleServerApi<{ message: string | null; until: string | null }>(
+        baseUrl, token, "/v1/users/out-of-office"
+      );
+      setMessage(data.message ?? "");
+      setUntil(data.until ? data.until.slice(0, 16) : "");
+    } catch { /* ignore */ }
+    setLoading(false);
+  }, [baseUrl, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const save = async () => {
+    if (!baseUrl || !token) return;
+    setSaving(true);
+    try {
+      await paleServerApi(baseUrl, token, "/v1/users/out-of-office", {
+        method: "PUT",
+        body: {
+          message: message.trim() || null,
+          until: until ? new Date(until).toISOString() : null,
+        },
+      });
+      toast({ type: "success", title: "Out of office settings saved" });
+    } catch {
+      toast({ type: "error", title: "Failed to save out of office settings" });
+    }
+    setSaving(false);
+  };
+
+  const clear = async () => {
+    if (!baseUrl || !token) return;
+    setSaving(true);
+    try {
+      await paleServerApi(baseUrl, token, "/v1/users/out-of-office", {
+        method: "PUT",
+        body: { message: null, until: null },
+      });
+      setMessage("");
+      setUntil("");
+      toast({ type: "success", title: "Out of office cleared" });
+    } catch {
+      toast({ type: "error", title: "Failed to clear out of office" });
+    }
+    setSaving(false);
+  };
+
+  if (loading) return <p className="text-sm text-secondary">Loading...</p>;
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-sm font-semibold">Out of Office</h2>
+      <p className="text-xs text-secondary">
+        When enabled, an auto-reply will be sent to anyone who messages you.
+      </p>
+      <div className="space-y-3">
+        <div>
+          <label className="text-xs font-medium text-secondary mb-1 block">Auto-reply message</label>
+          <textarea
+            className={cn(
+              "w-full bg-surface border border-border-subtle rounded-md",
+              "px-3 py-2 text-sm text-primary min-h-[80px]",
+              "placeholder:text-tertiary",
+              "focus:outline-none focus:border-border-focus focus:ring-1 focus:ring-accent/30"
+            )}
+            placeholder="I'm currently out of the office..."
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+          />
+        </div>
+        <div>
+          <label className="text-xs font-medium text-secondary mb-1 block">Return date/time (optional)</label>
+          <input
+            type="datetime-local"
+            className={cn(
+              "w-full bg-surface border border-border-subtle rounded-md",
+              "px-3 py-2 text-sm text-primary",
+              "focus:outline-none focus:border-border-focus focus:ring-1 focus:ring-accent/30"
+            )}
+            value={until}
+            onChange={(e) => setUntil(e.target.value)}
+          />
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={save}
+            disabled={saving}
+            className={cn(
+              "flex-1 px-4 py-2 rounded-md text-sm font-medium",
+              "bg-accent text-white hover:bg-accent/90 transition-colors",
+              "disabled:opacity-50"
+            )}
+          >
+            {saving ? "Saving..." : "Save"}
+          </button>
+          <button
+            onClick={clear}
+            disabled={saving}
+            className={cn(
+              "px-4 py-2 rounded-md text-sm font-medium",
+              "bg-hover text-secondary hover:text-primary transition-colors",
+              "disabled:opacity-50"
+            )}
+          >
+            Clear
+          </button>
+        </div>
+        {message && (
+          <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-md">
+            <div className="text-xs font-medium text-amber-600 mb-1">Out of office is active</div>
+            <div className="text-xs text-amber-700">{message}</div>
+            {until && (
+              <div className="text-[10px] text-amber-600 mt-1">
+                Until: {new Date(until).toLocaleString()}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
