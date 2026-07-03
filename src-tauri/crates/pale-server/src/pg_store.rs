@@ -87,6 +87,7 @@ impl PgStore {
             include_str!("../migrations/021_message_priority_saved.sql"),
             include_str!("../migrations/022_identity_lifecycle.sql"),
             include_str!("../migrations/023_call_policy.sql"),
+            include_str!("../migrations/024_chat_enterprise_parity.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {
@@ -1139,10 +1140,10 @@ impl PgStore {
         let mentions = serde_json::to_value(&msg.mentions)?;
         let mentioned_user_uris = serde_json::to_value(&msg.mentioned_user_uris)?;
         client.execute(
-            "INSERT INTO room_messages (id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned, mentions, mentioned_user_uris, priority, saved_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-             ON CONFLICT (id) DO UPDATE SET body = $4, edited_at = $8, pinned = $9, mentions = $10, mentioned_user_uris = $11, priority = $12, saved_by = $13",
-            &[&msg.id, &msg.room_id, &msg.sender_uri, &msg.body, &msg.content_type, &msg.created_at, &msg.reply_to, &msg.edited_at, &msg.pinned, &Json(mentions), &Json(mentioned_user_uris), &msg.priority, &msg.saved_by],
+            "INSERT INTO room_messages (id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned, mentions, mentioned_user_uris, priority, saved_by, scheduled_at, delivered, delivery_status)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+             ON CONFLICT (id) DO UPDATE SET body = $4, edited_at = $8, pinned = $9, mentions = $10, mentioned_user_uris = $11, priority = $12, saved_by = $13, scheduled_at = $14, delivered = $15, delivery_status = $16",
+            &[&msg.id, &msg.room_id, &msg.sender_uri, &msg.body, &msg.content_type, &msg.created_at, &msg.reply_to, &msg.edited_at, &msg.pinned, &Json(mentions), &Json(mentioned_user_uris), &msg.priority, &msg.saved_by, &msg.scheduled_at, &msg.delivered, &msg.delivery_status],
         ).await?;
         Ok(())
     }
@@ -1150,7 +1151,7 @@ impl PgStore {
     pub async fn load_room_messages(&self) -> Result<Vec<RoomMessage>, PgError> {
         let client = self.pool.get().await?;
         let rows = client.query(
-            "SELECT id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned, mentions, mentioned_user_uris, priority, saved_by FROM room_messages ORDER BY created_at",
+            "SELECT id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned, mentions, mentioned_user_uris, priority, saved_by, scheduled_at, delivered, delivery_status FROM room_messages ORDER BY created_at",
             &[],
         ).await?;
         Ok(rows
@@ -1177,6 +1178,11 @@ impl PgStore {
                     .try_get("priority")
                     .unwrap_or_else(|_| "normal".to_string()),
                 saved_by: r.try_get("saved_by").unwrap_or_default(),
+                scheduled_at: r.try_get("scheduled_at").ok().flatten(),
+                delivered: r.try_get("delivered").unwrap_or(true),
+                delivery_status: r
+                    .try_get("delivery_status")
+                    .unwrap_or_else(|_| "sent".to_string()),
             })
             .collect())
     }
@@ -1399,5 +1405,75 @@ impl PgStore {
             &[&id, &email, &title, &department, &phone_number],
         ).await?;
         Ok(())
+    }
+
+    // ─── Tags ───
+
+    pub async fn upsert_tag(&self, tag: &crate::Tag) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO tags (id, team_id, name, members, created_at)
+             VALUES ($1,$2,$3,$4,$5)
+             ON CONFLICT (id) DO UPDATE SET name=$3, members=$4",
+            &[&tag.id, &tag.team_id, &tag.name, &tag.members, &tag.created_at],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn delete_tag(&self, id: Uuid) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute("DELETE FROM tags WHERE id = $1", &[&id]).await?;
+        Ok(())
+    }
+
+    pub async fn load_tags(&self) -> Result<Vec<crate::Tag>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT id, team_id, name, members, created_at FROM tags ORDER BY created_at",
+            &[],
+        ).await?;
+        Ok(rows
+            .iter()
+            .map(|r| crate::Tag {
+                id: r.get("id"),
+                team_id: r.get("team_id"),
+                name: r.get("name"),
+                members: r.try_get("members").unwrap_or_default(),
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    // ─── Notification Preferences ───
+
+    pub async fn upsert_notification_preference(
+        &self,
+        pref: &crate::NotificationPreference,
+    ) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO notification_preferences (room_id, user_uri, notification_level, updated_at)
+             VALUES ($1,$2,$3,$4)
+             ON CONFLICT (room_id, user_uri) DO UPDATE SET notification_level=$3, updated_at=$4",
+            &[&pref.room_id, &pref.user_uri, &pref.notification_level, &pref.updated_at],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn load_notification_preferences(&self) -> Result<Vec<crate::NotificationPreference>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT room_id, user_uri, notification_level, updated_at FROM notification_preferences",
+            &[],
+        ).await?;
+        Ok(rows
+            .iter()
+            .map(|r| crate::NotificationPreference {
+                room_id: r.get("room_id"),
+                user_uri: r.get("user_uri"),
+                notification_level: r.get("notification_level"),
+                updated_at: r.get("updated_at"),
+            })
+            .collect())
     }
 }

@@ -23,12 +23,14 @@ use crate::{
     CreateConferenceRequest, CreateExtensionRequest, CreateHolidayRequest, CreateIvrRequest,
     CreatePagingGroupRequest, CreateQueueRequest, CreateRingGroupRequest, CreateRoomRequest,
     CreateRoutingRuleRequest, CreateScheduledMeetingRequest, CreateScorecardRequest,
-    CreateSipAccountRequest, CreateSpeedDialRequest, CreateTeamRequest, CreateUserRequest,
-    CreateVipCallerRequest, FileRecord, JoinConferenceRequest, ProvisionUserRequest,
-    RequestCallbackInput, RoomCallMode, SendRoomMessageRequest, SetAgentStateRequest,
+    CreateSipAccountRequest, CreateSpeedDialRequest, CreateTagRequest, CreateTeamRequest,
+    CreateUserRequest, CreateVipCallerRequest, FileRecord, JoinConferenceRequest, ProvisionUserRequest,
+    RequestCallbackInput, RoomCallMode, ScheduleRoomMessageRequest, SendRoomMessageRequest,
+    SetAgentStateRequest,
     SetPresenceRequest, StartMonitorRequest, SyncCallHistoryRequest, UpdateCallStatusRequest,
     UpdateCollaborationPolicyRequest, UpdateConferenceParticipantRequest,
-    UpdateScheduledMeetingRequest, UpdateSipAccountStatusRequest, UpsertRetentionPolicyRequest,
+    UpdateNotificationPreferenceRequest, UpdateScheduledMeetingRequest,
+    UpdateSipAccountStatusRequest, UpdateTagRequest, UpsertRetentionPolicyRequest,
 };
 
 type SharedState = Arc<AppState>;
@@ -100,6 +102,15 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/teams/{id}", get(get_team))
         .route("/v1/teams/{id}/members", post(add_team_member))
         .route("/v1/teams/{id}/channels", post(create_team_channel))
+        .route(
+            "/v1/teams/{id}/tags",
+            get(list_tags).post(create_tag),
+        )
+        .route(
+            "/v1/teams/{id}/tags/{tag_id}",
+            put(update_tag).delete(delete_tag),
+        )
+        .route("/v1/gif/search", get(gif_search))
         .route("/v1/meetings", get(list_meetings).post(create_meeting))
         .route(
             "/v1/meetings/{id}",
@@ -147,6 +158,14 @@ pub fn router(state: SharedState) -> Router {
         .route(
             "/v1/rooms/{id}/messages",
             get(list_room_messages).post(send_room_message),
+        )
+        .route(
+            "/v1/rooms/{id}/messages/schedule",
+            post(schedule_room_message),
+        )
+        .route(
+            "/v1/rooms/{id}/notifications",
+            get(get_notification_preference).put(set_notification_preference),
         )
         .route("/v1/rooms/{id}/message-state", get(list_room_message_state))
         .route(
@@ -1956,6 +1975,186 @@ async fn create_team_channel(
     Ok(Json(room))
 }
 
+// ─── Tags ───
+
+async fn list_tags(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::Tag>>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    Ok(Json(state.list_tags(id)))
+}
+
+async fn create_tag(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<CreateTagRequest>,
+) -> Result<Json<crate::Tag>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let tag = state
+        .create_tag(id, &input.name, input.members)
+        .map_err(ApiError::Conflict)?;
+    if let Some(pg) = state.pg_store() {
+        let tag_for_pg = tag.clone();
+        let pg = pg.clone();
+        tokio::spawn(async move {
+            if let Err(e) = pg.upsert_tag(&tag_for_pg).await {
+                log::warn!("Failed to persist tag: {}", e);
+            }
+        });
+    }
+    state.record_audit_event(&principal, "tag.created", Some(tag.id.to_string()));
+    Ok(Json(tag))
+}
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct TagPath {
+    id: Uuid,
+    tag_id: Uuid,
+}
+
+async fn update_tag(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(path): Path<TagPath>,
+    Json(input): Json<UpdateTagRequest>,
+) -> Result<Json<crate::Tag>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    let tag = state
+        .update_tag(path.tag_id, input.name, input.members)
+        .ok_or(ApiError::NotFound)?;
+    if let Some(pg) = state.pg_store() {
+        let tag_for_pg = tag.clone();
+        let pg = pg.clone();
+        tokio::spawn(async move {
+            if let Err(e) = pg.upsert_tag(&tag_for_pg).await {
+                log::warn!("Failed to persist tag: {}", e);
+            }
+        });
+    }
+    Ok(Json(tag))
+}
+
+async fn delete_tag(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(path): Path<TagPath>,
+) -> Result<Json<crate::Tag>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let tag = state.delete_tag(path.tag_id).ok_or(ApiError::NotFound)?;
+    if let Some(pg) = state.pg_store() {
+        let pg = pg.clone();
+        let tag_id = path.tag_id;
+        tokio::spawn(async move {
+            if let Err(e) = pg.delete_tag(tag_id).await {
+                log::warn!("Failed to delete tag from PG: {}", e);
+            }
+        });
+    }
+    state.record_audit_event(&principal, "tag.deleted", Some(tag.id.to_string()));
+    Ok(Json(tag))
+}
+
+// ─── GIF Search Proxy ───
+
+#[derive(serde::Deserialize)]
+struct GifSearchQuery {
+    q: String,
+    limit: Option<usize>,
+}
+
+async fn gif_search(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<GifSearchQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    let api_key = std::env::var("PALE_TENOR_API_KEY")
+        .or_else(|_| std::env::var("PALE_GIPHY_API_KEY"))
+        .unwrap_or_default();
+    let limit = query.limit.unwrap_or(20).min(50);
+
+    if api_key.is_empty() {
+        // Return empty results if no API key configured
+        return Ok(Json(json!({ "results": [] })));
+    }
+
+    // Determine provider from env
+    let is_tenor = std::env::var("PALE_TENOR_API_KEY").is_ok();
+    let url = if is_tenor {
+        format!(
+            "https://tenor.googleapis.com/v2/search?q={}&key={}&limit={}&media_filter=gif",
+            urlencoding::encode(&query.q),
+            urlencoding::encode(&api_key),
+            limit
+        )
+    } else {
+        format!(
+            "https://api.giphy.com/v1/gifs/search?q={}&api_key={}&limit={}",
+            urlencoding::encode(&query.q),
+            urlencoding::encode(&api_key),
+            limit
+        )
+    };
+
+    match reqwest::get(&url).await {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(body) => {
+                // Normalize response to a uniform shape
+                let results = if is_tenor {
+                    body.get("results")
+                        .and_then(|r| r.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|item| {
+                                    let title = item.get("content_description")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    let url = item.pointer("/media_formats/gif/url")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    let preview = item.pointer("/media_formats/tinygif/url")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or(url);
+                                    if url.is_empty() { return None; }
+                                    Some(json!({ "title": title, "url": url, "preview": preview }))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    body.get("data")
+                        .and_then(|d| d.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|item| {
+                                    let title = item.get("title")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    let url = item.pointer("/images/original/url")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    let preview = item.pointer("/images/fixed_height_small/url")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or(url);
+                                    if url.is_empty() { return None; }
+                                    Some(json!({ "title": title, "url": url, "preview": preview }))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                };
+                Ok(Json(json!({ "results": results })))
+            }
+            Err(_) => Ok(Json(json!({ "results": [] }))),
+        },
+        Err(_) => Ok(Json(json!({ "results": [] }))),
+    }
+}
+
 async fn list_meetings(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -2522,6 +2721,60 @@ async fn send_room_message(
         .send_room_message(id, &principal, &input.body, input.reply_to, input.priority)
         .map(Json)
         .map_err(ApiError::Conflict)
+}
+
+async fn schedule_room_message(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<ScheduleRoomMessageRequest>,
+) -> Result<Json<crate::RoomMessage>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    require_room_member(&state, id, &principal)?;
+    state
+        .schedule_room_message(
+            id,
+            &principal,
+            &input.body,
+            input.scheduled_at,
+            input.reply_to,
+            input.priority,
+        )
+        .map(Json)
+        .map_err(ApiError::Conflict)
+}
+
+// ─── Notification Preferences ───
+
+async fn get_notification_preference(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::NotificationPreference>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    require_room_member(&state, id, &principal)?;
+    Ok(Json(state.get_notification_preference(id, &principal)))
+}
+
+async fn set_notification_preference(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<UpdateNotificationPreferenceRequest>,
+) -> Result<Json<crate::NotificationPreference>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    require_room_member(&state, id, &principal)?;
+    let pref = state.set_notification_preference(id, &principal, &input.notification_level);
+    if let Some(pg) = state.pg_store() {
+        let pref_for_pg = pref.clone();
+        let pg = pg.clone();
+        tokio::spawn(async move {
+            if let Err(e) = pg.upsert_notification_preference(&pref_for_pg).await {
+                log::warn!("Failed to persist notification preference: {}", e);
+            }
+        });
+    }
+    Ok(Json(pref))
 }
 
 async fn add_room_member(
@@ -3936,7 +4189,8 @@ fn event_visible_to(state: &AppState, event: &crate::SseEvent, principal: &str) 
                     member.get("user_sip_uri").and_then(|uri| uri.as_str()) == Some(principal)
                 })
             }),
-        "room_message" | "typing" | "room_call_started" | "room_call_ended" => event
+        "room_message" | "typing" | "room_call_started" | "room_call_ended"
+        | "scheduled_message_delivered" => event
             .payload
             .get("room_id")
             .and_then(|id| id.as_str())

@@ -4495,6 +4495,7 @@ dependencies = [
  "pjsip-sys",
  "rand 0.8.6",
  "regex",
+ "reqwest 0.12.28",
  "rsip",
  "rusqlite",
  "serde",
@@ -4506,6 +4507,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "tracing-subscriber",
+ "urlencoding",
  "uuid 1.23.2",
 ]
 

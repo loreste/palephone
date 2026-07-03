@@ -153,6 +153,8 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
             saved_by: msg.saved_by ?? [],
             mentions: msg.mentions ?? [],
             mentioned_user_uris: msg.mentioned_user_uris ?? [],
+            delivery_status: msg.delivery_status ?? "sent",
+            scheduled_at: msg.scheduled_at,
           });
           if (!isOwn) {
             const senderLabel = msg.sender_uri?.replace(/^sip:/, "") ?? "Someone";
@@ -229,6 +231,30 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
           const roomId = payload.room_id;
           if (roomId && payload.message_id) {
             removeMessage(roomId, payload.message_id);
+          }
+        } catch { /* ignore */ }
+      });
+
+      es.addEventListener("scheduled_message_delivered", (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          const currentSipUri = useAccountStore.getState().account?.sipUri;
+          const isOwn = currentSipUri != null && msg.sender_uri === currentSipUri;
+          // The scheduled message is now delivered — add it as a regular message
+          addMessage({
+            event_id: msg.id,
+            room_id: msg.room_id,
+            sender: msg.sender_uri,
+            sender_name: null,
+            body: msg.body,
+            msg_type: "text" as const,
+            timestamp: Math.floor(new Date(msg.created_at).getTime() / 1000),
+            is_encrypted: false,
+            is_own: isOwn,
+            delivery_status: "sent",
+          });
+          if (isOwn) {
+            toast({ type: "success", title: "Scheduled message delivered" });
           }
         } catch { /* ignore */ }
       });

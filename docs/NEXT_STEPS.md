@@ -98,3 +98,11 @@ VERDICT ON THE PRIOR REVIEWER'S CLAIM: verified on every substantive clause; I c
 - **[qa/medium]** storage.rs ChaCha20Poly1305 encrypt/decrypt and pg_store.rs (778 lines) have zero tests — silent data-loss/corruption path for persisted secrets
   - File: /Users/loreste/palephone/src-tauri/crates/pale-server/src/storage.rs:167-215 (no mod tests in file); /Users/loreste/palephone/src-tauri/crates/pale-server/src/pg_store.rs (no tests)
   - Fix: First test: in storage.rs add `mod tests` with `fn encrypt_decrypt_roundtrip()` (construct the store with a fixed key, assert decrypt(encrypt(s)) == s) and `fn decrypt_rejects_tampered_ciphertext()` (flip one byte, assert Err not panic/garbage). For pg_store, add a #[ignore]-by-default tokio test gated on PALE_TEST_PG_URL that roundtrips upsert_registration, runnable in CI against the compose post
+
+## 4. Microsoft Teams enterprise parity — Chat/Messaging
+
+- [x] **Scheduled send** (2026-07-03) — `scheduled_at`/`delivered` columns on `room_messages`, `POST /v1/rooms/{id}/messages/schedule` endpoint, background task every 30s delivers due messages, SSE `scheduled_message_delivered` event, datetime picker + clock button in ChatView compose bar.
+- [x] **Message delivery/failure status** (2026-07-03) — `delivery_status` column on `room_messages` (pending/sent/delivered/failed), status indicators (checkmarks, clock, warning) in message bubbles, SSE events carry delivery_status field.
+- [x] **Tags for targeted communication** (2026-07-03) — `tags` table (id, team_id, name, members), CRUD endpoints at `/v1/teams/{id}/tags`, `@tag` mention resolution in messages that notifies all tag members, tag suggestions in mention autocomplete dropdown.
+- [x] **GIF integration** (2026-07-03) — `GET /v1/gif/search?q=...` proxy endpoint (Tenor/Giphy, key via `PALE_TENOR_API_KEY` or `PALE_GIPHY_API_KEY`), GIF picker panel in ChatView compose bar with search + grid selection, sends as markdown image.
+- [x] **Per-channel notification granularity** (2026-07-03) — `notification_preferences` table (room_id, user_uri, notification_level), `GET/PUT /v1/rooms/{id}/notifications` endpoints, notification level dropdown (all/mentions-only/muted) in ChatView room header.
