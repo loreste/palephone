@@ -270,6 +270,11 @@ pub struct AppState {
     // DLP policies and violations
     dlp_policies: ShardedMap<Uuid, DlpPolicy>,
     dlp_violations: RwLock<Vec<DlpViolation>>,
+    // Enterprise governance
+    information_barriers: ShardedMap<Uuid, InformationBarrier>,
+    sensitivity_labels: ShardedMap<Uuid, SensitivityLabel>,
+    custom_roles: ShardedMap<Uuid, CustomRole>,
+    policy_packages: ShardedMap<Uuid, PolicyPackage>,
     user_create_lock: std::sync::Mutex<()>,
     agent_assignment_lock: std::sync::Mutex<()>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
@@ -424,6 +429,10 @@ impl AppState {
             call_quality_reports: RwLock::new(Vec::new()),
             dlp_policies: ShardedMap::new(),
             dlp_violations: RwLock::new(Vec::new()),
+            information_barriers: ShardedMap::new(),
+            sensitivity_labels: ShardedMap::new(),
+            custom_roles: ShardedMap::new(),
+            policy_packages: ShardedMap::new(),
             user_create_lock: std::sync::Mutex::new(()),
             agent_assignment_lock: std::sync::Mutex::new(()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
@@ -668,6 +677,50 @@ impl AppState {
                 }
             }
             Err(e) => log::warn!("Failed to load collaboration policy from Postgres: {}", e),
+        }
+        match pg
+            .load_business_objects::<InformationBarrier>(InformationBarrier::collection())
+            .await
+        {
+            Ok(barriers) => {
+                for barrier in barriers {
+                    self.information_barriers.insert(barrier.id, barrier);
+                }
+            }
+            Err(e) => log::warn!("Failed to load information barriers from Postgres: {}", e),
+        }
+        match pg
+            .load_business_objects::<SensitivityLabel>(SensitivityLabel::collection())
+            .await
+        {
+            Ok(labels) => {
+                for label in labels {
+                    self.sensitivity_labels.insert(label.id, label);
+                }
+            }
+            Err(e) => log::warn!("Failed to load sensitivity labels from Postgres: {}", e),
+        }
+        match pg
+            .load_business_objects::<CustomRole>(CustomRole::collection())
+            .await
+        {
+            Ok(roles) => {
+                for role in roles {
+                    self.custom_roles.insert(role.id, role);
+                }
+            }
+            Err(e) => log::warn!("Failed to load custom roles from Postgres: {}", e),
+        }
+        match pg
+            .load_business_objects::<PolicyPackage>(PolicyPackage::collection())
+            .await
+        {
+            Ok(packages) => {
+                for pkg in packages {
+                    self.policy_packages.insert(pkg.id, pkg);
+                }
+            }
+            Err(e) => log::warn!("Failed to load policy packages from Postgres: {}", e),
         }
         log::info!("Loaded data from PostgreSQL into memory cache");
     }
@@ -3166,6 +3219,407 @@ impl AppState {
         let limit = query.limit.unwrap_or(500).clamp(1, 5000);
         violations.truncate(limit);
         violations
+    }
+
+    // ── Information Barriers ──────────────────────────────────────
+
+    pub fn list_barriers(&self) -> Vec<InformationBarrier> {
+        self.information_barriers.values()
+    }
+
+    pub fn create_barrier(&self, input: CreateInformationBarrierRequest) -> InformationBarrier {
+        let barrier = InformationBarrier {
+            id: Uuid::new_v4(),
+            name: input.name,
+            segment1_name: input.segment1_name,
+            segment1_users: input.segment1_users,
+            segment2_name: input.segment2_name,
+            segment2_users: input.segment2_users,
+            block_chat: input.block_chat,
+            block_call: input.block_call,
+            enabled: input.enabled,
+            created_at: Utc::now(),
+        };
+        self.information_barriers
+            .insert(barrier.id, barrier.clone());
+        self.persist(&barrier);
+        barrier
+    }
+
+    pub fn update_barrier(
+        &self,
+        id: Uuid,
+        input: UpdateInformationBarrierRequest,
+    ) -> Option<InformationBarrier> {
+        let updated = self.information_barriers.with_write(&id, |barriers| {
+            let barrier = barriers.get_mut(&id)?;
+            if let Some(name) = input.name {
+                barrier.name = name;
+            }
+            if let Some(s) = input.segment1_name {
+                barrier.segment1_name = s;
+            }
+            if let Some(users) = input.segment1_users {
+                barrier.segment1_users = users;
+            }
+            if let Some(s) = input.segment2_name {
+                barrier.segment2_name = s;
+            }
+            if let Some(users) = input.segment2_users {
+                barrier.segment2_users = users;
+            }
+            if let Some(v) = input.block_chat {
+                barrier.block_chat = v;
+            }
+            if let Some(v) = input.block_call {
+                barrier.block_call = v;
+            }
+            if let Some(v) = input.enabled {
+                barrier.enabled = v;
+            }
+            Some(barrier.clone())
+        });
+        if let Some(barrier) = &updated {
+            self.persist(barrier);
+        }
+        updated
+    }
+
+    pub fn delete_barrier(&self, id: Uuid) -> bool {
+        if self.information_barriers.remove(&id).is_some() {
+            self.delete_persisted(InformationBarrier::collection(), id.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check whether communication between two user URIs is blocked by a barrier.
+    pub fn check_barrier(&self, user_a: &str, user_b: &str, is_call: bool) -> BarrierCheckResult {
+        let barriers = self.information_barriers.values();
+        for barrier in &barriers {
+            if !barrier.enabled {
+                continue;
+            }
+            let blocked_type = if is_call {
+                barrier.block_call
+            } else {
+                barrier.block_chat
+            };
+            if !blocked_type {
+                continue;
+            }
+            let a_in_seg1 = barrier.segment1_users.iter().any(|u| u == user_a);
+            let a_in_seg2 = barrier.segment2_users.iter().any(|u| u == user_a);
+            let b_in_seg1 = barrier.segment1_users.iter().any(|u| u == user_b);
+            let b_in_seg2 = barrier.segment2_users.iter().any(|u| u == user_b);
+            if (a_in_seg1 && b_in_seg2) || (a_in_seg2 && b_in_seg1) {
+                return BarrierCheckResult {
+                    blocked: true,
+                    barrier_id: Some(barrier.id),
+                    barrier_name: Some(barrier.name.clone()),
+                };
+            }
+        }
+        BarrierCheckResult {
+            blocked: false,
+            barrier_id: None,
+            barrier_name: None,
+        }
+    }
+
+    // ── Sensitivity Labels ────────────────────────────────────────
+
+    pub fn list_labels(&self) -> Vec<SensitivityLabel> {
+        let mut labels = self.sensitivity_labels.values();
+        labels.sort_by(|a, b| b.priority.cmp(&a.priority));
+        labels
+    }
+
+    pub fn create_label(&self, input: CreateSensitivityLabelRequest) -> SensitivityLabel {
+        let label = SensitivityLabel {
+            id: Uuid::new_v4(),
+            name: input.name,
+            description: input.description,
+            color: input.color,
+            priority: input.priority,
+            encrypt_content: input.encrypt_content,
+            restrict_sharing: input.restrict_sharing,
+            watermark: input.watermark,
+            created_at: Utc::now(),
+        };
+        self.sensitivity_labels.insert(label.id, label.clone());
+        self.persist(&label);
+        label
+    }
+
+    pub fn update_label(
+        &self,
+        id: Uuid,
+        input: UpdateSensitivityLabelRequest,
+    ) -> Option<SensitivityLabel> {
+        let updated = self.sensitivity_labels.with_write(&id, |labels| {
+            let label = labels.get_mut(&id)?;
+            if let Some(name) = input.name {
+                label.name = name;
+            }
+            if let Some(desc) = input.description {
+                label.description = desc;
+            }
+            if let Some(color) = input.color {
+                label.color = color;
+            }
+            if let Some(priority) = input.priority {
+                label.priority = priority;
+            }
+            if let Some(v) = input.encrypt_content {
+                label.encrypt_content = v;
+            }
+            if let Some(v) = input.restrict_sharing {
+                label.restrict_sharing = v;
+            }
+            if let Some(v) = input.watermark {
+                label.watermark = v;
+            }
+            Some(label.clone())
+        });
+        if let Some(label) = &updated {
+            self.persist(label);
+        }
+        updated
+    }
+
+    pub fn delete_label(&self, id: Uuid) -> bool {
+        if self.sensitivity_labels.remove(&id).is_some() {
+            self.delete_persisted(SensitivityLabel::collection(), id.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    // ── Custom RBAC Roles ─────────────────────────────────────────
+
+    pub fn list_custom_roles(&self) -> Vec<CustomRole> {
+        self.custom_roles.values()
+    }
+
+    pub fn create_custom_role(&self, input: CreateCustomRoleRequest) -> Result<CustomRole, String> {
+        // Validate permissions
+        let valid = permissions::all();
+        for perm in &input.permissions {
+            if !valid.contains(&perm.as_str()) {
+                return Err(format!("unknown permission: {}", perm));
+            }
+        }
+        let role = CustomRole {
+            id: Uuid::new_v4(),
+            name: input.name,
+            permissions: input.permissions,
+            created_at: Utc::now(),
+        };
+        self.custom_roles.insert(role.id, role.clone());
+        self.persist(&role);
+        Ok(role)
+    }
+
+    pub fn update_custom_role(
+        &self,
+        id: Uuid,
+        input: UpdateCustomRoleRequest,
+    ) -> Result<Option<CustomRole>, String> {
+        if let Some(perms) = &input.permissions {
+            let valid = permissions::all();
+            for perm in perms {
+                if !valid.contains(&perm.as_str()) {
+                    return Err(format!("unknown permission: {}", perm));
+                }
+            }
+        }
+        let updated = self.custom_roles.with_write(&id, |roles| {
+            let role = roles.get_mut(&id)?;
+            if let Some(name) = input.name {
+                role.name = name;
+            }
+            if let Some(perms) = input.permissions {
+                role.permissions = perms;
+            }
+            Some(role.clone())
+        });
+        if let Some(role) = &updated {
+            self.persist(role);
+        }
+        Ok(updated)
+    }
+
+    pub fn delete_custom_role(&self, id: Uuid) -> bool {
+        if self.custom_roles.remove(&id).is_some() {
+            self.delete_persisted(CustomRole::collection(), id.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    // ── Policy Packages ───────────────────────────────────────────
+
+    pub fn list_policy_packages(&self) -> Vec<PolicyPackage> {
+        self.policy_packages.values()
+    }
+
+    pub fn create_policy_package(&self, input: CreatePolicyPackageRequest) -> PolicyPackage {
+        let pkg = PolicyPackage {
+            id: Uuid::new_v4(),
+            name: input.name,
+            description: input.description,
+            policies: input.policies,
+            created_at: Utc::now(),
+        };
+        self.policy_packages.insert(pkg.id, pkg.clone());
+        self.persist(&pkg);
+        pkg
+    }
+
+    pub fn update_policy_package(
+        &self,
+        id: Uuid,
+        input: UpdatePolicyPackageRequest,
+    ) -> Option<PolicyPackage> {
+        let updated = self.policy_packages.with_write(&id, |packages| {
+            let pkg = packages.get_mut(&id)?;
+            if let Some(name) = input.name {
+                pkg.name = name;
+            }
+            if let Some(desc) = input.description {
+                pkg.description = desc;
+            }
+            if let Some(policies) = input.policies {
+                pkg.policies = policies;
+            }
+            Some(pkg.clone())
+        });
+        if let Some(pkg) = &updated {
+            self.persist(pkg);
+        }
+        updated
+    }
+
+    pub fn delete_policy_package(&self, id: Uuid) -> bool {
+        if self.policy_packages.remove(&id).is_some() {
+            self.delete_persisted(PolicyPackage::collection(), id.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    // ── Bulk User Operations ──────────────────────────────────────
+
+    pub fn export_users_csv(&self) -> String {
+        let users = self.users.values();
+        let mut csv = "id,display_name,sip_uri,role,active,created_at\n".to_string();
+        for user in &users {
+            csv.push_str(&format!(
+                "{},{},{},{},{},{}\n",
+                user.id,
+                csv_escape_field(&user.display_name),
+                csv_escape_field(&user.sip_uri),
+                user.role,
+                user.active,
+                user.created_at.to_rfc3339(),
+            ));
+        }
+        csv
+    }
+
+    pub fn import_users_csv(&self, csv_data: &str) -> BulkImportResult {
+        let mut imported = 0usize;
+        let mut skipped = 0usize;
+        let mut errors = Vec::new();
+        let lines: Vec<&str> = csv_data.lines().collect();
+        if lines.is_empty() {
+            return BulkImportResult {
+                imported,
+                skipped,
+                errors,
+            };
+        }
+        // Skip header
+        for (i, line) in lines.iter().enumerate().skip(1) {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let fields: Vec<&str> = line.split(',').collect();
+            if fields.len() < 3 {
+                errors.push(format!("line {}: not enough fields", i + 1));
+                continue;
+            }
+            let display_name = fields[0].trim().trim_matches('"').to_string();
+            let sip_uri = fields[1].trim().trim_matches('"').to_string();
+            let password = if fields.len() > 2 && !fields[2].trim().is_empty() {
+                Some(fields[2].trim().trim_matches('"').to_string())
+            } else {
+                None
+            };
+            let role = if fields.len() > 3 && !fields[3].trim().is_empty() {
+                Some(fields[3].trim().trim_matches('"').to_string())
+            } else {
+                None
+            };
+            if self.user_by_sip_uri(&sip_uri).is_some() {
+                skipped += 1;
+                continue;
+            }
+            match self.create_user(CreateUserRequest {
+                display_name,
+                sip_uri,
+                matrix_user_id: None,
+                password,
+                role,
+            }) {
+                Ok(_) => imported += 1,
+                Err(err) => errors.push(format!("line {}: {}", i + 1, err)),
+            }
+        }
+        BulkImportResult {
+            imported,
+            skipped,
+            errors,
+        }
+    }
+
+    // ── Usage Analytics ───────────────────────────────────────────
+
+    pub fn usage_analytics(&self) -> UsageAnalytics {
+        let users = self.users.values();
+        let active_users = users.iter().filter(|u| u.active).count();
+        let total_messages = self
+            .room_messages
+            .read()
+            .expect("room messages lock")
+            .len();
+        let total_calls = self.calls.len();
+        let total_meetings = self.scheduled_meetings.len();
+        let files = self.files.values();
+        let total_storage: u64 = files.iter().map(|f| f.size).sum();
+        let online_users = self
+            .presence
+            .values()
+            .iter()
+            .filter(|p| p.status != PresenceStatus::Offline)
+            .count();
+
+        UsageAnalytics {
+            total_users: users.len(),
+            active_users,
+            total_messages,
+            total_calls,
+            total_meetings,
+            total_files: files.len(),
+            total_storage_bytes: total_storage,
+            online_users,
+        }
     }
 
     pub fn create_call(&self, input: CreateCallRequest) -> Result<CallSession, String> {
@@ -8412,6 +8866,233 @@ pub struct DlpViolationQuery {
 pub struct DlpScanResult {
     pub allowed: bool,
     pub violations: Vec<DlpViolation>,
+}
+
+// ── Information Barriers ──────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InformationBarrier {
+    pub id: Uuid,
+    pub name: String,
+    pub segment1_name: String,
+    pub segment1_users: Vec<String>,
+    pub segment2_name: String,
+    pub segment2_users: Vec<String>,
+    pub block_chat: bool,
+    pub block_call: bool,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateInformationBarrierRequest {
+    pub name: String,
+    pub segment1_name: String,
+    #[serde(default)]
+    pub segment1_users: Vec<String>,
+    pub segment2_name: String,
+    #[serde(default)]
+    pub segment2_users: Vec<String>,
+    #[serde(default = "default_true")]
+    pub block_chat: bool,
+    #[serde(default = "default_true")]
+    pub block_call: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateInformationBarrierRequest {
+    pub name: Option<String>,
+    pub segment1_name: Option<String>,
+    pub segment1_users: Option<Vec<String>>,
+    pub segment2_name: Option<String>,
+    pub segment2_users: Option<Vec<String>>,
+    pub block_chat: Option<bool>,
+    pub block_call: Option<bool>,
+    pub enabled: Option<bool>,
+}
+
+/// Result of an information barrier check.
+#[derive(Debug, Clone, Serialize)]
+pub struct BarrierCheckResult {
+    pub blocked: bool,
+    pub barrier_id: Option<Uuid>,
+    pub barrier_name: Option<String>,
+}
+
+// ── Sensitivity Labels ────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SensitivityLabel {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub color: String,
+    pub priority: i32,
+    pub encrypt_content: bool,
+    pub restrict_sharing: bool,
+    pub watermark: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateSensitivityLabelRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "default_label_color")]
+    pub color: String,
+    #[serde(default)]
+    pub priority: i32,
+    #[serde(default)]
+    pub encrypt_content: bool,
+    #[serde(default)]
+    pub restrict_sharing: bool,
+    #[serde(default)]
+    pub watermark: bool,
+}
+
+fn csv_escape_field(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+fn default_label_color() -> String {
+    "#6b7280".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateSensitivityLabelRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub color: Option<String>,
+    pub priority: Option<i32>,
+    pub encrypt_content: Option<bool>,
+    pub restrict_sharing: Option<bool>,
+    pub watermark: Option<bool>,
+}
+
+// ── Custom RBAC Roles ─────────────────────────────────────────────
+
+/// Well-known permission constants for custom roles.
+pub mod permissions {
+    pub const MANAGE_USERS: &str = "manage_users";
+    pub const MANAGE_CHANNELS: &str = "manage_channels";
+    pub const MANAGE_POLICIES: &str = "manage_policies";
+    pub const VIEW_AUDIT: &str = "view_audit";
+    pub const MANAGE_CALLS: &str = "manage_calls";
+    pub const MANAGE_MEETINGS: &str = "manage_meetings";
+    pub const MANAGE_FILES: &str = "manage_files";
+    pub const MANAGE_EXTENSIONS: &str = "manage_extensions";
+    pub const MANAGE_QUEUES: &str = "manage_queues";
+    pub const MANAGE_DLP: &str = "manage_dlp";
+    pub const MANAGE_BARRIERS: &str = "manage_barriers";
+    pub const MANAGE_LABELS: &str = "manage_labels";
+    pub const MANAGE_ROLES: &str = "manage_roles";
+    pub const MANAGE_PACKAGES: &str = "manage_packages";
+
+    pub fn all() -> Vec<&'static str> {
+        vec![
+            MANAGE_USERS,
+            MANAGE_CHANNELS,
+            MANAGE_POLICIES,
+            VIEW_AUDIT,
+            MANAGE_CALLS,
+            MANAGE_MEETINGS,
+            MANAGE_FILES,
+            MANAGE_EXTENSIONS,
+            MANAGE_QUEUES,
+            MANAGE_DLP,
+            MANAGE_BARRIERS,
+            MANAGE_LABELS,
+            MANAGE_ROLES,
+            MANAGE_PACKAGES,
+        ]
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomRole {
+    pub id: Uuid,
+    pub name: String,
+    pub permissions: Vec<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateCustomRoleRequest {
+    pub name: String,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateCustomRoleRequest {
+    pub name: Option<String>,
+    pub permissions: Option<Vec<String>>,
+}
+
+// ── Policy Packages ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyPackage {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub policies: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreatePolicyPackageRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "empty_json_object")]
+    pub policies: serde_json::Value,
+}
+
+fn empty_json_object() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdatePolicyPackageRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub policies: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AssignPolicyPackageRequest {
+    pub user_ids: Vec<Uuid>,
+}
+
+// ── Bulk User Operations ──────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BulkImportResult {
+    pub imported: usize,
+    pub skipped: usize,
+    pub errors: Vec<String>,
+}
+
+// ── Usage Analytics ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UsageAnalytics {
+    pub total_users: usize,
+    pub active_users: usize,
+    pub total_messages: usize,
+    pub total_calls: usize,
+    pub total_meetings: usize,
+    pub total_files: usize,
+    pub total_storage_bytes: u64,
+    pub online_users: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

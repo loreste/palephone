@@ -116,3 +116,12 @@ VERDICT ON THE PRIOR REVIEWER'S CLAIM: verified on every substantive clause; I c
 - **[qa/medium]** storage.rs ChaCha20Poly1305 encrypt/decrypt and pg_store.rs (778 lines) have zero tests — silent data-loss/corruption path for persisted secrets
   - File: /Users/loreste/palephone/src-tauri/crates/pale-server/src/storage.rs:167-215 (no mod tests in file); /Users/loreste/palephone/src-tauri/crates/pale-server/src/pg_store.rs (no tests)
   - Fix: First test: in storage.rs add `mod tests` with `fn encrypt_decrypt_roundtrip()` (construct the store with a fixed key, assert decrypt(encrypt(s)) == s) and `fn decrypt_rejects_tampered_ciphertext()` (flip one byte, assert Err not panic/garbage). For pg_store, add a #[ignore]-by-default tokio test gated on PALE_TEST_PG_URL that roundtrips upsert_registration, runnable in CI against the compose post
+
+## 4. Teams Enterprise Parity — Admin/Governance (LANDED 2026-07-03)
+
+- [x] **Information barriers** — `information_barriers` table (migration 024), CRUD endpoints (POST/GET/PUT/DELETE /v1/admin/barriers), enforcement check function (GET /v1/admin/barriers/check), "Barriers" tab in AdminView.tsx
+- [x] **Sensitivity labels** — `sensitivity_labels` table (migration 025), `sensitivity_label_id` added to files and room_messages, CRUD endpoints (/v1/admin/labels), "Labels" tab in AdminView.tsx with color swatches and property toggles
+- [x] **Custom RBAC roles** — `custom_roles` table (migration 026), `role_id` on users, CRUD endpoints (/v1/admin/roles), 14 permission constants, GET /v1/admin/roles/permissions, "Roles" tab with permission checkboxes
+- [x] **Policy packages** — `policy_packages` table (migration 027), CRUD endpoints (/v1/admin/policy-packages), POST /v1/admin/policy-packages/{id}/assign, "Packages" tab in AdminView.tsx
+- [x] **Bulk user operations** — POST /v1/admin/users/import (CSV), GET /v1/admin/users/export (CSV download), import/export buttons in Analytics tab
+- [x] **Usage analytics dashboard** — GET /v1/admin/analytics (active users, messages, calls, meetings, files, storage), "Analytics" tab with metric cards

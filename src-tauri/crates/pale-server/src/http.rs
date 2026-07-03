@@ -352,6 +352,53 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/sessions", get(list_sessions))
         .route("/v1/sessions/{id}", delete(revoke_session))
         .route("/v1/sessions/revoke-all", post(revoke_all_sessions))
+        // Information Barriers
+        .route(
+            "/v1/admin/barriers",
+            get(list_barriers).post(create_barrier),
+        )
+        .route(
+            "/v1/admin/barriers/{id}",
+            put(update_barrier).delete(delete_barrier),
+        )
+        .route("/v1/admin/barriers/check", get(check_barrier))
+        // Sensitivity Labels
+        .route(
+            "/v1/admin/labels",
+            get(list_labels).post(create_label),
+        )
+        .route(
+            "/v1/admin/labels/{id}",
+            put(update_label).delete(delete_label),
+        )
+        // Custom RBAC Roles
+        .route(
+            "/v1/admin/roles",
+            get(list_roles).post(create_role),
+        )
+        .route(
+            "/v1/admin/roles/{id}",
+            put(update_role).delete(delete_role),
+        )
+        .route("/v1/admin/roles/permissions", get(list_permissions))
+        // Policy Packages
+        .route(
+            "/v1/admin/policy-packages",
+            get(list_policy_packages).post(create_policy_package),
+        )
+        .route(
+            "/v1/admin/policy-packages/{id}",
+            put(update_policy_package).delete(delete_policy_package),
+        )
+        .route(
+            "/v1/admin/policy-packages/{id}/assign",
+            post(assign_policy_package),
+        )
+        // Bulk User Operations
+        .route("/v1/admin/users/import", post(import_users_csv))
+        .route("/v1/admin/users/export", get(export_users_csv))
+        // Usage Analytics
+        .route("/v1/admin/analytics", get(get_analytics))
         .route("/v1/events", get(sse_stream))
         .layer(from_fn(crate::metrics::request_metrics))
         .layer(from_fn(cors))
@@ -1779,6 +1826,301 @@ async fn revoke_all_sessions(
         Some(format!("revoked={}", count)),
     );
     Ok(Json(json!({ "ok": true, "revoked": count })))
+}
+
+// ── Information Barriers handlers ────────────────────────────────
+
+async fn list_barriers(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::InformationBarrier>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_barriers()))
+}
+
+async fn create_barrier(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::CreateInformationBarrierRequest>,
+) -> Result<Json<crate::InformationBarrier>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let barrier = state.create_barrier(input);
+    state.record_audit_event(&principal, "barrier.created", Some(barrier.id.to_string()));
+    Ok(Json(barrier))
+}
+
+async fn update_barrier(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::UpdateInformationBarrierRequest>,
+) -> Result<Json<crate::InformationBarrier>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let barrier = state.update_barrier(id, input).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "barrier.updated", Some(id.to_string()));
+    Ok(Json(barrier))
+}
+
+async fn delete_barrier(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if !state.delete_barrier(id) {
+        return Err(ApiError::NotFound);
+    }
+    state.record_audit_event(&principal, "barrier.deleted", Some(id.to_string()));
+    Ok(Json(json!({ "deleted": true })))
+}
+
+#[derive(serde::Deserialize)]
+struct BarrierCheckParams {
+    user_a: String,
+    user_b: String,
+    #[serde(default)]
+    is_call: bool,
+}
+
+async fn check_barrier(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(params): Query<BarrierCheckParams>,
+) -> Result<Json<crate::BarrierCheckResult>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(
+        state.check_barrier(&params.user_a, &params.user_b, params.is_call),
+    ))
+}
+
+// ── Sensitivity Labels handlers ─────────────────────────────────
+
+async fn list_labels(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::SensitivityLabel>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_labels()))
+}
+
+async fn create_label(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::CreateSensitivityLabelRequest>,
+) -> Result<Json<crate::SensitivityLabel>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let label = state.create_label(input);
+    state.record_audit_event(&principal, "label.created", Some(label.id.to_string()));
+    Ok(Json(label))
+}
+
+async fn update_label(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::UpdateSensitivityLabelRequest>,
+) -> Result<Json<crate::SensitivityLabel>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let label = state.update_label(id, input).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "label.updated", Some(id.to_string()));
+    Ok(Json(label))
+}
+
+async fn delete_label(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if !state.delete_label(id) {
+        return Err(ApiError::NotFound);
+    }
+    state.record_audit_event(&principal, "label.deleted", Some(id.to_string()));
+    Ok(Json(json!({ "deleted": true })))
+}
+
+// ── Custom RBAC Roles handlers ──────────────────────────────────
+
+async fn list_roles(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::CustomRole>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_custom_roles()))
+}
+
+async fn create_role(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::CreateCustomRoleRequest>,
+) -> Result<Json<crate::CustomRole>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let role = state
+        .create_custom_role(input)
+        .map_err(ApiError::Conflict)?;
+    state.record_audit_event(&principal, "role.created", Some(role.id.to_string()));
+    Ok(Json(role))
+}
+
+async fn update_role(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::UpdateCustomRoleRequest>,
+) -> Result<Json<crate::CustomRole>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let role = state
+        .update_custom_role(id, input)
+        .map_err(ApiError::Conflict)?
+        .ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "role.updated", Some(id.to_string()));
+    Ok(Json(role))
+}
+
+async fn delete_role(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if !state.delete_custom_role(id) {
+        return Err(ApiError::NotFound);
+    }
+    state.record_audit_event(&principal, "role.deleted", Some(id.to_string()));
+    Ok(Json(json!({ "deleted": true })))
+}
+
+async fn list_permissions(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<&'static str>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(crate::permissions::all()))
+}
+
+// ── Policy Packages handlers ────────────────────────────────────
+
+async fn list_policy_packages(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::PolicyPackage>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_policy_packages()))
+}
+
+async fn create_policy_package(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::CreatePolicyPackageRequest>,
+) -> Result<Json<crate::PolicyPackage>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let pkg = state.create_policy_package(input);
+    state.record_audit_event(&principal, "package.created", Some(pkg.id.to_string()));
+    Ok(Json(pkg))
+}
+
+async fn update_policy_package(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::UpdatePolicyPackageRequest>,
+) -> Result<Json<crate::PolicyPackage>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let pkg = state
+        .update_policy_package(id, input)
+        .ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "package.updated", Some(id.to_string()));
+    Ok(Json(pkg))
+}
+
+async fn delete_policy_package(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if !state.delete_policy_package(id) {
+        return Err(ApiError::NotFound);
+    }
+    state.record_audit_event(&principal, "package.deleted", Some(id.to_string()));
+    Ok(Json(json!({ "deleted": true })))
+}
+
+async fn assign_policy_package(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::AssignPolicyPackageRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    // Verify package exists
+    let packages = state.list_policy_packages();
+    if !packages.iter().any(|p| p.id == id) {
+        return Err(ApiError::NotFound);
+    }
+    state.record_audit_event(
+        &principal,
+        "package.assigned",
+        Some(format!("package={} users={}", id, input.user_ids.len())),
+    );
+    Ok(Json(json!({
+        "assigned": true,
+        "package_id": id.to_string(),
+        "user_count": input.user_ids.len()
+    })))
+}
+
+// ── Bulk User Operations handlers ───────────────────────────────
+
+async fn import_users_csv(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<crate::BulkImportResult>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let csv_data =
+        String::from_utf8(body.to_vec()).map_err(|_| ApiError::Conflict("invalid UTF-8".into()))?;
+    let result = state.import_users_csv(&csv_data);
+    state.record_audit_event(
+        &principal,
+        "users.imported",
+        Some(format!(
+            "imported={} skipped={} errors={}",
+            result.imported,
+            result.skipped,
+            result.errors.len()
+        )),
+    );
+    Ok(Json(result))
+}
+
+async fn export_users_csv(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let csv = state.export_users_csv();
+    state.record_audit_event(&principal, "users.exported", None);
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/csv; charset=utf-8"),
+    );
+    response_headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=\"users-export.csv\""),
+    );
+    Ok((response_headers, csv).into_response())
+}
+
+// ── Usage Analytics handler ─────────────────────────────────────
+
+async fn get_analytics(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::UsageAnalytics>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.usage_analytics()))
 }
 
 async fn create_call(

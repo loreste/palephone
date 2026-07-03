@@ -13,10 +13,10 @@ use uuid::Uuid;
 
 use crate::{
     AdminAuditEvent, CallQualityReport, CallSession, ChannelWebhook, CollaborationPolicy,
-    Conference, ConferenceAttendanceRecord, DlpPolicy, DlpViolation, FileRecord,
-    MessageReactionRecord, MessageRead, RetentionPolicy, Room, RoomMessage, RoutingRule,
-    ScheduledMeeting, SipAccount, SipDialog, SipMessage, SipRegistration, SipTransaction, Team,
-    User,
+    Conference, ConferenceAttendanceRecord, CustomRole, DlpPolicy, DlpViolation, FileRecord,
+    InformationBarrier, MessageReactionRecord, MessageRead, PolicyPackage, RetentionPolicy, Room,
+    RoomMessage, RoutingRule, ScheduledMeeting, SensitivityLabel, SipAccount, SipDialog,
+    SipMessage, SipRegistration, SipTransaction, Team, User,
 };
 
 const SCHEMA: &str = r#"
@@ -433,6 +433,46 @@ impl StoredObject for MessageReactionRecord {
 
     fn key(&self) -> String {
         MessageReactionRecord::key(self)
+    }
+}
+
+impl StoredObject for InformationBarrier {
+    fn collection() -> &'static str {
+        "information_barriers"
+    }
+
+    fn key(&self) -> String {
+        self.id.to_string()
+    }
+}
+
+impl StoredObject for SensitivityLabel {
+    fn collection() -> &'static str {
+        "sensitivity_labels"
+    }
+
+    fn key(&self) -> String {
+        self.id.to_string()
+    }
+}
+
+impl StoredObject for CustomRole {
+    fn collection() -> &'static str {
+        "custom_roles"
+    }
+
+    fn key(&self) -> String {
+        self.id.to_string()
+    }
+}
+
+impl StoredObject for PolicyPackage {
+    fn collection() -> &'static str {
+        "policy_packages"
+    }
+
+    fn key(&self) -> String {
+        self.id.to_string()
     }
 }
 
