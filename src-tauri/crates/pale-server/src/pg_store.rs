@@ -87,6 +87,10 @@ impl PgStore {
             include_str!("../migrations/021_message_priority_saved.sql"),
             include_str!("../migrations/022_identity_lifecycle.sql"),
             include_str!("../migrations/023_call_policy.sql"),
+            include_str!("../migrations/024_information_barriers.sql"),
+            include_str!("../migrations/025_sensitivity_labels.sql"),
+            include_str!("../migrations/026_custom_roles.sql"),
+            include_str!("../migrations/027_policy_packages.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {

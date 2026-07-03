@@ -53,7 +53,7 @@ async function api<T = any>(baseUrl: string, token: string, path: string, opts?:
   return paleServerApi<T>(baseUrl, token, path, opts);
 }
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -83,6 +83,11 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "policy", label: "Policy", icon: Shield },
   { id: "retention", label: "Retention", icon: Archive },
   { id: "dlp", label: "DLP", icon: Shield },
+  { id: "barriers", label: "Barriers", icon: Shield },
+  { id: "labels", label: "Labels", icon: FileText },
+  { id: "roles", label: "Roles", icon: Shield },
+  { id: "packages", label: "Packages", icon: ClipboardList },
+  { id: "analytics", label: "Analytics", icon: BarChart3 },
 ];
 
 export function AdminView() {
@@ -298,6 +303,11 @@ export function AdminView() {
         {activeTab === "policy" && <CollaborationPolicyPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "retention" && <RetentionPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "dlp" && <DlpPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "barriers" && <BarriersPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "labels" && <LabelsPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "roles" && <RolesPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "packages" && <PackagesPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "analytics" && <AnalyticsPanel baseUrl={baseUrl} token={token} />}
       </div>
     </div>
   );
@@ -4264,6 +4274,525 @@ function DlpPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
         </div>
       )}
     </div>
+  );
+}
+
+// ── Information Barriers Panel ─────────────────────────────────────
+
+function BarriersPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [barriers, setBarriers] = useState<any[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [seg1Name, setSeg1Name] = useState("");
+  const [seg1Users, setSeg1Users] = useState("");
+  const [seg2Name, setSeg2Name] = useState("");
+  const [seg2Users, setSeg2Users] = useState("");
+  const [blockChat, setBlockChat] = useState(true);
+  const [blockCall, setBlockCall] = useState(true);
+
+  const load = useCallback(() => {
+    api(baseUrl, token, "/v1/admin/barriers").then(setBarriers).catch(() => {});
+  }, [baseUrl, token]);
+
+  useEffect(load, [load]);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      await api(baseUrl, token, "/v1/admin/barriers", {
+        method: "POST",
+        body: {
+          name,
+          segment1_name: seg1Name,
+          segment1_users: seg1Users.split(",").map((u: string) => u.trim()).filter(Boolean),
+          segment2_name: seg2Name,
+          segment2_users: seg2Users.split(",").map((u: string) => u.trim()).filter(Boolean),
+          block_chat: blockChat,
+          block_call: blockCall,
+        },
+      });
+      setName(""); setSeg1Name(""); setSeg1Users(""); setSeg2Name(""); setSeg2Users("");
+      setCreating(false);
+      toast({ type: "success", title: "Information barrier created" });
+      load();
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Failed" });
+    }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/barriers/${id}`, { method: "DELETE" });
+      toast({ type: "success", title: "Barrier deleted" });
+      load();
+    } catch { toast({ type: "error", title: "Failed to delete" }); }
+  };
+
+  return (
+    <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+      <div className="p-3 border-b border-border-subtle flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Shield size={17} className="text-accent" />
+          <h2 className="font-medium">Information Barriers</h2>
+        </div>
+        <button onClick={() => setCreating(!creating)} className="h-8 px-3 rounded-md bg-accent hover:bg-accent-hover text-white text-sm flex items-center gap-2">
+          <Plus size={14} /> New Barrier
+        </button>
+      </div>
+      {creating && (
+        <form onSubmit={submit} className="p-3 border-b border-border-subtle space-y-2">
+          <div className="grid md:grid-cols-3 gap-2">
+            <Field label="Barrier Name" value={name} onChange={setName} />
+            <Field label="Segment 1 Name" value={seg1Name} onChange={setSeg1Name} />
+            <Field label="Segment 1 Users (comma-separated)" value={seg1Users} onChange={setSeg1Users} />
+          </div>
+          <div className="grid md:grid-cols-3 gap-2">
+            <Field label="Segment 2 Name" value={seg2Name} onChange={setSeg2Name} />
+            <Field label="Segment 2 Users (comma-separated)" value={seg2Users} onChange={setSeg2Users} />
+            <div className="flex gap-4 items-end pb-1">
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={blockChat} onChange={(e) => setBlockChat(e.target.checked)} /> Block Chat
+              </label>
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={blockCall} onChange={(e) => setBlockCall(e.target.checked)} /> Block Calls
+              </label>
+            </div>
+          </div>
+          <button className="h-9 px-4 rounded-md bg-accent hover:bg-accent-hover text-white text-sm">Create</button>
+        </form>
+      )}
+      <div className="p-3 overflow-x-auto">
+        <Table
+          title="Barriers"
+          columns={["Name", "Segment 1", "Segment 2", "Chat", "Call", "Enabled"]}
+          rows={barriers.map((b: any) => [
+            b.name,
+            `${b.segment1_name} (${(b.segment1_users || []).length})`,
+            `${b.segment2_name} (${(b.segment2_users || []).length})`,
+            b.block_chat ? "Blocked" : "Allowed",
+            b.block_call ? "Blocked" : "Allowed",
+            b.enabled ? "Yes" : "No",
+          ])}
+        />
+        {barriers.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {barriers.map((b: any) => (
+              <button key={b.id} onClick={() => remove(b.id)} className="text-xs text-destructive hover:underline">
+                Delete "{b.name}"
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+// ── Sensitivity Labels Panel ──────────────────────────────────────
+
+function LabelsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [labels, setLabels] = useState<any[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [color, setColor] = useState("#6b7280");
+  const [priority, setPriority] = useState("0");
+  const [encrypt, setEncrypt] = useState(false);
+  const [restrictSharing, setRestrictSharing] = useState(false);
+  const [watermark, setWatermark] = useState(false);
+
+  const load = useCallback(() => {
+    api(baseUrl, token, "/v1/admin/labels").then(setLabels).catch(() => {});
+  }, [baseUrl, token]);
+
+  useEffect(load, [load]);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      await api(baseUrl, token, "/v1/admin/labels", {
+        method: "POST",
+        body: {
+          name,
+          description,
+          color,
+          priority: parseInt(priority) || 0,
+          encrypt_content: encrypt,
+          restrict_sharing: restrictSharing,
+          watermark,
+        },
+      });
+      setName(""); setDescription(""); setColor("#6b7280"); setPriority("0");
+      setEncrypt(false); setRestrictSharing(false); setWatermark(false);
+      setCreating(false);
+      toast({ type: "success", title: "Sensitivity label created" });
+      load();
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Failed" });
+    }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/labels/${id}`, { method: "DELETE" });
+      toast({ type: "success", title: "Label deleted" }); load();
+    } catch { toast({ type: "error", title: "Failed to delete" }); }
+  };
+
+  return (
+    <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+      <div className="p-3 border-b border-border-subtle flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <FileText size={17} className="text-accent" />
+          <h2 className="font-medium">Sensitivity Labels</h2>
+        </div>
+        <button onClick={() => setCreating(!creating)} className="h-8 px-3 rounded-md bg-accent hover:bg-accent-hover text-white text-sm flex items-center gap-2">
+          <Plus size={14} /> New Label
+        </button>
+      </div>
+      {creating && (
+        <form onSubmit={submit} className="p-3 border-b border-border-subtle space-y-2">
+          <div className="grid md:grid-cols-4 gap-2">
+            <Field label="Name" value={name} onChange={setName} />
+            <Field label="Description" value={description} onChange={setDescription} />
+            <Field label="Color" value={color} onChange={setColor} />
+            <Field label="Priority" value={priority} onChange={setPriority} />
+          </div>
+          <div className="flex gap-4">
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={encrypt} onChange={(e) => setEncrypt(e.target.checked)} /> Encrypt Content
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={restrictSharing} onChange={(e) => setRestrictSharing(e.target.checked)} /> Restrict Sharing
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={watermark} onChange={(e) => setWatermark(e.target.checked)} /> Watermark
+            </label>
+          </div>
+          <button className="h-9 px-4 rounded-md bg-accent hover:bg-accent-hover text-white text-sm">Create</button>
+        </form>
+      )}
+      <div className="p-3 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="text-tertiary">
+            <tr className="border-b border-border-subtle">
+              <th className="text-left py-2 px-2 font-medium">Color</th>
+              <th className="text-left py-2 px-2 font-medium">Name</th>
+              <th className="text-left py-2 px-2 font-medium">Priority</th>
+              <th className="text-left py-2 px-2 font-medium">Encrypt</th>
+              <th className="text-left py-2 px-2 font-medium">Restrict</th>
+              <th className="text-left py-2 px-2 font-medium">Watermark</th>
+              <th className="text-left py-2 px-2 font-medium"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {labels.length === 0 ? (
+              <tr><td colSpan={7} className="py-4 px-2 text-secondary">No labels</td></tr>
+            ) : labels.map((label: any) => (
+              <tr key={label.id} className="border-b border-border-subtle">
+                <td className="py-2 px-2"><span className="inline-block w-4 h-4 rounded" style={{ backgroundColor: label.color }} /></td>
+                <td className="py-2 px-2">{label.name}</td>
+                <td className="py-2 px-2">{label.priority}</td>
+                <td className="py-2 px-2">{label.encrypt_content ? "Yes" : "No"}</td>
+                <td className="py-2 px-2">{label.restrict_sharing ? "Yes" : "No"}</td>
+                <td className="py-2 px-2">{label.watermark ? "Yes" : "No"}</td>
+                <td className="py-2 px-2 text-right">
+                  <IconButton label="Delete" tone="danger" onClick={() => remove(label.id)}><Trash2 size={16} /></IconButton>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+// ── Custom Roles Panel ────────────────────────────────────────────
+
+function RolesPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [roles, setRoles] = useState<any[]>([]);
+  const [allPermissions, setAllPermissions] = useState<string[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [selectedPerms, setSelectedPerms] = useState<Set<string>>(new Set());
+
+  const load = useCallback(() => {
+    api(baseUrl, token, "/v1/admin/roles").then(setRoles).catch(() => {});
+    api<string[]>(baseUrl, token, "/v1/admin/roles/permissions").then(setAllPermissions).catch(() => {});
+  }, [baseUrl, token]);
+
+  useEffect(load, [load]);
+
+  const togglePerm = (perm: string) => {
+    const next = new Set(selectedPerms);
+    if (next.has(perm)) next.delete(perm); else next.add(perm);
+    setSelectedPerms(next);
+  };
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      await api(baseUrl, token, "/v1/admin/roles", {
+        method: "POST",
+        body: { name, permissions: Array.from(selectedPerms) },
+      });
+      setName(""); setSelectedPerms(new Set()); setCreating(false);
+      toast({ type: "success", title: "Role created" }); load();
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Failed" });
+    }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/roles/${id}`, { method: "DELETE" });
+      toast({ type: "success", title: "Role deleted" }); load();
+    } catch { toast({ type: "error", title: "Failed to delete" }); }
+  };
+
+  return (
+    <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+      <div className="p-3 border-b border-border-subtle flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Shield size={17} className="text-accent" />
+          <h2 className="font-medium">Custom RBAC Roles</h2>
+        </div>
+        <button onClick={() => setCreating(!creating)} className="h-8 px-3 rounded-md bg-accent hover:bg-accent-hover text-white text-sm flex items-center gap-2">
+          <Plus size={14} /> New Role
+        </button>
+      </div>
+      {creating && (
+        <form onSubmit={submit} className="p-3 border-b border-border-subtle space-y-2">
+          <Field label="Role Name" value={name} onChange={setName} />
+          <div>
+            <span className="block text-xs text-tertiary mb-1">Permissions</span>
+            <div className="flex flex-wrap gap-2">
+              {allPermissions.map((perm) => (
+                <label key={perm} className="flex items-center gap-1.5 text-sm">
+                  <input type="checkbox" checked={selectedPerms.has(perm)} onChange={() => togglePerm(perm)} />
+                  {perm.replace(/_/g, " ")}
+                </label>
+              ))}
+            </div>
+          </div>
+          <button className="h-9 px-4 rounded-md bg-accent hover:bg-accent-hover text-white text-sm">Create</button>
+        </form>
+      )}
+      <div className="p-3 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="text-tertiary">
+            <tr className="border-b border-border-subtle">
+              <th className="text-left py-2 px-2 font-medium">Name</th>
+              <th className="text-left py-2 px-2 font-medium">Permissions</th>
+              <th className="text-left py-2 px-2 font-medium">Created</th>
+              <th className="text-left py-2 px-2 font-medium"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {roles.length === 0 ? (
+              <tr><td colSpan={4} className="py-4 px-2 text-secondary">No custom roles</td></tr>
+            ) : roles.map((role: any) => (
+              <tr key={role.id} className="border-b border-border-subtle">
+                <td className="py-2 px-2 font-medium">{role.name}</td>
+                <td className="py-2 px-2 max-w-[400px] truncate">{(role.permissions || []).join(", ")}</td>
+                <td className="py-2 px-2">{shortDate(role.created_at)}</td>
+                <td className="py-2 px-2 text-right">
+                  <IconButton label="Delete" tone="danger" onClick={() => remove(role.id)}><Trash2 size={16} /></IconButton>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+// ── Policy Packages Panel ─────────────────────────────────────────
+
+function PackagesPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [packages, setPackages] = useState<any[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [policies, setPolicies] = useState("{}");
+
+  const load = useCallback(() => {
+    api(baseUrl, token, "/v1/admin/policy-packages").then(setPackages).catch(() => {});
+  }, [baseUrl, token]);
+
+  useEffect(load, [load]);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      let parsedPolicies;
+      try { parsedPolicies = JSON.parse(policies); } catch { toast({ type: "error", title: "Invalid JSON" }); return; }
+      await api(baseUrl, token, "/v1/admin/policy-packages", {
+        method: "POST",
+        body: { name, description, policies: parsedPolicies },
+      });
+      setName(""); setDescription(""); setPolicies("{}"); setCreating(false);
+      toast({ type: "success", title: "Policy package created" }); load();
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Failed" });
+    }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/policy-packages/${id}`, { method: "DELETE" });
+      toast({ type: "success", title: "Package deleted" }); load();
+    } catch { toast({ type: "error", title: "Failed to delete" }); }
+  };
+
+  return (
+    <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+      <div className="p-3 border-b border-border-subtle flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <ClipboardList size={17} className="text-accent" />
+          <h2 className="font-medium">Policy Packages</h2>
+        </div>
+        <button onClick={() => setCreating(!creating)} className="h-8 px-3 rounded-md bg-accent hover:bg-accent-hover text-white text-sm flex items-center gap-2">
+          <Plus size={14} /> New Package
+        </button>
+      </div>
+      {creating && (
+        <form onSubmit={submit} className="p-3 border-b border-border-subtle space-y-2">
+          <div className="grid md:grid-cols-2 gap-2">
+            <Field label="Name" value={name} onChange={setName} />
+            <Field label="Description" value={description} onChange={setDescription} />
+          </div>
+          <JsonField label="Policies (JSON)" value={policies} onChange={setPolicies} />
+          <button className="h-9 px-4 rounded-md bg-accent hover:bg-accent-hover text-white text-sm">Create</button>
+        </form>
+      )}
+      <div className="p-3 overflow-x-auto">
+        <Table
+          title="Packages"
+          columns={["Name", "Description", "Created"]}
+          rows={packages.map((p: any) => [p.name, p.description || "-", shortDate(p.created_at)])}
+        />
+        {packages.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {packages.map((p: any) => (
+              <button key={p.id} onClick={() => remove(p.id)} className="text-xs text-destructive hover:underline">
+                Delete "{p.name}"
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+// ── Analytics Panel ───────────────────────────────────────────────
+
+function AnalyticsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [analytics, setAnalytics] = useState<any | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setAnalytics(await api(baseUrl, token, "/v1/admin/analytics"));
+    } catch {
+      toast({ type: "error", title: "Failed to load analytics" });
+    } finally {
+      setLoading(false);
+    }
+  }, [baseUrl, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  if (!analytics) {
+    return (
+      <section className="border border-border-subtle bg-surface rounded-md p-6 text-center text-secondary">
+        {loading ? "Loading analytics..." : "No data"}
+      </section>
+    );
+  }
+
+  return (
+    <section className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <BarChart3 size={17} className="text-accent" />
+          <h2 className="font-medium text-lg">Usage Analytics</h2>
+        </div>
+        <button onClick={load} disabled={loading} className="h-9 px-3 rounded-md border border-border-default hover:bg-elevated text-sm flex items-center gap-2 disabled:opacity-60">
+          <RefreshCw size={16} className={loading ? "animate-spin" : ""} /> Refresh
+        </button>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <Metric label="Total Users" value={analytics.total_users} />
+        <Metric label="Active Users" value={analytics.active_users} />
+        <Metric label="Online Now" value={analytics.online_users} />
+        <Metric label="Total Messages" value={analytics.total_messages} />
+        <Metric label="Total Calls" value={analytics.total_calls} />
+        <Metric label="Meetings" value={analytics.total_meetings} />
+        <Metric label="Files" value={analytics.total_files} />
+        <Metric label="Storage (MB)" value={Math.round((analytics.total_storage_bytes || 0) / 1048576)} />
+      </div>
+
+      {/* Users section with import/export */}
+      <div className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+        <div className="p-3 border-b border-border-subtle flex items-center justify-between">
+          <h3 className="font-medium">Bulk User Operations</h3>
+          <div className="flex items-center gap-2">
+            <label className="h-8 px-3 rounded-md border border-border-default hover:bg-elevated text-sm flex items-center gap-2 cursor-pointer">
+              <UserPlus size={14} /> Import CSV
+              <input type="file" accept=".csv" className="hidden" onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                const text = await file.text();
+                try {
+                  const response = await fetch(`${baseUrl.replace(/\/$/, "")}/v1/admin/users/import`, {
+                    method: "POST",
+                    headers: { Authorization: `Bearer ${token}`, "Content-Type": "text/csv" },
+                    body: text,
+                  });
+                  if (!response.ok) throw new Error(`Import failed (${response.status})`);
+                  const result = await response.json();
+                  toast({ type: "success", title: `Imported ${result.imported}, skipped ${result.skipped}` });
+                  if (result.errors?.length) toast({ type: "info", title: `${result.errors.length} errors` });
+                } catch (err) {
+                  toast({ type: "error", title: err instanceof Error ? err.message : "Import failed" });
+                }
+                e.target.value = "";
+              }} />
+            </label>
+            <button
+              onClick={async () => {
+                try {
+                  const response = await fetch(`${baseUrl.replace(/\/$/, "")}/v1/admin/users/export`, {
+                    headers: { Authorization: `Bearer ${token}` },
+                  });
+                  if (!response.ok) throw new Error(`Export failed (${response.status})`);
+                  const blob = await response.blob();
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `users-${new Date().toISOString().slice(0, 10)}.csv`;
+                  a.click();
+                  URL.revokeObjectURL(url);
+                } catch (err) {
+                  toast({ type: "error", title: err instanceof Error ? err.message : "Export failed" });
+                }
+              }}
+              className="h-8 px-3 rounded-md bg-accent hover:bg-accent-hover text-white text-sm flex items-center gap-2"
+            >
+              <Download size={14} /> Export CSV
+            </button>
+          </div>
+        </div>
+        <div className="p-3 text-sm text-secondary">
+          CSV format for import: <code className="bg-base px-1 rounded">display_name,sip_uri,password,role</code>
+        </div>
+      </div>
+    </section>
   );
 }
 
