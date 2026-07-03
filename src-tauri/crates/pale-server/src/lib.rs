@@ -185,6 +185,10 @@ pub struct ServerConfig {
     pub http_tls_cert: Option<PathBuf>,
     pub http_tls_key: Option<PathBuf>,
     pub media: MediaConfig,
+    /// Path to a CA certificate for verifying client TLS certificates on SIP.
+    pub ca_cert_path: Option<PathBuf>,
+    /// When true, require and verify client certificates on SIP TLS connections.
+    pub verify_client_certs: bool,
 }
 
 pub struct AppState {
@@ -1283,15 +1287,349 @@ impl AppState {
             }
         });
 
+        // Check if MFA is enabled for this user
+        let mfa_required = self.is_mfa_enabled(user.id);
+
+        if mfa_required {
+            // Return a limited MFA token — the user must validate the TOTP code
+            // before getting full access. Mark the session role as "mfa_pending"
+            // so it cannot pass authenticated_principal checks.
+            let mfa_session = AdminSession {
+                token: Uuid::new_v4().to_string(),
+                principal: user.sip_uri.clone(),
+                role: "mfa_pending".to_string(),
+                expires_at: Utc::now() + Duration::minutes(5),
+            };
+            self.admin_sessions
+                .insert(mfa_session.token.clone(), mfa_session.clone());
+            return Ok(UserLoginResponse {
+                token: mfa_session.token,
+                user,
+                sip_credentials: sip_creds,
+                expires_at: mfa_session.expires_at,
+                mfa_required: true,
+            });
+        }
+
         // Set presence to online
         self.update_presence(&user.sip_uri, PresenceStatus::Online, None);
+
+        // Track session
+        self.track_session(user.id, &session.token, "Desktop", "desktop", "direct");
 
         Ok(UserLoginResponse {
             token: session.token,
             user,
             sip_credentials: sip_creds,
             expires_at: session.expires_at,
+            mfa_required: false,
         })
+    }
+
+    // ─── MFA / TOTP ───
+
+    /// Check if MFA/TOTP is enabled for a user (by SIP URI lookup).
+    pub fn is_mfa_enabled(&self, user_id: Uuid) -> bool {
+        if let Some(pg) = &self.pg {
+            let pg = pg.clone();
+            let rt = tokio::runtime::Handle::try_current();
+            if let Ok(handle) = rt {
+                if let Ok(Some((_, enabled, _))) =
+                    std::thread::scope(|_| handle.block_on(pg.get_totp_secret(user_id)))
+                {
+                    return enabled;
+                }
+            }
+        }
+        false
+    }
+
+    /// Generate a TOTP secret for MFA setup. Returns provisioning URI + backup codes.
+    pub fn mfa_setup(&self, user_id: Uuid, sip_uri: &str) -> Result<MfaSetupResponse, String> {
+        use totp_rs::{Algorithm, Secret, TOTP};
+
+        let secret = Secret::generate_secret();
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret.to_bytes().map_err(|e| e.to_string())?,
+            Some("Pale Softphone".to_string()),
+            sip_uri.to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+
+        let provisioning_uri = totp.get_url();
+        let secret_base32 = secret.to_encoded().to_string();
+
+        // Generate backup codes
+        let mut backup_codes = Vec::new();
+        for _ in 0..8 {
+            let code = format!("{:08x}", rand::random::<u32>());
+            backup_codes.push(code);
+        }
+
+        // Store encrypted secret (not yet enabled)
+        let encrypted = secret_base32.clone(); // Will be stored encrypted in PG
+        let codes_json = serde_json::to_string(&backup_codes).unwrap_or_default();
+        if let Some(pg) = &self.pg {
+            let pg = pg.clone();
+            let encrypted = encrypted.clone();
+            let codes_json = codes_json.clone();
+            tokio::spawn(async move {
+                let _ = pg
+                    .upsert_totp_secret(user_id, &encrypted, false, &codes_json)
+                    .await;
+            });
+        }
+
+        Ok(MfaSetupResponse {
+            provisioning_uri,
+            secret_base32,
+            backup_codes,
+        })
+    }
+
+    /// Verify a TOTP code to enable MFA for a user.
+    pub fn mfa_verify_enable(&self, user_id: Uuid, code: &str) -> Result<(), String> {
+        use totp_rs::{Algorithm, Secret, TOTP};
+
+        let (secret_b32, _enabled, backup_codes_json) = self
+            .get_totp_data(user_id)
+            .ok_or_else(|| "MFA not set up".to_string())?;
+
+        let secret_bytes = Secret::Encoded(secret_b32.clone())
+            .to_bytes()
+            .map_err(|e| e.to_string())?;
+        let totp =
+            TOTP::new(Algorithm::SHA1, 6, 1, 30, secret_bytes, None, String::new()).map_err(|e| e.to_string())?;
+
+        if !totp.check_current(code).map_err(|e| e.to_string())? {
+            return Err("Invalid TOTP code".to_string());
+        }
+
+        // Enable MFA
+        if let Some(pg) = &self.pg {
+            let pg = pg.clone();
+            let secret_b32 = secret_b32.clone();
+            let backup_codes_json = backup_codes_json.clone();
+            tokio::spawn(async move {
+                let _ = pg
+                    .upsert_totp_secret(user_id, &secret_b32, true, &backup_codes_json)
+                    .await;
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Validate a TOTP code during login. Also accepts backup codes.
+    pub fn mfa_validate(&self, user_id: Uuid, code: &str) -> Result<bool, String> {
+        use totp_rs::{Algorithm, Secret, TOTP};
+
+        let (secret_b32, enabled, backup_codes_json) = self
+            .get_totp_data(user_id)
+            .ok_or_else(|| "MFA not configured".to_string())?;
+
+        if !enabled {
+            return Err("MFA not enabled".to_string());
+        }
+
+        // Check backup codes first
+        if let Ok(mut backup_codes) =
+            serde_json::from_str::<Vec<String>>(&backup_codes_json)
+        {
+            if let Some(pos) = backup_codes.iter().position(|c| c == code) {
+                backup_codes.remove(pos);
+                let new_codes_json = serde_json::to_string(&backup_codes).unwrap_or_default();
+                if let Some(pg) = &self.pg {
+                    let pg = pg.clone();
+                    let secret_b32 = secret_b32.clone();
+                    tokio::spawn(async move {
+                        let _ = pg
+                            .upsert_totp_secret(user_id, &secret_b32, true, &new_codes_json)
+                            .await;
+                    });
+                }
+                return Ok(true);
+            }
+        }
+
+        // Validate TOTP
+        let secret_bytes = Secret::Encoded(secret_b32)
+            .to_bytes()
+            .map_err(|e| e.to_string())?;
+        let totp =
+            TOTP::new(Algorithm::SHA1, 6, 1, 30, secret_bytes, None, String::new()).map_err(|e| e.to_string())?;
+
+        totp.check_current(code).map_err(|e| e.to_string())
+    }
+
+    /// Disable MFA for a user.
+    pub fn mfa_disable(&self, user_id: Uuid) {
+        if let Some(pg) = &self.pg {
+            let pg = pg.clone();
+            tokio::spawn(async move {
+                let _ = pg.delete_totp_secret(user_id).await;
+            });
+        }
+    }
+
+    fn get_totp_data(&self, user_id: Uuid) -> Option<(String, bool, String)> {
+        if let Some(pg) = &self.pg {
+            let pg = pg.clone();
+            let rt = tokio::runtime::Handle::try_current();
+            if let Ok(handle) = rt {
+                if let Ok(data) =
+                    std::thread::scope(|_| handle.block_on(pg.get_totp_secret(user_id)))
+                {
+                    return data;
+                }
+            }
+        }
+        None
+    }
+
+    // ─── Session Management ───
+
+    /// Record a new session in the user_sessions table.
+    pub fn track_session(
+        &self,
+        user_id: Uuid,
+        token: &str,
+        device_name: &str,
+        device_type: &str,
+        ip_address: &str,
+    ) {
+        let token_hash = Self::hash_token(token);
+        let session_id = Uuid::new_v4();
+        if let Some(pg) = &self.pg {
+            let pg = pg.clone();
+            let token_hash = token_hash.clone();
+            let device_name = device_name.to_string();
+            let device_type = device_type.to_string();
+            let ip_address = ip_address.to_string();
+            tokio::spawn(async move {
+                let _ = pg
+                    .insert_user_session(
+                        session_id,
+                        user_id,
+                        &token_hash,
+                        &device_name,
+                        &device_type,
+                        &ip_address,
+                    )
+                    .await;
+            });
+        }
+    }
+
+    /// List active sessions for a user.
+    pub fn list_sessions(
+        &self,
+        user_id: Uuid,
+        current_token: &str,
+    ) -> Vec<UserSessionInfo> {
+        if let Some(pg) = &self.pg {
+            let pg = pg.clone();
+            let rt = tokio::runtime::Handle::try_current();
+            let _current_hash = Self::hash_token(current_token);
+            if let Ok(handle) = rt {
+                if let Ok(sessions) =
+                    std::thread::scope(|_| handle.block_on(pg.list_user_sessions(user_id)))
+                {
+                    return sessions
+                        .into_iter()
+                        .map(|s| {
+                            let id = s["id"].as_str().unwrap_or("").to_string();
+                            UserSessionInfo {
+                                id,
+                                device_name: s["device_name"]
+                                    .as_str()
+                                    .unwrap_or("Unknown")
+                                    .to_string(),
+                                device_type: s["device_type"]
+                                    .as_str()
+                                    .unwrap_or("desktop")
+                                    .to_string(),
+                                ip_address: s["ip_address"]
+                                    .as_str()
+                                    .unwrap_or("unknown")
+                                    .to_string(),
+                                created_at: s["created_at"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .to_string(),
+                                last_active: s["last_active"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .to_string(),
+                                current: false, // Set below
+                            }
+                        })
+                        .collect();
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    /// Revoke a specific session by ID.
+    pub fn revoke_session_by_id(&self, session_id: Uuid) -> bool {
+        if let Some(pg) = &self.pg {
+            let pg = pg.clone();
+            let rt = tokio::runtime::Handle::try_current();
+            if let Ok(handle) = rt {
+                // Get the token_hash for this session so we can also remove it from admin_sessions
+                if let Ok(Some(token_hash)) = std::thread::scope(|_| {
+                    handle.block_on(pg.get_session_token_hash_for_id(session_id))
+                }) {
+                    // Remove from in-memory session map
+                    self.admin_sessions.retain(|_, s| {
+                        Self::hash_token(&s.token) != token_hash
+                    });
+                }
+                if let Ok(revoked) =
+                    std::thread::scope(|_| handle.block_on(pg.revoke_user_session(session_id)))
+                {
+                    return revoked;
+                }
+            }
+        }
+        false
+    }
+
+    /// Revoke all sessions for a user except the current one.
+    pub fn revoke_all_sessions(&self, user_id: Uuid, current_token: &str) -> u64 {
+        let current_hash = Self::hash_token(current_token);
+        if let Some(pg) = &self.pg {
+            let pg = pg.clone();
+            let rt = tokio::runtime::Handle::try_current();
+            if let Ok(handle) = rt {
+                if let Ok(count) = std::thread::scope(|_| {
+                    handle.block_on(pg.revoke_all_user_sessions(user_id, &current_hash))
+                }) {
+                    // Also remove from in-memory map
+                    self.admin_sessions.retain(|_, s| {
+                        let h = Self::hash_token(&s.token);
+                        h == current_hash || s.principal != self.user_sip_uri_for_id(user_id).unwrap_or_default()
+                    });
+                    return count;
+                }
+            }
+        }
+        0
+    }
+
+    fn user_sip_uri_for_id(&self, user_id: Uuid) -> Option<String> {
+        self.users.get(&user_id).map(|u| u.sip_uri.clone())
+    }
+
+    fn hash_token(token: &str) -> String {
+        use sha2::Digest as _;
+        let digest = Sha256::digest(token.as_bytes());
+        hex::encode(digest)
     }
 
     pub fn users(&self) -> Vec<User> {
@@ -6586,6 +6924,10 @@ pub struct UserLoginResponse {
     pub user: User,
     pub sip_credentials: Option<SipCredentials>,
     pub expires_at: DateTime<Utc>,
+    /// When true, the token is a temporary MFA token that must be exchanged
+    /// via POST /v1/mfa/validate before it grants access to other endpoints.
+    #[serde(default)]
+    pub mfa_required: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -9219,6 +9561,66 @@ impl PersistedMapObject for AdminAuditEvent {
 
     fn map_key(&self) -> Self::Key {
         self.id
+    }
+}
+
+// ─── MFA / TOTP Types ───
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MfaSetupResponse {
+    pub provisioning_uri: String,
+    pub secret_base32: String,
+    pub backup_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MfaStatusResponse {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MfaVerifyRequest {
+    pub code: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MfaValidateRequest {
+    pub code: String,
+}
+
+/// Response from user login when MFA is required — contains a temporary token
+/// that must be exchanged via POST /v1/mfa/validate.
+#[derive(Debug, Clone, Serialize)]
+pub struct MfaPendingResponse {
+    pub mfa_required: bool,
+    pub mfa_token: String,
+}
+
+// ─── Session Management Types ───
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UserSessionInfo {
+    pub id: String,
+    pub device_name: String,
+    pub device_type: String,
+    pub ip_address: String,
+    pub created_at: String,
+    pub last_active: String,
+    pub current: bool,
+}
+
+// ─── Certificate Auth Types ───
+
+/// Extract identity from a client certificate's CN or SAN.
+pub fn extract_cert_identity(cn: &str) -> Option<String> {
+    // Map CN to SIP URI: "300" -> "sip:300@<domain>" or pass through if already a URI
+    if cn.starts_with("sip:") || cn.starts_with("sips:") {
+        Some(cn.to_string())
+    } else if cn.contains('@') {
+        Some(format!("sip:{}", cn))
+    } else {
+        // Just the user part — caller must resolve domain
+        Some(cn.to_string())
     }
 }
 

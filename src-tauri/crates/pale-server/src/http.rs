@@ -342,6 +342,16 @@ pub fn router(state: SharedState) -> Router {
             get(export_dlp_violations_csv),
         )
         .route("/v1/admin/dlp/scan", post(scan_content_dlp))
+        // MFA / TOTP
+        .route("/v1/mfa/status", get(mfa_status))
+        .route("/v1/mfa/setup", post(mfa_setup))
+        .route("/v1/mfa/verify", post(mfa_verify))
+        .route("/v1/mfa/validate", post(mfa_validate))
+        .route("/v1/mfa/disable", post(mfa_disable))
+        // Session management
+        .route("/v1/sessions", get(list_sessions))
+        .route("/v1/sessions/{id}", delete(revoke_session))
+        .route("/v1/sessions/revoke-all", post(revoke_all_sessions))
         .route("/v1/events", get(sse_stream))
         .layer(from_fn(crate::metrics::request_metrics))
         .layer(from_fn(cors))
@@ -1591,6 +1601,184 @@ async fn scan_content_dlp(
         Some(format!("matches={}", result.violations.len())),
     );
     Ok(Json(result))
+}
+
+// ─── MFA / TOTP Handlers ───
+
+async fn mfa_status(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::MfaStatusResponse>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let user = state
+        .user_by_sip_uri(&principal)
+        .ok_or(ApiError::NotFound)?;
+    let enabled = state.is_mfa_enabled(user.id);
+    Ok(Json(crate::MfaStatusResponse { enabled }))
+}
+
+async fn mfa_setup(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::MfaSetupResponse>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let user = state
+        .user_by_sip_uri(&principal)
+        .ok_or(ApiError::NotFound)?;
+    let response = state
+        .mfa_setup(user.id, &user.sip_uri)
+        .map_err(ApiError::Conflict)?;
+    state.record_audit_event(&principal, "mfa.setup_initiated", None);
+    Ok(Json(response))
+}
+
+async fn mfa_verify(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::MfaVerifyRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let user = state
+        .user_by_sip_uri(&principal)
+        .ok_or(ApiError::NotFound)?;
+    state
+        .mfa_verify_enable(user.id, &input.code)
+        .map_err(ApiError::Conflict)?;
+    state.record_audit_event(&principal, "mfa.enabled", None);
+    Ok(Json(json!({ "ok": true, "mfa_enabled": true })))
+}
+
+async fn mfa_validate(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::MfaValidateRequest>,
+) -> Result<Json<crate::UserLoginResponse>, ApiError> {
+    // The bearer token here is the temporary mfa_pending token
+    let token = bearer_token(&headers);
+    let session = state
+        .admin_sessions
+        .get(&token.to_string())
+        .ok_or(ApiError::Unauthorized)?;
+    if session.role != "mfa_pending" {
+        return Err(ApiError::Conflict(
+            "Token is not an MFA pending token".to_string(),
+        ));
+    }
+    let user = state
+        .user_by_sip_uri(&session.principal)
+        .ok_or(ApiError::Unauthorized)?;
+
+    // Validate the TOTP code
+    let valid = state
+        .mfa_validate(user.id, &input.code)
+        .map_err(|e| ApiError::Conflict(e))?;
+    if !valid {
+        return Err(ApiError::Unauthorized);
+    }
+
+    // Remove the MFA pending session
+    state.admin_sessions.remove(&token.to_string());
+
+    // Create a real session
+    let real_session = crate::AdminSession {
+        token: Uuid::new_v4().to_string(),
+        principal: user.sip_uri.clone(),
+        role: user.role.clone(),
+        expires_at: Utc::now() + chrono::Duration::hours(12),
+    };
+    state
+        .admin_sessions
+        .insert(real_session.token.clone(), real_session.clone());
+
+    // Track session
+    let ip = request_source(&headers);
+    state.track_session(user.id, &real_session.token, "Desktop", "desktop", &ip);
+
+    // Set presence to online
+    state.update_presence(&user.sip_uri, crate::PresenceStatus::Online, None);
+
+    // Build SIP credentials
+    let sip_creds = crate::split_sip_aor_simple(&user.sip_uri).map(|(username, domain)| {
+        crate::SipCredentials {
+            sip_uri: user.sip_uri.clone(),
+            registrar_uri: None,
+            registration_available: state.sip_registration_available(),
+            username,
+            password: String::new(), // Password not available after MFA flow
+            transport: "udp".to_string(),
+            domain,
+        }
+    });
+
+    state.record_audit_event(&user.sip_uri, "mfa.validated", None);
+
+    Ok(Json(crate::UserLoginResponse {
+        token: real_session.token,
+        user,
+        sip_credentials: sip_creds,
+        expires_at: real_session.expires_at,
+        mfa_required: false,
+    }))
+}
+
+async fn mfa_disable(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let user = state
+        .user_by_sip_uri(&principal)
+        .ok_or(ApiError::NotFound)?;
+    state.mfa_disable(user.id);
+    state.record_audit_event(&principal, "mfa.disabled", None);
+    Ok(Json(json!({ "ok": true, "mfa_enabled": false })))
+}
+
+// ─── Session Management Handlers ───
+
+async fn list_sessions(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::UserSessionInfo>>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let user = state
+        .user_by_sip_uri(&principal)
+        .ok_or(ApiError::NotFound)?;
+    let current_token = bearer_token(&headers).to_string();
+    let sessions = state.list_sessions(user.id, &current_token);
+    Ok(Json(sessions))
+}
+
+async fn revoke_session(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let revoked = state.revoke_session_by_id(id);
+    if !revoked {
+        return Err(ApiError::NotFound);
+    }
+    state.record_audit_event(&principal, "session.revoked", Some(id.to_string()));
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn revoke_all_sessions(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let user = state
+        .user_by_sip_uri(&principal)
+        .ok_or(ApiError::NotFound)?;
+    let current_token = bearer_token(&headers).to_string();
+    let count = state.revoke_all_sessions(user.id, &current_token);
+    state.record_audit_event(
+        &principal,
+        "sessions.revoked_all",
+        Some(format!("revoked={}", count)),
+    );
+    Ok(Json(json!({ "ok": true, "revoked": count })))
 }
 
 async fn create_call(

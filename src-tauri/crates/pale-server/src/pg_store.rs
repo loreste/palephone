@@ -87,6 +87,7 @@ impl PgStore {
             include_str!("../migrations/021_message_priority_saved.sql"),
             include_str!("../migrations/022_identity_lifecycle.sql"),
             include_str!("../migrations/023_call_policy.sql"),
+            include_str!("../migrations/024_mfa_sessions_certauth.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {
@@ -1384,6 +1385,159 @@ impl PgStore {
     }
 
     // ─── User Profile ───
+
+    // ─── TOTP MFA ───
+
+    pub async fn upsert_totp_secret(
+        &self,
+        user_id: Uuid,
+        encrypted_secret: &str,
+        enabled: bool,
+        backup_codes: &str,
+    ) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "INSERT INTO totp_secrets (user_id, encrypted_secret, enabled, backup_codes)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (user_id) DO UPDATE SET
+                    encrypted_secret = $2, enabled = $3, backup_codes = $4",
+                &[&user_id, &encrypted_secret, &enabled, &backup_codes],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_totp_secret(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Option<(String, bool, String)>, PgError> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_opt(
+                "SELECT encrypted_secret, enabled, backup_codes FROM totp_secrets WHERE user_id = $1",
+                &[&user_id],
+            )
+            .await?;
+        Ok(row.map(|r| {
+            (
+                r.get::<_, String>("encrypted_secret"),
+                r.get::<_, bool>("enabled"),
+                r.get::<_, String>("backup_codes"),
+            )
+        }))
+    }
+
+    pub async fn delete_totp_secret(&self, user_id: Uuid) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client
+            .execute("DELETE FROM totp_secrets WHERE user_id = $1", &[&user_id])
+            .await?;
+        Ok(())
+    }
+
+    // ─── User Sessions ───
+
+    pub async fn insert_user_session(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        token_hash: &str,
+        device_name: &str,
+        device_type: &str,
+        ip_address: &str,
+    ) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "INSERT INTO user_sessions (id, user_id, token_hash, device_name, device_type, ip_address)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+                &[&id, &user_id, &token_hash, &device_name, &device_type, &ip_address],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_user_sessions(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<serde_json::Value>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT id, device_name, device_type, ip_address, created_at, last_active
+                 FROM user_sessions
+                 WHERE user_id = $1 AND NOT revoked
+                 ORDER BY last_active DESC",
+                &[&user_id],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.get::<_, Uuid>("id").to_string(),
+                    "device_name": r.get::<_, String>("device_name"),
+                    "device_type": r.get::<_, String>("device_type"),
+                    "ip_address": r.get::<_, String>("ip_address"),
+                    "created_at": r.get::<_, chrono::DateTime<chrono::Utc>>("created_at").to_rfc3339(),
+                    "last_active": r.get::<_, chrono::DateTime<chrono::Utc>>("last_active").to_rfc3339(),
+                })
+            })
+            .collect())
+    }
+
+    pub async fn revoke_user_session(&self, session_id: Uuid) -> Result<bool, PgError> {
+        let client = self.pool.get().await?;
+        let count = client
+            .execute(
+                "UPDATE user_sessions SET revoked = true WHERE id = $1 AND NOT revoked",
+                &[&session_id],
+            )
+            .await?;
+        Ok(count > 0)
+    }
+
+    pub async fn revoke_all_user_sessions(
+        &self,
+        user_id: Uuid,
+        except_token_hash: &str,
+    ) -> Result<u64, PgError> {
+        let client = self.pool.get().await?;
+        let count = client
+            .execute(
+                "UPDATE user_sessions SET revoked = true
+                 WHERE user_id = $1 AND token_hash != $2 AND NOT revoked",
+                &[&user_id, &except_token_hash],
+            )
+            .await?;
+        Ok(count)
+    }
+
+    pub async fn touch_user_session(&self, token_hash: &str) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "UPDATE user_sessions SET last_active = now() WHERE token_hash = $1 AND NOT revoked",
+                &[&token_hash],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_session_token_hash_for_id(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Option<String>, PgError> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_opt(
+                "SELECT token_hash FROM user_sessions WHERE id = $1 AND NOT revoked",
+                &[&session_id],
+            )
+            .await?;
+        Ok(row.map(|r| r.get("token_hash")))
+    }
 
     pub async fn update_user_profile(
         &self,

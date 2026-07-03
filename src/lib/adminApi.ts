@@ -395,6 +395,61 @@ export function loadPresence(baseUrl: string, token: string) {
   return adminGet<AdminPresence[]>(baseUrl, token, "/v1/presence");
 }
 
+// ─── MFA / TOTP ───
+
+export interface MfaSetupResponse {
+  provisioning_uri: string;
+  secret_base32: string;
+  backup_codes: string[];
+}
+
+export interface MfaStatusResponse {
+  enabled: boolean;
+}
+
+export function getMfaStatus(baseUrl: string, token: string) {
+  return adminGet<MfaStatusResponse>(baseUrl, token, "/v1/mfa/status");
+}
+
+export function setupMfa(baseUrl: string, token: string) {
+  return adminPost<MfaSetupResponse>(baseUrl, token, "/v1/mfa/setup", {});
+}
+
+export function verifyMfa(baseUrl: string, token: string, code: string) {
+  return adminPost<{ ok: boolean; mfa_enabled: boolean }>(baseUrl, token, "/v1/mfa/verify", { code });
+}
+
+export function disableMfa(baseUrl: string, token: string) {
+  return adminPost<{ ok: boolean; mfa_enabled: boolean }>(baseUrl, token, "/v1/mfa/disable", {});
+}
+
+// ─── Session Management ───
+
+export interface SessionInfo {
+  id: string;
+  device_name: string;
+  device_type: string;
+  ip_address: string;
+  created_at: string;
+  last_active: string;
+  current: boolean;
+}
+
+export function listSessions(baseUrl: string, token: string) {
+  return adminGet<SessionInfo[]>(baseUrl, token, "/v1/sessions");
+}
+
+export function revokeSession(baseUrl: string, token: string, id: string) {
+  return request<{ ok: boolean }>(baseUrl, `/v1/sessions/${id}`, {
+    method: "DELETE",
+    headers: authHeaders(token),
+  });
+}
+
+export function revokeAllSessions(baseUrl: string, token: string) {
+  return adminPost<{ ok: boolean; revoked: number }>(baseUrl, token, "/v1/sessions/revoke-all", {});
+}
+
 function adminGet<T>(baseUrl: string, token: string, path: string) {
   return request<T>(baseUrl, path, { headers: authHeaders(token) });
 }

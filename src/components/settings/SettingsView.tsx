@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from "react";
-import { User, Volume2, Globe, Info, Server, Bell, Phone, LogOut, Sun, Moon, Palette } from "lucide-react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { User, Volume2, Globe, Info, Server, Bell, Phone, LogOut, Sun, Moon, Palette, Shield, Monitor, Smartphone, Laptop, Trash2 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useAccountStore } from "@/store/accountStore";
 import { useServerStore } from "@/store/serverStore";
@@ -7,12 +7,13 @@ import { useUiStore } from "@/store/uiStore";
 import { AudioSettings } from "./AudioSettings";
 import { NetworkSettings } from "./NetworkSettings";
 import { registerAccount, storeSipPassword, getConfig, saveSettings } from "@/lib/tauri";
-import { adminLogin, adminLogout, adminBaseUrl } from "@/lib/adminApi";
+import { adminLogin, adminLogout, adminBaseUrl, getMfaStatus, setupMfa, verifyMfa, disableMfa, listSessions, revokeSession, revokeAllSessions } from "@/lib/adminApi";
+import type { MfaSetupResponse, SessionInfo } from "@/lib/adminApi";
 import { disconnectServer, signOut } from "@/lib/session";
 import { toast } from "@/components/ui/Toast";
 import type { SipAccount } from "@/types";
 
-type SettingsTab = "account" | "audio" | "network" | "server" | "calls" | "notifications" | "appearance" | "about";
+type SettingsTab = "account" | "audio" | "network" | "server" | "calls" | "notifications" | "security" | "appearance" | "about";
 
 const settingsTabs: { id: SettingsTab; label: string; icon: typeof User }[] = [
   { id: "account", label: "Account", icon: User },
@@ -20,6 +21,7 @@ const settingsTabs: { id: SettingsTab; label: string; icon: typeof User }[] = [
   { id: "audio", label: "Audio", icon: Volume2 },
   { id: "network", label: "Network", icon: Globe },
   { id: "server", label: "Server", icon: Server },
+  { id: "security", label: "Security", icon: Shield },
   { id: "notifications", label: "Notifications", icon: Bell },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "about", label: "About", icon: Info },
@@ -62,6 +64,7 @@ export function SettingsView() {
         {activeTab === "calls" && <CallSettingsPanel />}
         {activeTab === "network" && <NetworkSettings />}
         {activeTab === "server" && <ServerSettingsPanel />}
+        {activeTab === "security" && <SecuritySettingsPanel />}
         {activeTab === "notifications" && <NotificationSettingsPanel />}
         {activeTab === "appearance" && <AppearancePanel />}
         {activeTab === "about" && <AboutPanel />}
@@ -440,6 +443,312 @@ function ChangePasswordSection() {
         </button>
       </div>
     </>
+  );
+}
+
+function SecuritySettingsPanel() {
+  return (
+    <div className="space-y-6">
+      <MfaSection />
+      <SessionsSection />
+    </div>
+  );
+}
+
+function MfaSection() {
+  const { baseUrl, token, connected } = useServerStore();
+  const [mfaEnabled, setMfaEnabled] = useState<boolean | null>(null);
+  const [setupData, setSetupData] = useState<MfaSetupResponse | null>(null);
+  const [verifyCode, setVerifyCode] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!connected || !baseUrl || !token) return;
+    getMfaStatus(baseUrl, token)
+      .then((status) => setMfaEnabled(status.enabled))
+      .catch(() => setMfaEnabled(null));
+  }, [connected, baseUrl, token]);
+
+  const handleSetup = async () => {
+    if (!baseUrl || !token) return;
+    setLoading(true);
+    try {
+      const data = await setupMfa(baseUrl, token);
+      setSetupData(data);
+    } catch (err) {
+      toast({ type: "error", title: "Failed to set up MFA", description: String(err) });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleVerify = async () => {
+    if (!baseUrl || !token || !verifyCode) return;
+    setLoading(true);
+    try {
+      await verifyMfa(baseUrl, token, verifyCode);
+      setMfaEnabled(true);
+      setSetupData(null);
+      setVerifyCode("");
+      toast({ type: "success", title: "MFA enabled successfully" });
+    } catch (err) {
+      toast({ type: "error", title: "Invalid code", description: String(err) });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDisable = async () => {
+    if (!baseUrl || !token) return;
+    setLoading(true);
+    try {
+      await disableMfa(baseUrl, token);
+      setMfaEnabled(false);
+      toast({ type: "info", title: "MFA disabled" });
+    } catch (err) {
+      toast({ type: "error", title: "Failed to disable MFA", description: String(err) });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!connected) {
+    return (
+      <div className="space-y-3">
+        <SectionHeader title="Multi-Factor Authentication" />
+        <p className="text-sm text-tertiary">Connect to a server to manage MFA.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <SectionHeader title="Multi-Factor Authentication" />
+
+      {mfaEnabled === null && (
+        <p className="text-sm text-tertiary">Loading MFA status...</p>
+      )}
+
+      {mfaEnabled === false && !setupData && (
+        <div className="space-y-2">
+          <p className="text-sm text-secondary">
+            Add an extra layer of security to your account with a time-based one-time password (TOTP).
+          </p>
+          <button
+            onClick={handleSetup}
+            disabled={loading}
+            className={cn(
+              "px-4 py-2 rounded-md text-sm font-medium",
+              "bg-accent text-inverse hover:bg-accent-hover transition-colors",
+              loading && "opacity-50 cursor-not-allowed"
+            )}
+          >
+            {loading ? "Setting up..." : "Enable MFA"}
+          </button>
+        </div>
+      )}
+
+      {setupData && (
+        <div className="space-y-3">
+          <p className="text-sm text-secondary">
+            Scan this QR code with your authenticator app, or enter the secret manually.
+          </p>
+          <div className="bg-elevated rounded-lg p-4 space-y-2">
+            <p className="text-xs text-tertiary font-mono break-all">
+              {setupData.provisioning_uri}
+            </p>
+            <div className="space-y-1">
+              <p className="text-xs font-medium text-secondary">Secret key:</p>
+              <p className="text-xs font-mono text-primary bg-surface px-2 py-1 rounded break-all">
+                {setupData.secret_base32}
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <p className="text-xs font-medium text-secondary">Backup codes (save these):</p>
+            <div className="grid grid-cols-2 gap-1">
+              {setupData.backup_codes.map((code, i) => (
+                <span key={i} className="text-xs font-mono text-primary bg-elevated px-2 py-1 rounded">
+                  {code}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          <FormField
+            label="Enter verification code"
+            value={verifyCode}
+            onChange={setVerifyCode}
+            placeholder="123456"
+          />
+          <button
+            onClick={handleVerify}
+            disabled={loading || !verifyCode}
+            className={cn(
+              "w-full px-4 py-2 rounded-md text-sm font-medium",
+              "bg-accent text-inverse hover:bg-accent-hover transition-colors",
+              (loading || !verifyCode) && "opacity-50 cursor-not-allowed"
+            )}
+          >
+            {loading ? "Verifying..." : "Verify & Enable"}
+          </button>
+        </div>
+      )}
+
+      {mfaEnabled === true && (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <Shield size={16} className="text-success" />
+            <span className="text-sm text-primary font-medium">MFA is enabled</span>
+          </div>
+          <p className="text-sm text-tertiary">
+            Your account is protected with TOTP-based multi-factor authentication.
+          </p>
+          <button
+            onClick={handleDisable}
+            disabled={loading}
+            className={cn(
+              "px-4 py-2 rounded-md text-sm font-medium",
+              "bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors",
+              loading && "opacity-50 cursor-not-allowed"
+            )}
+          >
+            {loading ? "Disabling..." : "Disable MFA"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SessionsSection() {
+  const { baseUrl, token, connected } = useServerStore();
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const loadSessions = useCallback(async () => {
+    if (!connected || !baseUrl || !token) return;
+    try {
+      const data = await listSessions(baseUrl, token);
+      setSessions(data);
+    } catch {
+      // silently fail if endpoint not available
+    }
+  }, [connected, baseUrl, token]);
+
+  useEffect(() => {
+    loadSessions();
+  }, [loadSessions]);
+
+  const handleRevoke = async (id: string) => {
+    if (!baseUrl || !token) return;
+    setLoading(true);
+    try {
+      await revokeSession(baseUrl, token, id);
+      setSessions((prev) => prev.filter((s) => s.id !== id));
+      toast({ type: "success", title: "Session revoked" });
+    } catch (err) {
+      toast({ type: "error", title: "Failed to revoke session", description: String(err) });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRevokeAll = async () => {
+    if (!baseUrl || !token) return;
+    setLoading(true);
+    try {
+      const result = await revokeAllSessions(baseUrl, token);
+      loadSessions();
+      toast({ type: "success", title: `Revoked ${result.revoked} session(s)` });
+    } catch (err) {
+      toast({ type: "error", title: "Failed to revoke sessions", description: String(err) });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const deviceIcon = (type: string) => {
+    switch (type) {
+      case "mobile":
+        return <Smartphone size={14} className="text-tertiary" />;
+      case "tablet":
+        return <Monitor size={14} className="text-tertiary" />;
+      default:
+        return <Laptop size={14} className="text-tertiary" />;
+    }
+  };
+
+  if (!connected) {
+    return (
+      <div className="space-y-3">
+        <SectionHeader title="Active Sessions" />
+        <p className="text-sm text-tertiary">Connect to a server to manage sessions.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <SectionHeader title="Active Sessions" />
+        {sessions.length > 1 && (
+          <button
+            onClick={handleRevokeAll}
+            disabled={loading}
+            className={cn(
+              "text-xs text-destructive hover:text-destructive/80 transition-colors",
+              loading && "opacity-50 cursor-not-allowed"
+            )}
+          >
+            Revoke all other sessions
+          </button>
+        )}
+      </div>
+
+      {sessions.length === 0 && (
+        <p className="text-sm text-tertiary">No active sessions found.</p>
+      )}
+
+      <div className="space-y-2">
+        {sessions.map((session) => (
+          <div
+            key={session.id}
+            className={cn(
+              "flex items-center justify-between p-3 rounded-lg",
+              "bg-elevated border border-border-subtle"
+            )}
+          >
+            <div className="flex items-center gap-3">
+              {deviceIcon(session.device_type)}
+              <div>
+                <p className="text-sm text-primary font-medium">
+                  {session.device_name}
+                  {session.current && (
+                    <span className="ml-2 text-xs text-accent font-normal">(current)</span>
+                  )}
+                </p>
+                <p className="text-xs text-tertiary">
+                  {session.ip_address} - Last active{" "}
+                  {new Date(session.last_active).toLocaleDateString()}
+                </p>
+              </div>
+            </div>
+            {!session.current && (
+              <button
+                onClick={() => handleRevoke(session.id)}
+                disabled={loading}
+                className="p-1.5 rounded-md text-tertiary hover:text-destructive hover:bg-destructive/10 transition-colors"
+                title="Revoke session"
+              >
+                <Trash2 size={14} />
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

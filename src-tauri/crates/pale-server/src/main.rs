@@ -337,6 +337,8 @@ fn config_from_env() -> Result<ServerConfig, String> {
         http_tls_cert: optional_env("PALE_HTTP_TLS_CERT").map(PathBuf::from),
         http_tls_key: optional_env("PALE_HTTP_TLS_KEY").map(PathBuf::from),
         media: media_config_from_env(),
+        ca_cert_path: optional_env("PALE_CA_CERT_PATH").map(PathBuf::from),
+        verify_client_certs: env_bool("PALE_VERIFY_CLIENT_CERTS", false),
     })
 }
 

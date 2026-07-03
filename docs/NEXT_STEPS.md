@@ -1,5 +1,23 @@
 # Next Steps — Production Readiness Handoff
 
+## 0. Enterprise Security Features — LANDED (2026-07-03)
+
+The following Microsoft Teams enterprise parity features shipped:
+
+- **MFA / TOTP** (2026-07-03): TOTP-based multi-factor authentication with
+  `totp_secrets` table (migration 024), setup/verify/validate/disable endpoints
+  (`/v1/mfa/*`), backup codes, and a Security tab in SettingsView with QR
+  provisioning URI display and code verification.
+- **Session management** (2026-07-03): Concurrent session tracking via
+  `user_sessions` table (migration 024), list/revoke/revoke-all endpoints
+  (`/v1/sessions/*`), device name/type/IP tracking, and an Active Sessions
+  section in the Security settings tab with per-session revoke buttons.
+- **Certificate-based authentication** (2026-07-03): Server config fields
+  `ca_cert_path` and `verify_client_certs` (`PALE_CA_CERT_PATH`,
+  `PALE_VERIFY_CLIENT_CERTS` env vars), plus `extract_cert_identity` helper
+  for mapping client certificate CN/SAN to SIP user identity. SIP TLS path
+  already supported `PALE_SIP_TLS_VERIFY_CLIENT` and `PALE_SIP_TLS_CA_FILE`.
+
 Produced by a five-team review (SIP/RFC compliance, architecture, UI/UX, API
 contract, QA) with adversarial cross-verification: 25 confirmed findings,
 0 refuted. The security, UX-trust, and provisioning fixes landed in commit
