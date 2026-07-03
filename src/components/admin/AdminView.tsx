@@ -22,6 +22,8 @@ import {
   UserPlus,
   Upload,
   Users,
+  Monitor,
+  Smartphone,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -54,7 +56,7 @@ async function api<T = any>(baseUrl: string, token: string, path: string, opts?:
   return paleServerApi<T>(baseUrl, token, path, opts);
 }
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music" | "sso" | "encryption" | "pam";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music" | "sso" | "encryption" | "pam" | "common_area_phones" | "meeting_rooms_admin" | "devices";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -95,6 +97,9 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "sso", label: "SSO", icon: Shield },
   { id: "encryption", label: "Encryption", icon: Lock },
   { id: "pam", label: "Priv. Access", icon: Shield },
+  { id: "common_area_phones", label: "Area Phones", icon: Smartphone },
+  { id: "meeting_rooms_admin", label: "Meeting Rooms", icon: Monitor },
+  { id: "devices", label: "Devices", icon: Server },
 ];
 
 export function AdminView() {
@@ -332,6 +337,9 @@ export function AdminView() {
         {activeTab === "sso" && <SsoProvidersPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "encryption" && <EncryptionPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "pam" && <PrivilegedAccessPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "common_area_phones" && <CommonAreaPhonesPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "meeting_rooms_admin" && <MeetingRoomsPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "devices" && <DevicesPanel baseUrl={baseUrl} token={token} />}
       </div>
     </div>
   );
@@ -5374,6 +5382,91 @@ function EncryptionPanel({ baseUrl, token }: { baseUrl: string; token: string })
   );
 }
 
+// ─── Common Area Phones ───
+
+interface CommonAreaPhone {
+  id: string;
+  name: string;
+  extension: string;
+  location: string;
+  features: Record<string, unknown>;
+  enabled: boolean;
+  created_at: string;
+}
+
+function CommonAreaPhonesPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [phones, setPhones] = useState<CommonAreaPhone[]>([]);
+  const [name, setName] = useState("");
+  const [extension, setExtension] = useState("");
+  const [location, setLocation] = useState("");
+
+  useEffect(() => {
+    api<CommonAreaPhone[]>(baseUrl, token, "/v1/admin/common-area-phones")
+      .then(setPhones)
+      .catch(() => {});
+  }, [baseUrl, token]);
+
+  const create = async () => {
+    if (!name || !extension) return;
+    try {
+      const phone = await api<CommonAreaPhone>(baseUrl, token, "/v1/admin/common-area-phones", {
+        method: "POST",
+        body: { name, extension, location, enabled: true },
+      });
+      setPhones([...phones, phone]);
+      setName("");
+      setExtension("");
+      setLocation("");
+      toast({ type: "success", title: "Common area phone created" });
+    } catch {
+      toast({ type: "error", title: "Failed to create phone" });
+    }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/common-area-phones/${id}`, { method: "DELETE" });
+      setPhones(phones.filter((p) => p.id !== id));
+      toast({ type: "success", title: "Phone deleted" });
+    } catch {
+      toast({ type: "error", title: "Failed to delete" });
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-base font-semibold">Common Area Phones</h2>
+      <p className="text-sm text-secondary">Manage shared/lobby phones not assigned to individual users.</p>
+
+      <div className="grid grid-cols-3 gap-2">
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name" className="px-3 py-2 text-sm border border-border-subtle rounded-md bg-surface" />
+        <input value={extension} onChange={(e) => setExtension(e.target.value)} placeholder="Extension" className="px-3 py-2 text-sm border border-border-subtle rounded-md bg-surface" />
+        <input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Location" className="px-3 py-2 text-sm border border-border-subtle rounded-md bg-surface" />
+      </div>
+      <button onClick={create} disabled={!name || !extension} className="h-9 px-4 rounded-md bg-accent text-white text-sm font-medium disabled:opacity-60">
+        <Plus size={14} className="inline mr-1" />Add Phone
+      </button>
+
+      <div className="space-y-2">
+        {phones.map((p) => (
+          <div key={p.id} className="flex items-center justify-between p-3 rounded-md border border-border-default bg-surface">
+            <div>
+              <p className="text-sm font-medium">{p.name}</p>
+              <p className="text-xs text-secondary">
+                Ext: {p.extension} {p.location && `· ${p.location}`} · {p.enabled ? "Enabled" : "Disabled"}
+              </p>
+            </div>
+            <button onClick={() => remove(p.id)} className="p-1 text-destructive hover:text-destructive/80">
+              <Trash2 size={14} />
+            </button>
+          </div>
+        ))}
+        {phones.length === 0 && <p className="text-sm text-tertiary">No common area phones configured.</p>}
+      </div>
+    </div>
+  );
+}
+
 // ─── Privileged Access Management Panel ───
 
 function PrivilegedAccessPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
@@ -5457,6 +5550,195 @@ function PrivilegedAccessPanel({ baseUrl, token }: { baseUrl: string; token: str
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Meeting Rooms Admin ───
+
+interface MeetingRoomEntry {
+  id: string;
+  name: string;
+  location: string;
+  capacity: number;
+  equipment: string[];
+  bookable: boolean;
+  created_at: string;
+}
+
+function MeetingRoomsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [rooms, setRooms] = useState<MeetingRoomEntry[]>([]);
+  const [name, setName] = useState("");
+  const [location, setLocation] = useState("");
+  const [capacity, setCapacity] = useState("10");
+  const [equipment, setEquipment] = useState("");
+
+  useEffect(() => {
+    api<MeetingRoomEntry[]>(baseUrl, token, "/v1/admin/meeting-rooms")
+      .then(setRooms)
+      .catch(() => {});
+  }, [baseUrl, token]);
+
+  const create = async () => {
+    if (!name) return;
+    try {
+      const room = await api<MeetingRoomEntry>(baseUrl, token, "/v1/admin/meeting-rooms", {
+        method: "POST",
+        body: {
+          name,
+          location,
+          capacity: parseInt(capacity) || 10,
+          equipment: equipment.split(",").map((s) => s.trim()).filter(Boolean),
+          bookable: true,
+        },
+      });
+      setRooms([...rooms, room]);
+      setName("");
+      setLocation("");
+      setCapacity("10");
+      setEquipment("");
+      toast({ type: "success", title: "Meeting room created" });
+    } catch {
+      toast({ type: "error", title: "Failed to create room" });
+    }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/meeting-rooms/${id}`, { method: "DELETE" });
+      setRooms(rooms.filter((r) => r.id !== id));
+      toast({ type: "success", title: "Room deleted" });
+    } catch {
+      toast({ type: "error", title: "Failed to delete" });
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-base font-semibold">Meeting Rooms</h2>
+      <p className="text-sm text-secondary">Manage physical meeting rooms available for booking.</p>
+
+      <div className="grid grid-cols-2 gap-2">
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Room name" className="px-3 py-2 text-sm border border-border-subtle rounded-md bg-surface" />
+        <input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Location (e.g., Floor 3)" className="px-3 py-2 text-sm border border-border-subtle rounded-md bg-surface" />
+        <input value={capacity} onChange={(e) => setCapacity(e.target.value)} placeholder="Capacity" className="px-3 py-2 text-sm border border-border-subtle rounded-md bg-surface" />
+        <input value={equipment} onChange={(e) => setEquipment(e.target.value)} placeholder="Equipment (comma-separated)" className="px-3 py-2 text-sm border border-border-subtle rounded-md bg-surface" />
+      </div>
+      <button onClick={create} disabled={!name} className="h-9 px-4 rounded-md bg-accent text-white text-sm font-medium disabled:opacity-60">
+        <Plus size={14} className="inline mr-1" />Add Room
+      </button>
+
+      <div className="space-y-2">
+        {rooms.map((r) => (
+          <div key={r.id} className="flex items-center justify-between p-3 rounded-md border border-border-default bg-surface">
+            <div>
+              <p className="text-sm font-medium">{r.name}</p>
+              <p className="text-xs text-secondary">
+                {r.location && `${r.location} · `}Capacity: {r.capacity}
+                {r.equipment.length > 0 && ` · ${r.equipment.join(", ")}`}
+                {r.bookable ? "" : " · Not bookable"}
+              </p>
+            </div>
+            <button onClick={() => remove(r.id)} className="p-1 text-destructive hover:text-destructive/80">
+              <Trash2 size={14} />
+            </button>
+          </div>
+        ))}
+        {rooms.length === 0 && <p className="text-sm text-tertiary">No meeting rooms configured.</p>}
+      </div>
+    </div>
+  );
+}
+
+// ─── Devices (Provisioning) ───
+
+interface DeviceEntry {
+  id: string;
+  mac_address: string;
+  model: string;
+  assigned_user: string | null;
+  config_template: string;
+  provisioned_at: string;
+  last_seen: string | null;
+}
+
+function DevicesPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [devices, setDevices] = useState<DeviceEntry[]>([]);
+  const [mac, setMac] = useState("");
+  const [model, setModel] = useState("");
+  const [assignedUser, setAssignedUser] = useState("");
+
+  useEffect(() => {
+    api<DeviceEntry[]>(baseUrl, token, "/v1/admin/devices")
+      .then(setDevices)
+      .catch(() => {});
+  }, [baseUrl, token]);
+
+  const create = async () => {
+    if (!mac) return;
+    try {
+      const device = await api<DeviceEntry>(baseUrl, token, "/v1/admin/devices", {
+        method: "POST",
+        body: {
+          mac_address: mac,
+          model: model || undefined,
+          assigned_user: assignedUser || undefined,
+        },
+      });
+      setDevices([...devices, device]);
+      setMac("");
+      setModel("");
+      setAssignedUser("");
+      toast({ type: "success", title: "Device provisioned" });
+    } catch {
+      toast({ type: "error", title: "Failed to create device" });
+    }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/devices/${id}`, { method: "DELETE" });
+      setDevices(devices.filter((d) => d.id !== id));
+      toast({ type: "success", title: "Device removed" });
+    } catch {
+      toast({ type: "error", title: "Failed to delete" });
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-base font-semibold">SIP Phone Provisioning</h2>
+      <p className="text-sm text-secondary">
+        Provision SIP phones by MAC address. Devices auto-configure via GET /v1/provisioning/&#123;mac&#125;.
+      </p>
+
+      <div className="grid grid-cols-3 gap-2">
+        <input value={mac} onChange={(e) => setMac(e.target.value)} placeholder="MAC Address" className="px-3 py-2 text-sm border border-border-subtle rounded-md bg-surface" />
+        <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="Model (optional)" className="px-3 py-2 text-sm border border-border-subtle rounded-md bg-surface" />
+        <input value={assignedUser} onChange={(e) => setAssignedUser(e.target.value)} placeholder="Assigned User URI" className="px-3 py-2 text-sm border border-border-subtle rounded-md bg-surface" />
+      </div>
+      <button onClick={create} disabled={!mac} className="h-9 px-4 rounded-md bg-accent text-white text-sm font-medium disabled:opacity-60">
+        <Plus size={14} className="inline mr-1" />Provision Device
+      </button>
+
+      <div className="space-y-2">
+        {devices.map((d) => (
+          <div key={d.id} className="flex items-center justify-between p-3 rounded-md border border-border-default bg-surface">
+            <div>
+              <p className="text-sm font-medium">{d.mac_address}</p>
+              <p className="text-xs text-secondary">
+                {d.model && `${d.model} · `}
+                {d.assigned_user ? `User: ${d.assigned_user}` : "Unassigned"}
+                {d.last_seen ? ` · Last seen: ${shortDate(d.last_seen)}` : ""}
+              </p>
+            </div>
+            <button onClick={() => remove(d.id)} className="p-1 text-destructive hover:text-destructive/80">
+              <Trash2 size={14} />
+            </button>
+          </div>
+        ))}
+        {devices.length === 0 && <p className="text-sm text-tertiary">No devices provisioned.</p>}
+      </div>
     </div>
   );
 }

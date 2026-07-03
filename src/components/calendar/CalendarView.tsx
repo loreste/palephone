@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import {
+  Building2,
   ChevronLeft,
   ChevronRight,
   Plus,
@@ -69,6 +70,40 @@ export function CalendarView() {
   const [recurrenceInterval, setRecurrenceInterval] = useState("1");
   const [recurrenceUntil, setRecurrenceUntil] = useState("");
   const [preJoinMeeting, setPreJoinMeeting] = useState<CalendarMeetingOccurrence | null>(null);
+
+  // Room booking state
+  interface MeetingRoomInfo { id: string; name: string; location: string; capacity: number; equipment: string[]; bookable: boolean; }
+  const [availableRooms, setAvailableRooms] = useState<MeetingRoomInfo[]>([]);
+  const [selectedRoomId, setSelectedRoomId] = useState<string>("");
+  const [showRoomPicker, setShowRoomPicker] = useState(false);
+
+  const loadAvailableRooms = useCallback(async () => {
+    if (!baseUrl || !token || !startDate || !startTime || !endTime) return;
+    try {
+      const start = new Date(`${startDate}T${startTime}`).toISOString();
+      const end = new Date(`${startDate}T${endTime}`).toISOString();
+      const rooms = await paleServerApi<MeetingRoomInfo[]>(
+        baseUrl, token,
+        `/v1/meeting-rooms/available?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`
+      );
+      setAvailableRooms(rooms);
+    } catch { setAvailableRooms([]); }
+  }, [baseUrl, token, startDate, startTime, endTime]);
+
+  const bookRoom = useCallback(async (meetingId?: string) => {
+    if (!baseUrl || !token || !selectedRoomId || !startDate) return;
+    try {
+      const start = new Date(`${startDate}T${startTime}`).toISOString();
+      const end = new Date(`${startDate}T${endTime}`).toISOString();
+      await paleServerApi(baseUrl, token, `/v1/meeting-rooms/${selectedRoomId}/book`, {
+        method: "POST",
+        body: { start_time: start, end_time: end, meeting_id: meetingId },
+      });
+      toast({ type: "success", title: "Room booked" });
+    } catch {
+      toast({ type: "error", title: "Failed to book room" });
+    }
+  }, [baseUrl, token, selectedRoomId, startDate, startTime, endTime]);
 
   const loadMeetings = useCallback(async () => {
     if (!baseUrl || !token) return;
@@ -478,6 +513,37 @@ export function CalendarView() {
                 aria-label="Repeat until"
               />
             </div>
+            {/* Room booking */}
+            <div className="border-t border-border-subtle pt-2">
+              <button
+                type="button"
+                onClick={() => { setShowRoomPicker(!showRoomPicker); if (!showRoomPicker) loadAvailableRooms(); }}
+                className="flex items-center gap-1.5 text-xs text-accent hover:underline"
+              >
+                <Building2 size={13} />
+                {showRoomPicker ? "Hide room booking" : "Book a meeting room"}
+              </button>
+              {showRoomPicker && (
+                <div className="mt-2 space-y-2">
+                  {availableRooms.length === 0 ? (
+                    <p className="text-xs text-tertiary">No rooms available for this time slot.</p>
+                  ) : (
+                    <select
+                      value={selectedRoomId}
+                      onChange={(e) => setSelectedRoomId(e.target.value)}
+                      className="w-full rounded-md border border-border-subtle bg-input px-2 py-1.5 text-sm"
+                    >
+                      <option value="">Select a room...</option>
+                      {availableRooms.map((r) => (
+                        <option key={r.id} value={r.id}>
+                          {r.name} ({r.location}, cap. {r.capacity})
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+              )}
+            </div>
             <div className="flex justify-end gap-2 pt-2">
               <button
                 onClick={resetForm}
@@ -486,7 +552,7 @@ export function CalendarView() {
                 Cancel
               </button>
               <button
-                onClick={handleSave}
+                onClick={async () => { await handleSave(); if (selectedRoomId) await bookRoom(); }}
                 disabled={!title || !startDate}
                 className="px-4 py-2 text-sm bg-accent text-white rounded-md hover:bg-accent/90 disabled:opacity-50"
               >
