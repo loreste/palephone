@@ -1,12 +1,12 @@
 import { useState, useRef, useEffect, useCallback, type ReactNode } from "react";
-import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Video, Users, Reply, Pencil, Pin, Forward, Check, CheckCheck, Search, Radio, Hash, CalendarClock, Star, AlertTriangle, Plug, Copy, Trash2, Clock, Image as ImageLucide } from "lucide-react";
+import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Video, Users, Reply, Pencil, Pin, Forward, Check, CheckCheck, Search, Radio, Hash, CalendarClock, Star, AlertTriangle, Plug, Copy, Trash2, Clock, Image as ImageLucide, Languages, Bold, Italic, Code, Link, BookOpen, ListTodo, ExternalLink } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useChatStore, type ChatMessage, type RoomSummary } from "@/store/chatStore";
 import { useMatrixStore } from "@/store/matrixStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
-import { matrixSendMessage, matrixSetTyping, matrixCreateDm, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerSaveMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerEndRoomCall, paleServerGetConferences, paleServerGetMeetings, paleServerCreateMeeting, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerGetRoomMessages, paleServerGetRoomMessageState, paleServerSendRoomMessage, paleServerScheduleRoomMessage, paleServerGetChannelWebhooks, paleServerCreateChannelWebhook, paleServerUpdateChannelWebhook, paleServerDeleteChannelWebhook, paleServerEditMessage, paleServerDeleteMessage, paleServerGetNotificationPreference, paleServerSetNotificationPreference, paleServerSearchGifs, paleServerGetTags, type ServerRoom, type ServerUser, type ServerRoomMessage, type ServerRoomMessageState, type ServerMeeting, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult, type ServerChannelWebhook, type GifResult, type ServerTag } from "@/lib/tauri";
+import { matrixSendMessage, matrixSetTyping, matrixCreateDm, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerSaveMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerEndRoomCall, paleServerGetConferences, paleServerGetMeetings, paleServerCreateMeeting, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerGetRoomMessages, paleServerGetRoomMessageState, paleServerSendRoomMessage, paleServerScheduleRoomMessage, paleServerGetChannelWebhooks, paleServerCreateChannelWebhook, paleServerUpdateChannelWebhook, paleServerDeleteChannelWebhook, paleServerEditMessage, paleServerDeleteMessage, paleServerGetNotificationPreference, paleServerSetNotificationPreference, paleServerSearchGifs, paleServerGetTags, paleServerTranslate, paleServerGetCustomEmojis, paleServerGetWikiPages, paleServerCreateWikiPage, paleServerUpdateWikiPage, paleServerDeleteWikiPage, paleServerGetTaskBoards, paleServerCreateTaskBoard, paleServerGetTasks, paleServerCreateTask, paleServerUpdateTask, type ServerRoom, type ServerUser, type ServerRoomMessage, type ServerRoomMessageState, type ServerMeeting, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult, type ServerChannelWebhook, type GifResult, type ServerTag, type CustomEmoji, type WikiPage, type TaskBoard, type TaskItem } from "@/lib/tauri";
 import { joinScheduledMeeting } from "@/lib/meetingJoin";
 import { toast } from "@/components/ui/Toast";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
@@ -82,6 +82,7 @@ function mapServerRoomMessages(
       read_by: (messageState?.reads ?? []).map((read) => read.reader_uri),
       delivery_status: msg.delivery_status ?? "sent",
       scheduled_at: msg.scheduled_at,
+      card_payload: msg.card_payload ?? null,
     } satisfies ChatMessage;
   });
 }
@@ -970,6 +971,8 @@ function ChatRoom({
   const [gifResults, setGifResults] = useState<GifResult[]>([]);
   const [gifLoading, setGifLoading] = useState(false);
   const [teamTags, setTeamTags] = useState<ServerTag[]>([]);
+  const [customEmojis, setCustomEmojis] = useState<CustomEmoji[]>([]);
+  const [subTab, setSubTab] = useState<"chat" | "wiki" | "tasks">("chat");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<number | null>(null);
@@ -1009,6 +1012,9 @@ function ChatRoom({
     if (!isServerRoom || !connected || !baseUrl || !token || !room.team_id) return;
     paleServerGetTags(baseUrl, token, room.team_id)
       .then(setTeamTags)
+      .catch(() => {});
+    paleServerGetCustomEmojis(baseUrl, token, room.team_id)
+      .then(setCustomEmojis)
       .catch(() => {});
   }, [room.team_id, isServerRoom, connected, baseUrl, token]);
 
@@ -1378,6 +1384,60 @@ function ChatRoom({
     }
   };
 
+  const handleTranslate = async (msg: ChatMessage, targetLanguage: string) => {
+    if (!connected || !baseUrl || !token) return;
+    try {
+      const result = await paleServerTranslate(baseUrl, token, msg.body, targetLanguage);
+      updateMessage(room.room_id, msg.event_id, { translated_text: result.translated_text });
+    } catch (err) {
+      toast({ type: "error", title: "Translation failed", description: String(err) });
+    }
+  };
+
+  const insertMarkdown = (syntax: "bold" | "italic" | "code" | "link") => {
+    const el = inputRef.current;
+    if (!el) return;
+    const start = el.selectionStart ?? input.length;
+    const end = el.selectionEnd ?? input.length;
+    const selected = input.slice(start, end);
+    let replacement: string;
+    let cursorOffset: number;
+    switch (syntax) {
+      case "bold":
+        replacement = `**${selected || "text"}**`;
+        cursorOffset = selected ? replacement.length : 2;
+        break;
+      case "italic":
+        replacement = `*${selected || "text"}*`;
+        cursorOffset = selected ? replacement.length : 1;
+        break;
+      case "code":
+        replacement = `\`${selected || "code"}\``;
+        cursorOffset = selected ? replacement.length : 1;
+        break;
+      case "link":
+        replacement = selected ? `[${selected}](url)` : "[text](url)";
+        cursorOffset = selected ? replacement.length - 4 : 1;
+        break;
+    }
+    const newInput = input.slice(0, start) + replacement + input.slice(end);
+    setInput(newInput);
+    setTimeout(() => {
+      el.focus();
+      const newPos = start + cursorOffset;
+      el.setSelectionRange(newPos, newPos);
+    }, 0);
+  };
+
+  const handleComposeKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      handleSend();
+    } else if (e.ctrlKey || e.metaKey) {
+      if (e.key === "b") { e.preventDefault(); insertMarkdown("bold"); }
+      else if (e.key === "i") { e.preventDefault(); insertMarkdown("italic"); }
+    }
+  };
+
   const startRoomCall = async (mode: "audio" | "video") => {
     try {
       if (room.is_direct) {
@@ -1527,7 +1587,39 @@ function ChatRoom({
         />
       )}
 
-      {hasActiveRoomCall && (
+      {/* Team sub-tabs (Wiki, Tasks) */}
+      {isServerRoom && room.team_id && (
+        <div className="flex items-center gap-0.5 px-4 py-1.5 border-b border-border-subtle bg-elevated/50">
+          <button
+            onClick={() => setSubTab("chat")}
+            className={cn("px-2.5 py-1 rounded-md text-xs font-medium transition-colors", subTab === "chat" ? "bg-accent text-white" : "text-tertiary hover:text-primary hover:bg-elevated")}
+          >
+            <MessageSquare size={12} className="inline mr-1" />Chat
+          </button>
+          <button
+            onClick={() => setSubTab("wiki")}
+            className={cn("px-2.5 py-1 rounded-md text-xs font-medium transition-colors", subTab === "wiki" ? "bg-accent text-white" : "text-tertiary hover:text-primary hover:bg-elevated")}
+          >
+            <BookOpen size={12} className="inline mr-1" />Wiki
+          </button>
+          <button
+            onClick={() => setSubTab("tasks")}
+            className={cn("px-2.5 py-1 rounded-md text-xs font-medium transition-colors", subTab === "tasks" ? "bg-accent text-white" : "text-tertiary hover:text-primary hover:bg-elevated")}
+          >
+            <ListTodo size={12} className="inline mr-1" />Tasks
+          </button>
+        </div>
+      )}
+
+      {subTab === "wiki" && room.team_id && baseUrl && token && (
+        <WikiPanel teamId={room.team_id} baseUrl={baseUrl} token={token} />
+      )}
+
+      {subTab === "tasks" && room.team_id && baseUrl && token && (
+        <TasksPanel teamId={room.team_id} baseUrl={baseUrl} token={token} />
+      )}
+
+      {hasActiveRoomCall && subTab === "chat" && (
         <div className="flex items-center justify-between gap-3 px-4 py-2 border-b border-border-subtle bg-success/10 text-sm">
           <div className="flex items-center gap-2 min-w-0 text-success">
             <Phone size={14} />
@@ -1550,6 +1642,7 @@ function ChatRoom({
         </div>
       )}
 
+      {subTab === "chat" && <>
       {/* Messages */}
       <div
         ref={messagesContainerRef}
@@ -1579,6 +1672,8 @@ function ChatRoom({
             onForward={handleForward}
             onPin={handlePin}
             onSave={handleSave}
+            onTranslate={handleTranslate}
+            customEmojis={customEmojis}
           />
         ))}
         <div ref={messagesEndRef} />
@@ -1764,21 +1859,38 @@ function ChatRoom({
             <option value="urgent">Urgent</option>
           </select>
         )}
-        <input
-          ref={inputRef}
-          type="text"
-          value={input}
-          onChange={(e) => handleInputChange(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
-          placeholder={editingMessage ? "Edit your message..." : "Type a message..."}
-          className={cn(
-            "flex-1 bg-surface border border-border-subtle rounded-lg",
-            "px-3 py-2 text-sm text-primary",
-            "placeholder:text-tertiary",
-            "focus:outline-none focus:border-border-focus",
-            editingMessage && "border-warning/50"
-          )}
-        />
+        <div className="flex-1 flex flex-col">
+          {/* Rich text toolbar */}
+          <div className="flex items-center gap-0.5 px-1 pb-1">
+            <button onClick={() => insertMarkdown("bold")} className="p-1 rounded text-tertiary hover:text-primary hover:bg-elevated" title="Bold (Ctrl+B)">
+              <Bold size={14} />
+            </button>
+            <button onClick={() => insertMarkdown("italic")} className="p-1 rounded text-tertiary hover:text-primary hover:bg-elevated" title="Italic (Ctrl+I)">
+              <Italic size={14} />
+            </button>
+            <button onClick={() => insertMarkdown("code")} className="p-1 rounded text-tertiary hover:text-primary hover:bg-elevated" title="Code">
+              <Code size={14} />
+            </button>
+            <button onClick={() => insertMarkdown("link")} className="p-1 rounded text-tertiary hover:text-primary hover:bg-elevated" title="Link">
+              <Link size={14} />
+            </button>
+          </div>
+          <input
+            ref={inputRef}
+            type="text"
+            value={input}
+            onChange={(e) => handleInputChange(e.target.value)}
+            onKeyDown={handleComposeKeyDown}
+            placeholder={editingMessage ? "Edit your message..." : "Type a message..."}
+            className={cn(
+              "w-full bg-surface border border-border-subtle rounded-lg",
+              "px-3 py-2 text-sm text-primary",
+              "placeholder:text-tertiary",
+              "focus:outline-none focus:border-border-focus",
+              editingMessage && "border-warning/50"
+            )}
+          />
+        </div>
         {isServerRoom && !editingMessage && (
           <button
             onClick={() => { setShowScheduleSend(!showScheduleSend); setShowGifPicker(false); }}
@@ -1808,6 +1920,285 @@ function ChatRoom({
           {editingMessage ? <Check size={18} /> : <Send size={18} />}
         </button>
       </div>
+      </>}
+    </div>
+  );
+}
+
+function WikiPanel({ teamId, baseUrl, token }: { teamId: string; baseUrl: string; token: string }) {
+  const [pages, setPages] = useState<WikiPage[]>([]);
+  const [selectedPage, setSelectedPage] = useState<WikiPage | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [newTitle, setNewTitle] = useState("");
+  const [editBody, setEditBody] = useState("");
+  const [editing, setEditing] = useState(false);
+
+  useEffect(() => {
+    paleServerGetWikiPages(baseUrl, token, teamId).then(setPages).catch(() => {});
+  }, [teamId, baseUrl, token]);
+
+  const handleCreate = async () => {
+    if (!newTitle.trim()) return;
+    try {
+      const page = await paleServerCreateWikiPage(baseUrl, token, teamId, newTitle.trim());
+      setPages((prev) => [...prev, page]);
+      setNewTitle("");
+      setCreating(false);
+      setSelectedPage(page);
+    } catch (err) {
+      toast({ type: "error", title: "Failed to create wiki page", description: String(err) });
+    }
+  };
+
+  const handleSave = async () => {
+    if (!selectedPage) return;
+    try {
+      const updated = await paleServerUpdateWikiPage(baseUrl, token, selectedPage.id, { body: editBody });
+      setSelectedPage(updated);
+      setPages((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+      setEditing(false);
+    } catch (err) {
+      toast({ type: "error", title: "Failed to save wiki page", description: String(err) });
+    }
+  };
+
+  const handleDelete = async (pageId: string) => {
+    try {
+      await paleServerDeleteWikiPage(baseUrl, token, pageId);
+      setPages((prev) => prev.filter((p) => p.id !== pageId));
+      if (selectedPage?.id === pageId) setSelectedPage(null);
+    } catch (err) {
+      toast({ type: "error", title: "Failed to delete wiki page", description: String(err) });
+    }
+  };
+
+  if (selectedPage) {
+    return (
+      <div className="flex-1 overflow-y-auto p-4">
+        <button onClick={() => { setSelectedPage(null); setEditing(false); }} className="text-xs text-accent hover:underline mb-3">&larr; All pages</button>
+        <h2 className="text-lg font-semibold text-primary mb-2">{selectedPage.title}</h2>
+        <p className="text-[10px] text-tertiary mb-3">Updated by {selectedPage.updated_by} on {new Date(selectedPage.updated_at).toLocaleDateString()}</p>
+        {editing ? (
+          <div className="space-y-2">
+            <textarea
+              value={editBody}
+              onChange={(e) => setEditBody(e.target.value)}
+              className="w-full h-64 bg-surface border border-border-subtle rounded-lg px-3 py-2 text-sm text-primary focus:outline-none focus:border-border-focus resize-y"
+              placeholder="Write your wiki content in markdown..."
+            />
+            <div className="flex gap-2">
+              <button onClick={handleSave} className="px-3 py-1.5 rounded-md bg-accent text-white text-xs font-medium hover:bg-accent-hover">Save</button>
+              <button onClick={() => setEditing(false)} className="px-3 py-1.5 rounded-md border border-border-subtle text-xs text-secondary hover:text-primary">Cancel</button>
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div className="text-sm text-primary whitespace-pre-wrap break-words" dangerouslySetInnerHTML={{ __html: renderMarkdown(selectedPage.body || "No content yet.") }} />
+            <button onClick={() => { setEditing(true); setEditBody(selectedPage.body); }} className="mt-3 px-3 py-1.5 rounded-md border border-border-subtle text-xs text-secondary hover:text-primary">
+              <Pencil size={12} className="inline mr-1" />Edit
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 overflow-y-auto p-4">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-primary">Wiki Pages</h3>
+        <button onClick={() => setCreating(!creating)} className="p-1 rounded-md text-tertiary hover:text-accent hover:bg-elevated">
+          <Plus size={16} />
+        </button>
+      </div>
+      {creating && (
+        <div className="flex gap-2 mb-3">
+          <input
+            value={newTitle}
+            onChange={(e) => setNewTitle(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleCreate()}
+            placeholder="Page title..."
+            className="flex-1 bg-surface border border-border-subtle rounded-md px-2 py-1.5 text-sm text-primary focus:outline-none focus:border-border-focus"
+            autoFocus
+          />
+          <button onClick={handleCreate} className="px-2.5 py-1.5 rounded-md bg-accent text-white text-xs font-medium hover:bg-accent-hover">Create</button>
+        </div>
+      )}
+      {pages.length === 0 ? (
+        <p className="text-sm text-tertiary text-center py-8">No wiki pages yet. Create one to get started.</p>
+      ) : (
+        <div className="space-y-1">
+          {pages.map((page) => (
+            <div key={page.id} className="flex items-center justify-between group px-2 py-2 rounded-md hover:bg-elevated cursor-pointer" onClick={() => setSelectedPage(page)}>
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-primary truncate">{page.title}</p>
+                <p className="text-[10px] text-tertiary">Updated {new Date(page.updated_at).toLocaleDateString()}</p>
+              </div>
+              <button
+                onClick={(e) => { e.stopPropagation(); handleDelete(page.id); }}
+                className="opacity-0 group-hover:opacity-100 p-1 text-tertiary hover:text-destructive"
+                title="Delete"
+              >
+                <Trash2 size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TasksPanel({ teamId, baseUrl, token }: { teamId: string; baseUrl: string; token: string }) {
+  const [boards, setBoards] = useState<TaskBoard[]>([]);
+  const [selectedBoard, setSelectedBoard] = useState<TaskBoard | null>(null);
+  const [tasks, setTasks] = useState<TaskItem[]>([]);
+  const [creatingBoard, setCreatingBoard] = useState(false);
+  const [newBoardName, setNewBoardName] = useState("");
+  const [creatingTask, setCreatingTask] = useState(false);
+  const [newTaskTitle, setNewTaskTitle] = useState("");
+
+  useEffect(() => {
+    paleServerGetTaskBoards(baseUrl, token, teamId).then(setBoards).catch(() => {});
+  }, [teamId, baseUrl, token]);
+
+  useEffect(() => {
+    if (!selectedBoard) { setTasks([]); return; }
+    paleServerGetTasks(baseUrl, token, selectedBoard.id).then(setTasks).catch(() => {});
+  }, [selectedBoard, baseUrl, token]);
+
+  const handleCreateBoard = async () => {
+    if (!newBoardName.trim()) return;
+    try {
+      const board = await paleServerCreateTaskBoard(baseUrl, token, teamId, newBoardName.trim());
+      setBoards((prev) => [...prev, board]);
+      setNewBoardName("");
+      setCreatingBoard(false);
+      setSelectedBoard(board);
+    } catch (err) {
+      toast({ type: "error", title: "Failed to create board", description: String(err) });
+    }
+  };
+
+  const handleCreateTask = async () => {
+    if (!newTaskTitle.trim() || !selectedBoard) return;
+    try {
+      const task = await paleServerCreateTask(baseUrl, token, selectedBoard.id, { title: newTaskTitle.trim() });
+      setTasks((prev) => [...prev, task]);
+      setNewTaskTitle("");
+      setCreatingTask(false);
+    } catch (err) {
+      toast({ type: "error", title: "Failed to create task", description: String(err) });
+    }
+  };
+
+  const handleUpdateTaskStatus = async (task: TaskItem, newStatus: string) => {
+    try {
+      const updated = await paleServerUpdateTask(baseUrl, token, task.id, { status: newStatus });
+      setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+    } catch (err) {
+      toast({ type: "error", title: "Failed to update task", description: String(err) });
+    }
+  };
+
+  const columns = [
+    { key: "todo", label: "To Do", color: "border-t-tertiary" },
+    { key: "in-progress", label: "In Progress", color: "border-t-warning" },
+    { key: "done", label: "Done", color: "border-t-success" },
+  ];
+
+  if (selectedBoard) {
+    return (
+      <div className="flex-1 overflow-y-auto p-4">
+        <button onClick={() => setSelectedBoard(null)} className="text-xs text-accent hover:underline mb-3">&larr; All boards</button>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-primary">{selectedBoard.name}</h3>
+          <button onClick={() => setCreatingTask(!creatingTask)} className="p-1 rounded-md text-tertiary hover:text-accent hover:bg-elevated" title="Add task">
+            <Plus size={16} />
+          </button>
+        </div>
+        {creatingTask && (
+          <div className="flex gap-2 mb-3">
+            <input
+              value={newTaskTitle}
+              onChange={(e) => setNewTaskTitle(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleCreateTask()}
+              placeholder="Task title..."
+              className="flex-1 bg-surface border border-border-subtle rounded-md px-2 py-1.5 text-sm text-primary focus:outline-none focus:border-border-focus"
+              autoFocus
+            />
+            <button onClick={handleCreateTask} className="px-2.5 py-1.5 rounded-md bg-accent text-white text-xs font-medium hover:bg-accent-hover">Add</button>
+          </div>
+        )}
+        <div className="grid grid-cols-3 gap-3">
+          {columns.map((col) => {
+            const colTasks = tasks.filter((t) => t.status === col.key);
+            return (
+              <div key={col.key} className={cn("border-t-2 rounded-t-none rounded-b-lg bg-elevated/50 p-2 min-h-[120px]", col.color)}>
+                <p className="text-[10px] font-semibold text-tertiary uppercase tracking-wider mb-2">{col.label} ({colTasks.length})</p>
+                <div className="space-y-1.5">
+                  {colTasks.map((task) => (
+                    <div key={task.id} className="bg-surface border border-border-subtle rounded-md p-2">
+                      <p className="text-xs font-medium text-primary mb-1">{task.title}</p>
+                      {task.assignee && <p className="text-[10px] text-tertiary">{task.assignee}</p>}
+                      {task.due_date && <p className="text-[10px] text-tertiary">{new Date(task.due_date).toLocaleDateString()}</p>}
+                      <div className="flex gap-1 mt-1.5">
+                        {columns.filter((c) => c.key !== task.status).map((c) => (
+                          <button
+                            key={c.key}
+                            onClick={() => handleUpdateTaskStatus(task, c.key)}
+                            className="text-[9px] px-1.5 py-0.5 rounded border border-border-subtle text-tertiary hover:text-primary hover:bg-elevated"
+                          >
+                            {c.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 overflow-y-auto p-4">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-primary">Task Boards</h3>
+        <button onClick={() => setCreatingBoard(!creatingBoard)} className="p-1 rounded-md text-tertiary hover:text-accent hover:bg-elevated">
+          <Plus size={16} />
+        </button>
+      </div>
+      {creatingBoard && (
+        <div className="flex gap-2 mb-3">
+          <input
+            value={newBoardName}
+            onChange={(e) => setNewBoardName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleCreateBoard()}
+            placeholder="Board name..."
+            className="flex-1 bg-surface border border-border-subtle rounded-md px-2 py-1.5 text-sm text-primary focus:outline-none focus:border-border-focus"
+            autoFocus
+          />
+          <button onClick={handleCreateBoard} className="px-2.5 py-1.5 rounded-md bg-accent text-white text-xs font-medium hover:bg-accent-hover">Create</button>
+        </div>
+      )}
+      {boards.length === 0 ? (
+        <p className="text-sm text-tertiary text-center py-8">No task boards yet. Create one to get started.</p>
+      ) : (
+        <div className="space-y-1">
+          {boards.map((board) => (
+            <div key={board.id} className="flex items-center justify-between group px-2 py-2 rounded-md hover:bg-elevated cursor-pointer" onClick={() => setSelectedBoard(board)}>
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-primary truncate">{board.name}</p>
+                <p className="text-[10px] text-tertiary">Created {new Date(board.created_at).toLocaleDateString()}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -2197,7 +2588,7 @@ function NewChatInput({
   );
 }
 
-function EmojiPickerButton({ onSelect }: { onSelect: (emoji: string) => void }) {
+function EmojiPickerButton({ onSelect, customEmojis }: { onSelect: (emoji: string) => void; customEmojis?: CustomEmoji[] }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="relative">
@@ -2209,7 +2600,7 @@ function EmojiPickerButton({ onSelect }: { onSelect: (emoji: string) => void }) 
         <Plus size={12} />
       </button>
       {open && (
-        <div className="absolute bottom-6 right-0 z-50 bg-surface border border-border-subtle rounded-lg shadow-lg p-2 w-56">
+        <div className="absolute bottom-6 right-0 z-50 bg-surface border border-border-subtle rounded-lg shadow-lg p-2 w-56 max-h-64 overflow-y-auto">
           {EMOJI_CATEGORIES.map((cat) => (
             <div key={cat.label} className="mb-1.5">
               <p className="text-[9px] font-semibold text-tertiary uppercase tracking-wider mb-0.5 px-0.5">{cat.label}</p>
@@ -2226,6 +2617,23 @@ function EmojiPickerButton({ onSelect }: { onSelect: (emoji: string) => void }) 
               </div>
             </div>
           ))}
+          {customEmojis && customEmojis.length > 0 && (
+            <div className="mb-1.5">
+              <p className="text-[9px] font-semibold text-tertiary uppercase tracking-wider mb-0.5 px-0.5">Custom</p>
+              <div className="flex flex-wrap gap-0.5">
+                {customEmojis.map((emoji) => (
+                  <button
+                    key={emoji.id}
+                    onClick={() => { onSelect(`:${emoji.shortcode}:`); setOpen(false); }}
+                    className="w-6 h-6 flex items-center justify-center rounded hover:bg-elevated"
+                    title={`:${emoji.shortcode}:`}
+                  >
+                    <img src={emoji.image_url} alt={emoji.shortcode} className="w-5 h-5 object-contain" />
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -2258,6 +2666,47 @@ function msgTypeLabel(mt: ChatMessage["msg_type"]): string {
   return "text";
 }
 
+const TRANSLATE_LANGUAGES = [
+  { code: "en", label: "English" },
+  { code: "es", label: "Spanish" },
+  { code: "fr", label: "French" },
+  { code: "de", label: "German" },
+  { code: "pt", label: "Portuguese" },
+  { code: "zh", label: "Chinese" },
+  { code: "ja", label: "Japanese" },
+  { code: "ko", label: "Korean" },
+  { code: "ar", label: "Arabic" },
+  { code: "ru", label: "Russian" },
+];
+
+function TranslateMenu({ message, onTranslate }: { message: ChatMessage; onTranslate: (msg: ChatMessage, lang: string) => void }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen(!open)}
+        className="p-0.5 rounded text-tertiary hover:text-accent"
+        title="Translate"
+      >
+        <Languages size={12} />
+      </button>
+      {open && (
+        <div className="absolute bottom-6 right-0 z-50 bg-surface border border-border-subtle rounded-lg shadow-lg p-1 w-32">
+          {TRANSLATE_LANGUAGES.map((lang) => (
+            <button
+              key={lang.code}
+              onClick={() => { onTranslate(message, lang.code); setOpen(false); }}
+              className="w-full text-left px-2 py-1 text-xs rounded hover:bg-elevated text-primary"
+            >
+              {lang.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MessageBubble({
   message,
   onReply,
@@ -2265,6 +2714,8 @@ function MessageBubble({
   onForward,
   onPin,
   onSave,
+  onTranslate,
+  customEmojis,
 }: {
   message: ChatMessage;
   onReply?: (msg: ChatMessage) => void;
@@ -2272,6 +2723,8 @@ function MessageBubble({
   onForward?: (msg: ChatMessage) => void;
   onPin?: (msg: ChatMessage) => void;
   onSave?: (msg: ChatMessage) => void;
+  onTranslate?: (msg: ChatMessage, targetLang: string) => void;
+  customEmojis?: CustomEmoji[];
 }) {
   const time = new Date(message.timestamp * 1000).toLocaleTimeString([], {
     hour: "numeric",
@@ -2371,6 +2824,10 @@ function MessageBubble({
           >
             <Forward size={12} />
           </button>
+          {/* Translate */}
+          {!message.is_own && onTranslate && (
+            <TranslateMenu message={message} onTranslate={onTranslate} />
+          )}
           {/* Delete (own only) */}
           {message.is_own && (
             <button
@@ -2393,7 +2850,7 @@ function MessageBubble({
             </button>
           ))}
           {!message.is_own && (
-            <EmojiPickerButton onSelect={handleReaction} />
+            <EmojiPickerButton onSelect={handleReaction} customEmojis={customEmojis} />
           )}
         </div>
       )}
@@ -2484,6 +2941,57 @@ function MessageBubble({
             className="text-sm whitespace-pre-wrap break-words"
             dangerouslySetInnerHTML={{ __html: renderedBody }}
           />
+
+          {/* Adaptive card rendering */}
+          {message.card_payload && (
+            <div className={cn(
+              "mt-2 rounded-lg border p-3",
+              message.is_own ? "border-white/20 bg-white/10" : "border-border-subtle bg-elevated"
+            )}>
+              {message.card_payload.image_url && (
+                <img src={message.card_payload.image_url} alt="" className="rounded max-w-full max-h-40 object-contain mb-2" />
+              )}
+              {message.card_payload.title && (
+                <p className="font-semibold text-sm mb-1">{message.card_payload.title}</p>
+              )}
+              {message.card_payload.body && (
+                <p className="text-xs opacity-80 mb-2">{message.card_payload.body}</p>
+              )}
+              {message.card_payload.actions.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {message.card_payload.actions.map((action, idx) => (
+                    <button
+                      key={idx}
+                      onClick={() => {
+                        if (action.url) window.open(action.url, "_blank", "noopener,noreferrer");
+                      }}
+                      className={cn(
+                        "text-xs px-2.5 py-1 rounded-md font-medium transition-colors",
+                        action.url
+                          ? "bg-accent text-white hover:bg-accent-hover cursor-pointer"
+                          : "bg-elevated border border-border-subtle text-primary"
+                      )}
+                    >
+                      {action.url && <ExternalLink size={10} className="inline mr-1" />}
+                      {action.title}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Translation */}
+          {message.translated_text && (
+            <div className={cn(
+              "mt-1.5 pt-1.5 border-t text-xs italic",
+              message.is_own ? "border-white/20 text-white/70" : "border-border-subtle text-secondary"
+            )}>
+              <Languages size={10} className="inline mr-1" />
+              {message.translated_text}
+            </div>
+          )}
+
           <p
             className={cn(
               "text-[9px] mt-1 flex items-center gap-1",

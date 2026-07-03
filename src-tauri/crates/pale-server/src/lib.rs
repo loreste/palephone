@@ -291,6 +291,10 @@ pub struct AppState {
     hold_music: ShardedMap<Uuid, HoldMusic>,
     // Personal call groups
     personal_call_groups: ShardedMap<Uuid, PersonalCallGroup>,
+    custom_emojis: ShardedMap<Uuid, CustomEmoji>,
+    wiki_pages: ShardedMap<Uuid, WikiPage>,
+    task_boards: ShardedMap<Uuid, TaskBoard>,
+    tasks: ShardedMap<Uuid, Task>,
     user_create_lock: std::sync::Mutex<()>,
     agent_assignment_lock: std::sync::Mutex<()>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
@@ -459,6 +463,10 @@ impl AppState {
             recording_policies: ShardedMap::new(),
             hold_music: ShardedMap::new(),
             personal_call_groups: ShardedMap::new(),
+            custom_emojis: ShardedMap::new(),
+            wiki_pages: ShardedMap::new(),
+            task_boards: ShardedMap::new(),
+            tasks: ShardedMap::new(),
             user_create_lock: std::sync::Mutex::new(()),
             agent_assignment_lock: std::sync::Mutex::new(()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
@@ -4368,6 +4376,86 @@ impl AppState {
         self.personal_call_groups.remove(&id)
     }
 
+    // ─── Custom Emojis ───
+
+    pub fn custom_emojis_for_team(&self, team_id: Uuid) -> Vec<CustomEmoji> {
+        self.custom_emojis.values().into_iter()
+            .filter(|e| e.team_id == team_id)
+            .collect()
+    }
+
+    pub fn put_custom_emoji(&self, emoji: CustomEmoji) {
+        self.custom_emojis.insert(emoji.id, emoji);
+    }
+
+    pub fn delete_custom_emoji(&self, id: Uuid) -> Option<CustomEmoji> {
+        self.custom_emojis.remove(&id)
+    }
+
+    // ─── Wiki Pages ───
+
+    pub fn wiki_pages_for_team(&self, team_id: Uuid) -> Vec<WikiPage> {
+        let mut pages: Vec<_> = self.wiki_pages.values().into_iter()
+            .filter(|p| p.team_id == team_id)
+            .collect();
+        pages.sort_by_key(|p| p.created_at);
+        pages
+    }
+
+    pub fn wiki_page(&self, id: Uuid) -> Option<WikiPage> {
+        self.wiki_pages.get(&id)
+    }
+
+    pub fn put_wiki_page(&self, page: WikiPage) {
+        self.wiki_pages.insert(page.id, page);
+    }
+
+    pub fn delete_wiki_page(&self, id: Uuid) -> Option<WikiPage> {
+        self.wiki_pages.remove(&id)
+    }
+
+    // ─── Task Boards ───
+
+    pub fn task_boards_for_team(&self, team_id: Uuid) -> Vec<TaskBoard> {
+        let mut boards: Vec<_> = self.task_boards.values().into_iter()
+            .filter(|b| b.team_id == team_id)
+            .collect();
+        boards.sort_by_key(|b| b.created_at);
+        boards
+    }
+
+    pub fn task_board(&self, id: Uuid) -> Option<TaskBoard> {
+        self.task_boards.get(&id)
+    }
+
+    pub fn put_task_board(&self, board: TaskBoard) {
+        self.task_boards.insert(board.id, board);
+    }
+
+    pub fn delete_task_board(&self, id: Uuid) -> Option<TaskBoard> {
+        self.task_boards.remove(&id)
+    }
+
+    pub fn tasks_for_board(&self, board_id: Uuid) -> Vec<Task> {
+        let mut tasks: Vec<_> = self.tasks.values().into_iter()
+            .filter(|t| t.board_id == board_id)
+            .collect();
+        tasks.sort_by_key(|t| t.created_at);
+        tasks
+    }
+
+    pub fn task(&self, id: Uuid) -> Option<Task> {
+        self.tasks.get(&id)
+    }
+
+    pub fn put_task(&self, task: Task) {
+        self.tasks.insert(task.id, task);
+    }
+
+    pub fn delete_task(&self, id: Uuid) -> Option<Task> {
+        self.tasks.remove(&id)
+    }
+
     // ─── Call Analytics ───
 
     pub fn user_call_analytics(&self, user_sip_uri: &str) -> serde_json::Value {
@@ -6745,6 +6833,7 @@ impl AppState {
             scheduled_at: None,
             delivered: true,
             delivery_status: "sent".to_string(),
+            card_payload: None,
         };
         let mut messages = self
             .room_messages
@@ -6762,6 +6851,28 @@ impl AppState {
             event_type: "room_message".to_string(),
             payload: serde_json::to_value(&msg).unwrap_or_default(),
         });
+        Ok(msg)
+    }
+
+    /// Send a room message with optional adaptive card payload.
+    pub fn send_room_message_with_card(
+        &self,
+        room_id: Uuid,
+        sender_uri: &str,
+        body: &str,
+        reply_to: Option<Uuid>,
+        priority: Option<String>,
+        card_payload: Option<AdaptiveCard>,
+    ) -> Result<RoomMessage, String> {
+        let mut msg = self.send_room_message(room_id, sender_uri, body, reply_to, priority)?;
+        if let Some(card) = card_payload {
+            msg.card_payload = Some(card);
+            // Update the message in-place
+            let mut messages = self.room_messages.write().expect("room messages lock poisoned");
+            if let Some(existing) = messages.iter_mut().find(|m| m.id == msg.id) {
+                existing.card_payload = msg.card_payload.clone();
+            }
+        }
         Ok(msg)
     }
 
@@ -6822,6 +6933,7 @@ impl AppState {
             scheduled_at: Some(scheduled_at),
             delivered: false,
             delivery_status: "pending".to_string(),
+            card_payload: None,
         };
         let mut messages = self
             .room_messages
@@ -9030,6 +9142,9 @@ pub struct RoomMessage {
     /// Delivery status: pending, sent, delivered, failed.
     #[serde(default = "default_delivery_status")]
     pub delivery_status: String,
+    /// Optional adaptive card payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_payload: Option<AdaptiveCard>,
 }
 
 fn default_message_priority() -> String {
@@ -9134,6 +9249,8 @@ pub struct SendRoomMessageRequest {
     pub reply_to: Option<Uuid>,
     #[serde(default)]
     pub priority: Option<String>,
+    #[serde(default)]
+    pub card_payload: Option<AdaptiveCard>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -10380,6 +10497,144 @@ pub struct CreatePersonalCallGroupRequest {
     pub numbers: Vec<String>,
     pub ring_duration: Option<i32>,
     pub enabled: Option<bool>,
+}
+
+// ─── Custom Emojis ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomEmoji {
+    pub id: Uuid,
+    pub team_id: Uuid,
+    pub shortcode: String,
+    pub image_url: String,
+    pub uploaded_by: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateCustomEmojiRequest {
+    pub shortcode: String,
+    pub image_url: String,
+}
+
+// ─── Wiki Pages ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WikiPage {
+    pub id: Uuid,
+    pub team_id: Uuid,
+    pub title: String,
+    pub body: String,
+    pub created_by: String,
+    pub updated_by: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub parent_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateWikiPageRequest {
+    pub title: String,
+    pub body: Option<String>,
+    pub parent_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateWikiPageRequest {
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub parent_id: Option<Uuid>,
+}
+
+// ─── Task Boards ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskBoard {
+    pub id: Uuid,
+    pub team_id: Uuid,
+    pub name: String,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateTaskBoardRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Task {
+    pub id: Uuid,
+    pub board_id: Uuid,
+    pub title: String,
+    pub description: String,
+    pub assignee: Option<String>,
+    pub status: String,
+    pub priority: String,
+    pub due_date: Option<DateTime<Utc>>,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateTaskRequest {
+    pub title: String,
+    pub description: Option<String>,
+    pub assignee: Option<String>,
+    pub status: Option<String>,
+    pub priority: Option<String>,
+    pub due_date: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateTaskRequest {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub assignee: Option<String>,
+    pub status: Option<String>,
+    pub priority: Option<String>,
+    pub due_date: Option<DateTime<Utc>>,
+}
+
+// ─── Inline Translation ───
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TranslateRequest {
+    pub text: String,
+    pub target_language: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TranslateResponse {
+    pub translated_text: String,
+    pub source_language: Option<String>,
+    pub target_language: String,
+}
+
+// ─── Adaptive Cards ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdaptiveCard {
+    #[serde(default = "default_adaptive_card_type")]
+    pub card_type: String,
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub image_url: Option<String>,
+    #[serde(default)]
+    pub actions: Vec<AdaptiveCardAction>,
+}
+
+fn default_adaptive_card_type() -> String {
+    "AdaptiveCard".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdaptiveCardAction {
+    pub action_type: String,
+    pub title: String,
+    pub url: Option<String>,
+    pub data: Option<serde_json::Value>,
 }
 
 fn is_textual_content(content_type: &str) -> bool {

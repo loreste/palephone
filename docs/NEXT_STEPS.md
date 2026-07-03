@@ -162,17 +162,17 @@ implement. Use this as a roadmap for closing the gap.
 
 ### 4.3 Chat & Messaging
 - [x] Scheduled send (future delivery) — done 2026-07-03
-- [ ] Inline message translation
+- [x] Inline message translation — done 2026-07-03
 - [ ] Federated cross-organization chat
 - [ ] Guest access (invite flow, scoped permissions — flag exists but not implemented)
-- [ ] Rich text editor / WYSIWYG (currently markdown only)
+- [x] Rich text editor / WYSIWYG (currently markdown only) — done 2026-07-03
 - [ ] Loop components (live collaborative inline content)
 - [ ] Immersive reader (accessibility)
 - [x] Message delivery/failure status and retry — done 2026-07-03
 - [x] Tags for targeted communication (@Managers-style group tags) — done 2026-07-03
-- [ ] Custom emoji / sticker packs
+- [x] Custom emoji / sticker packs — done 2026-07-03
 - [x] GIF integration (Giphy or equivalent) — done 2026-07-03
-- [ ] Adaptive cards / interactive structured messages
+- [x] Adaptive cards / interactive structured messages — done 2026-07-03
 
 ### 4.4 Files & Collaboration
 - [ ] Co-authoring / real-time document editing
@@ -180,8 +180,8 @@ implement. Use this as a roadmap for closing the gap.
 - [ ] Cloud storage integration (SharePoint, OneDrive, Google Drive)
 - [x] Folder structure per channel (currently flat) — done 2026-07-03
 - [x] File locking / checkout — done 2026-07-03
-- [ ] Wiki / knowledge base per team
-- [ ] Task management / Planner boards
+- [x] Wiki / knowledge base per team — done 2026-07-03
+- [x] Task management / Planner boards — done 2026-07-03
 - [x] Approvals workflow — done 2026-07-03
 
 ### 4.5 Admin & Governance

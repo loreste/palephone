@@ -49,6 +49,14 @@ export interface ChatMessage {
   read_by?: string[];
   delivery_status?: "pending" | "sent" | "delivered" | "failed";
   scheduled_at?: string;
+  card_payload?: {
+    card_type: string;
+    title?: string | null;
+    body?: string | null;
+    image_url?: string | null;
+    actions: { action_type: string; title: string; url?: string | null; data?: unknown }[];
+  } | null;
+  translated_text?: string;
 }
 
 interface ChatStoreState {

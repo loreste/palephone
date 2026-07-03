@@ -665,6 +665,73 @@ export interface ServerRoomMessage {
   scheduled_at?: string;
   delivered?: boolean;
   delivery_status?: "pending" | "sent" | "delivered" | "failed";
+  card_payload?: AdaptiveCardPayload | null;
+}
+
+// ─── Adaptive Cards ───
+
+export interface AdaptiveCardAction {
+  action_type: string;
+  title: string;
+  url?: string | null;
+  data?: unknown;
+}
+
+export interface AdaptiveCardPayload {
+  card_type: string;
+  title?: string | null;
+  body?: string | null;
+  image_url?: string | null;
+  actions: AdaptiveCardAction[];
+}
+
+// ─── Custom Emojis ───
+
+export interface CustomEmoji {
+  id: string;
+  team_id: string;
+  shortcode: string;
+  image_url: string;
+  uploaded_by: string;
+  created_at: string;
+}
+
+// ─── Wiki Pages ───
+
+export interface WikiPage {
+  id: string;
+  team_id: string;
+  title: string;
+  body: string;
+  created_by: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+  parent_id?: string | null;
+}
+
+// ─── Task Boards & Tasks ───
+
+export interface TaskBoard {
+  id: string;
+  team_id: string;
+  name: string;
+  created_by: string;
+  created_at: string;
+}
+
+export interface TaskItem {
+  id: string;
+  board_id: string;
+  title: string;
+  description: string;
+  assignee?: string | null;
+  status: string;
+  priority: string;
+  due_date?: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
 }
 
 // ─── Tags ───
@@ -1403,4 +1470,186 @@ export function paleServerDeleteFile(
 
 export function paleServerFileDownloadUrl(baseUrl: string, _token: string, id: string): string {
   return `${baseUrl.replace(/\/+$/, "")}/v1/files/${id}`;
+}
+
+// ─── Custom Emojis ───
+
+export function paleServerGetCustomEmojis(
+  baseUrl: string,
+  token: string,
+  teamId: string,
+): Promise<CustomEmoji[]> {
+  return serverFetch(baseUrl, token, `/v1/teams/${teamId}/emojis`);
+}
+
+export function paleServerCreateCustomEmoji(
+  baseUrl: string,
+  token: string,
+  teamId: string,
+  shortcode: string,
+  imageUrl: string,
+): Promise<CustomEmoji> {
+  return serverFetch(baseUrl, token, `/v1/teams/${teamId}/emojis`, {
+    method: "POST",
+    body: JSON.stringify({ shortcode, image_url: imageUrl }),
+  });
+}
+
+export function paleServerDeleteCustomEmoji(
+  baseUrl: string,
+  token: string,
+  teamId: string,
+  emojiId: string,
+): Promise<CustomEmoji> {
+  return serverFetch(baseUrl, token, `/v1/teams/${teamId}/emojis/${emojiId}`, {
+    method: "DELETE",
+  });
+}
+
+// ─── Wiki Pages ───
+
+export function paleServerGetWikiPages(
+  baseUrl: string,
+  token: string,
+  teamId: string,
+): Promise<WikiPage[]> {
+  return serverFetch(baseUrl, token, `/v1/teams/${teamId}/wiki`);
+}
+
+export function paleServerCreateWikiPage(
+  baseUrl: string,
+  token: string,
+  teamId: string,
+  title: string,
+  body?: string,
+  parentId?: string | null,
+): Promise<WikiPage> {
+  return serverFetch(baseUrl, token, `/v1/teams/${teamId}/wiki`, {
+    method: "POST",
+    body: JSON.stringify({ title, body: body ?? "", parent_id: parentId ?? null }),
+  });
+}
+
+export function paleServerGetWikiPage(
+  baseUrl: string,
+  token: string,
+  pageId: string,
+): Promise<WikiPage> {
+  return serverFetch(baseUrl, token, `/v1/wiki/${pageId}`);
+}
+
+export function paleServerUpdateWikiPage(
+  baseUrl: string,
+  token: string,
+  pageId: string,
+  updates: { title?: string; body?: string; parent_id?: string | null },
+): Promise<WikiPage> {
+  return serverFetch(baseUrl, token, `/v1/wiki/${pageId}`, {
+    method: "PUT",
+    body: JSON.stringify(updates),
+  });
+}
+
+export function paleServerDeleteWikiPage(
+  baseUrl: string,
+  token: string,
+  pageId: string,
+): Promise<WikiPage> {
+  return serverFetch(baseUrl, token, `/v1/wiki/${pageId}`, {
+    method: "DELETE",
+  });
+}
+
+// ─── Task Boards & Tasks ───
+
+export function paleServerGetTaskBoards(
+  baseUrl: string,
+  token: string,
+  teamId: string,
+): Promise<TaskBoard[]> {
+  return serverFetch(baseUrl, token, `/v1/teams/${teamId}/boards`);
+}
+
+export function paleServerCreateTaskBoard(
+  baseUrl: string,
+  token: string,
+  teamId: string,
+  name: string,
+): Promise<TaskBoard> {
+  return serverFetch(baseUrl, token, `/v1/teams/${teamId}/boards`, {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function paleServerDeleteTaskBoard(
+  baseUrl: string,
+  token: string,
+  boardId: string,
+): Promise<TaskBoard> {
+  return serverFetch(baseUrl, token, `/v1/boards/${boardId}`, {
+    method: "DELETE",
+  });
+}
+
+export function paleServerGetTasks(
+  baseUrl: string,
+  token: string,
+  boardId: string,
+): Promise<TaskItem[]> {
+  return serverFetch(baseUrl, token, `/v1/boards/${boardId}/tasks`);
+}
+
+export function paleServerCreateTask(
+  baseUrl: string,
+  token: string,
+  boardId: string,
+  task: { title: string; description?: string; assignee?: string; status?: string; priority?: string; due_date?: string },
+): Promise<TaskItem> {
+  return serverFetch(baseUrl, token, `/v1/boards/${boardId}/tasks`, {
+    method: "POST",
+    body: JSON.stringify(task),
+  });
+}
+
+export function paleServerUpdateTask(
+  baseUrl: string,
+  token: string,
+  taskId: string,
+  updates: { title?: string; description?: string; assignee?: string; status?: string; priority?: string; due_date?: string },
+): Promise<TaskItem> {
+  return serverFetch(baseUrl, token, `/v1/tasks/${taskId}`, {
+    method: "PUT",
+    body: JSON.stringify(updates),
+  });
+}
+
+export function paleServerDeleteTask(
+  baseUrl: string,
+  token: string,
+  taskId: string,
+): Promise<TaskItem> {
+  return serverFetch(baseUrl, token, `/v1/tasks/${taskId}`, {
+    method: "DELETE",
+  });
+}
+
+// ─── Inline Translation ───
+
+export interface TranslateResult {
+  translated_text: string;
+  source_language?: string | null;
+  target_language: string;
+}
+
+export function paleServerTranslate(
+  baseUrl: string,
+  token: string,
+  text: string,
+  targetLanguage: string,
+): Promise<TranslateResult> {
+  return serverFetch(baseUrl, token, "/v1/translate", {
+    method: "POST",
+    body: JSON.stringify({ text, target_language: targetLanguage }),
+  });
 }

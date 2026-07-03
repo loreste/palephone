@@ -54,7 +54,7 @@ async function api<T = any>(baseUrl: string, token: string, path: string, opts?:
   return paleServerApi<T>(baseUrl, token, path, opts);
 }
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music" | "custom_emojis";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -92,6 +92,7 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "meeting_templates", label: "Meeting Templates", icon: ClipboardList },
   { id: "recording_policies", label: "Rec. Policies", icon: Mic },
   { id: "hold_music", label: "Hold Music", icon: RadioTower },
+  { id: "custom_emojis", label: "Custom Emojis", icon: Activity },
 ];
 
 export function AdminView() {
@@ -315,6 +316,7 @@ export function AdminView() {
         {activeTab === "meeting_templates" && <MeetingTemplatesPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "recording_policies" && <RecordingPoliciesPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "hold_music" && <HoldMusicPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "custom_emojis" && <CustomEmojisPanel baseUrl={baseUrl} token={token} />}
       </div>
     </div>
   );
@@ -5165,6 +5167,104 @@ function MeetingTemplatesPanel({ baseUrl, token }: { baseUrl: string; token: str
                 {t.max_participants && <span className="px-1.5 py-0.5 bg-purple-500/10 text-purple-600 rounded">Max: {t.max_participants}</span>}
               </div>
               <div className="text-[10px] text-tertiary">Created by {t.created_by} on {shortDate(t.created_at)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CustomEmojisPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [teams, setTeams] = useState<{ id: string; name: string }[]>([]);
+  const [selectedTeam, setSelectedTeam] = useState("");
+  const [emojis, setEmojis] = useState<{ id: string; shortcode: string; image_url: string; uploaded_by: string; created_at: string }[]>([]);
+  const [shortcode, setShortcode] = useState("");
+  const [imageUrl, setImageUrl] = useState("");
+
+  useEffect(() => {
+    api(baseUrl, token, "/v1/teams").then((t: { id: string; name: string }[]) => {
+      setTeams(t);
+      if (t.length > 0 && !selectedTeam) setSelectedTeam(t[0].id);
+    }).catch(() => {});
+  }, [baseUrl, token]);
+
+  useEffect(() => {
+    if (!selectedTeam) return;
+    api(baseUrl, token, `/v1/teams/${selectedTeam}/emojis`).then(setEmojis).catch(() => setEmojis([]));
+  }, [selectedTeam, baseUrl, token]);
+
+  const handleCreate = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!shortcode.trim() || !imageUrl.trim() || !selectedTeam) return;
+    try {
+      const emoji = await api(baseUrl, token, `/v1/teams/${selectedTeam}/emojis`, {
+        method: "POST",
+        body: { shortcode: shortcode.trim(), image_url: imageUrl.trim() },
+      });
+      setEmojis((prev) => [...prev, emoji]);
+      setShortcode("");
+      setImageUrl("");
+      toast({ type: "success", title: "Custom emoji created" });
+    } catch (err) {
+      toast({ type: "error", title: "Failed to create emoji", description: String(err) });
+    }
+  };
+
+  const handleDelete = async (emojiId: string) => {
+    try {
+      await api(baseUrl, token, `/v1/teams/${selectedTeam}/emojis/${emojiId}`, { method: "DELETE" });
+      setEmojis((prev) => prev.filter((e) => e.id !== emojiId));
+      toast({ type: "success", title: "Emoji deleted" });
+    } catch (err) {
+      toast({ type: "error", title: "Failed to delete emoji", description: String(err) });
+    }
+  };
+
+  return (
+    <div>
+      <h2 className="text-lg font-semibold mb-4">Custom Emoji Management</h2>
+      <div className="mb-4">
+        <label className="text-sm text-secondary mb-1 block">Team</label>
+        <select
+          value={selectedTeam}
+          onChange={(e) => setSelectedTeam(e.target.value)}
+          className="h-9 rounded-md bg-surface border border-border-subtle px-2 text-sm text-primary focus:outline-none focus:border-border-focus"
+        >
+          {teams.map((t) => (
+            <option key={t.id} value={t.id}>{t.name}</option>
+          ))}
+        </select>
+      </div>
+      <form onSubmit={handleCreate} className="flex gap-2 mb-4">
+        <input
+          value={shortcode}
+          onChange={(e) => setShortcode(e.target.value)}
+          placeholder="Shortcode (e.g. thumbsup)"
+          className="flex-1 h-9 rounded-md bg-surface border border-border-subtle px-2 text-sm text-primary focus:outline-none focus:border-border-focus"
+        />
+        <input
+          value={imageUrl}
+          onChange={(e) => setImageUrl(e.target.value)}
+          placeholder="Image URL"
+          className="flex-1 h-9 rounded-md bg-surface border border-border-subtle px-2 text-sm text-primary focus:outline-none focus:border-border-focus"
+        />
+        <button type="submit" className="h-9 px-3 rounded-md bg-accent text-white text-sm font-medium hover:bg-accent/90">Add</button>
+      </form>
+      {emojis.length === 0 ? (
+        <p className="text-sm text-tertiary">No custom emojis for this team.</p>
+      ) : (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+          {emojis.map((emoji) => (
+            <div key={emoji.id} className="flex items-center gap-2 p-2 bg-elevated rounded-md">
+              <img src={emoji.image_url} alt={emoji.shortcode} className="w-8 h-8 object-contain" />
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium text-primary truncate">:{emoji.shortcode}:</p>
+                <p className="text-[10px] text-tertiary">by {emoji.uploaded_by.replace(/^sip:/, "").split("@")[0]}</p>
+              </div>
+              <button onClick={() => handleDelete(emoji.id)} className="p-1 text-tertiary hover:text-destructive">
+                <Trash2 size={14} />
+              </button>
             </div>
           ))}
         </div>
