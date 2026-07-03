@@ -98,3 +98,15 @@ VERDICT ON THE PRIOR REVIEWER'S CLAIM: verified on every substantive clause; I c
 - **[qa/medium]** storage.rs ChaCha20Poly1305 encrypt/decrypt and pg_store.rs (778 lines) have zero tests — silent data-loss/corruption path for persisted secrets
   - File: /Users/loreste/palephone/src-tauri/crates/pale-server/src/storage.rs:167-215 (no mod tests in file); /Users/loreste/palephone/src-tauri/crates/pale-server/src/pg_store.rs (no tests)
   - Fix: First test: in storage.rs add `mod tests` with `fn encrypt_decrypt_roundtrip()` (construct the store with a fixed key, assert decrypt(encrypt(s)) == s) and `fn decrypt_rejects_tampered_ciphertext()` (flip one byte, assert Err not panic/garbage). For pg_store, add a #[ignore]-by-default tokio test gated on PALE_TEST_PG_URL that roundtrips upsert_registration, runnable in CI against the compose post
+
+## 4. Teams Enterprise Parity Features
+
+- [x] **File versioning** — Track version history for uploaded files (2026-07-03)
+- [x] **Folder structure per channel** — Organize files in directories (2026-07-03)
+- [x] **File locking / checkout** — Prevent concurrent edits (2026-07-03)
+- [x] **Approvals workflow** — Request and track approvals (2026-07-03)
+- [x] **Policy-based compliance recording** — Auto-record based on policies (2026-07-03)
+- [x] **Configurable music on hold** — Custom hold music (2026-07-03)
+- [x] **Per-user call analytics dashboard** — Individual call quality view (2026-07-03)
+- [x] **User-configurable personal call groups** — Ring multiple devices/numbers (2026-07-03)
+- [x] **Chat density toggle** — Compact vs comfortable vs spacious view (2026-07-03)

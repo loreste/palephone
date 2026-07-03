@@ -87,6 +87,10 @@ impl PgStore {
             include_str!("../migrations/021_message_priority_saved.sql"),
             include_str!("../migrations/022_identity_lifecycle.sql"),
             include_str!("../migrations/023_call_policy.sql"),
+            include_str!("../migrations/024_file_versioning_folders.sql"),
+            include_str!("../migrations/025_approvals.sql"),
+            include_str!("../migrations/026_recording_policies_hold_music.sql"),
+            include_str!("../migrations/027_personal_call_groups.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {
@@ -383,8 +387,8 @@ impl PgStore {
         let client = self.pool.get().await?;
         let size = file.size as i64;
         client.execute(
-            "INSERT INTO files (id, owner, filename, content_type, size, sha256, created_at, dlp_status, dlp_violation_count, legal_hold, deleted_at, deleted_by)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            "INSERT INTO files (id, owner, filename, content_type, size, sha256, created_at, dlp_status, dlp_violation_count, legal_hold, deleted_at, deleted_by, folder_id, locked_by, locked_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
              ON CONFLICT (id) DO UPDATE SET
                 filename=$3,
                 content_type=$4,
@@ -394,7 +398,10 @@ impl PgStore {
                 dlp_violation_count=$9,
                 legal_hold=$10,
                 deleted_at=$11,
-                deleted_by=$12",
+                deleted_by=$12,
+                folder_id=$13,
+                locked_by=$14,
+                locked_at=$15",
             &[
                 &file.id,
                 &file.owner,
@@ -408,6 +415,9 @@ impl PgStore {
                 &file.legal_hold,
                 &file.deleted_at,
                 &file.deleted_by,
+                &file.folder_id,
+                &file.locked_by,
+                &file.locked_at,
             ],
         ).await?;
         Ok(())

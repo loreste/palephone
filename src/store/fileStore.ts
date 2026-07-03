@@ -38,6 +38,42 @@ export interface ServerFile {
   legal_hold?: boolean;
   deleted_at?: string | null;
   deleted_by?: string | null;
+  folder_id?: string | null;
+  locked_by?: string | null;
+  locked_at?: string | null;
+}
+
+export interface FileVersion {
+  id: string;
+  file_id: string;
+  version_number: number;
+  uploader: string;
+  size: number;
+  sha256: string;
+  created_at: string;
+  storage_path: string;
+}
+
+export interface Folder {
+  id: string;
+  room_id: string;
+  parent_id: string | null;
+  name: string;
+  created_by: string;
+  created_at: string;
+}
+
+export interface ApprovalRequest {
+  id: string;
+  title: string;
+  description: string;
+  requestor: string;
+  approvers: string[];
+  status: string;
+  responses: Array<{ user: string; decision: string; comment?: string; responded_at: string }>;
+  room_id?: string | null;
+  created_at: string;
+  resolved_at?: string | null;
 }
 
 interface FileStoreState {

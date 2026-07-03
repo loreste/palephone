@@ -1,4 +1,4 @@
-import { FormEvent, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   BarChart3,
@@ -20,6 +20,7 @@ import {
   Shield,
   Trash2,
   UserPlus,
+  Upload,
   Users,
   type LucideIcon,
 } from "lucide-react";
@@ -53,7 +54,7 @@ async function api<T = any>(baseUrl: string, token: string, path: string, opts?:
   return paleServerApi<T>(baseUrl, token, path, opts);
 }
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "recording_policies" | "hold_music";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -83,6 +84,8 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "policy", label: "Policy", icon: Shield },
   { id: "retention", label: "Retention", icon: Archive },
   { id: "dlp", label: "DLP", icon: Shield },
+  { id: "recording_policies", label: "Rec. Policies", icon: Mic },
+  { id: "hold_music", label: "Hold Music", icon: RadioTower },
 ];
 
 export function AdminView() {
@@ -298,6 +301,8 @@ export function AdminView() {
         {activeTab === "policy" && <CollaborationPolicyPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "retention" && <RetentionPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "dlp" && <DlpPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "recording_policies" && <RecordingPoliciesPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "hold_music" && <HoldMusicPanel baseUrl={baseUrl} token={token} />}
       </div>
     </div>
   );
@@ -4263,6 +4268,202 @@ function DlpPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
           />
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Recording Policies Panel ───
+
+interface RecordingPolicy {
+  id: string;
+  name: string;
+  trigger: string;
+  target_ids: string[];
+  enabled: boolean;
+  created_at: string;
+}
+
+function RecordingPoliciesPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [policies, setPolicies] = useState<RecordingPolicy[]>([]);
+  const [name, setName] = useState("");
+  const [trigger, setTrigger] = useState("all_calls");
+  const [targetIds, setTargetIds] = useState("");
+
+  useEffect(() => {
+    api<RecordingPolicy[]>(baseUrl, token, "/v1/admin/recording-policies")
+      .then(setPolicies)
+      .catch(() => {});
+  }, [baseUrl, token]);
+
+  const create = async () => {
+    if (!name) return;
+    try {
+      const policy = await api<RecordingPolicy>(baseUrl, token, "/v1/admin/recording-policies", {
+        method: "POST",
+        body: {
+          name,
+          trigger,
+          target_ids: targetIds ? targetIds.split(",").map((s) => s.trim()) : [],
+          enabled: true,
+        },
+      });
+      setPolicies([...policies, policy]);
+      setName("");
+      setTargetIds("");
+      toast({ type: "success", title: "Recording policy created" });
+    } catch (err) {
+      toast({ type: "error", title: "Failed", description: String(err) });
+    }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/recording-policies/${id}`, { method: "DELETE" });
+      setPolicies(policies.filter((p) => p.id !== id));
+      toast({ type: "success", title: "Policy deleted" });
+    } catch (err) {
+      toast({ type: "error", title: "Failed", description: String(err) });
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-base font-semibold">Recording Policies</h2>
+      <p className="text-sm text-secondary">Auto-record calls based on compliance policies.</p>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+        <Field label="Name" value={name} onChange={setName} />
+        <div>
+          <label className="text-xs font-medium text-secondary block mb-1">Trigger</label>
+          <select
+            value={trigger}
+            onChange={(e) => setTrigger(e.target.value)}
+            className="w-full h-10 rounded-md border border-border-default bg-surface px-3 text-sm"
+          >
+            <option value="all_calls">All Calls</option>
+            <option value="all_external">All External</option>
+            <option value="specific_users">Specific Users</option>
+            <option value="specific_queues">Specific Queues</option>
+          </select>
+        </div>
+        <Field label="Target IDs (comma-sep)" value={targetIds} onChange={setTargetIds} />
+      </div>
+      <button onClick={create} className="h-9 px-4 rounded-md bg-accent text-white text-sm font-medium">
+        <Plus size={14} className="inline mr-1" />Create Policy
+      </button>
+
+      <div className="space-y-2">
+        {policies.map((p) => (
+          <div key={p.id} className="flex items-center justify-between p-3 rounded-md border border-border-default bg-surface">
+            <div>
+              <p className="text-sm font-medium">{p.name}</p>
+              <p className="text-xs text-secondary">
+                Trigger: {p.trigger} | Targets: {p.target_ids.join(", ") || "all"} | {p.enabled ? "Enabled" : "Disabled"}
+              </p>
+            </div>
+            <button onClick={() => remove(p.id)} className="p-1 text-destructive hover:text-destructive/80">
+              <Trash2 size={14} />
+            </button>
+          </div>
+        ))}
+        {policies.length === 0 && <p className="text-sm text-tertiary">No recording policies configured.</p>}
+      </div>
+    </div>
+  );
+}
+
+// ─── Hold Music Panel ───
+
+interface HoldMusicEntry {
+  id: string;
+  name: string;
+  file_path: string;
+  queue_id: string | null;
+  is_default: boolean;
+  uploaded_by: string;
+  created_at: string;
+}
+
+function HoldMusicPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [entries, setEntries] = useState<HoldMusicEntry[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    api<HoldMusicEntry[]>(baseUrl, token, "/v1/admin/hold-music")
+      .then(setEntries)
+      .catch(() => {});
+  }, [baseUrl, token]);
+
+  const upload = async (file: File) => {
+    try {
+      const buffer = await file.arrayBuffer();
+      const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/admin/hold-music`, {
+        method: "POST",
+        headers: {
+          "Content-Type": file.type || "audio/mpeg",
+          Authorization: `Bearer ${token}`,
+          "X-Pale-Filename": file.name,
+        },
+        body: buffer,
+      });
+      if (!response.ok) throw new Error("Upload failed");
+      const entry = await response.json();
+      setEntries([...entries, entry]);
+      toast({ type: "success", title: "Hold music uploaded" });
+    } catch (err) {
+      toast({ type: "error", title: "Upload failed", description: String(err) });
+    }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/hold-music/${id}`, { method: "DELETE" });
+      setEntries(entries.filter((e) => e.id !== id));
+      toast({ type: "success", title: "Hold music deleted" });
+    } catch (err) {
+      toast({ type: "error", title: "Failed", description: String(err) });
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-base font-semibold">Hold Music</h2>
+      <p className="text-sm text-secondary">Configure custom music on hold for calls and queues.</p>
+
+      <button
+        onClick={() => fileInputRef.current?.click()}
+        className="h-9 px-4 rounded-md bg-accent text-white text-sm font-medium"
+      >
+        <Upload size={14} className="inline mr-1" />Upload Audio
+      </button>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="audio/*"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) upload(file);
+        }}
+      />
+
+      <div className="space-y-2">
+        {entries.map((entry) => (
+          <div key={entry.id} className="flex items-center justify-between p-3 rounded-md border border-border-default bg-surface">
+            <div>
+              <p className="text-sm font-medium">{entry.name}</p>
+              <p className="text-xs text-secondary">
+                {entry.uploaded_by} &middot; {entry.is_default ? "Default" : "Custom"}
+                {entry.queue_id ? ` · Queue: ${entry.queue_id}` : ""}
+              </p>
+            </div>
+            <button onClick={() => remove(entry.id)} className="p-1 text-destructive hover:text-destructive/80">
+              <Trash2 size={14} />
+            </button>
+          </div>
+        ))}
+        {entries.length === 0 && <p className="text-sm text-tertiary">No hold music configured.</p>}
+      </div>
     </div>
   );
 }

@@ -266,6 +266,16 @@ pub struct AppState {
     // DLP policies and violations
     dlp_policies: ShardedMap<Uuid, DlpPolicy>,
     dlp_violations: RwLock<Vec<DlpViolation>>,
+    // File versioning & folders
+    file_versions: RwLock<Vec<FileVersion>>,
+    folders: ShardedMap<Uuid, Folder>,
+    // Approvals
+    approval_requests: ShardedMap<Uuid, ApprovalRequest>,
+    // Recording policies & hold music
+    recording_policies: ShardedMap<Uuid, RecordingPolicy>,
+    hold_music: ShardedMap<Uuid, HoldMusic>,
+    // Personal call groups
+    personal_call_groups: ShardedMap<Uuid, PersonalCallGroup>,
     user_create_lock: std::sync::Mutex<()>,
     agent_assignment_lock: std::sync::Mutex<()>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
@@ -420,6 +430,12 @@ impl AppState {
             call_quality_reports: RwLock::new(Vec::new()),
             dlp_policies: ShardedMap::new(),
             dlp_violations: RwLock::new(Vec::new()),
+            file_versions: RwLock::new(Vec::new()),
+            folders: ShardedMap::new(),
+            approval_requests: ShardedMap::new(),
+            recording_policies: ShardedMap::new(),
+            hold_music: ShardedMap::new(),
+            personal_call_groups: ShardedMap::new(),
             user_create_lock: std::sync::Mutex::new(()),
             agent_assignment_lock: std::sync::Mutex::new(()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
@@ -2971,6 +2987,223 @@ impl AppState {
         })
     }
 
+    // ─── File Versioning ───
+
+    pub fn add_file_version(&self, version: FileVersion) {
+        let mut versions = self.file_versions.write().expect("file_versions lock");
+        versions.push(version);
+    }
+
+    pub fn file_versions(&self, file_id: Uuid) -> Vec<FileVersion> {
+        let versions = self.file_versions.read().expect("file_versions lock");
+        let mut result: Vec<_> = versions.iter().filter(|v| v.file_id == file_id).cloned().collect();
+        result.sort_by_key(|v| v.version_number);
+        result
+    }
+
+    pub fn file_version_path(&self, version_id: Uuid) -> PathBuf {
+        self.files_dir().join(format!("version_{}", version_id))
+    }
+
+    // ─── Folders ───
+
+    pub fn put_folder(&self, folder: Folder) {
+        self.folders.insert(folder.id, folder);
+    }
+
+    pub fn folder(&self, id: Uuid) -> Option<Folder> {
+        self.folders.get(&id)
+    }
+
+    pub fn folders_for_room(&self, room_id: Uuid, parent_id: Option<Uuid>) -> Vec<Folder> {
+        self.folders.values().into_iter()
+            .filter(|f| f.room_id == room_id && f.parent_id == parent_id)
+            .collect()
+    }
+
+    pub fn delete_folder(&self, id: Uuid) -> Option<Folder> {
+        self.folders.remove(&id)
+    }
+
+    // ─── File Lock ───
+
+    pub fn lock_file(&self, id: Uuid, user: &str) -> Option<FileRecord> {
+        self.files.with_write(&id, |files| {
+            let file = files.get_mut(&id)?;
+            if file.locked_by.is_some() {
+                return None; // already locked
+            }
+            file.locked_by = Some(user.to_string());
+            file.locked_at = Some(Utc::now());
+            let record = file.clone();
+            Some(record)
+        })
+    }
+
+    pub fn unlock_file(&self, id: Uuid, user: &str) -> Option<FileRecord> {
+        self.files.with_write(&id, |files| {
+            let file = files.get_mut(&id)?;
+            if file.locked_by.as_deref() != Some(user) {
+                return None; // not locked by this user
+            }
+            file.locked_by = None;
+            file.locked_at = None;
+            let record = file.clone();
+            Some(record)
+        })
+    }
+
+    // ─── Approvals ───
+
+    pub fn put_approval(&self, approval: ApprovalRequest) {
+        self.approval_requests.insert(approval.id, approval);
+    }
+
+    pub fn approval(&self, id: Uuid) -> Option<ApprovalRequest> {
+        self.approval_requests.get(&id)
+    }
+
+    pub fn approvals(&self) -> Vec<ApprovalRequest> {
+        let mut list = self.approval_requests.values();
+        list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        list
+    }
+
+    pub fn update_approval(&self, id: Uuid, updater: impl FnOnce(&mut ApprovalRequest)) -> Option<ApprovalRequest> {
+        self.approval_requests.with_write(&id, |map| {
+            let approval = map.get_mut(&id)?;
+            updater(approval);
+            Some(approval.clone())
+        })
+    }
+
+    // ─── Recording Policies ───
+
+    pub fn put_recording_policy(&self, policy: RecordingPolicy) {
+        self.recording_policies.insert(policy.id, policy);
+    }
+
+    pub fn recording_policy(&self, id: Uuid) -> Option<RecordingPolicy> {
+        self.recording_policies.get(&id)
+    }
+
+    pub fn recording_policies_list(&self) -> Vec<RecordingPolicy> {
+        self.recording_policies.values()
+    }
+
+    pub fn delete_recording_policy(&self, id: Uuid) -> Option<RecordingPolicy> {
+        self.recording_policies.remove(&id)
+    }
+
+    /// Check if a call should be auto-recorded based on policies.
+    pub fn should_auto_record(&self, caller_uri: &str, callee_uri: &str) -> bool {
+        for policy in self.recording_policies_list() {
+            if !policy.enabled {
+                continue;
+            }
+            match policy.trigger.as_str() {
+                "all_calls" => return true,
+                "all_external" => {
+                    // External if callee doesn't match any registered account
+                    let callee_user = sip_user_part(callee_uri);
+                    let is_internal = self.sip_accounts.values().iter().any(|a| a.username == callee_user);
+                    if !is_internal {
+                        return true;
+                    }
+                }
+                "specific_users" => {
+                    let caller_user = sip_user_part(caller_uri);
+                    let callee_user = sip_user_part(callee_uri);
+                    if policy.target_ids.iter().any(|t| t == caller_user || t == callee_user) {
+                        return true;
+                    }
+                }
+                "specific_queues" => {
+                    // Check if callee is in a targeted queue
+                    if policy.target_ids.iter().any(|t| callee_uri.contains(t.as_str())) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    // ─── Hold Music ───
+
+    pub fn put_hold_music(&self, music: HoldMusic) {
+        self.hold_music.insert(music.id, music);
+    }
+
+    pub fn hold_music_list(&self) -> Vec<HoldMusic> {
+        self.hold_music.values()
+    }
+
+    pub fn delete_hold_music(&self, id: Uuid) -> Option<HoldMusic> {
+        self.hold_music.remove(&id)
+    }
+
+    // ─── Personal Call Groups ───
+
+    pub fn put_personal_call_group(&self, group: PersonalCallGroup) {
+        self.personal_call_groups.insert(group.id, group);
+    }
+
+    pub fn personal_call_groups_for_user(&self, user_id: &str) -> Vec<PersonalCallGroup> {
+        self.personal_call_groups.values().into_iter()
+            .filter(|g| g.user_id == user_id)
+            .collect()
+    }
+
+    pub fn personal_call_group(&self, id: Uuid) -> Option<PersonalCallGroup> {
+        self.personal_call_groups.get(&id)
+    }
+
+    pub fn delete_personal_call_group(&self, id: Uuid) -> Option<PersonalCallGroup> {
+        self.personal_call_groups.remove(&id)
+    }
+
+    // ─── Call Analytics ───
+
+    pub fn user_call_analytics(&self, user_sip_uri: &str) -> serde_json::Value {
+        let cdrs = self.cdrs.read().expect("cdrs lock");
+        let user_cdrs: Vec<_> = cdrs.iter()
+            .filter(|c| c.caller_uri == user_sip_uri || c.callee_uri == user_sip_uri)
+            .collect();
+        let total_calls = user_cdrs.len();
+        let answered_calls = user_cdrs.iter().filter(|c| c.disposition == "answered").count();
+        let total_duration: i32 = user_cdrs.iter().map(|c| c.duration_secs).sum();
+        let avg_duration = if total_calls > 0 { total_duration as f64 / total_calls as f64 } else { 0.0 };
+
+        // MOS from call quality reports
+        let reports = self.call_quality_reports.read().expect("cqr lock");
+        let user_reports: Vec<_> = reports.iter()
+            .filter(|r| r.user_sip_uri == user_sip_uri)
+            .collect();
+        let avg_mos = if user_reports.is_empty() {
+            0.0
+        } else {
+            user_reports.iter().map(|r| r.mos_score).sum::<f64>() / user_reports.len() as f64
+        };
+        let avg_packet_loss = if user_reports.is_empty() {
+            0.0
+        } else {
+            user_reports.iter().map(|r| r.packet_loss_pct).sum::<f64>() / user_reports.len() as f64
+        };
+
+        serde_json::json!({
+            "user_sip_uri": user_sip_uri,
+            "total_calls": total_calls,
+            "answered_calls": answered_calls,
+            "avg_duration_secs": avg_duration,
+            "avg_mos": avg_mos,
+            "avg_packet_loss": avg_packet_loss,
+            "total_duration_secs": total_duration,
+            "total_quality_reports": user_reports.len(),
+        })
+    }
+
     pub fn create_routing_rule(&self, input: CreateRoutingRuleRequest) -> RoutingRule {
         let rule = RoutingRule {
             id: Uuid::new_v4(),
@@ -4091,6 +4324,15 @@ impl AppState {
         callee_uri: &str,
         direction: &str,
     ) -> CallDetailRecord {
+        // Check recording policies for auto-record
+        let auto_record = self.should_auto_record(caller_uri, callee_uri);
+        if auto_record {
+            log::info!(
+                "Auto-recording call {} -> {} per recording policy",
+                caller_uri,
+                callee_uri
+            );
+        }
         let cdr = CallDetailRecord {
             id: Uuid::new_v4(),
             call_id: call_id.map(String::from),
@@ -4104,7 +4346,7 @@ impl AppState {
             disposition: "no_answer".to_string(),
             queue_name: None,
             queue_wait_secs: None,
-            recorded: false,
+            recorded: auto_record,
         };
         self.record_cdr(cdr.clone());
         cdr
@@ -8131,6 +8373,12 @@ pub struct FileRecord {
     pub deleted_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub deleted_by: Option<String>,
+    #[serde(default)]
+    pub folder_id: Option<Uuid>,
+    #[serde(default)]
+    pub locked_by: Option<String>,
+    #[serde(default)]
+    pub locked_at: Option<DateTime<Utc>>,
 }
 
 fn default_dlp_status() -> String {
@@ -8159,6 +8407,121 @@ pub struct FileGovernanceDecision {
     pub dlp_status: String,
     pub dlp_violation_count: usize,
     pub legal_hold: bool,
+}
+
+// ─── File Versioning ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileVersion {
+    pub id: Uuid,
+    pub file_id: Uuid,
+    pub version_number: i32,
+    pub uploader: String,
+    pub size: i64,
+    pub sha256: String,
+    pub created_at: DateTime<Utc>,
+    pub storage_path: String,
+}
+
+// ─── Folder Structure ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Folder {
+    pub id: Uuid,
+    pub room_id: Uuid,
+    pub parent_id: Option<Uuid>,
+    pub name: String,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateFolderRequest {
+    pub name: String,
+    pub parent_id: Option<Uuid>,
+}
+
+// ─── Approvals Workflow ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalRequest {
+    pub id: Uuid,
+    pub title: String,
+    pub description: String,
+    pub requestor: String,
+    pub approvers: Vec<String>,
+    pub status: String,
+    pub responses: serde_json::Value,
+    pub room_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub resolved_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateApprovalRequest {
+    pub title: String,
+    pub description: Option<String>,
+    pub approvers: Vec<String>,
+    pub room_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApprovalResponseInput {
+    pub decision: String, // "approve" or "reject"
+    pub comment: Option<String>,
+}
+
+// ─── Recording Policies ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordingPolicy {
+    pub id: Uuid,
+    pub name: String,
+    pub trigger: String,
+    pub target_ids: Vec<String>,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateRecordingPolicyRequest {
+    pub name: String,
+    pub trigger: String,
+    pub target_ids: Option<Vec<String>>,
+    pub enabled: Option<bool>,
+}
+
+// ─── Hold Music ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HoldMusic {
+    pub id: Uuid,
+    pub name: String,
+    pub file_path: String,
+    pub queue_id: Option<Uuid>,
+    pub is_default: bool,
+    pub uploaded_by: String,
+    pub created_at: DateTime<Utc>,
+}
+
+// ─── Personal Call Groups ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonalCallGroup {
+    pub id: Uuid,
+    pub user_id: String,
+    pub name: String,
+    pub numbers: Vec<String>,
+    pub ring_duration: i32,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreatePersonalCallGroupRequest {
+    pub name: String,
+    pub numbers: Vec<String>,
+    pub ring_duration: Option<i32>,
+    pub enabled: Option<bool>,
 }
 
 fn is_textual_content(content_type: &str) -> bool {
@@ -11051,6 +11414,9 @@ mod tests {
             legal_hold: false,
             deleted_at: None,
             deleted_by: None,
+            folder_id: None,
+            locked_by: None,
+            locked_at: None,
         };
         state.put_file_record(file.clone());
         state.upsert_retention_policy(

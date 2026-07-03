@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -342,6 +343,53 @@ pub fn router(state: SharedState) -> Router {
             get(export_dlp_violations_csv),
         )
         .route("/v1/admin/dlp/scan", post(scan_content_dlp))
+        // File versioning
+        .route("/v1/files/{id}/versions", get(list_file_versions))
+        .route(
+            "/v1/files/{id}/versions/{version}",
+            get(download_file_version),
+        )
+        // File lock/unlock
+        .route("/v1/files/{id}/lock", post(lock_file_handler))
+        .route("/v1/files/{id}/unlock", post(unlock_file_handler))
+        // Folders
+        .route(
+            "/v1/rooms/{id}/folders",
+            get(list_folders).post(create_folder),
+        )
+        .route("/v1/folders/{id}", delete(delete_folder))
+        // Approvals
+        .route("/v1/approvals", get(list_approvals).post(create_approval))
+        .route("/v1/approvals/{id}/respond", post(respond_to_approval))
+        // Recording policies
+        .route(
+            "/v1/admin/recording-policies",
+            get(list_recording_policies).post(create_recording_policy),
+        )
+        .route(
+            "/v1/admin/recording-policies/{id}",
+            put(update_recording_policy).delete(delete_recording_policy_handler),
+        )
+        // Hold music
+        .route(
+            "/v1/admin/hold-music",
+            get(list_hold_music).post(upload_hold_music),
+        )
+        .route(
+            "/v1/admin/hold-music/{id}",
+            delete(delete_hold_music_handler),
+        )
+        // Call groups
+        .route(
+            "/v1/call-groups",
+            get(list_call_groups).post(create_call_group),
+        )
+        .route(
+            "/v1/call-groups/{id}",
+            put(update_call_group).delete(delete_call_group),
+        )
+        // Per-user call analytics
+        .route("/v1/users/{id}/call-analytics", get(user_call_analytics))
         .route("/v1/events", get(sse_stream))
         .layer(from_fn(crate::metrics::request_metrics))
         .layer(from_fn(cors))
@@ -1695,14 +1743,99 @@ async fn upload_file(
         return Err(ApiError::Conflict("file blocked by DLP policy".to_string()));
     }
 
+    let folder_id = header_string(&headers, "x-pale-folder-id")
+        .and_then(|s| Uuid::parse_str(&s).ok());
+    let room_id = header_string(&headers, "x-pale-room-id")
+        .and_then(|s| Uuid::parse_str(&s).ok());
+
     tokio::fs::create_dir_all(state.files_dir()).await?;
-    let id = Uuid::new_v4();
-    let path = state.file_path(id);
-    tokio::fs::write(&path, &body).await?;
 
     let mut hasher = Sha256::new();
     hasher.update(&body);
     let sha256 = to_hex(&hasher.finalize());
+
+    // Check if a file with the same name exists in the same room/folder — if so, create a version
+    let existing = room_id.and_then(|_rid| {
+        state
+            .file_records()
+            .into_iter()
+            .find(|f| f.filename == filename && f.folder_id == folder_id && f.owner == owner)
+    });
+
+    if let Some(existing_file) = existing {
+        // Check file lock before allowing overwrite
+        if let Some(locker) = &existing_file.locked_by {
+            if *locker != owner {
+                return Err(ApiError::Conflict(format!(
+                    "file is locked by {}",
+                    locker
+                )));
+            }
+        }
+        // Create a new version of the existing file
+        let versions = state.file_versions(existing_file.id);
+        let next_version = versions
+            .last()
+            .map(|v| v.version_number + 1)
+            .unwrap_or(2); // first versioned upload is v2
+
+        // Save current file as a version if this is the first time versioning
+        if versions.is_empty() {
+            let v1_id = Uuid::new_v4();
+            let v1_path = state.file_version_path(v1_id);
+            // Copy current file content to version storage
+            if let Ok(current_bytes) = tokio::fs::read(state.file_path(existing_file.id)).await {
+                let _ = tokio::fs::write(&v1_path, &current_bytes).await;
+            }
+            state.add_file_version(crate::FileVersion {
+                id: v1_id,
+                file_id: existing_file.id,
+                version_number: 1,
+                uploader: existing_file.owner.clone(),
+                size: existing_file.size as i64,
+                sha256: existing_file.sha256.clone(),
+                created_at: existing_file.created_at,
+                storage_path: v1_path.to_string_lossy().to_string(),
+            });
+        }
+
+        // Save the new upload as the latest version
+        let ver_id = Uuid::new_v4();
+        let ver_path = state.file_version_path(ver_id);
+        tokio::fs::write(&ver_path, &body).await?;
+        state.add_file_version(crate::FileVersion {
+            id: ver_id,
+            file_id: existing_file.id,
+            version_number: next_version,
+            uploader: owner.clone(),
+            size: body.len() as i64,
+            sha256: sha256.clone(),
+            created_at: Utc::now(),
+            storage_path: ver_path.to_string_lossy().to_string(),
+        });
+
+        // Update the main file record with new content
+        let path = state.file_path(existing_file.id);
+        tokio::fs::write(&path, &body).await?;
+
+        let mut updated = existing_file;
+        updated.size = body.len() as u64;
+        updated.sha256 = sha256;
+        updated.dlp_status = governance.dlp_status;
+        updated.dlp_violation_count = governance.dlp_violation_count;
+        updated.legal_hold = governance.legal_hold;
+        state.put_file_record(updated.clone());
+        state.record_audit_event(
+            &owner,
+            "file.version_uploaded",
+            Some(format!("{}:v{}", updated.id, next_version)),
+        );
+        return Ok(Json(updated));
+    }
+
+    let id = Uuid::new_v4();
+    let path = state.file_path(id);
+    tokio::fs::write(&path, &body).await?;
 
     let record = FileRecord {
         id,
@@ -1717,6 +1850,9 @@ async fn upload_file(
         legal_hold: governance.legal_hold,
         deleted_at: None,
         deleted_by: None,
+        folder_id,
+        locked_by: None,
+        locked_at: None,
     };
     state.put_file_record(record.clone());
     state.record_audit_event(&owner, "file.uploaded", Some(record.id.to_string()));
@@ -2932,6 +3068,9 @@ async fn upload_avatar(
         legal_hold: state.file_on_legal_hold(),
         deleted_at: None,
         deleted_by: None,
+        folder_id: None,
+        locked_by: None,
+        locked_at: None,
     };
     state.put_file_record(record);
     state.record_audit_event(&principal, "user.avatar_updated", Some(user_id.to_string()));
@@ -3848,6 +3987,447 @@ async fn delete_recording(
         .ok_or(ApiError::NotFound)?;
     state.record_audit_event(&principal, "recording.deleted", Some(id.to_string()));
     Ok(Json(json!({ "ok": true })))
+}
+
+// ─── File Versioning ───
+
+async fn list_file_versions(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::FileVersion>>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    let versions = state.file_versions(id);
+    Ok(Json(versions))
+}
+
+async fn download_file_version(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path((id, version)): Path<(Uuid, i32)>,
+) -> Result<Response, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    let record = state.file_record(id).ok_or(ApiError::NotFound)?;
+    if !state.is_admin_principal(&requester) && requester != record.owner {
+        return Err(ApiError::Forbidden);
+    }
+    let versions = state.file_versions(id);
+    let ver = versions
+        .iter()
+        .find(|v| v.version_number == version)
+        .ok_or(ApiError::NotFound)?;
+    let bytes = tokio::fs::read(&ver.storage_path).await?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&record.content_type)
+            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+    );
+    let disposition = format!(
+        "attachment; filename=\"v{}_{}\"\r\n",
+        version,
+        record.filename.replace('"', "")
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(disposition.trim())
+            .unwrap_or(HeaderValue::from_static("attachment")),
+    );
+    Ok((headers, bytes).into_response())
+}
+
+// ─── File Lock ───
+
+async fn lock_file_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::FileRecord>, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    let record = state
+        .lock_file(id, &requester)
+        .ok_or(ApiError::Conflict("file is already locked".to_string()))?;
+    state.persist(&record);
+    state.record_audit_event(&requester, "file.locked", Some(id.to_string()));
+    Ok(Json(record))
+}
+
+async fn unlock_file_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::FileRecord>, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    // Admins can force-unlock
+    let record = if state.is_admin_principal(&requester) {
+        state
+            .files
+            .with_write(&id, |files| {
+                let file = files.get_mut(&id)?;
+                file.locked_by = None;
+                file.locked_at = None;
+                Some(file.clone())
+            })
+            .ok_or(ApiError::NotFound)?
+    } else {
+        state
+            .unlock_file(id, &requester)
+            .ok_or(ApiError::Conflict(
+                "file not locked by you".to_string(),
+            ))?
+    };
+    state.persist(&record);
+    state.record_audit_event(&requester, "file.unlocked", Some(id.to_string()));
+    Ok(Json(record))
+}
+
+// ─── Folders ───
+
+async fn list_folders(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<crate::Folder>>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    let parent_id = params
+        .get("parent_id")
+        .and_then(|s| Uuid::parse_str(s).ok());
+    let folders = state.folders_for_room(id, parent_id);
+    Ok(Json(folders))
+}
+
+async fn create_folder(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::CreateFolderRequest>,
+) -> Result<Json<crate::Folder>, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    let folder = crate::Folder {
+        id: Uuid::new_v4(),
+        room_id: id,
+        parent_id: input.parent_id,
+        name: input.name,
+        created_by: requester.clone(),
+        created_at: Utc::now(),
+    };
+    state.put_folder(folder.clone());
+    state.record_audit_event(&requester, "folder.created", Some(folder.id.to_string()));
+    Ok(Json(folder))
+}
+
+async fn delete_folder(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    state.delete_folder(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&requester, "folder.deleted", Some(id.to_string()));
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ─── Approvals ───
+
+async fn list_approvals(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::ApprovalRequest>>, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    let approvals: Vec<_> = state
+        .approvals()
+        .into_iter()
+        .filter(|a| {
+            state.is_admin_principal(&requester)
+                || a.requestor == requester
+                || a.approvers.contains(&requester)
+        })
+        .collect();
+    Ok(Json(approvals))
+}
+
+async fn create_approval(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::CreateApprovalRequest>,
+) -> Result<Json<crate::ApprovalRequest>, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    let approval = crate::ApprovalRequest {
+        id: Uuid::new_v4(),
+        title: input.title,
+        description: input.description.unwrap_or_default(),
+        requestor: requester.clone(),
+        approvers: input.approvers,
+        status: "pending".to_string(),
+        responses: serde_json::json!([]),
+        room_id: input.room_id,
+        created_at: Utc::now(),
+        resolved_at: None,
+    };
+    state.put_approval(approval.clone());
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "approval_created".to_string(),
+        payload: serde_json::to_value(&approval).unwrap_or_default(),
+    });
+    state.record_audit_event(&requester, "approval.created", Some(approval.id.to_string()));
+    Ok(Json(approval))
+}
+
+async fn respond_to_approval(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::ApprovalResponseInput>,
+) -> Result<Json<crate::ApprovalRequest>, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    let approval = state
+        .update_approval(id, |a| {
+            let response = serde_json::json!({
+                "user": requester,
+                "decision": input.decision,
+                "comment": input.comment,
+                "responded_at": Utc::now().to_rfc3339(),
+            });
+            let mut responses = a.responses.as_array().cloned().unwrap_or_default();
+            responses.push(response);
+            a.responses = serde_json::Value::Array(responses.clone());
+
+            // Check if all approvers have responded
+            let approver_count = a.approvers.len();
+            if responses.len() >= approver_count {
+                let all_approved = responses.iter().all(|r| {
+                    r.get("decision")
+                        .and_then(|d| d.as_str())
+                        .map(|d| d == "approve")
+                        .unwrap_or(false)
+                });
+                a.status = if all_approved {
+                    "approved".to_string()
+                } else {
+                    "rejected".to_string()
+                };
+                a.resolved_at = Some(Utc::now());
+            }
+        })
+        .ok_or(ApiError::NotFound)?;
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "approval_response".to_string(),
+        payload: serde_json::to_value(&approval).unwrap_or_default(),
+    });
+    Ok(Json(approval))
+}
+
+// ─── Recording Policies ───
+
+async fn list_recording_policies(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::RecordingPolicy>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.recording_policies_list()))
+}
+
+async fn create_recording_policy(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::CreateRecordingPolicyRequest>,
+) -> Result<Json<crate::RecordingPolicy>, ApiError> {
+    let admin = authenticated_admin(&headers, &state)?;
+    let policy = crate::RecordingPolicy {
+        id: Uuid::new_v4(),
+        name: input.name,
+        trigger: input.trigger,
+        target_ids: input.target_ids.unwrap_or_default(),
+        enabled: input.enabled.unwrap_or(true),
+        created_at: Utc::now(),
+    };
+    state.put_recording_policy(policy.clone());
+    state.record_audit_event(&admin, "recording_policy.created", Some(policy.id.to_string()));
+    Ok(Json(policy))
+}
+
+async fn update_recording_policy(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::CreateRecordingPolicyRequest>,
+) -> Result<Json<crate::RecordingPolicy>, ApiError> {
+    let admin = authenticated_admin(&headers, &state)?;
+    let _existing = state.recording_policy(id).ok_or(ApiError::NotFound)?;
+    let policy = crate::RecordingPolicy {
+        id,
+        name: input.name,
+        trigger: input.trigger,
+        target_ids: input.target_ids.unwrap_or_default(),
+        enabled: input.enabled.unwrap_or(true),
+        created_at: _existing.created_at,
+    };
+    state.put_recording_policy(policy.clone());
+    state.record_audit_event(&admin, "recording_policy.updated", Some(id.to_string()));
+    Ok(Json(policy))
+}
+
+async fn delete_recording_policy_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let admin = authenticated_admin(&headers, &state)?;
+    state
+        .delete_recording_policy(id)
+        .ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&admin, "recording_policy.deleted", Some(id.to_string()));
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ─── Hold Music ───
+
+async fn list_hold_music(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::HoldMusic>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.hold_music_list()))
+}
+
+async fn upload_hold_music(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<crate::HoldMusic>, ApiError> {
+    let admin = authenticated_admin(&headers, &state)?;
+    let name =
+        header_string(&headers, "x-pale-filename").unwrap_or_else(|| "hold_music".to_string());
+    let queue_id = header_string(&headers, "x-pale-queue-id")
+        .and_then(|s| Uuid::parse_str(&s).ok());
+    let is_default = header_string(&headers, "x-pale-default")
+        .map(|s| s == "true")
+        .unwrap_or(false);
+
+    tokio::fs::create_dir_all(state.files_dir()).await?;
+    let id = Uuid::new_v4();
+    let file_path = state.files_dir().join(format!("hold_music_{}", id));
+    tokio::fs::write(&file_path, &body).await?;
+
+    let music = crate::HoldMusic {
+        id,
+        name: safe_filename(&name),
+        file_path: file_path.to_string_lossy().to_string(),
+        queue_id,
+        is_default,
+        uploaded_by: admin.clone(),
+        created_at: Utc::now(),
+    };
+    state.put_hold_music(music.clone());
+    state.record_audit_event(&admin, "hold_music.uploaded", Some(id.to_string()));
+    Ok(Json(music))
+}
+
+async fn delete_hold_music_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let admin = authenticated_admin(&headers, &state)?;
+    let music = state.delete_hold_music(id).ok_or(ApiError::NotFound)?;
+    // Try to delete the file
+    let _ = tokio::fs::remove_file(&music.file_path).await;
+    state.record_audit_event(&admin, "hold_music.deleted", Some(id.to_string()));
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ─── Personal Call Groups ───
+
+async fn list_call_groups(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::PersonalCallGroup>>, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    Ok(Json(state.personal_call_groups_for_user(&requester)))
+}
+
+async fn create_call_group(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::CreatePersonalCallGroupRequest>,
+) -> Result<Json<crate::PersonalCallGroup>, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    let group = crate::PersonalCallGroup {
+        id: Uuid::new_v4(),
+        user_id: requester.clone(),
+        name: input.name,
+        numbers: input.numbers,
+        ring_duration: input.ring_duration.unwrap_or(20),
+        enabled: input.enabled.unwrap_or(true),
+    };
+    state.put_personal_call_group(group.clone());
+    state.record_audit_event(&requester, "call_group.created", Some(group.id.to_string()));
+    Ok(Json(group))
+}
+
+async fn update_call_group(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::CreatePersonalCallGroupRequest>,
+) -> Result<Json<crate::PersonalCallGroup>, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    let existing = state
+        .personal_call_group(id)
+        .ok_or(ApiError::NotFound)?;
+    if existing.user_id != requester {
+        return Err(ApiError::Forbidden);
+    }
+    let group = crate::PersonalCallGroup {
+        id,
+        user_id: requester.clone(),
+        name: input.name,
+        numbers: input.numbers,
+        ring_duration: input.ring_duration.unwrap_or(existing.ring_duration),
+        enabled: input.enabled.unwrap_or(existing.enabled),
+    };
+    state.put_personal_call_group(group.clone());
+    Ok(Json(group))
+}
+
+async fn delete_call_group(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    let existing = state
+        .personal_call_group(id)
+        .ok_or(ApiError::NotFound)?;
+    if existing.user_id != requester && !state.is_admin_principal(&requester) {
+        return Err(ApiError::Forbidden);
+    }
+    state
+        .delete_personal_call_group(id)
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ─── Per-User Call Analytics ───
+
+async fn user_call_analytics(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    let user = state
+        .all_users()
+        .into_iter()
+        .find(|u| u.id == id)
+        .ok_or(ApiError::NotFound)?;
+    // Users can only view own analytics unless admin
+    if !state.is_admin_principal(&requester) && user.sip_uri != requester {
+        return Err(ApiError::Forbidden);
+    }
+    let analytics = state.user_call_analytics(&user.sip_uri);
+    Ok(Json(analytics))
 }
 
 // ─── Server-Sent Events ───
