@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { User, Volume2, Globe, Info, Server, Bell, Phone, LogOut, Sun, Moon, Palette, Shield, Monitor, Smartphone, Laptop, Trash2, Clock } from "lucide-react";
+import { User, Users, Volume2, Globe, Info, Server, Bell, Phone, LogOut, Sun, Moon, Palette, Shield, Monitor, Smartphone, Laptop, Trash2, Clock } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useAccountStore } from "@/store/accountStore";
 import { useServerStore } from "@/store/serverStore";
@@ -13,13 +13,14 @@ import { disconnectServer, signOut } from "@/lib/session";
 import { toast } from "@/components/ui/Toast";
 import type { SipAccount } from "@/types";
 
-type SettingsTab = "account" | "audio" | "network" | "server" | "calls" | "call_analytics" | "call_groups" | "notifications" | "security" | "appearance" | "ooo" | "about";
+type SettingsTab = "account" | "audio" | "network" | "server" | "calls" | "call_analytics" | "call_groups" | "delegation" | "notifications" | "security" | "appearance" | "ooo" | "about";
 
 const settingsTabs: { id: SettingsTab; label: string; icon: typeof User }[] = [
   { id: "account", label: "Account", icon: User },
   { id: "calls", label: "Calls", icon: Phone },
   { id: "call_analytics", label: "Analytics", icon: Phone },
   { id: "call_groups", label: "Groups", icon: Phone },
+  { id: "delegation", label: "Delegation", icon: Users },
   { id: "audio", label: "Audio", icon: Volume2 },
   { id: "network", label: "Network", icon: Globe },
   { id: "server", label: "Server", icon: Server },
@@ -67,6 +68,7 @@ export function SettingsView() {
         {activeTab === "calls" && <CallSettingsPanel />}
         {activeTab === "call_analytics" && <CallAnalyticsPanel />}
         {activeTab === "call_groups" && <CallGroupsPanel />}
+        {activeTab === "delegation" && <DelegationPanel />}
         {activeTab === "network" && <NetworkSettings />}
         {activeTab === "server" && <ServerSettingsPanel />}
         {activeTab === "security" && <SecuritySettingsPanel />}
@@ -1240,6 +1242,159 @@ function CallGroupsPanel() {
           </div>
         ))}
         {groups.length === 0 && <p className="text-sm text-tertiary">No call groups configured.</p>}
+      </div>
+    </div>
+  );
+}
+
+// ─── Delegation Panel (Boss-Secretary) ───
+
+interface Delegation {
+  id: string;
+  owner_uri: string;
+  delegate_uri: string;
+  can_answer: boolean;
+  can_make: boolean;
+  can_view_history: boolean;
+  created_at: string;
+}
+
+function DelegationPanel() {
+  const { baseUrl, token, connected } = useServerStore();
+  const account = useAccountStore((s) => s.account);
+  const [delegations, setDelegations] = useState<Delegation[]>([]);
+  const [delegateUri, setDelegateUri] = useState("");
+  const [canAnswer, setCanAnswer] = useState(true);
+  const [canMake, setCanMake] = useState(false);
+  const [canViewHistory, setCanViewHistory] = useState(false);
+
+  const ownerUri = account?.sipUri || "";
+
+  useEffect(() => {
+    if (!connected || !baseUrl || !token || !ownerUri) return;
+    fetch(`${baseUrl}/v1/users/${encodeURIComponent(ownerUri)}/delegates`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => (r.ok ? r.json() : []))
+      .then(setDelegations)
+      .catch(() => {});
+  }, [connected, baseUrl, token, ownerUri]);
+
+  const create = async () => {
+    if (!baseUrl || !token || !delegateUri || !ownerUri) return;
+    try {
+      const res = await fetch(
+        `${baseUrl}/v1/users/${encodeURIComponent(ownerUri)}/delegates`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            delegate_uri: delegateUri,
+            can_answer: canAnswer,
+            can_make: canMake,
+            can_view_history: canViewHistory,
+          }),
+        }
+      );
+      if (!res.ok) throw new Error("Failed");
+      const d = await res.json();
+      setDelegations([...delegations, d]);
+      setDelegateUri("");
+      toast({ type: "success", title: "Delegate added" });
+    } catch {
+      toast({ type: "error", title: "Failed to add delegate" });
+    }
+  };
+
+  const remove = async (id: string) => {
+    if (!baseUrl || !token || !ownerUri) return;
+    try {
+      await fetch(
+        `${baseUrl}/v1/users/${encodeURIComponent(ownerUri)}/delegates/${id}`,
+        { method: "DELETE", headers: { Authorization: `Bearer ${token}` } }
+      );
+      setDelegations(delegations.filter((d) => d.id !== id));
+      toast({ type: "success", title: "Delegate removed" });
+    } catch {
+      toast({ type: "error", title: "Failed to remove delegate" });
+    }
+  };
+
+  if (!connected) {
+    return (
+      <div className="space-y-4">
+        <SectionHeader title="Line Delegation" />
+        <p className="text-sm text-tertiary">Connect to a server to manage delegates.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <SectionHeader title="Line Delegation" />
+      <p className="text-sm text-secondary">
+        Allow another user to answer, make calls, or view call history on your behalf (boss-secretary).
+      </p>
+
+      <FormField
+        label="Delegate SIP URI"
+        value={delegateUri}
+        onChange={setDelegateUri}
+        placeholder="sip:assistant@example.com"
+      />
+
+      <div className="flex gap-4 text-sm">
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={canAnswer} onChange={(e) => setCanAnswer(e.target.checked)} />
+          Can answer
+        </label>
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={canMake} onChange={(e) => setCanMake(e.target.checked)} />
+          Can make calls
+        </label>
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={canViewHistory} onChange={(e) => setCanViewHistory(e.target.checked)} />
+          View history
+        </label>
+      </div>
+
+      <button
+        onClick={create}
+        disabled={!delegateUri}
+        className={cn(
+          "px-4 py-2 rounded-md text-sm font-medium",
+          "bg-accent text-inverse hover:bg-accent-hover transition-colors",
+          "disabled:opacity-60"
+        )}
+      >
+        Add Delegate
+      </button>
+
+      <div className="space-y-2">
+        {delegations.map((d) => (
+          <div
+            key={d.id}
+            className="flex items-center justify-between p-3 rounded-lg border border-border-subtle bg-surface"
+          >
+            <div>
+              <p className="text-sm font-medium text-primary">{d.delegate_uri}</p>
+              <p className="text-[10px] text-tertiary">
+                {d.can_answer ? "Answer" : ""}
+                {d.can_make ? " · Make calls" : ""}
+                {d.can_view_history ? " · View history" : ""}
+              </p>
+            </div>
+            <button
+              onClick={() => remove(d.id)}
+              className="p-1 text-tertiary hover:text-destructive"
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
+        ))}
+        {delegations.length === 0 && (
+          <p className="text-sm text-tertiary">No delegates configured.</p>
+        )}
       </div>
     </div>
   );

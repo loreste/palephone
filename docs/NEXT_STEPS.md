@@ -129,14 +129,14 @@ implement. Use this as a roadmap for closing the gap.
 - [ ] Speech-enabled auto-attendant / natural language IVR (Pale has DTMF-only)
 - [ ] Emergency calling (E911/dynamic) with location policies
 - [ ] PSTN Calling Plans / Operator Connect / Direct Routing SBC integration
-- [ ] Shared line appearance / boss-secretary delegation
+- [x] Shared line appearance / boss-secretary delegation — done 2026-07-03
 - [x] User-configurable personal call groups — done 2026-07-03
 - [x] Policy-based compliance recording (auto-trigger, third-party recorder integration) — done 2026-07-03
 - [x] Configurable music on hold (per queue/tenant custom audio upload) — done 2026-07-03
 - [x] Per-user call analytics dashboard (data exists server-side, no UI) — done 2026-07-03
 - [ ] Reverse number lookup / CNAM caller ID enrichment
 - [ ] SIP gateway / analog device (ATA) management
-- [ ] Common area phone profiles
+- [x] Common area phone profiles — done 2026-07-03
 - [ ] Location-based PSTN routing
 - [ ] Bandwidth management / call admission control
 
@@ -208,12 +208,12 @@ implement. Use this as a roadmap for closing the gap.
 - [ ] Privileged access management (just-in-time admin)
 
 ### 4.7 Devices & Rooms
-- [ ] Meeting room device management and room booking
-- [ ] SIP phone provisioning portal / certified device management
+- [x] Meeting room device management and room booking — done 2026-07-03
+- [x] SIP phone provisioning portal / certified device management — done 2026-07-03
 - [ ] USB HID device integration (headset call control)
 - [ ] Digital signage
 - [ ] Room scheduling panel devices
-- [ ] Hot desking (phone login/logout)
+- [x] Hot desking (phone login/logout) — done 2026-07-03
 
 ### 4.8 Platform & Integration
 - [ ] Low-code automation (Power Platform equivalent)

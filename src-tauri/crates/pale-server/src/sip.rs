@@ -568,7 +568,18 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
         .unwrap_or_else(|| requested_uri.clone());
 
     // ── Direct registration lookup ──
+    // Also check for shared-line delegates who can answer on behalf of the owner.
     if let Some(registration) = state.registration_for(&routed_uri) {
+        // Collect delegate contacts for shared-line appearance (SIP forking)
+        let delegates = state.delegations_for_owner(&routed_uri);
+        let mut contacts = vec![format!("<{}>", registration.contact)];
+        for d in &delegates {
+            if d.can_answer {
+                if let Some(del_reg) = state.registration_for(&d.delegate_uri) {
+                    contacts.push(format!("<{}>", del_reg.contact));
+                }
+            }
+        }
         state.upsert_sip_dialog(UpsertSipDialog {
             call_id: call_id_str.clone(),
             from_uri: from_aor.clone(),
@@ -581,7 +592,7 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
         return Some(request.response(
             302,
             "Moved Temporarily",
-            &[("Contact", format!("<{}>", registration.contact))],
+            &[("Contact", contacts.join(", "))],
         ));
     }
 

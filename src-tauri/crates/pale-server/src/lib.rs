@@ -291,6 +291,17 @@ pub struct AppState {
     hold_music: ShardedMap<Uuid, HoldMusic>,
     // Personal call groups
     personal_call_groups: ShardedMap<Uuid, PersonalCallGroup>,
+    // Line delegations (boss-secretary)
+    line_delegations: ShardedMap<Uuid, LineDelegation>,
+    // Common area phones
+    common_area_phones: ShardedMap<Uuid, CommonAreaPhone>,
+    // Meeting rooms & bookings
+    meeting_rooms: ShardedMap<Uuid, MeetingRoom>,
+    room_bookings: ShardedMap<Uuid, RoomBooking>,
+    // Provisioned devices
+    provisioned_devices: ShardedMap<Uuid, ProvisionedDevice>,
+    // Hot desking
+    hotdesk_sessions: ShardedMap<Uuid, HotdeskSession>,
     user_create_lock: std::sync::Mutex<()>,
     agent_assignment_lock: std::sync::Mutex<()>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
@@ -459,6 +470,12 @@ impl AppState {
             recording_policies: ShardedMap::new(),
             hold_music: ShardedMap::new(),
             personal_call_groups: ShardedMap::new(),
+            line_delegations: ShardedMap::new(),
+            common_area_phones: ShardedMap::new(),
+            meeting_rooms: ShardedMap::new(),
+            room_bookings: ShardedMap::new(),
+            provisioned_devices: ShardedMap::new(),
+            hotdesk_sessions: ShardedMap::new(),
             user_create_lock: std::sync::Mutex::new(()),
             agent_assignment_lock: std::sync::Mutex::new(()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
@@ -747,6 +764,54 @@ impl AppState {
                 }
             }
             Err(e) => log::warn!("Failed to load policy packages from Postgres: {}", e),
+        }
+        match pg.load_line_delegations().await {
+            Ok(delegations) => {
+                for d in delegations {
+                    self.line_delegations.insert(d.id, d);
+                }
+            }
+            Err(e) => log::warn!("Failed to load line delegations from Postgres: {}", e),
+        }
+        match pg.load_common_area_phones().await {
+            Ok(phones) => {
+                for p in phones {
+                    self.common_area_phones.insert(p.id, p);
+                }
+            }
+            Err(e) => log::warn!("Failed to load common area phones from Postgres: {}", e),
+        }
+        match pg.load_meeting_rooms().await {
+            Ok(rooms) => {
+                for r in rooms {
+                    self.meeting_rooms.insert(r.id, r);
+                }
+            }
+            Err(e) => log::warn!("Failed to load meeting rooms from Postgres: {}", e),
+        }
+        match pg.load_room_bookings().await {
+            Ok(bookings) => {
+                for b in bookings {
+                    self.room_bookings.insert(b.id, b);
+                }
+            }
+            Err(e) => log::warn!("Failed to load room bookings from Postgres: {}", e),
+        }
+        match pg.load_provisioned_devices().await {
+            Ok(devices) => {
+                for d in devices {
+                    self.provisioned_devices.insert(d.id, d);
+                }
+            }
+            Err(e) => log::warn!("Failed to load provisioned devices from Postgres: {}", e),
+        }
+        match pg.load_hotdesk_sessions().await {
+            Ok(sessions) => {
+                for s in sessions {
+                    self.hotdesk_sessions.insert(s.id, s);
+                }
+            }
+            Err(e) => log::warn!("Failed to load hotdesk sessions from Postgres: {}", e),
         }
         log::info!("Loaded data from PostgreSQL into memory cache");
     }
@@ -4366,6 +4431,142 @@ impl AppState {
 
     pub fn delete_personal_call_group(&self, id: Uuid) -> Option<PersonalCallGroup> {
         self.personal_call_groups.remove(&id)
+    }
+
+    // ─── Line Delegations (Boss-Secretary) ───
+
+    pub fn put_line_delegation(&self, d: LineDelegation) {
+        self.line_delegations.insert(d.id, d);
+    }
+
+    pub fn delegations_for_owner(&self, owner_uri: &str) -> Vec<LineDelegation> {
+        self.line_delegations.values().into_iter()
+            .filter(|d| d.owner_uri == owner_uri)
+            .collect()
+    }
+
+    pub fn delegations_for_delegate(&self, delegate_uri: &str) -> Vec<LineDelegation> {
+        self.line_delegations.values().into_iter()
+            .filter(|d| d.delegate_uri == delegate_uri)
+            .collect()
+    }
+
+    pub fn line_delegation(&self, id: Uuid) -> Option<LineDelegation> {
+        self.line_delegations.get(&id)
+    }
+
+    pub fn delete_line_delegation(&self, id: Uuid) -> Option<LineDelegation> {
+        self.line_delegations.remove(&id)
+    }
+
+    /// Check if delegate_uri can answer calls for target_uri.
+    pub fn can_delegate_answer(&self, target_uri: &str, delegate_uri: &str) -> bool {
+        self.line_delegations.values().into_iter()
+            .any(|d| d.owner_uri == target_uri && d.delegate_uri == delegate_uri && d.can_answer)
+    }
+
+    // ─── Common Area Phones ───
+
+    pub fn put_common_area_phone(&self, phone: CommonAreaPhone) {
+        self.common_area_phones.insert(phone.id, phone);
+    }
+
+    pub fn common_area_phone_list(&self) -> Vec<CommonAreaPhone> {
+        self.common_area_phones.values()
+    }
+
+    pub fn common_area_phone(&self, id: Uuid) -> Option<CommonAreaPhone> {
+        self.common_area_phones.get(&id)
+    }
+
+    pub fn delete_common_area_phone(&self, id: Uuid) -> Option<CommonAreaPhone> {
+        self.common_area_phones.remove(&id)
+    }
+
+    // ─── Meeting Rooms ───
+
+    pub fn put_meeting_room(&self, room: MeetingRoom) {
+        self.meeting_rooms.insert(room.id, room);
+    }
+
+    pub fn meeting_room_list(&self) -> Vec<MeetingRoom> {
+        self.meeting_rooms.values()
+    }
+
+    pub fn meeting_room(&self, id: Uuid) -> Option<MeetingRoom> {
+        self.meeting_rooms.get(&id)
+    }
+
+    pub fn delete_meeting_room(&self, id: Uuid) -> Option<MeetingRoom> {
+        self.meeting_rooms.remove(&id)
+    }
+
+    pub fn put_room_booking(&self, booking: RoomBooking) {
+        self.room_bookings.insert(booking.id, booking);
+    }
+
+    pub fn room_bookings_for_room(&self, room_id: Uuid) -> Vec<RoomBooking> {
+        self.room_bookings.values().into_iter()
+            .filter(|b| b.room_id == room_id)
+            .collect()
+    }
+
+    pub fn available_rooms(&self, start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<MeetingRoom> {
+        let bookings = self.room_bookings.values();
+        self.meeting_rooms.values().into_iter()
+            .filter(|room| {
+                room.bookable && !bookings.iter().any(|b| {
+                    b.room_id == room.id && b.start_time < end && b.end_time > start
+                })
+            })
+            .collect()
+    }
+
+    pub fn delete_room_booking(&self, id: Uuid) -> Option<RoomBooking> {
+        self.room_bookings.remove(&id)
+    }
+
+    // ─── Provisioned Devices ───
+
+    pub fn put_provisioned_device(&self, device: ProvisionedDevice) {
+        self.provisioned_devices.insert(device.id, device);
+    }
+
+    pub fn provisioned_device_list(&self) -> Vec<ProvisionedDevice> {
+        self.provisioned_devices.values()
+    }
+
+    pub fn provisioned_device(&self, id: Uuid) -> Option<ProvisionedDevice> {
+        self.provisioned_devices.get(&id)
+    }
+
+    pub fn provisioned_device_by_mac(&self, mac: &str) -> Option<ProvisionedDevice> {
+        let mac_lower = mac.to_lowercase().replace([':', '-'], "");
+        self.provisioned_devices.values().into_iter()
+            .find(|d| d.mac_address.to_lowercase().replace([':', '-'], "") == mac_lower)
+    }
+
+    pub fn delete_provisioned_device(&self, id: Uuid) -> Option<ProvisionedDevice> {
+        self.provisioned_devices.remove(&id)
+    }
+
+    // ─── Hot Desking ───
+
+    pub fn put_hotdesk_session(&self, session: HotdeskSession) {
+        self.hotdesk_sessions.insert(session.id, session);
+    }
+
+    pub fn active_hotdesk_for_device(&self, device_id: Uuid) -> Option<HotdeskSession> {
+        self.hotdesk_sessions.values().into_iter()
+            .find(|s| s.device_id == device_id && s.logged_out_at.is_none())
+    }
+
+    pub fn hotdesk_logout(&self, device_id: Uuid) -> Option<HotdeskSession> {
+        let session = self.active_hotdesk_for_device(device_id)?;
+        let mut updated = session.clone();
+        updated.logged_out_at = Some(Utc::now());
+        self.hotdesk_sessions.insert(updated.id, updated.clone());
+        Some(updated)
     }
 
     // ─── Call Analytics ───
@@ -10380,6 +10581,127 @@ pub struct CreatePersonalCallGroupRequest {
     pub numbers: Vec<String>,
     pub ring_duration: Option<i32>,
     pub enabled: Option<bool>,
+}
+
+// ─── Line Delegation (Boss-Secretary) ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LineDelegation {
+    pub id: Uuid,
+    pub owner_uri: String,
+    pub delegate_uri: String,
+    pub can_answer: bool,
+    pub can_make: bool,
+    pub can_view_history: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateLineDelegationRequest {
+    pub delegate_uri: String,
+    pub can_answer: Option<bool>,
+    pub can_make: Option<bool>,
+    pub can_view_history: Option<bool>,
+}
+
+// ─── Common Area Phones ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommonAreaPhone {
+    pub id: Uuid,
+    pub name: String,
+    pub extension: String,
+    pub location: String,
+    pub features: serde_json::Value,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateCommonAreaPhoneRequest {
+    pub name: String,
+    pub extension: String,
+    pub location: Option<String>,
+    pub features: Option<serde_json::Value>,
+    pub enabled: Option<bool>,
+}
+
+// ─── Meeting Rooms ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeetingRoom {
+    pub id: Uuid,
+    pub name: String,
+    pub location: String,
+    pub capacity: i32,
+    pub equipment: Vec<String>,
+    pub bookable: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateMeetingRoomRequest {
+    pub name: String,
+    pub location: Option<String>,
+    pub capacity: Option<i32>,
+    pub equipment: Option<Vec<String>>,
+    pub bookable: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomBooking {
+    pub id: Uuid,
+    pub room_id: Uuid,
+    pub meeting_id: Option<Uuid>,
+    pub booked_by: String,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateRoomBookingRequest {
+    pub meeting_id: Option<Uuid>,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+}
+
+// ─── Provisioned Devices ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisionedDevice {
+    pub id: Uuid,
+    pub mac_address: String,
+    pub model: String,
+    pub assigned_user: Option<String>,
+    pub config_template: String,
+    pub provisioned_at: DateTime<Utc>,
+    pub last_seen: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateProvisionedDeviceRequest {
+    pub mac_address: String,
+    pub model: Option<String>,
+    pub assigned_user: Option<String>,
+    pub config_template: Option<String>,
+}
+
+// ─── Hot Desking ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotdeskSession {
+    pub id: Uuid,
+    pub device_id: Uuid,
+    pub user_uri: String,
+    pub logged_in_at: DateTime<Utc>,
+    pub logged_out_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct HotdeskLoginRequest {
+    pub device_id: Uuid,
+    pub user_uri: String,
 }
 
 fn is_textual_content(content_type: &str) -> bool {

@@ -511,6 +511,53 @@ pub fn router(state: SharedState) -> Router {
         )
         // Per-user call analytics
         .route("/v1/users/{id}/call-analytics", get(user_call_analytics))
+        // Line delegations (boss-secretary)
+        .route(
+            "/v1/users/{uri}/delegates",
+            get(list_delegations).post(create_delegation),
+        )
+        .route(
+            "/v1/users/{uri}/delegates/{id}",
+            delete(delete_delegation),
+        )
+        // Common area phones
+        .route(
+            "/v1/admin/common-area-phones",
+            get(list_common_area_phones).post(create_common_area_phone),
+        )
+        .route(
+            "/v1/admin/common-area-phones/{id}",
+            put(update_common_area_phone).delete(delete_common_area_phone),
+        )
+        // Meeting rooms
+        .route(
+            "/v1/admin/meeting-rooms",
+            get(list_meeting_rooms).post(create_meeting_room),
+        )
+        .route(
+            "/v1/admin/meeting-rooms/{id}",
+            put(update_meeting_room).delete(delete_meeting_room),
+        )
+        .route("/v1/meeting-rooms/{id}/book", post(book_meeting_room))
+        .route(
+            "/v1/meeting-rooms/{id}/bookings",
+            get(list_room_bookings),
+        )
+        .route("/v1/meeting-rooms/available", get(available_meeting_rooms))
+        // Device provisioning
+        .route(
+            "/v1/admin/devices",
+            get(list_devices).post(create_device),
+        )
+        .route(
+            "/v1/admin/devices/{id}",
+            put(update_device).delete(delete_device_handler),
+        )
+        .route("/v1/provisioning/{mac}", get(get_device_config))
+        // Hot desking
+        .route("/v1/hotdesk/login", post(hotdesk_login))
+        .route("/v1/hotdesk/logout", post(hotdesk_logout))
+        .route("/v1/hotdesk/status/{device_id}", get(hotdesk_status))
         .route("/v1/events", get(sse_stream))
         .layer(from_fn(crate::metrics::request_metrics))
         .layer(from_fn(cors))
@@ -5479,6 +5526,495 @@ async fn delete_call_group(
     Ok(Json(json!({ "ok": true })))
 }
 
+// ─── Line Delegations (Boss-Secretary) ───
+
+async fn list_delegations(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(uri): Path<String>,
+) -> Result<Json<Vec<crate::LineDelegation>>, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    // Owner can see their own delegates; delegates can see lines they serve
+    let owner_uri = percent_decode(&uri);
+    if requester != owner_uri && !state.is_admin_principal(&requester) {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(Json(state.delegations_for_owner(&owner_uri)))
+}
+
+async fn create_delegation(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(uri): Path<String>,
+    Json(input): Json<crate::CreateLineDelegationRequest>,
+) -> Result<Json<crate::LineDelegation>, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    let owner_uri = percent_decode(&uri);
+    if requester != owner_uri && !state.is_admin_principal(&requester) {
+        return Err(ApiError::Forbidden);
+    }
+    let delegation = crate::LineDelegation {
+        id: Uuid::new_v4(),
+        owner_uri: owner_uri.clone(),
+        delegate_uri: input.delegate_uri,
+        can_answer: input.can_answer.unwrap_or(true),
+        can_make: input.can_make.unwrap_or(false),
+        can_view_history: input.can_view_history.unwrap_or(false),
+        created_at: Utc::now(),
+    };
+    state.put_line_delegation(delegation.clone());
+    if let Some(pg) = state.pg_store() {
+        let d = delegation.clone();
+        let pg = pg.clone();
+        tokio::spawn(async move { let _ = pg.upsert_line_delegation(&d).await; });
+    }
+    state.record_audit_event(&requester, "delegation.created", Some(delegation.id.to_string()));
+    Ok(Json(delegation))
+}
+
+async fn delete_delegation(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path((uri, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    let owner_uri = percent_decode(&uri);
+    if requester != owner_uri && !state.is_admin_principal(&requester) {
+        return Err(ApiError::Forbidden);
+    }
+    state.delete_line_delegation(id).ok_or(ApiError::NotFound)?;
+    if let Some(pg) = state.pg_store() {
+        let pg = pg.clone();
+        tokio::spawn(async move { let _ = pg.delete_line_delegation(id).await; });
+    }
+    state.record_audit_event(&requester, "delegation.deleted", Some(id.to_string()));
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ─── Common Area Phones ───
+
+async fn list_common_area_phones(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::CommonAreaPhone>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.common_area_phone_list()))
+}
+
+async fn create_common_area_phone(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::CreateCommonAreaPhoneRequest>,
+) -> Result<Json<crate::CommonAreaPhone>, ApiError> {
+    let admin = authenticated_admin(&headers, &state)?;
+    let phone = crate::CommonAreaPhone {
+        id: Uuid::new_v4(),
+        name: input.name,
+        extension: input.extension,
+        location: input.location.unwrap_or_default(),
+        features: input.features.unwrap_or_else(|| serde_json::json!({})),
+        enabled: input.enabled.unwrap_or(true),
+        created_at: Utc::now(),
+    };
+    state.put_common_area_phone(phone.clone());
+    if let Some(pg) = state.pg_store() {
+        let p = phone.clone();
+        let pg = pg.clone();
+        tokio::spawn(async move { let _ = pg.upsert_common_area_phone(&p).await; });
+    }
+    state.record_audit_event(&admin, "common_area_phone.created", Some(phone.id.to_string()));
+    Ok(Json(phone))
+}
+
+async fn update_common_area_phone(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::CreateCommonAreaPhoneRequest>,
+) -> Result<Json<crate::CommonAreaPhone>, ApiError> {
+    let admin = authenticated_admin(&headers, &state)?;
+    let existing = state.common_area_phone(id).ok_or(ApiError::NotFound)?;
+    let phone = crate::CommonAreaPhone {
+        id,
+        name: input.name,
+        extension: input.extension,
+        location: input.location.unwrap_or(existing.location),
+        features: input.features.unwrap_or(existing.features),
+        enabled: input.enabled.unwrap_or(existing.enabled),
+        created_at: existing.created_at,
+    };
+    state.put_common_area_phone(phone.clone());
+    if let Some(pg) = state.pg_store() {
+        let p = phone.clone();
+        let pg = pg.clone();
+        tokio::spawn(async move { let _ = pg.upsert_common_area_phone(&p).await; });
+    }
+    state.record_audit_event(&admin, "common_area_phone.updated", Some(id.to_string()));
+    Ok(Json(phone))
+}
+
+async fn delete_common_area_phone(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let admin = authenticated_admin(&headers, &state)?;
+    state.delete_common_area_phone(id).ok_or(ApiError::NotFound)?;
+    if let Some(pg) = state.pg_store() {
+        let pg = pg.clone();
+        tokio::spawn(async move { let _ = pg.delete_common_area_phone(id).await; });
+    }
+    state.record_audit_event(&admin, "common_area_phone.deleted", Some(id.to_string()));
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ─── Meeting Rooms ───
+
+async fn list_meeting_rooms(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::MeetingRoom>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.meeting_room_list()))
+}
+
+async fn create_meeting_room(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::CreateMeetingRoomRequest>,
+) -> Result<Json<crate::MeetingRoom>, ApiError> {
+    let admin = authenticated_admin(&headers, &state)?;
+    let room = crate::MeetingRoom {
+        id: Uuid::new_v4(),
+        name: input.name,
+        location: input.location.unwrap_or_default(),
+        capacity: input.capacity.unwrap_or(0),
+        equipment: input.equipment.unwrap_or_default(),
+        bookable: input.bookable.unwrap_or(true),
+        created_at: Utc::now(),
+    };
+    state.put_meeting_room(room.clone());
+    if let Some(pg) = state.pg_store() {
+        let r = room.clone();
+        let pg = pg.clone();
+        tokio::spawn(async move { let _ = pg.upsert_meeting_room(&r).await; });
+    }
+    state.record_audit_event(&admin, "meeting_room.created", Some(room.id.to_string()));
+    Ok(Json(room))
+}
+
+async fn update_meeting_room(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::CreateMeetingRoomRequest>,
+) -> Result<Json<crate::MeetingRoom>, ApiError> {
+    let admin = authenticated_admin(&headers, &state)?;
+    let existing = state.meeting_room(id).ok_or(ApiError::NotFound)?;
+    let room = crate::MeetingRoom {
+        id,
+        name: input.name,
+        location: input.location.unwrap_or(existing.location),
+        capacity: input.capacity.unwrap_or(existing.capacity),
+        equipment: input.equipment.unwrap_or(existing.equipment),
+        bookable: input.bookable.unwrap_or(existing.bookable),
+        created_at: existing.created_at,
+    };
+    state.put_meeting_room(room.clone());
+    if let Some(pg) = state.pg_store() {
+        let r = room.clone();
+        let pg = pg.clone();
+        tokio::spawn(async move { let _ = pg.upsert_meeting_room(&r).await; });
+    }
+    state.record_audit_event(&admin, "meeting_room.updated", Some(id.to_string()));
+    Ok(Json(room))
+}
+
+async fn delete_meeting_room(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let admin = authenticated_admin(&headers, &state)?;
+    state.delete_meeting_room(id).ok_or(ApiError::NotFound)?;
+    if let Some(pg) = state.pg_store() {
+        let pg = pg.clone();
+        tokio::spawn(async move { let _ = pg.delete_meeting_room(id).await; });
+    }
+    state.record_audit_event(&admin, "meeting_room.deleted", Some(id.to_string()));
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn book_meeting_room(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::CreateRoomBookingRequest>,
+) -> Result<Json<crate::RoomBooking>, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    let room = state.meeting_room(id).ok_or(ApiError::NotFound)?;
+    if !room.bookable {
+        return Err(ApiError::Conflict("Room is not bookable".to_string()));
+    }
+    // Check for overlapping bookings
+    let existing = state.room_bookings_for_room(id);
+    let overlap = existing.iter().any(|b| b.start_time < input.end_time && b.end_time > input.start_time);
+    if overlap {
+        return Err(ApiError::Conflict("Time slot already booked".to_string()));
+    }
+    let booking = crate::RoomBooking {
+        id: Uuid::new_v4(),
+        room_id: id,
+        meeting_id: input.meeting_id,
+        booked_by: requester.clone(),
+        start_time: input.start_time,
+        end_time: input.end_time,
+        created_at: Utc::now(),
+    };
+    state.put_room_booking(booking.clone());
+    if let Some(pg) = state.pg_store() {
+        let b = booking.clone();
+        let pg = pg.clone();
+        tokio::spawn(async move { let _ = pg.upsert_room_booking(&b).await; });
+    }
+    state.record_audit_event(&requester, "room_booking.created", Some(booking.id.to_string()));
+    Ok(Json(booking))
+}
+
+async fn list_room_bookings(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::RoomBooking>>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    Ok(Json(state.room_bookings_for_room(id)))
+}
+
+#[derive(serde::Deserialize)]
+struct AvailableRoomsQuery {
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+}
+
+async fn available_meeting_rooms(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<AvailableRoomsQuery>,
+) -> Result<Json<Vec<crate::MeetingRoom>>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    Ok(Json(state.available_rooms(q.start, q.end)))
+}
+
+// ─── Device Provisioning ───
+
+async fn list_devices(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::ProvisionedDevice>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.provisioned_device_list()))
+}
+
+async fn create_device(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::CreateProvisionedDeviceRequest>,
+) -> Result<Json<crate::ProvisionedDevice>, ApiError> {
+    let admin = authenticated_admin(&headers, &state)?;
+    let device = crate::ProvisionedDevice {
+        id: Uuid::new_v4(),
+        mac_address: input.mac_address,
+        model: input.model.unwrap_or_default(),
+        assigned_user: input.assigned_user,
+        config_template: input.config_template.unwrap_or_default(),
+        provisioned_at: Utc::now(),
+        last_seen: None,
+    };
+    state.put_provisioned_device(device.clone());
+    if let Some(pg) = state.pg_store() {
+        let d = device.clone();
+        let pg = pg.clone();
+        tokio::spawn(async move { let _ = pg.upsert_provisioned_device(&d).await; });
+    }
+    state.record_audit_event(&admin, "device.created", Some(device.id.to_string()));
+    Ok(Json(device))
+}
+
+async fn update_device(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::CreateProvisionedDeviceRequest>,
+) -> Result<Json<crate::ProvisionedDevice>, ApiError> {
+    let admin = authenticated_admin(&headers, &state)?;
+    let existing = state.provisioned_device(id).ok_or(ApiError::NotFound)?;
+    let device = crate::ProvisionedDevice {
+        id,
+        mac_address: input.mac_address,
+        model: input.model.unwrap_or(existing.model),
+        assigned_user: input.assigned_user.or(existing.assigned_user),
+        config_template: input.config_template.unwrap_or(existing.config_template),
+        provisioned_at: existing.provisioned_at,
+        last_seen: existing.last_seen,
+    };
+    state.put_provisioned_device(device.clone());
+    if let Some(pg) = state.pg_store() {
+        let d = device.clone();
+        let pg = pg.clone();
+        tokio::spawn(async move { let _ = pg.upsert_provisioned_device(&d).await; });
+    }
+    state.record_audit_event(&admin, "device.updated", Some(id.to_string()));
+    Ok(Json(device))
+}
+
+async fn delete_device_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let admin = authenticated_admin(&headers, &state)?;
+    state.delete_provisioned_device(id).ok_or(ApiError::NotFound)?;
+    if let Some(pg) = state.pg_store() {
+        let pg = pg.clone();
+        tokio::spawn(async move { let _ = pg.delete_provisioned_device(id).await; });
+    }
+    state.record_audit_event(&admin, "device.deleted", Some(id.to_string()));
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn get_device_config(
+    State(state): State<SharedState>,
+    Path(mac): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let device = state.provisioned_device_by_mac(&mac).ok_or(ApiError::NotFound)?;
+    // Update last_seen
+    let mut updated = device.clone();
+    updated.last_seen = Some(Utc::now());
+    state.put_provisioned_device(updated.clone());
+    if let Some(pg) = state.pg_store() {
+        let d = updated;
+        let pg = pg.clone();
+        tokio::spawn(async move { let _ = pg.upsert_provisioned_device(&d).await; });
+    }
+    // If template is empty, return a basic config
+    let config = if device.config_template.is_empty() {
+        let user = device.assigned_user.as_deref().unwrap_or("unassigned");
+        format!(
+            r#"<?xml version="1.0"?><device><mac>{}</mac><model>{}</model><user>{}</user></device>"#,
+            device.mac_address, device.model, user
+        )
+    } else {
+        // Substitute variables in the template
+        device.config_template
+            .replace("{{mac}}", &device.mac_address)
+            .replace("{{model}}", &device.model)
+            .replace("{{user}}", device.assigned_user.as_deref().unwrap_or(""))
+    };
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/xml")],
+        config,
+    ))
+}
+
+// ─── Hot Desking ───
+
+async fn hotdesk_login(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::HotdeskLoginRequest>,
+) -> Result<Json<crate::HotdeskSession>, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    // Verify device exists
+    state.provisioned_device(input.device_id).ok_or(ApiError::NotFound)?;
+    // Log out any existing session on this device
+    if let Some(existing) = state.active_hotdesk_for_device(input.device_id) {
+        let mut updated = existing;
+        updated.logged_out_at = Some(Utc::now());
+        state.put_hotdesk_session(updated.clone());
+        if let Some(pg) = state.pg_store() {
+            let s = updated;
+            let pg = pg.clone();
+            tokio::spawn(async move { let _ = pg.upsert_hotdesk_session(&s).await; });
+        }
+    }
+    let session = crate::HotdeskSession {
+        id: Uuid::new_v4(),
+        device_id: input.device_id,
+        user_uri: input.user_uri.clone(),
+        logged_in_at: Utc::now(),
+        logged_out_at: None,
+    };
+    state.put_hotdesk_session(session.clone());
+    // Temporarily assign the user's extension to the device
+    if let Some(mut device) = state.provisioned_device(input.device_id) {
+        device.assigned_user = Some(input.user_uri.clone());
+        state.put_provisioned_device(device.clone());
+        if let Some(pg) = state.pg_store() {
+            let d = device;
+            let pg = pg.clone();
+            tokio::spawn(async move { let _ = pg.upsert_provisioned_device(&d).await; });
+        }
+    }
+    if let Some(pg) = state.pg_store() {
+        let s = session.clone();
+        let pg = pg.clone();
+        tokio::spawn(async move { let _ = pg.upsert_hotdesk_session(&s).await; });
+    }
+    state.record_audit_event(&requester, "hotdesk.login", Some(session.id.to_string()));
+    Ok(Json(session))
+}
+
+async fn hotdesk_logout(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    let device_id = input
+        .get("device_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .ok_or(ApiError::BadRequest("device_id required".to_string()))?;
+    let session = state.hotdesk_logout(device_id).ok_or(ApiError::NotFound)?;
+    // Clear assigned user from device
+    if let Some(mut device) = state.provisioned_device(device_id) {
+        device.assigned_user = None;
+        state.put_provisioned_device(device.clone());
+        if let Some(pg) = state.pg_store() {
+            let d = device;
+            let pg = pg.clone();
+            tokio::spawn(async move { let _ = pg.upsert_provisioned_device(&d).await; });
+        }
+    }
+    if let Some(pg) = state.pg_store() {
+        let s = session;
+        let pg = pg.clone();
+        tokio::spawn(async move { let _ = pg.upsert_hotdesk_session(&s).await; });
+    }
+    state.record_audit_event(&requester, "hotdesk.logout", Some(device_id.to_string()));
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn hotdesk_status(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(device_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    if let Some(session) = state.active_hotdesk_for_device(device_id) {
+        Ok(Json(json!({
+            "logged_in": true,
+            "session": session,
+        })))
+    } else {
+        Ok(Json(json!({
+            "logged_in": false,
+            "session": null,
+        })))
+    }
+}
+
 // ─── Per-User Call Analytics ───
 
 async fn user_call_analytics(
@@ -5766,6 +6302,8 @@ enum ApiError {
     #[error("too many requests")]
     TooManyRequests,
     #[error("{0}")]
+    BadRequest(String),
+    #[error("{0}")]
     Conflict(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -5779,6 +6317,7 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             ApiError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
+            ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };

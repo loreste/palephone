@@ -99,6 +99,7 @@ impl PgStore {
             include_str!("../migrations/033_approvals.sql"),
             include_str!("../migrations/034_recording_policies_hold_music.sql"),
             include_str!("../migrations/035_personal_call_groups.sql"),
+            include_str!("../migrations/036_devices_rooms_delegation.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {
@@ -1649,5 +1650,211 @@ impl PgStore {
                 updated_at: r.get("updated_at"),
             })
             .collect())
+    }
+
+    // ─── Line Delegations ───
+
+    pub async fn upsert_line_delegation(&self, d: &crate::LineDelegation) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO line_delegations (id, owner_uri, delegate_uri, can_answer, can_make, can_view_history, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (id) DO UPDATE SET can_answer=$4, can_make=$5, can_view_history=$6",
+            &[&d.id, &d.owner_uri, &d.delegate_uri, &d.can_answer, &d.can_make, &d.can_view_history, &d.created_at],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn delete_line_delegation(&self, id: Uuid) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute("DELETE FROM line_delegations WHERE id = $1", &[&id]).await?;
+        Ok(())
+    }
+
+    pub async fn load_line_delegations(&self) -> Result<Vec<crate::LineDelegation>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT id, owner_uri, delegate_uri, can_answer, can_make, can_view_history, created_at FROM line_delegations ORDER BY created_at",
+            &[],
+        ).await?;
+        Ok(rows.iter().map(|r| crate::LineDelegation {
+            id: r.get("id"),
+            owner_uri: r.get("owner_uri"),
+            delegate_uri: r.get("delegate_uri"),
+            can_answer: r.get("can_answer"),
+            can_make: r.get("can_make"),
+            can_view_history: r.get("can_view_history"),
+            created_at: r.get("created_at"),
+        }).collect())
+    }
+
+    // ─── Common Area Phones ───
+
+    pub async fn upsert_common_area_phone(&self, p: &crate::CommonAreaPhone) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO common_area_phones (id, name, extension, location, features, enabled, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (id) DO UPDATE SET name=$2, extension=$3, location=$4, features=$5, enabled=$6",
+            &[&p.id, &p.name, &p.extension, &p.location, &p.features, &p.enabled, &p.created_at],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn delete_common_area_phone(&self, id: Uuid) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute("DELETE FROM common_area_phones WHERE id = $1", &[&id]).await?;
+        Ok(())
+    }
+
+    pub async fn load_common_area_phones(&self) -> Result<Vec<crate::CommonAreaPhone>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT id, name, extension, location, features, enabled, created_at FROM common_area_phones ORDER BY name",
+            &[],
+        ).await?;
+        Ok(rows.iter().map(|r| crate::CommonAreaPhone {
+            id: r.get("id"),
+            name: r.get("name"),
+            extension: r.get("extension"),
+            location: r.get("location"),
+            features: r.get("features"),
+            enabled: r.get("enabled"),
+            created_at: r.get("created_at"),
+        }).collect())
+    }
+
+    // ─── Meeting Rooms ───
+
+    pub async fn upsert_meeting_room(&self, room: &crate::MeetingRoom) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO meeting_rooms (id, name, location, capacity, equipment, bookable, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (id) DO UPDATE SET name=$2, location=$3, capacity=$4, equipment=$5, bookable=$6",
+            &[&room.id, &room.name, &room.location, &room.capacity, &room.equipment, &room.bookable, &room.created_at],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn delete_meeting_room(&self, id: Uuid) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute("DELETE FROM meeting_rooms WHERE id = $1", &[&id]).await?;
+        Ok(())
+    }
+
+    pub async fn load_meeting_rooms(&self) -> Result<Vec<crate::MeetingRoom>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT id, name, location, capacity, equipment, bookable, created_at FROM meeting_rooms ORDER BY name",
+            &[],
+        ).await?;
+        Ok(rows.iter().map(|r| crate::MeetingRoom {
+            id: r.get("id"),
+            name: r.get("name"),
+            location: r.get("location"),
+            capacity: r.get("capacity"),
+            equipment: r.get("equipment"),
+            bookable: r.get("bookable"),
+            created_at: r.get("created_at"),
+        }).collect())
+    }
+
+    pub async fn upsert_room_booking(&self, b: &crate::RoomBooking) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO room_bookings (id, room_id, meeting_id, booked_by, start_time, end_time, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (id) DO UPDATE SET meeting_id=$3, start_time=$5, end_time=$6",
+            &[&b.id, &b.room_id, &b.meeting_id, &b.booked_by, &b.start_time, &b.end_time, &b.created_at],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn delete_room_booking(&self, id: Uuid) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute("DELETE FROM room_bookings WHERE id = $1", &[&id]).await?;
+        Ok(())
+    }
+
+    pub async fn load_room_bookings(&self) -> Result<Vec<crate::RoomBooking>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT id, room_id, meeting_id, booked_by, start_time, end_time, created_at FROM room_bookings ORDER BY start_time",
+            &[],
+        ).await?;
+        Ok(rows.iter().map(|r| crate::RoomBooking {
+            id: r.get("id"),
+            room_id: r.get("room_id"),
+            meeting_id: r.try_get("meeting_id").ok().flatten(),
+            booked_by: r.get("booked_by"),
+            start_time: r.get("start_time"),
+            end_time: r.get("end_time"),
+            created_at: r.get("created_at"),
+        }).collect())
+    }
+
+    // ─── Provisioned Devices ───
+
+    pub async fn upsert_provisioned_device(&self, d: &crate::ProvisionedDevice) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO provisioned_devices (id, mac_address, model, assigned_user, config_template, provisioned_at, last_seen)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (id) DO UPDATE SET mac_address=$2, model=$3, assigned_user=$4, config_template=$5, last_seen=$7",
+            &[&d.id, &d.mac_address, &d.model, &d.assigned_user, &d.config_template, &d.provisioned_at, &d.last_seen],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn delete_provisioned_device(&self, id: Uuid) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute("DELETE FROM provisioned_devices WHERE id = $1", &[&id]).await?;
+        Ok(())
+    }
+
+    pub async fn load_provisioned_devices(&self) -> Result<Vec<crate::ProvisionedDevice>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT id, mac_address, model, assigned_user, config_template, provisioned_at, last_seen FROM provisioned_devices ORDER BY provisioned_at",
+            &[],
+        ).await?;
+        Ok(rows.iter().map(|r| crate::ProvisionedDevice {
+            id: r.get("id"),
+            mac_address: r.get("mac_address"),
+            model: r.get("model"),
+            assigned_user: r.try_get("assigned_user").ok().flatten(),
+            config_template: r.get("config_template"),
+            provisioned_at: r.get("provisioned_at"),
+            last_seen: r.try_get("last_seen").ok().flatten(),
+        }).collect())
+    }
+
+    // ─── Hot Desk Sessions ───
+
+    pub async fn upsert_hotdesk_session(&self, s: &crate::HotdeskSession) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO hotdesk_sessions (id, device_id, user_uri, logged_in_at, logged_out_at)
+             VALUES ($1,$2,$3,$4,$5)
+             ON CONFLICT (id) DO UPDATE SET logged_out_at=$5",
+            &[&s.id, &s.device_id, &s.user_uri, &s.logged_in_at, &s.logged_out_at],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn load_hotdesk_sessions(&self) -> Result<Vec<crate::HotdeskSession>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT id, device_id, user_uri, logged_in_at, logged_out_at FROM hotdesk_sessions WHERE logged_out_at IS NULL ORDER BY logged_in_at",
+            &[],
+        ).await?;
+        Ok(rows.iter().map(|r| crate::HotdeskSession {
+            id: r.get("id"),
+            device_id: r.get("device_id"),
+            user_uri: r.get("user_uri"),
+            logged_in_at: r.get("logged_in_at"),
+            logged_out_at: r.try_get("logged_out_at").ok().flatten(),
+        }).collect())
     }
 }
