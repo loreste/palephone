@@ -51,11 +51,39 @@ export interface ChatMessage {
   scheduled_at?: string;
 }
 
+export interface QueuedMessage {
+  id: string;
+  room_id: string;
+  body: string;
+  queued_at: number;
+}
+
+const QUEUED_MESSAGES_KEY = "pale.queuedMessages";
+
+function loadQueuedMessages(): QueuedMessage[] {
+  try {
+    const raw = localStorage.getItem(QUEUED_MESSAGES_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistQueuedMessages(msgs: QueuedMessage[]) {
+  try {
+    localStorage.setItem(QUEUED_MESSAGES_KEY, JSON.stringify(msgs));
+  } catch {
+    // localStorage may not be available in test environments
+  }
+}
+
 interface ChatStoreState {
   rooms: RoomSummary[];
   activeRoomId: string | null;
   messages: Record<string, ChatMessage[]>; // room_id -> messages
   typingByRoom: Record<string, string[]>;
+  isOffline: boolean;
+  queuedMessages: QueuedMessage[];
 
   setRooms: (rooms: RoomSummary[]) => void;
   upsertRoom: (room: RoomSummary) => void;
@@ -65,6 +93,9 @@ interface ChatStoreState {
   removeMessage: (roomId: string, eventId: string) => void;
   updateMessage: (roomId: string, eventId: string, updates: Partial<ChatMessage>) => void;
   setTypingUsers: (roomId: string, userIds: string[]) => void;
+  setOffline: (offline: boolean) => void;
+  enqueueMessage: (msg: QueuedMessage) => void;
+  flushQueue: () => QueuedMessage[];
   clearServerData: () => void;
 }
 
@@ -73,11 +104,13 @@ export function isServerRoomId(roomId: string): boolean {
   return !roomId.startsWith("!");
 }
 
-export const useChatStore = create<ChatStoreState>((set) => ({
+export const useChatStore = create<ChatStoreState>((set, get) => ({
   rooms: [],
   activeRoomId: null,
   messages: {},
   typingByRoom: {},
+  isOffline: false,
+  queuedMessages: loadQueuedMessages(),
 
   setRooms: (rooms) =>
     set((state) => {
@@ -152,6 +185,21 @@ export const useChatStore = create<ChatStoreState>((set) => ({
     set((state) => ({
       typingByRoom: { ...state.typingByRoom, [roomId]: userIds },
     })),
+
+  setOffline: (offline) => set({ isOffline: offline }),
+
+  enqueueMessage: (msg) => {
+    const updated = [...get().queuedMessages, msg];
+    persistQueuedMessages(updated);
+    set({ queuedMessages: updated });
+  },
+
+  flushQueue: () => {
+    const queued = get().queuedMessages;
+    persistQueuedMessages([]);
+    set({ queuedMessages: [] });
+    return queued;
+  },
 
   // Drop all pale-server rooms/messages (e.g. on server disconnect),
   // keeping Matrix data intact.

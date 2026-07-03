@@ -1,10 +1,13 @@
 import { useState, useCallback, useEffect } from "react";
+import { WifiOff } from "lucide-react";
 import { TitleBar } from "./TitleBar";
 import { StatusBar } from "./StatusBar";
 import { BottomNav } from "./BottomNav";
 import { useUiStore } from "@/store/uiStore";
 import { isMobile } from "@/hooks/usePlatform";
 import { useCallStore } from "@/store/callStore";
+import { useChatStore } from "@/store/chatStore";
+import { t } from "@/lib/i18n";
 import { DialpadView } from "@/components/dialpad/DialpadView";
 import { SettingsView } from "@/components/settings/SettingsView";
 import { RecentCallsList } from "@/components/recent/RecentCallsList";
@@ -49,6 +52,8 @@ export function AppShell() {
   const activeTab = useUiStore((s) => s.activeTab);
   const activeCallId = useCallStore((s) => s.activeCallId);
   const hasActiveCall = activeCallId !== null;
+  const isOffline = useChatStore((s) => s.isOffline);
+  const queuedCount = useChatStore((s) => s.queuedMessages.length);
 
   const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -161,6 +166,23 @@ export function AppShell() {
       {!mobile && <TitleBar />}
       <StatusBar />
 
+      {/* Offline indicator banner */}
+      {isOffline && (
+        <div
+          className="flex items-center gap-2 px-4 py-2 bg-warning/20 border-b border-warning/30 text-warning text-xs font-medium"
+          role="alert"
+          aria-live="assertive"
+        >
+          <WifiOff size={14} aria-hidden="true" />
+          <span>{t("offline.banner")}</span>
+          {queuedCount > 0 && (
+            <span className="ml-auto text-warning/80">
+              {queuedCount} {t("offline.queued")}
+            </span>
+          )}
+        </div>
+      )}
+
       <main className="flex-1 overflow-y-auto relative">
         {hasActiveCall ? <ActiveCallView /> : <View />}
       </main>
@@ -171,7 +193,10 @@ export function AppShell() {
       <IncomingCallOverlay />
       <CommandPalette open={cmdPaletteOpen} onClose={closeCommandPalette} />
       <SearchOverlay open={searchOpen} onClose={closeSearch} />
-      <ToastContainer />
+      {/* Notification toast region with aria-live for screen readers */}
+      <div aria-live="polite" aria-atomic="true">
+        <ToastContainer />
+      </div>
     </div>
   );
 }

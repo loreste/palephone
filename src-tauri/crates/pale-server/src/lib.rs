@@ -12,6 +12,7 @@ use sha2::{Digest as ShaDigest, Sha256};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
+pub mod cli;
 pub mod http;
 pub mod ldap_auth;
 pub mod metrics;
@@ -291,6 +292,8 @@ pub struct AppState {
     hold_music: ShardedMap<Uuid, HoldMusic>,
     // Personal call groups
     personal_call_groups: ShardedMap<Uuid, PersonalCallGroup>,
+    // Conditional access policies
+    conditional_access_policies: ShardedMap<Uuid, ConditionalAccessPolicy>,
     user_create_lock: std::sync::Mutex<()>,
     agent_assignment_lock: std::sync::Mutex<()>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
@@ -459,6 +462,7 @@ impl AppState {
             recording_policies: ShardedMap::new(),
             hold_music: ShardedMap::new(),
             personal_call_groups: ShardedMap::new(),
+            conditional_access_policies: ShardedMap::new(),
             user_create_lock: std::sync::Mutex::new(()),
             agent_assignment_lock: std::sync::Mutex::new(()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
@@ -10380,6 +10384,126 @@ pub struct CreatePersonalCallGroupRequest {
     pub numbers: Vec<String>,
     pub ring_duration: Option<i32>,
     pub enabled: Option<bool>,
+}
+
+// ── Conditional Access Policies ──────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConditionalAccessConditions {
+    #[serde(default)]
+    pub ip_ranges: Vec<String>,
+    #[serde(default)]
+    pub device_types: Vec<String>,
+    #[serde(default)]
+    pub user_groups: Vec<String>,
+    #[serde(default)]
+    pub time_windows: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConditionalAccessActions {
+    #[serde(default)]
+    pub allow: bool,
+    #[serde(default)]
+    pub block: bool,
+    #[serde(default)]
+    pub require_mfa: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConditionalAccessPolicy {
+    pub id: Uuid,
+    pub name: String,
+    pub conditions: ConditionalAccessConditions,
+    pub actions: ConditionalAccessActions,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateConditionalAccessPolicyRequest {
+    pub name: String,
+    pub conditions: ConditionalAccessConditions,
+    pub actions: ConditionalAccessActions,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateConditionalAccessPolicyRequest {
+    pub name: Option<String>,
+    pub conditions: Option<ConditionalAccessConditions>,
+    pub actions: Option<ConditionalAccessActions>,
+    pub enabled: Option<bool>,
+}
+
+impl AppState {
+    pub fn list_conditional_access_policies(&self) -> Vec<ConditionalAccessPolicy> {
+        let mut policies = self.conditional_access_policies.values();
+        policies.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        policies
+    }
+
+    pub fn create_conditional_access_policy(
+        &self,
+        req: CreateConditionalAccessPolicyRequest,
+    ) -> ConditionalAccessPolicy {
+        let policy = ConditionalAccessPolicy {
+            id: Uuid::new_v4(),
+            name: req.name,
+            conditions: req.conditions,
+            actions: req.actions,
+            enabled: req.enabled.unwrap_or(true),
+            created_at: Utc::now(),
+        };
+        self.conditional_access_policies.insert(policy.id, policy.clone());
+        policy
+    }
+
+    pub fn update_conditional_access_policy(
+        &self,
+        id: Uuid,
+        req: UpdateConditionalAccessPolicyRequest,
+    ) -> Option<ConditionalAccessPolicy> {
+        let mut policy = self.conditional_access_policies.get(&id)?;
+        if let Some(name) = req.name { policy.name = name; }
+        if let Some(conditions) = req.conditions { policy.conditions = conditions; }
+        if let Some(actions) = req.actions { policy.actions = actions; }
+        if let Some(enabled) = req.enabled { policy.enabled = enabled; }
+        self.conditional_access_policies.insert(id, policy.clone());
+        Some(policy)
+    }
+
+    pub fn delete_conditional_access_policy(&self, id: Uuid) -> bool {
+        self.conditional_access_policies.remove(&id).is_some()
+    }
+
+    /// Evaluate conditional access policies against a login request context.
+    /// Returns the action to apply (allow/block/require_mfa).
+    pub fn evaluate_conditional_access(
+        &self,
+        ip_address: &str,
+        device_type: &str,
+        user_groups: &[String],
+    ) -> ConditionalAccessActions {
+        let policies = self.list_conditional_access_policies();
+        let mut result = ConditionalAccessActions { allow: true, block: false, require_mfa: false };
+
+        for policy in policies.iter().filter(|p| p.enabled) {
+            let ip_match = policy.conditions.ip_ranges.is_empty()
+                || policy.conditions.ip_ranges.iter().any(|r| ip_address.starts_with(r));
+            let device_match = policy.conditions.device_types.is_empty()
+                || policy.conditions.device_types.contains(&device_type.to_string());
+            let group_match = policy.conditions.user_groups.is_empty()
+                || policy.conditions.user_groups.iter().any(|g| user_groups.contains(g));
+
+            if ip_match && device_match && group_match {
+                if policy.actions.block { result.block = true; result.allow = false; }
+                if policy.actions.require_mfa { result.require_mfa = true; }
+                if !policy.actions.allow && !policy.actions.block { result.allow = false; }
+            }
+        }
+        result
+    }
 }
 
 fn is_textual_content(content_type: &str) -> bool {

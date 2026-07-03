@@ -187,14 +187,14 @@ implement. Use this as a roadmap for closing the gap.
 ### 4.5 Admin & Governance
 - [x] Information barriers (compliance walls between user groups) — done 2026-07-03
 - [x] Sensitivity labels / data classification — done 2026-07-03
-- [ ] Conditional access policies (device compliance, location, risk)
+- [x] Conditional access policies (device compliance, location, risk) — done 2026-07-03
 - [ ] ML-based communication compliance (beyond pattern-matching DLP)
 - [ ] Multi-geo / data residency controls
 - [x] Usage analytics / adoption dashboards (Prometheus exists, no user-facing UI) — done 2026-07-03
 - [x] Policy packages (bundled policies per role) — done 2026-07-03
 - [x] Bulk user operations UI (CSV import/export) — done 2026-07-03
 - [x] Custom RBAC roles (currently admin/user only) — done 2026-07-03
-- [ ] CLI admin tools for scripting
+- [x] CLI admin tools for scripting — done 2026-07-03
 
 ### 4.6 Security & Compliance
 - [x] MFA / multi-factor authentication — done 2026-07-03
@@ -230,9 +230,9 @@ implement. Use this as a roadmap for closing the gap.
 - [ ] Mobile app (iOS/Android)
 - [ ] Web client (browser-based)
 - [ ] Pop-out multi-window support
-- [ ] Offline mode / message queue
-- [ ] Accessibility / WCAG compliance
-- [ ] Localization / i18n (currently English only)
+- [x] Offline mode / message queue — done 2026-07-03
+- [x] Accessibility / WCAG compliance — done 2026-07-03
+- [x] Localization / i18n (currently English only) — done 2026-07-03
 - [x] Out-of-office auto-reply — done 2026-07-03
 - [x] Per-channel notification granularity (mentions only, etc.) — done 2026-07-03
 - [x] Chat density toggle (compact/comfortable) — done 2026-07-03

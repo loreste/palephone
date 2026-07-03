@@ -177,6 +177,39 @@ describe("chatStore", () => {
     store.addMessage(msg);
     expect(useChatStore.getState().messages["!room1:example.com"]).toHaveLength(1);
   });
+
+  it("tracks offline state", () => {
+    const store = useChatStore.getState();
+    expect(store.isOffline).toBe(false);
+    store.setOffline(true);
+    expect(useChatStore.getState().isOffline).toBe(true);
+    store.setOffline(false);
+    expect(useChatStore.getState().isOffline).toBe(false);
+  });
+
+  it("enqueues and flushes messages", () => {
+    const store = useChatStore.getState();
+    store.enqueueMessage({
+      id: "q1",
+      room_id: "room-1",
+      body: "Hello offline",
+      queued_at: Date.now(),
+    });
+    expect(useChatStore.getState().queuedMessages).toHaveLength(1);
+    expect(useChatStore.getState().queuedMessages[0].body).toBe("Hello offline");
+
+    store.enqueueMessage({
+      id: "q2",
+      room_id: "room-1",
+      body: "Second message",
+      queued_at: Date.now(),
+    });
+    expect(useChatStore.getState().queuedMessages).toHaveLength(2);
+
+    const flushed = store.flushQueue();
+    expect(flushed).toHaveLength(2);
+    expect(useChatStore.getState().queuedMessages).toHaveLength(0);
+  });
 });
 
 describe("presenceStore", () => {

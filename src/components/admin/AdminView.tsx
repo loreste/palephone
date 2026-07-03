@@ -54,7 +54,7 @@ async function api<T = any>(baseUrl: string, token: string, path: string, opts?:
   return paleServerApi<T>(baseUrl, token, path, opts);
 }
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music" | "conditional_access";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -92,6 +92,7 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "meeting_templates", label: "Meeting Templates", icon: ClipboardList },
   { id: "recording_policies", label: "Rec. Policies", icon: Mic },
   { id: "hold_music", label: "Hold Music", icon: RadioTower },
+  { id: "conditional_access", label: "Conditional Access", icon: Lock },
 ];
 
 export function AdminView() {
@@ -315,6 +316,7 @@ export function AdminView() {
         {activeTab === "meeting_templates" && <MeetingTemplatesPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "recording_policies" && <RecordingPoliciesPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "hold_music" && <HoldMusicPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "conditional_access" && <ConditionalAccessPanel baseUrl={baseUrl} token={token} />}
       </div>
     </div>
   );
@@ -5169,6 +5171,173 @@ function MeetingTemplatesPanel({ baseUrl, token }: { baseUrl: string; token: str
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Conditional Access Panel ───
+
+interface ConditionalAccessPolicy {
+  id: string;
+  name: string;
+  conditions: {
+    ip_ranges: string[];
+    device_types: string[];
+    user_groups: string[];
+    time_windows: string[];
+  };
+  actions: {
+    allow: boolean;
+    block: boolean;
+    require_mfa: boolean;
+  };
+  enabled: boolean;
+  created_at: string;
+}
+
+function ConditionalAccessPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [policies, setPolicies] = useState<ConditionalAccessPolicy[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [name, setName] = useState("");
+  const [ipRanges, setIpRanges] = useState("");
+  const [deviceTypes, setDeviceTypes] = useState("");
+  const [userGroups, setUserGroups] = useState("");
+  const [timeWindows, setTimeWindows] = useState("");
+  const [actionAllow, setActionAllow] = useState(true);
+  const [actionBlock, setActionBlock] = useState(false);
+  const [actionMfa, setActionMfa] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api<ConditionalAccessPolicy[]>(baseUrl, token, "/v1/admin/conditional-access");
+      setPolicies(data);
+    } catch { /* ignore */ }
+    setLoading(false);
+  }, [baseUrl, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleCreate = async () => {
+    if (!name.trim()) return;
+    try {
+      await api(baseUrl, token, "/v1/admin/conditional-access", {
+        method: "POST",
+        body: {
+          name: name.trim(),
+          conditions: {
+            ip_ranges: ipRanges.split(",").map((s) => s.trim()).filter(Boolean),
+            device_types: deviceTypes.split(",").map((s) => s.trim()).filter(Boolean),
+            user_groups: userGroups.split(",").map((s) => s.trim()).filter(Boolean),
+            time_windows: timeWindows.split(",").map((s) => s.trim()).filter(Boolean),
+          },
+          actions: {
+            allow: actionAllow,
+            block: actionBlock,
+            require_mfa: actionMfa,
+          },
+        },
+      });
+      setName("");
+      setIpRanges("");
+      setDeviceTypes("");
+      setUserGroups("");
+      setTimeWindows("");
+      load();
+      toast({ type: "success", title: "Policy created" });
+    } catch {
+      toast({ type: "error", title: "Failed to create policy" });
+    }
+  };
+
+  const handleToggle = async (id: string, enabled: boolean) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/conditional-access/${id}`, {
+        method: "PUT",
+        body: { enabled: !enabled },
+      });
+      load();
+    } catch {
+      toast({ type: "error", title: "Failed to update policy" });
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/conditional-access/${id}`, { method: "DELETE" });
+      load();
+      toast({ type: "success", title: "Policy deleted" });
+    } catch {
+      toast({ type: "error", title: "Failed to delete policy" });
+    }
+  };
+
+  if (loading) return <p className="text-sm text-tertiary py-8 text-center">Loading...</p>;
+
+  return (
+    <div className="space-y-4">
+      <h3 className="text-sm font-semibold">Conditional Access Policies</h3>
+      <p className="text-xs text-secondary">
+        Control access based on IP ranges, device types, user groups, and time windows.
+      </p>
+
+      {/* Create form */}
+      <div className="space-y-2 p-3 bg-elevated rounded-lg">
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Policy name"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <input value={ipRanges} onChange={(e) => setIpRanges(e.target.value)} placeholder="IP ranges (comma-separated, e.g. 10.0.0, 192.168.1)"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <input value={deviceTypes} onChange={(e) => setDeviceTypes(e.target.value)} placeholder="Device types (e.g. desktop, mobile, tablet)"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <input value={userGroups} onChange={(e) => setUserGroups(e.target.value)} placeholder="User groups (comma-separated)"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <input value={timeWindows} onChange={(e) => setTimeWindows(e.target.value)} placeholder="Time windows (e.g. 09:00-17:00)"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <div className="flex gap-4 text-xs">
+          <label className="flex items-center gap-1.5"><input type="checkbox" checked={actionAllow} onChange={(e) => setActionAllow(e.target.checked)} className="accent-accent" /> Allow</label>
+          <label className="flex items-center gap-1.5"><input type="checkbox" checked={actionBlock} onChange={(e) => setActionBlock(e.target.checked)} className="accent-accent" /> Block</label>
+          <label className="flex items-center gap-1.5"><input type="checkbox" checked={actionMfa} onChange={(e) => setActionMfa(e.target.checked)} className="accent-accent" /> Require MFA</label>
+        </div>
+        <button onClick={handleCreate} disabled={!name.trim()}
+          className={cn("px-4 py-2 rounded-md text-sm font-medium bg-accent text-inverse hover:bg-accent-hover transition-colors disabled:opacity-50")}>
+          Create Policy
+        </button>
+      </div>
+
+      {/* Policy list */}
+      <div className="space-y-2">
+        {policies.length === 0 && <p className="text-xs text-tertiary">No conditional access policies configured.</p>}
+        {policies.map((p) => (
+          <div key={p.id} className={cn("p-3 rounded-lg border", p.enabled ? "border-accent/30 bg-accent/5" : "border-border-subtle bg-surface")}>
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-sm font-medium text-primary">{p.name}</span>
+                <span className={cn("ml-2 text-[10px] px-1.5 py-0.5 rounded", p.enabled ? "bg-green-500/10 text-green-600" : "bg-zinc-500/10 text-zinc-500")}>
+                  {p.enabled ? "Enabled" : "Disabled"}
+                </span>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => handleToggle(p.id, p.enabled)} className="text-xs text-accent hover:underline">
+                  {p.enabled ? "Disable" : "Enable"}
+                </button>
+                <button onClick={() => handleDelete(p.id)} className="text-xs text-destructive hover:underline" aria-label="Delete policy">
+                  Delete
+                </button>
+              </div>
+            </div>
+            <div className="mt-1 text-[10px] text-tertiary space-x-3">
+              {p.conditions.ip_ranges.length > 0 && <span>IPs: {p.conditions.ip_ranges.join(", ")}</span>}
+              {p.conditions.device_types.length > 0 && <span>Devices: {p.conditions.device_types.join(", ")}</span>}
+              {p.conditions.user_groups.length > 0 && <span>Groups: {p.conditions.user_groups.join(", ")}</span>}
+              {p.conditions.time_windows.length > 0 && <span>Times: {p.conditions.time_windows.join(", ")}</span>}
+            </div>
+            <div className="mt-1 text-[10px] text-secondary flex gap-2">
+              {p.actions.allow && <span className="text-green-600">Allow</span>}
+              {p.actions.block && <span className="text-red-600">Block</span>}
+              {p.actions.require_mfa && <span className="text-amber-600">Require MFA</span>}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
