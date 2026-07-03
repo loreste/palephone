@@ -13,11 +13,13 @@ import { disconnectServer, signOut } from "@/lib/session";
 import { toast } from "@/components/ui/Toast";
 import type { SipAccount } from "@/types";
 
-type SettingsTab = "account" | "audio" | "network" | "server" | "calls" | "notifications" | "security" | "appearance" | "ooo" | "about";
+type SettingsTab = "account" | "audio" | "network" | "server" | "calls" | "call_analytics" | "call_groups" | "notifications" | "security" | "appearance" | "ooo" | "about";
 
 const settingsTabs: { id: SettingsTab; label: string; icon: typeof User }[] = [
   { id: "account", label: "Account", icon: User },
   { id: "calls", label: "Calls", icon: Phone },
+  { id: "call_analytics", label: "Analytics", icon: Phone },
+  { id: "call_groups", label: "Groups", icon: Phone },
   { id: "audio", label: "Audio", icon: Volume2 },
   { id: "network", label: "Network", icon: Globe },
   { id: "server", label: "Server", icon: Server },
@@ -63,6 +65,8 @@ export function SettingsView() {
         {activeTab === "account" && <AccountSettingsPanel />}
         {activeTab === "audio" && <AudioSettings />}
         {activeTab === "calls" && <CallSettingsPanel />}
+        {activeTab === "call_analytics" && <CallAnalyticsPanel />}
+        {activeTab === "call_groups" && <CallGroupsPanel />}
         {activeTab === "network" && <NetworkSettings />}
         {activeTab === "server" && <ServerSettingsPanel />}
         {activeTab === "security" && <SecuritySettingsPanel />}
@@ -1046,8 +1050,222 @@ function CallSettingsPanel() {
   );
 }
 
+// ─── Call Analytics Panel ───
+
+function CallAnalyticsPanel() {
+  const { baseUrl, token, connected } = useServerStore();
+  const [analytics, setAnalytics] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!connected || !baseUrl || !token) return;
+    setLoading(true);
+    // Get current user's analytics - we need the user id
+    // Use the users list to find ourselves
+    fetch(`${baseUrl}/v1/users`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.ok ? r.json() : [])
+      .then((users: any[]) => {
+        // Find own user by checking who we are via account store
+        const account = useAccountStore.getState().account;
+        const me = users.find((u) => account?.sipUri && u.sip_uri === `sip:${account.sipUri}`);
+        if (me) {
+          return fetch(`${baseUrl}/v1/users/${me.id}/call-analytics`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+        }
+        return null;
+      })
+      .then((r) => r?.ok ? r.json() : null)
+      .then((data) => { if (data) setAnalytics(data); })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [connected, baseUrl, token]);
+
+  if (!connected) {
+    return (
+      <div className="space-y-4">
+        <SectionHeader title="Call Analytics" />
+        <p className="text-sm text-tertiary">Connect to a server to view your call analytics.</p>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="space-y-4">
+        <SectionHeader title="Call Analytics" />
+        <p className="text-sm text-tertiary">Loading...</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <SectionHeader title="Call Analytics" />
+      {analytics ? (
+        <div className="grid grid-cols-2 gap-3">
+          <StatCard label="Total Calls" value={analytics.total_calls} />
+          <StatCard label="Answered" value={analytics.answered_calls} />
+          <StatCard label="Avg Duration" value={`${Math.round(analytics.avg_duration_secs)}s`} />
+          <StatCard label="Total Duration" value={`${Math.round(analytics.total_duration_secs / 60)}m`} />
+          <StatCard label="Avg MOS" value={analytics.avg_mos.toFixed(2)} />
+          <StatCard label="Avg Packet Loss" value={`${analytics.avg_packet_loss.toFixed(2)}%`} />
+          <StatCard label="Quality Reports" value={analytics.total_quality_reports} />
+        </div>
+      ) : (
+        <p className="text-sm text-tertiary">No analytics data available.</p>
+      )}
+    </div>
+  );
+}
+
+function StatCard({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="p-3 rounded-lg border border-border-subtle bg-surface">
+      <p className="text-[10px] text-tertiary uppercase tracking-wider">{label}</p>
+      <p className="text-lg font-semibold text-primary mt-1">{String(value)}</p>
+    </div>
+  );
+}
+
+// ─── Personal Call Groups Panel ───
+
+interface CallGroup {
+  id: string;
+  user_id: string;
+  name: string;
+  numbers: string[];
+  ring_duration: number;
+  enabled: boolean;
+}
+
+function CallGroupsPanel() {
+  const { baseUrl, token, connected } = useServerStore();
+  const [groups, setGroups] = useState<CallGroup[]>([]);
+  const [name, setName] = useState("");
+  const [numbers, setNumbers] = useState("");
+  const [ringDuration, setRingDuration] = useState("20");
+
+  useEffect(() => {
+    if (!connected || !baseUrl || !token) return;
+    fetch(`${baseUrl}/v1/call-groups`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.ok ? r.json() : [])
+      .then(setGroups)
+      .catch(() => {});
+  }, [connected, baseUrl, token]);
+
+  const create = async () => {
+    if (!baseUrl || !token || !name) return;
+    try {
+      const res = await fetch(`${baseUrl}/v1/call-groups`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          name,
+          numbers: numbers.split(",").map((s) => s.trim()).filter(Boolean),
+          ring_duration: parseInt(ringDuration) || 20,
+          enabled: true,
+        }),
+      });
+      if (!res.ok) throw new Error("Failed");
+      const group = await res.json();
+      setGroups([...groups, group]);
+      setName("");
+      setNumbers("");
+      toast({ type: "success", title: "Call group created" });
+    } catch {
+      toast({ type: "error", title: "Failed to create call group" });
+    }
+  };
+
+  const remove = async (id: string) => {
+    if (!baseUrl || !token) return;
+    try {
+      await fetch(`${baseUrl}/v1/call-groups/${id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setGroups(groups.filter((g) => g.id !== id));
+      toast({ type: "success", title: "Call group deleted" });
+    } catch {
+      toast({ type: "error", title: "Failed to delete" });
+    }
+  };
+
+  if (!connected) {
+    return (
+      <div className="space-y-4">
+        <SectionHeader title="Personal Call Groups" />
+        <p className="text-sm text-tertiary">Connect to a server to manage call groups.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <SectionHeader title="Personal Call Groups" />
+      <p className="text-sm text-secondary">Ring multiple devices or numbers for incoming calls.</p>
+
+      <FormField label="Group Name" value={name} onChange={setName} placeholder="My devices" />
+      <FormField label="Numbers (comma-separated)" value={numbers} onChange={setNumbers} placeholder="+1234567890, sip:mobile@example.com" />
+      <FormField label="Ring Duration (seconds)" value={ringDuration} onChange={setRingDuration} placeholder="20" />
+
+      <button
+        onClick={create}
+        disabled={!name}
+        className={cn(
+          "px-4 py-2 rounded-md text-sm font-medium",
+          "bg-accent text-inverse hover:bg-accent-hover transition-colors",
+          "disabled:opacity-60"
+        )}
+      >
+        Add Group
+      </button>
+
+      <div className="space-y-2">
+        {groups.map((g) => (
+          <div key={g.id} className="flex items-center justify-between p-3 rounded-lg border border-border-subtle bg-surface">
+            <div>
+              <p className="text-sm font-medium text-primary">{g.name}</p>
+              <p className="text-[10px] text-tertiary">
+                {g.numbers.join(", ")} &middot; Ring {g.ring_duration}s &middot; {g.enabled ? "Enabled" : "Disabled"}
+              </p>
+            </div>
+            <button
+              onClick={() => remove(g.id)}
+              className="p-1 text-tertiary hover:text-destructive"
+            >
+              <Phone size={14} />
+            </button>
+          </div>
+        ))}
+        {groups.length === 0 && <p className="text-sm text-tertiary">No call groups configured.</p>}
+      </div>
+    </div>
+  );
+}
+
+// ─── Appearance Panel (with chat density) ───
+
+type ChatDensity = "compact" | "comfortable" | "spacious";
+
 function AppearancePanel() {
   const { theme, setTheme } = useUiStore();
+  const [chatDensity, setChatDensity] = useState<ChatDensity>(() => {
+    return (localStorage.getItem("pale.chatDensity") as ChatDensity) || "comfortable";
+  });
+
+  const handleDensityChange = (density: ChatDensity) => {
+    setChatDensity(density);
+    localStorage.setItem("pale.chatDensity", density);
+    // Apply the CSS class to the document for global effect
+    document.documentElement.setAttribute("data-chat-density", density);
+  };
+
+  // Apply on mount
+  useEffect(() => {
+    document.documentElement.setAttribute("data-chat-density", chatDensity);
+  }, [chatDensity]);
 
   return (
     <div className="space-y-4">
@@ -1079,6 +1297,30 @@ function AppearancePanel() {
           Light
         </button>
       </div>
+
+      <SectionHeader title="Chat Density" />
+      <p className="text-sm text-secondary">Adjust message spacing and size in chat.</p>
+      <div className="flex gap-2">
+        {(["compact", "comfortable", "spacious"] as const).map((density) => (
+          <button
+            key={density}
+            onClick={() => handleDensityChange(density)}
+            className={cn(
+              "flex-1 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors border capitalize",
+              chatDensity === density
+                ? "border-accent bg-accent-muted text-accent"
+                : "border-border-subtle bg-surface text-secondary hover:bg-elevated"
+            )}
+          >
+            {density}
+          </button>
+        ))}
+      </div>
+      <p className="text-xs text-tertiary">
+        {chatDensity === "compact" && "Smaller text and tighter spacing for maximum content."}
+        {chatDensity === "comfortable" && "Balanced spacing and text size (default)."}
+        {chatDensity === "spacious" && "Larger text and more padding for easy reading."}
+      </p>
     </div>
   );
 }

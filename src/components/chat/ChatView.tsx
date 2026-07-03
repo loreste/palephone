@@ -17,6 +17,34 @@ const QUICK_REACTIONS = ["\u{1F44D}", "\u{2764}\u{FE0F}", "\u{1F602}", "\u{1F44F
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 const ROOM_HISTORY_PAGE_SIZE = 50;
 
+function getChatDensity(): "compact" | "comfortable" | "spacious" {
+  return (localStorage.getItem("pale.chatDensity") as any) || "comfortable";
+}
+
+function chatDensitySpacing(): string {
+  const density = getChatDensity();
+  switch (density) {
+    case "compact":
+      return "space-y-0.5";
+    case "spacious":
+      return "space-y-4";
+    default:
+      return "space-y-2";
+  }
+}
+
+function chatDensityBubble(): string {
+  const density = getChatDensity();
+  switch (density) {
+    case "compact":
+      return "px-2 py-1 text-xs";
+    case "spacious":
+      return "px-4 py-3 text-base";
+    default:
+      return "px-3 py-2 text-sm";
+  }
+}
+
 function mapServerRoomMessages(
   msgs: ServerRoomMessage[],
   roomId: string,
@@ -1525,7 +1553,10 @@ function ChatRoom({
       {/* Messages */}
       <div
         ref={messagesContainerRef}
-        className="flex-1 overflow-y-auto px-4 py-3 space-y-2"
+        className={cn(
+          "flex-1 overflow-y-auto px-4 py-3",
+          chatDensitySpacing(),
+        )}
         onScroll={handleScroll}
       >
         {loadingHistory && (
@@ -2369,7 +2400,8 @@ function MessageBubble({
       <div className="max-w-[80%]">
         <div
           className={cn(
-            "rounded-2xl px-3 py-2 relative",
+            "rounded-2xl relative",
+            chatDensityBubble(),
             message.is_own
               ? "bg-accent text-white rounded-br-md"
               : "bg-surface border border-border-subtle text-primary rounded-bl-md"
@@ -2558,5 +2590,147 @@ function PresenceLabel({ name, isDirect, isEncrypted }: { name: string; isDirect
     <p className="text-[10px] text-tertiary">
       {isEncrypted ? "End-to-end encrypted" : "Not encrypted"}
     </p>
+  );
+}
+
+// ─── Approvals Panel (accessible via /approvals command or external import) ───
+
+export function ApprovalsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [approvals, setApprovals] = useState<any[]>([]);
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [approvers, setApprovers] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+
+  useEffect(() => {
+    paleServerApi<any[]>(baseUrl, token, "/v1/approvals")
+      .then(setApprovals)
+      .catch(() => {});
+  }, [baseUrl, token]);
+
+  const create = async () => {
+    if (!title || !approvers) return;
+    try {
+      const approval = await paleServerApi<any>(baseUrl, token, "/v1/approvals", {
+        method: "POST",
+        body: {
+          title,
+          description: description || undefined,
+          approvers: approvers.split(",").map((s) => s.trim()).filter(Boolean),
+        },
+      });
+      setApprovals([approval, ...approvals]);
+      setTitle("");
+      setDescription("");
+      setApprovers("");
+      setShowCreate(false);
+    } catch (err) {
+      toast({ type: "error", title: "Failed to create approval", description: String(err) });
+    }
+  };
+
+  const respond = async (id: string, decision: string) => {
+    try {
+      const updated = await paleServerApi<any>(baseUrl, token, `/v1/approvals/${id}/respond`, {
+        method: "POST",
+        body: { decision },
+      });
+      setApprovals(approvals.map((a) => (a.id === id ? updated : a)));
+    } catch (err) {
+      toast({ type: "error", title: "Failed to respond", description: String(err) });
+    }
+  };
+
+  return (
+    <div className="p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-primary">Approvals</h3>
+        <button
+          onClick={() => setShowCreate(!showCreate)}
+          className="text-xs text-accent hover:underline"
+        >
+          {showCreate ? "Cancel" : "New Request"}
+        </button>
+      </div>
+
+      {showCreate && (
+        <div className="space-y-2 p-3 rounded-lg border border-border-subtle bg-surface">
+          <input
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Title"
+            className="w-full bg-elevated border border-border-subtle rounded px-2 py-1 text-sm"
+          />
+          <input
+            type="text"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Description (optional)"
+            className="w-full bg-elevated border border-border-subtle rounded px-2 py-1 text-sm"
+          />
+          <input
+            type="text"
+            value={approvers}
+            onChange={(e) => setApprovers(e.target.value)}
+            placeholder="Approvers (comma-separated SIP URIs)"
+            className="w-full bg-elevated border border-border-subtle rounded px-2 py-1 text-sm"
+          />
+          <button
+            onClick={create}
+            disabled={!title || !approvers}
+            className="px-3 py-1 rounded bg-accent text-inverse text-xs font-medium disabled:opacity-60"
+          >
+            Submit Request
+          </button>
+        </div>
+      )}
+
+      {approvals.length === 0 ? (
+        <p className="text-sm text-tertiary">No approval requests.</p>
+      ) : (
+        approvals.map((a) => (
+          <div key={a.id} className="p-3 rounded-lg border border-border-subtle bg-surface space-y-1">
+            <div className="flex items-center justify-between">
+              <p className="text-sm font-medium text-primary">{a.title}</p>
+              <span
+                className={cn(
+                  "text-[10px] px-1.5 py-0.5 rounded",
+                  a.status === "approved"
+                    ? "bg-success/10 text-success"
+                    : a.status === "rejected"
+                    ? "bg-destructive/10 text-destructive"
+                    : "bg-accent/10 text-accent"
+                )}
+              >
+                {a.status}
+              </span>
+            </div>
+            {a.description && (
+              <p className="text-xs text-secondary">{a.description}</p>
+            )}
+            <p className="text-[10px] text-tertiary">
+              By {a.requestor} &middot; {new Date(a.created_at).toLocaleString()}
+            </p>
+            {a.status === "pending" && (
+              <div className="flex gap-2 pt-1">
+                <button
+                  onClick={() => respond(a.id, "approve")}
+                  className="px-2 py-0.5 rounded bg-success/10 text-success text-xs hover:bg-success/20"
+                >
+                  Approve
+                </button>
+                <button
+                  onClick={() => respond(a.id, "reject")}
+                  className="px-2 py-0.5 rounded bg-destructive/10 text-destructive text-xs hover:bg-destructive/20"
+                >
+                  Reject
+                </button>
+              </div>
+            )}
+          </div>
+        ))
+      )}
+    </div>
   );
 }
