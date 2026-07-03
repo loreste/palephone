@@ -191,6 +191,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     });
 
+    // Spawn scheduled message delivery task (every 30s)
+    let scheduled_state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let delivered = scheduled_state.deliver_scheduled_messages();
+            if !delivered.is_empty() {
+                log::info!(
+                    "Delivered {} scheduled message(s)",
+                    delivered.len()
+                );
+            }
+        }
+    });
+
     // Spawn periodic database cleanup (every 24 hours, also runs on startup)
     let cleanup_state = state.clone();
     tokio::spawn(async move {

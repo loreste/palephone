@@ -37,3 +37,5 @@ rand = "0.8"
 regex = "1"
 totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
 hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+urlencoding = "2"

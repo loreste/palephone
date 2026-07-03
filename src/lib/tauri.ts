@@ -662,6 +662,36 @@ export interface ServerRoomMessage {
   saved_by?: string[];
   mentions?: { kind: string; token: string; user_sip_uri?: string | null }[];
   mentioned_user_uris?: string[];
+  scheduled_at?: string;
+  delivered?: boolean;
+  delivery_status?: "pending" | "sent" | "delivered" | "failed";
+}
+
+// ─── Tags ───
+
+export interface ServerTag {
+  id: string;
+  team_id: string;
+  name: string;
+  members: string[];
+  created_at: string;
+}
+
+// ─── Notification Preferences ───
+
+export interface ServerNotificationPreference {
+  room_id: string;
+  user_uri: string;
+  notification_level: "all" | "mentions" | "muted";
+  updated_at: string;
+}
+
+// ─── GIF Search ───
+
+export interface GifResult {
+  title: string;
+  url: string;
+  preview: string;
 }
 
 export interface ServerChannelWebhook {
@@ -943,6 +973,103 @@ export function paleServerSendRoomMessage(
     method: "POST",
     body: JSON.stringify({ body, reply_to: replyTo ?? null, priority }),
   });
+}
+
+export function paleServerScheduleRoomMessage(
+  baseUrl: string,
+  token: string,
+  roomId: string,
+  body: string,
+  scheduledAt: string,
+  replyTo?: string,
+  priority: "normal" | "high" | "urgent" = "normal",
+): Promise<ServerRoomMessage> {
+  return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/messages/schedule`, {
+    method: "POST",
+    body: JSON.stringify({ body, scheduled_at: scheduledAt, reply_to: replyTo ?? null, priority }),
+  });
+}
+
+// ─── Tag API ───
+
+export function paleServerGetTags(
+  baseUrl: string,
+  token: string,
+  teamId: string,
+): Promise<ServerTag[]> {
+  return serverFetch(baseUrl, token, `/v1/teams/${teamId}/tags`);
+}
+
+export function paleServerCreateTag(
+  baseUrl: string,
+  token: string,
+  teamId: string,
+  name: string,
+  members: string[],
+): Promise<ServerTag> {
+  return serverFetch(baseUrl, token, `/v1/teams/${teamId}/tags`, {
+    method: "POST",
+    body: JSON.stringify({ name, members }),
+  });
+}
+
+export function paleServerUpdateTag(
+  baseUrl: string,
+  token: string,
+  teamId: string,
+  tagId: string,
+  updates: { name?: string; members?: string[] },
+): Promise<ServerTag> {
+  return serverFetch(baseUrl, token, `/v1/teams/${teamId}/tags/${tagId}`, {
+    method: "PUT",
+    body: JSON.stringify(updates),
+  });
+}
+
+export function paleServerDeleteTag(
+  baseUrl: string,
+  token: string,
+  teamId: string,
+  tagId: string,
+): Promise<ServerTag> {
+  return serverFetch(baseUrl, token, `/v1/teams/${teamId}/tags/${tagId}`, {
+    method: "DELETE",
+  });
+}
+
+// ─── Notification Preferences API ───
+
+export function paleServerGetNotificationPreference(
+  baseUrl: string,
+  token: string,
+  roomId: string,
+): Promise<ServerNotificationPreference> {
+  return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/notifications`);
+}
+
+export function paleServerSetNotificationPreference(
+  baseUrl: string,
+  token: string,
+  roomId: string,
+  level: "all" | "mentions" | "muted",
+): Promise<ServerNotificationPreference> {
+  return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/notifications`, {
+    method: "PUT",
+    body: JSON.stringify({ notification_level: level }),
+  });
+}
+
+// ─── GIF Search API ───
+
+export function paleServerSearchGifs(
+  baseUrl: string,
+  token: string,
+  query: string,
+  limit?: number,
+): Promise<{ results: GifResult[] }> {
+  const params = new URLSearchParams({ q: query });
+  if (limit) params.set("limit", String(limit));
+  return serverFetch(baseUrl, token, `/v1/gif/search?${params}`);
 }
 
 export function paleServerGetChannelWebhooks(

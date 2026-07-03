@@ -47,6 +47,8 @@ export interface ChatMessage {
   mentioned_user_uris?: string[];
   reactions?: Record<string, string[]>; // emoji -> [user_uri, ...]
   read_by?: string[];
+  delivery_status?: "pending" | "sent" | "delivered" | "failed";
+  scheduled_at?: string;
 }
 
 interface ChatStoreState {

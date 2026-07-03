@@ -132,3 +132,11 @@ VERDICT ON THE PRIOR REVIEWER'S CLAIM: verified on every substantive clause; I c
 - [x] **Persistent meeting chat** — `chat_room_id` on conferences (migration 025), auto-created chat room linked to meeting, "Chat" tab in MeetingPanel
 - [x] **Green room / presenter staging** — `green_room_enabled` on conferences, join/ready endpoints, SSE `green_room_updated`, "Green Room" tab in MeetingPanel
 - [x] **Out-of-office auto-reply** — `out_of_office_message`/`out_of_office_until` on users (migration 025), GET/PUT `/v1/users/out-of-office`, "Out of Office" tab in Settings
+
+## 5. Microsoft Teams enterprise parity — Chat/Messaging
+
+- [x] **Scheduled send** (2026-07-03) — `scheduled_at`/`delivered` columns on `room_messages`, `POST /v1/rooms/{id}/messages/schedule` endpoint, background task every 30s delivers due messages, SSE `scheduled_message_delivered` event, datetime picker + clock button in ChatView compose bar.
+- [x] **Message delivery/failure status** (2026-07-03) — `delivery_status` column on `room_messages` (pending/sent/delivered/failed), status indicators (checkmarks, clock, warning) in message bubbles, SSE events carry delivery_status field.
+- [x] **Tags for targeted communication** (2026-07-03) — `tags` table (id, team_id, name, members), CRUD endpoints at `/v1/teams/{id}/tags`, `@tag` mention resolution in messages that notifies all tag members, tag suggestions in mention autocomplete dropdown.
+- [x] **GIF integration** (2026-07-03) — `GET /v1/gif/search?q=...` proxy endpoint (Tenor/Giphy, key via `PALE_TENOR_API_KEY` or `PALE_GIPHY_API_KEY`), GIF picker panel in ChatView compose bar with search + grid selection, sends as markdown image.
+- [x] **Per-channel notification granularity** (2026-07-03) — `notification_preferences` table (room_id, user_uri, notification_level), `GET/PUT /v1/rooms/{id}/notifications` endpoints, notification level dropdown (all/mentions-only/muted) in ChatView room header.

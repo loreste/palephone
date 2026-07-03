@@ -1,12 +1,12 @@
 import { useState, useRef, useEffect, useCallback, type ReactNode } from "react";
-import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Video, Users, Reply, Pencil, Pin, Forward, Check, CheckCheck, Search, Radio, Hash, CalendarClock, Star, AlertTriangle, Plug, Copy, Trash2 } from "lucide-react";
+import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Video, Users, Reply, Pencil, Pin, Forward, Check, CheckCheck, Search, Radio, Hash, CalendarClock, Star, AlertTriangle, Plug, Copy, Trash2, Clock, Image as ImageLucide } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useChatStore, type ChatMessage, type RoomSummary } from "@/store/chatStore";
 import { useMatrixStore } from "@/store/matrixStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
-import { matrixSendMessage, matrixSetTyping, matrixCreateDm, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerSaveMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerEndRoomCall, paleServerGetConferences, paleServerGetMeetings, paleServerCreateMeeting, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerGetRoomMessages, paleServerGetRoomMessageState, paleServerSendRoomMessage, paleServerGetChannelWebhooks, paleServerCreateChannelWebhook, paleServerUpdateChannelWebhook, paleServerDeleteChannelWebhook, paleServerEditMessage, paleServerDeleteMessage, type ServerRoom, type ServerUser, type ServerRoomMessage, type ServerRoomMessageState, type ServerMeeting, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult, type ServerChannelWebhook } from "@/lib/tauri";
+import { matrixSendMessage, matrixSetTyping, matrixCreateDm, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerSaveMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerEndRoomCall, paleServerGetConferences, paleServerGetMeetings, paleServerCreateMeeting, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerGetRoomMessages, paleServerGetRoomMessageState, paleServerSendRoomMessage, paleServerScheduleRoomMessage, paleServerGetChannelWebhooks, paleServerCreateChannelWebhook, paleServerUpdateChannelWebhook, paleServerDeleteChannelWebhook, paleServerEditMessage, paleServerDeleteMessage, paleServerGetNotificationPreference, paleServerSetNotificationPreference, paleServerSearchGifs, paleServerGetTags, type ServerRoom, type ServerUser, type ServerRoomMessage, type ServerRoomMessageState, type ServerMeeting, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult, type ServerChannelWebhook, type GifResult, type ServerTag } from "@/lib/tauri";
 import { joinScheduledMeeting } from "@/lib/meetingJoin";
 import { toast } from "@/components/ui/Toast";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
@@ -52,6 +52,8 @@ function mapServerRoomMessages(
       mentioned_user_uris: msg.mentioned_user_uris ?? [],
       reactions,
       read_by: (messageState?.reads ?? []).map((read) => read.reader_uri),
+      delivery_status: msg.delivery_status ?? "sent",
+      scheduled_at: msg.scheduled_at,
     } satisfies ChatMessage;
   });
 }
@@ -932,6 +934,14 @@ function ChatRoom({
   const [allUsers, setAllUsers] = useState<ServerUser[]>([]);
   const [showConnectors, setShowConnectors] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [showScheduleSend, setShowScheduleSend] = useState(false);
+  const [scheduleDate, setScheduleDate] = useState("");
+  const [notificationLevel, setNotificationLevel] = useState<"all" | "mentions" | "muted">("all");
+  const [showGifPicker, setShowGifPicker] = useState(false);
+  const [gifQuery, setGifQuery] = useState("");
+  const [gifResults, setGifResults] = useState<GifResult[]>([]);
+  const [gifLoading, setGifLoading] = useState(false);
+  const [teamTags, setTeamTags] = useState<ServerTag[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<number | null>(null);
@@ -957,6 +967,22 @@ function ChatRoom({
     if (!connected || !baseUrl || !token) return;
     paleServerGetUsers(baseUrl, token).then(setAllUsers).catch(() => {});
   }, [connected, baseUrl, token]);
+
+  // Load notification preference for current room
+  useEffect(() => {
+    if (!isServerRoom || !connected || !baseUrl || !token) return;
+    paleServerGetNotificationPreference(baseUrl, token, room.room_id)
+      .then((pref) => setNotificationLevel(pref.notification_level))
+      .catch(() => {});
+  }, [room.room_id, isServerRoom, connected, baseUrl, token]);
+
+  // Load team tags for mention autocomplete
+  useEffect(() => {
+    if (!isServerRoom || !connected || !baseUrl || !token || !room.team_id) return;
+    paleServerGetTags(baseUrl, token, room.team_id)
+      .then(setTeamTags)
+      .catch(() => {});
+  }, [room.team_id, isServerRoom, connected, baseUrl, token]);
 
   // Load server room messages on mount (stable deps only — no addMessage to avoid re-render loop)
   useEffect(() => {
@@ -1208,6 +1234,73 @@ function ChatRoom({
     setReplyingTo(null);
   };
 
+  const handleScheduleSend = async () => {
+    if (!input.trim() || !scheduleDate || !isServerRoom || !connected || !baseUrl || !token) return;
+    const body = input.trim();
+    setInput("");
+    setShowScheduleSend(false);
+    stopTyping();
+    try {
+      const scheduledAt = new Date(scheduleDate).toISOString();
+      await paleServerScheduleRoomMessage(baseUrl, token, room.room_id, body, scheduledAt, replyingTo?.event_id, messagePriority);
+      toast({ type: "success", title: "Message scheduled", description: `Will be sent at ${new Date(scheduleDate).toLocaleString()}` });
+      setReplyingTo(null);
+      setMessagePriority("normal");
+      setScheduleDate("");
+    } catch (err) {
+      toast({ type: "error", title: "Schedule failed", description: String(err) });
+    }
+  };
+
+  const handleGifSearch = useCallback(async (query: string) => {
+    if (!query.trim() || !connected || !baseUrl || !token) return;
+    setGifLoading(true);
+    try {
+      const result = await paleServerSearchGifs(baseUrl, token, query, 20);
+      setGifResults(result.results);
+    } catch {
+      setGifResults([]);
+    } finally {
+      setGifLoading(false);
+    }
+  }, [connected, baseUrl, token]);
+
+  const handleGifSelect = async (gif: GifResult) => {
+    setShowGifPicker(false);
+    setGifQuery("");
+    setGifResults([]);
+    if (!isServerRoom || !connected || !baseUrl || !token) return;
+    try {
+      const body = `![${gif.title}](${gif.url})`;
+      const msg = await paleServerSendRoomMessage(baseUrl, token, room.room_id, body, replyingTo?.event_id, "normal");
+      addMessage({
+        event_id: msg.id,
+        room_id: room.room_id,
+        sender: msg.sender_uri,
+        sender_name: null,
+        body: msg.body,
+        msg_type: "text",
+        timestamp: Math.floor(new Date(msg.created_at).getTime() / 1000),
+        is_encrypted: false,
+        is_own: true,
+        delivery_status: msg.delivery_status ?? "sent",
+      });
+      setReplyingTo(null);
+    } catch (err) {
+      toast({ type: "error", title: "Send failed", description: String(err) });
+    }
+  };
+
+  const handleNotificationLevelChange = async (level: "all" | "mentions" | "muted") => {
+    if (!isServerRoom || !connected || !baseUrl || !token) return;
+    setNotificationLevel(level);
+    try {
+      await paleServerSetNotificationPreference(baseUrl, token, room.room_id, level);
+    } catch (err) {
+      toast({ type: "error", title: "Failed to update notifications", description: String(err) });
+    }
+  };
+
   const handleReply = (msg: ChatMessage) => {
     setReplyingTo(msg);
     setEditingMessage(null);
@@ -1343,6 +1436,19 @@ function ChatRoom({
           </div>
           <PresenceLabel name={room.name} isDirect={room.is_direct} isEncrypted={room.is_encrypted} />
         </div>
+        {isServerRoom && (
+          <select
+            value={notificationLevel}
+            onChange={(e) => handleNotificationLevelChange(e.target.value as typeof notificationLevel)}
+            className="h-8 rounded-md bg-surface border border-border-subtle px-1.5 text-xs text-tertiary hover:text-primary focus:outline-none focus:border-border-focus"
+            aria-label="Notification level"
+            title="Notification level"
+          >
+            <option value="all">All notifications</option>
+            <option value="mentions">Mentions only</option>
+            <option value="muted">Muted</option>
+          </select>
+        )}
         {canManageConnectors && (
           <button
             onClick={() => setShowConnectors(true)}
@@ -1474,9 +1580,29 @@ function ChatRoom({
       )}
 
       {/* Mention dropdown */}
-      {mentionQuery !== null && mentionUsers.length > 0 && (
+      {mentionQuery !== null && (mentionUsers.length > 0 || teamTags.filter(t => t.name.toLowerCase().includes((mentionQuery ?? "").toLowerCase())).length > 0) && (
         <div className="px-3 pb-1">
           <div className="bg-surface border border-border-subtle rounded-lg shadow-lg max-h-32 overflow-y-auto">
+            {teamTags
+              .filter((t) => t.name.toLowerCase().includes((mentionQuery ?? "").toLowerCase()))
+              .map((tag) => (
+                <button
+                  key={`tag-${tag.id}`}
+                  onClick={() => {
+                    const before = input.slice(0, input.lastIndexOf("@"));
+                    setInput(`${before}@${tag.name} `);
+                    setMentionQuery(null);
+                    inputRef.current?.focus();
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-elevated transition-colors text-sm"
+                >
+                  <span className="w-5 h-5 rounded-full bg-warning/20 text-warning flex items-center justify-center text-[10px] font-bold">
+                    #
+                  </span>
+                  <span className="text-primary">@{tag.name}</span>
+                  <span className="text-tertiary text-xs ml-auto">{tag.members.length} members</span>
+                </button>
+              ))}
             {mentionUsers.map((u) => (
               <button
                 key={u.id}
@@ -1494,6 +1620,86 @@ function ChatRoom({
         </div>
       )}
 
+      {/* Schedule send panel */}
+      {showScheduleSend && (
+        <div className="px-3 py-2 border-t border-border-subtle bg-elevated/50">
+          <div className="flex items-center gap-2">
+            <Clock size={14} className="text-accent shrink-0" />
+            <span className="text-xs text-secondary">Schedule send:</span>
+            <input
+              type="datetime-local"
+              value={scheduleDate}
+              onChange={(e) => setScheduleDate(e.target.value)}
+              min={datetimeLocalValue(new Date())}
+              className="flex-1 h-7 rounded-md bg-surface border border-border-subtle px-2 text-xs text-primary focus:outline-none focus:border-border-focus"
+            />
+            <button
+              onClick={handleScheduleSend}
+              disabled={!input.trim() || !scheduleDate}
+              className={cn(
+                "px-2 py-1 rounded-md text-xs font-medium transition-colors",
+                input.trim() && scheduleDate
+                  ? "bg-accent text-white hover:bg-accent-hover"
+                  : "bg-elevated text-tertiary cursor-not-allowed"
+              )}
+            >
+              Schedule
+            </button>
+            <button
+              onClick={() => { setShowScheduleSend(false); setScheduleDate(""); }}
+              className="p-1 text-tertiary hover:text-primary"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* GIF picker */}
+      {showGifPicker && (
+        <div className="px-3 py-2 border-t border-border-subtle bg-elevated/50">
+          <div className="flex items-center gap-2 mb-2">
+            <input
+              type="text"
+              value={gifQuery}
+              onChange={(e) => setGifQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") handleGifSearch(gifQuery); }}
+              placeholder="Search GIFs..."
+              className="flex-1 h-7 rounded-md bg-surface border border-border-subtle px-2 text-xs text-primary placeholder:text-tertiary focus:outline-none focus:border-border-focus"
+              autoFocus
+            />
+            <button
+              onClick={() => handleGifSearch(gifQuery)}
+              disabled={!gifQuery.trim()}
+              className="px-2 py-1 rounded-md text-xs font-medium bg-accent text-white hover:bg-accent-hover disabled:bg-elevated disabled:text-tertiary"
+            >
+              Search
+            </button>
+            <button onClick={() => { setShowGifPicker(false); setGifQuery(""); setGifResults([]); }} className="p-1 text-tertiary hover:text-primary">
+              <X size={14} />
+            </button>
+          </div>
+          {gifLoading && <div className="flex justify-center py-4"><Loader2 size={18} className="animate-spin text-tertiary" /></div>}
+          {!gifLoading && gifResults.length > 0 && (
+            <div className="grid grid-cols-3 gap-1 max-h-40 overflow-y-auto">
+              {gifResults.map((gif, i) => (
+                <button
+                  key={i}
+                  onClick={() => handleGifSelect(gif)}
+                  className="rounded overflow-hidden hover:ring-2 hover:ring-accent transition-all"
+                  title={gif.title}
+                >
+                  <img src={gif.preview} alt={gif.title} className="w-full h-20 object-cover" loading="lazy" />
+                </button>
+              ))}
+            </div>
+          )}
+          {!gifLoading && gifResults.length === 0 && gifQuery.trim() && (
+            <p className="text-xs text-tertiary text-center py-3">No GIFs found</p>
+          )}
+        </div>
+      )}
+
       {/* Compose bar */}
       <div className="flex items-center gap-2 px-3 py-2 border-t border-border-subtle shrink-0">
         <button
@@ -1502,6 +1708,19 @@ function ChatRoom({
         >
           <Paperclip size={18} />
         </button>
+        {isServerRoom && !editingMessage && (
+          <button
+            onClick={() => { setShowGifPicker(!showGifPicker); setShowScheduleSend(false); }}
+            className={cn(
+              "p-2 rounded-md transition-colors",
+              showGifPicker ? "text-accent bg-accent/10" : "text-tertiary hover:text-secondary hover:bg-elevated"
+            )}
+            aria-label="GIF picker"
+            title="Send a GIF"
+          >
+            <ImageLucide size={18} />
+          </button>
+        )}
         {!editingMessage && (
           <select
             value={messagePriority}
@@ -1529,6 +1748,19 @@ function ChatRoom({
             editingMessage && "border-warning/50"
           )}
         />
+        {isServerRoom && !editingMessage && (
+          <button
+            onClick={() => { setShowScheduleSend(!showScheduleSend); setShowGifPicker(false); }}
+            className={cn(
+              "p-2 rounded-md transition-colors",
+              showScheduleSend ? "text-accent bg-accent/10" : "text-tertiary hover:text-secondary hover:bg-elevated"
+            )}
+            aria-label="Schedule send"
+            title="Schedule message for later"
+          >
+            <Clock size={18} />
+          </button>
+        )}
         <button
           onClick={handleSend}
           disabled={!input.trim()}
@@ -2228,10 +2460,19 @@ function MessageBubble({
           >
             {time}
             {message.edited_at && <span>(edited)</span>}
-            {/* Read receipt indicators (own messages only) */}
+            {message.scheduled_at && !message.delivery_status?.startsWith("sent") && (
+              <span className="inline-flex items-center ml-0.5" title={`Scheduled: ${new Date(message.scheduled_at).toLocaleString()}`}>
+                <Clock size={9} className="text-warning" />
+              </span>
+            )}
+            {/* Delivery status + read receipt indicators (own messages only) */}
             {message.is_own && (
-              <span className="inline-flex items-center ml-0.5">
-                {readCount > 0 ? (
+              <span className="inline-flex items-center ml-0.5" title={message.delivery_status === "failed" ? "Delivery failed" : message.delivery_status === "pending" ? "Pending" : readCount > 0 ? "Delivered and read" : "Sent"}>
+                {message.delivery_status === "failed" ? (
+                  <AlertTriangle size={10} className="text-red-400" />
+                ) : message.delivery_status === "pending" ? (
+                  <Clock size={10} className="text-yellow-300" />
+                ) : readCount > 0 ? (
                   <CheckCheck size={10} className="text-blue-300" />
                 ) : (
                   <Check size={10} />

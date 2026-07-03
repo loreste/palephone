@@ -252,6 +252,8 @@ pub struct AppState {
     queue_callbacks: ShardedMap<Uuid, QueueCallback>,
     vip_callers: ShardedMap<Uuid, VipCaller>,
     message_reactions: ShardedMap<Uuid, Vec<MessageReaction>>,
+    tags: ShardedMap<Uuid, Tag>,
+    notification_preferences: ShardedMap<String, NotificationPreference>,
     user_favorites: ShardedMap<String, Vec<String>>,
     // Meeting lobby state keyed by conference_id
     conference_lobbies: ShardedMap<Uuid, ConferenceLobby>,
@@ -423,6 +425,8 @@ impl AppState {
             queue_callbacks: ShardedMap::new(),
             vip_callers: ShardedMap::new(),
             message_reactions: ShardedMap::new(),
+            tags: ShardedMap::new(),
+            notification_preferences: ShardedMap::new(),
             user_favorites: ShardedMap::new(),
             conference_lobbies: ShardedMap::new(),
             raised_hands: ShardedMap::new(),
@@ -6484,6 +6488,9 @@ impl AppState {
             mentioned_user_uris,
             priority,
             saved_by: Vec::new(),
+            scheduled_at: None,
+            delivered: true,
+            delivery_status: "sent".to_string(),
         };
         let mut messages = self
             .room_messages
@@ -6502,6 +6509,194 @@ impl AppState {
             payload: serde_json::to_value(&msg).unwrap_or_default(),
         });
         Ok(msg)
+    }
+
+    /// Schedule a message for future delivery.
+    pub fn schedule_room_message(
+        &self,
+        room_id: Uuid,
+        sender_uri: &str,
+        body: &str,
+        scheduled_at: DateTime<Utc>,
+        reply_to: Option<Uuid>,
+        priority: Option<String>,
+    ) -> Result<RoomMessage, String> {
+        let room = self.room(room_id);
+        let (mentions, mentioned_user_uris) = room
+            .as_ref()
+            .map(|room| self.resolve_message_mentions(room, body))
+            .unwrap_or_default();
+        if let Some(room) = room.as_ref() {
+            if room.posting_policy == "owners"
+                && !room.channel_owners.iter().any(|owner| owner == sender_uri)
+                && !room.members.iter().any(|member| {
+                    member.user_sip_uri == sender_uri
+                        && matches!(member.role.as_str(), "owner" | "admin")
+                })
+            {
+                return Err("only channel owners can post in this channel".to_string());
+            }
+            self.authorize_message_mentions(room, sender_uri, &mentions)?;
+        }
+        let priority = normalize_message_priority(priority.as_deref());
+        let msg = RoomMessage {
+            id: Uuid::new_v4(),
+            room_id,
+            sender_uri: sender_uri.to_string(),
+            body: body.to_string(),
+            content_type: "text/plain".to_string(),
+            created_at: Utc::now(),
+            reply_to,
+            edited_at: None,
+            pinned: false,
+            mentions,
+            mentioned_user_uris,
+            priority,
+            saved_by: Vec::new(),
+            scheduled_at: Some(scheduled_at),
+            delivered: false,
+            delivery_status: "pending".to_string(),
+        };
+        let mut messages = self
+            .room_messages
+            .write()
+            .expect("room messages lock poisoned");
+        messages.push(msg.clone());
+        if messages.len() > MAX_ROOM_MESSAGES {
+            let overflow = messages.len() - MAX_ROOM_MESSAGES;
+            messages.drain(..overflow);
+        }
+        self.persist(&msg);
+        let msg_for_pg = msg.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.insert_room_message(&msg_for_pg).await }));
+        Ok(msg)
+    }
+
+    /// Deliver scheduled messages that are due. Called by background task.
+    pub fn deliver_scheduled_messages(&self) -> Vec<RoomMessage> {
+        let now = Utc::now();
+        let mut delivered = Vec::new();
+        let mut messages = self
+            .room_messages
+            .write()
+            .expect("room messages lock poisoned");
+        for msg in messages.iter_mut() {
+            if !msg.delivered {
+                if let Some(scheduled_at) = msg.scheduled_at {
+                    if scheduled_at <= now {
+                        msg.delivered = true;
+                        msg.delivery_status = "sent".to_string();
+                        delivered.push(msg.clone());
+                    }
+                }
+            }
+        }
+        drop(messages);
+        for msg in &delivered {
+            self.persist(msg);
+            let msg_for_pg = msg.clone();
+            self.pg_spawn(
+                move |pg| Box::pin(async move { pg.insert_room_message(&msg_for_pg).await }),
+            );
+            self.broadcast_sse(SseEvent {
+                event_type: "room_message".to_string(),
+                payload: serde_json::to_value(msg).unwrap_or_default(),
+            });
+            self.broadcast_sse(SseEvent {
+                event_type: "scheduled_message_delivered".to_string(),
+                payload: serde_json::to_value(msg).unwrap_or_default(),
+            });
+        }
+        delivered
+    }
+
+    // ─── Tags ───
+
+    pub fn create_tag(&self, team_id: Uuid, name: &str, members: Vec<String>) -> Result<Tag, String> {
+        // Check team exists
+        if self.teams.get(&team_id).is_none() {
+            return Err("team not found".to_string());
+        }
+        // Check duplicate name
+        let duplicate = self
+            .tags
+            .values()
+            .iter()
+            .any(|t| t.team_id == team_id && t.name.eq_ignore_ascii_case(name));
+        if duplicate {
+            return Err("tag name already exists in this team".to_string());
+        }
+        let tag = Tag {
+            id: Uuid::new_v4(),
+            team_id,
+            name: name.to_string(),
+            members,
+            created_at: Utc::now(),
+        };
+        self.tags.insert(tag.id, tag.clone());
+        Ok(tag)
+    }
+
+    pub fn list_tags(&self, team_id: Uuid) -> Vec<Tag> {
+        self.tags
+            .values()
+            .into_iter()
+            .filter(|t| t.team_id == team_id)
+            .collect()
+    }
+
+    pub fn update_tag(
+        &self,
+        tag_id: Uuid,
+        name: Option<String>,
+        members: Option<Vec<String>>,
+    ) -> Option<Tag> {
+        let mut tag = self.tags.get(&tag_id)?;
+        if let Some(new_name) = name {
+            tag.name = new_name;
+        }
+        if let Some(new_members) = members {
+            tag.members = new_members;
+        }
+        self.tags.insert(tag_id, tag.clone());
+        Some(tag)
+    }
+
+    pub fn delete_tag(&self, tag_id: Uuid) -> Option<Tag> {
+        self.tags.remove(&tag_id)
+    }
+
+    // ─── Notification Preferences ───
+
+    pub fn get_notification_preference(&self, room_id: Uuid, user_uri: &str) -> NotificationPreference {
+        let key = format!("{}:{}", room_id, user_uri);
+        self.notification_preferences.get(&key).unwrap_or(NotificationPreference {
+            room_id,
+            user_uri: user_uri.to_string(),
+            notification_level: "all".to_string(),
+            updated_at: Utc::now(),
+        })
+    }
+
+    pub fn set_notification_preference(
+        &self,
+        room_id: Uuid,
+        user_uri: &str,
+        level: &str,
+    ) -> NotificationPreference {
+        let valid_level = match level {
+            "all" | "mentions" | "muted" => level.to_string(),
+            _ => "all".to_string(),
+        };
+        let pref = NotificationPreference {
+            room_id,
+            user_uri: user_uri.to_string(),
+            notification_level: valid_level,
+            updated_at: Utc::now(),
+        };
+        let key = format!("{}:{}", room_id, user_uri);
+        self.notification_preferences.insert(key, pref.clone());
+        pref
     }
 
     pub fn edit_room_message(
@@ -6576,6 +6771,24 @@ impl AppState {
                     .iter()
                     .map(|member| member.user_sip_uri.clone()),
             );
+        }
+
+        // Resolve @tag mentions
+        if let Some(team_id) = room.team_id {
+            for tag in self.tags.values() {
+                if tag.team_id != team_id {
+                    continue;
+                }
+                let tag_token = format!("@{}", tag.name.to_lowercase());
+                if normalized_body.contains(&tag_token) {
+                    mentions.push(MessageMention {
+                        kind: "tag".to_string(),
+                        token: tag.name.clone(),
+                        user_sip_uri: None,
+                    });
+                    mentioned_user_uris.extend(tag.members.clone());
+                }
+            }
         }
 
         for member in &room.members {
@@ -7607,7 +7820,18 @@ impl AppState {
             .read()
             .expect("room messages lock poisoned")
             .iter()
-            .filter(|m| m.room_id == room_id)
+            .filter(|m| m.room_id == room_id && m.delivered)
+            .cloned()
+            .collect()
+    }
+
+    /// Return scheduled (not yet delivered) messages for a room by the sender.
+    pub fn scheduled_room_messages(&self, room_id: Uuid, sender_uri: &str) -> Vec<RoomMessage> {
+        self.room_messages
+            .read()
+            .expect("room messages lock poisoned")
+            .iter()
+            .filter(|m| m.room_id == room_id && !m.delivered && m.sender_uri == sender_uri)
             .cloned()
             .collect()
     }
@@ -8531,10 +8755,23 @@ pub struct RoomMessage {
     pub priority: String,
     #[serde(default)]
     pub saved_by: Vec<String>,
+    /// When set, the message is scheduled for future delivery.
+    #[serde(default)]
+    pub scheduled_at: Option<DateTime<Utc>>,
+    /// Whether a scheduled message has been delivered.
+    #[serde(default = "default_true")]
+    pub delivered: bool,
+    /// Delivery status: pending, sent, delivered, failed.
+    #[serde(default = "default_delivery_status")]
+    pub delivery_status: String,
 }
 
 fn default_message_priority() -> String {
     "normal".to_string()
+}
+
+fn default_delivery_status() -> String {
+    "sent".to_string()
 }
 
 fn normalize_message_priority(value: Option<&str>) -> String {
@@ -8631,6 +8868,53 @@ pub struct SendRoomMessageRequest {
     pub reply_to: Option<Uuid>,
     #[serde(default)]
     pub priority: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScheduleRoomMessageRequest {
+    pub body: String,
+    pub scheduled_at: DateTime<Utc>,
+    pub reply_to: Option<Uuid>,
+    #[serde(default)]
+    pub priority: Option<String>,
+}
+
+// ─── Tags ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tag {
+    pub id: Uuid,
+    pub team_id: Uuid,
+    pub name: String,
+    pub members: Vec<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateTagRequest {
+    pub name: String,
+    pub members: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateTagRequest {
+    pub name: Option<String>,
+    pub members: Option<Vec<String>>,
+}
+
+// ─── Notification Preferences ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationPreference {
+    pub room_id: Uuid,
+    pub user_uri: String,
+    pub notification_level: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateNotificationPreferenceRequest {
+    pub notification_level: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
