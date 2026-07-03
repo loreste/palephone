@@ -35,6 +35,11 @@ use crate::{
     SetSpotlightRequest, SendMeetingReactionRequest,
     SetOutOfOfficeRequest,
     UpdateNotificationPreferenceRequest, UpdateTagRequest,
+    OAuthTokenRequest, CreateApiClientRequest,
+    CreateBotRequest, UpdateBotRequest, BotMessageRequest,
+    CreateCalendarIntegrationRequest,
+    CreateContactSyncRequest,
+    CreateConnectorRequest, UpdateConnectorRequest,
 };
 
 type SharedState = Arc<AppState>;
@@ -511,6 +516,55 @@ pub fn router(state: SharedState) -> Router {
         )
         // Per-user call analytics
         .route("/v1/users/{id}/call-analytics", get(user_call_analytics))
+        // OAuth API
+        .route("/v1/oauth/token", post(oauth_token))
+        .route(
+            "/v1/admin/api-clients",
+            get(list_api_clients).post(create_api_client),
+        )
+        .route(
+            "/v1/admin/api-clients/{id}",
+            delete(delete_api_client),
+        )
+        // Bots
+        .route(
+            "/v1/admin/bots",
+            get(list_bots).post(create_bot),
+        )
+        .route(
+            "/v1/admin/bots/{id}",
+            put(update_bot).delete(delete_bot),
+        )
+        .route("/v1/bot/message", post(bot_send_message))
+        // Calendar integration
+        .route(
+            "/v1/users/calendar-integration",
+            get(list_calendar_integrations).post(create_calendar_integration),
+        )
+        .route(
+            "/v1/users/calendar-integration/{id}",
+            delete(delete_calendar_integration),
+        )
+        .route("/v1/users/calendar/sync", get(sync_calendar))
+        // Contact sync
+        .route(
+            "/v1/users/contact-sync",
+            get(list_contact_sync).post(create_contact_sync),
+        )
+        .route(
+            "/v1/users/contact-sync/{id}",
+            delete(delete_contact_sync),
+        )
+        .route("/v1/users/contacts", get(list_contacts_merged))
+        // Connectors
+        .route(
+            "/v1/admin/connectors",
+            get(list_connectors).post(create_connector),
+        )
+        .route(
+            "/v1/admin/connectors/{id}",
+            put(update_connector).delete(delete_connector),
+        )
         .route("/v1/events", get(sse_stream))
         .layer(from_fn(crate::metrics::request_metrics))
         .layer(from_fn(cors))
@@ -5498,6 +5552,236 @@ async fn user_call_analytics(
     }
     let analytics = state.user_call_analytics(&user.sip_uri);
     Ok(Json(analytics))
+}
+
+// ─── OAuth API ───
+
+async fn oauth_token(
+    State(state): State<SharedState>,
+    Json(input): Json<OAuthTokenRequest>,
+) -> Result<Json<crate::OAuthTokenResponse>, ApiError> {
+    state.create_oauth_token(input).map(Json).ok_or(ApiError::Unauthorized)
+}
+
+async fn list_api_clients(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::ApiClient>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_api_clients()))
+}
+
+async fn create_api_client(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateApiClientRequest>,
+) -> Result<Json<crate::CreateApiClientResponse>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let resp = state.create_api_client(input, &principal);
+    state.record_audit_event(&principal, "api_client.created", Some(resp.client.id.to_string()));
+    Ok(Json(resp))
+}
+
+async fn delete_api_client(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if !state.delete_api_client(id) {
+        return Err(ApiError::NotFound);
+    }
+    state.record_audit_event(&principal, "api_client.deleted", Some(id.to_string()));
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ─── Bots ───
+
+async fn list_bots(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::Bot>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_bots()))
+}
+
+async fn create_bot(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateBotRequest>,
+) -> Result<Json<crate::Bot>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let bot = state.create_bot(input, &principal);
+    state.record_audit_event(&principal, "bot.created", Some(bot.id.to_string()));
+    Ok(Json(bot))
+}
+
+async fn update_bot(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<UpdateBotRequest>,
+) -> Result<Json<crate::Bot>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let bot = state.update_bot(id, input).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "bot.updated", Some(id.to_string()));
+    Ok(Json(bot))
+}
+
+async fn delete_bot(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if !state.delete_bot(id) {
+        return Err(ApiError::NotFound);
+    }
+    state.record_audit_event(&principal, "bot.deleted", Some(id.to_string()));
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn bot_send_message(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<BotMessageRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let token = bearer_token(&headers);
+    if token.is_empty() {
+        return Err(ApiError::Unauthorized);
+    }
+    let bot = state.bot_by_token(token).ok_or(ApiError::Unauthorized)?;
+    let sender = format!("bot:{}", bot.name);
+    let msg = state
+        .send_room_message(input.room_id, &sender, &input.body, None, None)
+        .map_err(ApiError::Conflict)?;
+    Ok(Json(json!({ "ok": true, "message_id": msg.id })))
+}
+
+// ─── Calendar Integration ───
+
+async fn list_calendar_integrations(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::CalendarIntegration>>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    Ok(Json(state.list_calendar_integrations(&principal)))
+}
+
+async fn create_calendar_integration(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateCalendarIntegrationRequest>,
+) -> Result<Json<crate::CalendarIntegration>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let integration = state.create_calendar_integration(&principal, input);
+    Ok(Json(integration))
+}
+
+async fn delete_calendar_integration(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let _principal = authenticated_principal(&headers, &state)?;
+    if !state.delete_calendar_integration(id) {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn sync_calendar(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::CalendarEvent>>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    Ok(Json(state.calendar_events(&principal)))
+}
+
+// ─── Contact Sync ───
+
+async fn list_contact_sync(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::ContactSyncConfig>>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    Ok(Json(state.list_contact_sync_configs(&principal)))
+}
+
+async fn create_contact_sync(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateContactSyncRequest>,
+) -> Result<Json<crate::ContactSyncConfig>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let config = state.create_contact_sync(&principal, input);
+    Ok(Json(config))
+}
+
+async fn delete_contact_sync(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let _principal = authenticated_principal(&headers, &state)?;
+    if !state.delete_contact_sync(id) {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn list_contacts_merged(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::SyncedContact>>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    Ok(Json(state.list_contacts_merged(&principal)))
+}
+
+// ─── Connectors ───
+
+async fn list_connectors(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::Connector>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_connectors()))
+}
+
+async fn create_connector(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateConnectorRequest>,
+) -> Result<Json<crate::Connector>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let connector = state.create_connector(input, &principal);
+    state.record_audit_event(&principal, "connector.created", Some(connector.id.to_string()));
+    Ok(Json(connector))
+}
+
+async fn update_connector(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<UpdateConnectorRequest>,
+) -> Result<Json<crate::Connector>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let connector = state.update_connector(id, input).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "connector.updated", Some(id.to_string()));
+    Ok(Json(connector))
+}
+
+async fn delete_connector(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if !state.delete_connector(id) {
+        return Err(ApiError::NotFound);
+    }
+    state.record_audit_event(&principal, "connector.deleted", Some(id.to_string()));
+    Ok(Json(json!({ "ok": true })))
 }
 
 // ─── Server-Sent Events ───

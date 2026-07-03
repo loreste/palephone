@@ -291,6 +291,14 @@ pub struct AppState {
     hold_music: ShardedMap<Uuid, HoldMusic>,
     // Personal call groups
     personal_call_groups: ShardedMap<Uuid, PersonalCallGroup>,
+    // Platform & integration
+    api_clients: ShardedMap<Uuid, ApiClient>,
+    api_tokens: ShardedMap<Uuid, ApiToken>,
+    bots: ShardedMap<Uuid, Bot>,
+    calendar_integrations: ShardedMap<Uuid, CalendarIntegration>,
+    contact_sync_configs: ShardedMap<Uuid, ContactSyncConfig>,
+    synced_contacts: ShardedMap<Uuid, SyncedContact>,
+    connectors: ShardedMap<Uuid, Connector>,
     user_create_lock: std::sync::Mutex<()>,
     agent_assignment_lock: std::sync::Mutex<()>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
@@ -459,6 +467,13 @@ impl AppState {
             recording_policies: ShardedMap::new(),
             hold_music: ShardedMap::new(),
             personal_call_groups: ShardedMap::new(),
+            api_clients: ShardedMap::new(),
+            api_tokens: ShardedMap::new(),
+            bots: ShardedMap::new(),
+            calendar_integrations: ShardedMap::new(),
+            contact_sync_configs: ShardedMap::new(),
+            synced_contacts: ShardedMap::new(),
+            connectors: ShardedMap::new(),
             user_create_lock: std::sync::Mutex::new(()),
             agent_assignment_lock: std::sync::Mutex::new(()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
@@ -4366,6 +4381,268 @@ impl AppState {
 
     pub fn delete_personal_call_group(&self, id: Uuid) -> Option<PersonalCallGroup> {
         self.personal_call_groups.remove(&id)
+    }
+
+    // ─── OAuth API Clients ───
+
+    pub fn create_api_client(&self, input: CreateApiClientRequest, principal: &str) -> CreateApiClientResponse {
+        let raw_id = Uuid::new_v4().to_string();
+        let raw_secret = Uuid::new_v4().to_string();
+        let client = ApiClient {
+            id: Uuid::new_v4(),
+            name: input.name,
+            client_id: raw_id.clone(),
+            client_secret_hash: sha256_hex(raw_secret.as_bytes()),
+            scopes: input.scopes,
+            redirect_uris: input.redirect_uris,
+            created_by: principal.to_string(),
+            created_at: Utc::now(),
+        };
+        self.api_clients.insert(client.id, client.clone());
+        CreateApiClientResponse { client, client_secret: raw_secret }
+    }
+
+    pub fn list_api_clients(&self) -> Vec<ApiClient> {
+        self.api_clients.values()
+    }
+
+    pub fn delete_api_client(&self, id: Uuid) -> bool {
+        // Remove associated tokens
+        let token_ids: Vec<Uuid> = self.api_tokens.values().into_iter()
+            .filter(|t| t.client_id == id)
+            .map(|t| t.id)
+            .collect();
+        for tid in token_ids {
+            self.api_tokens.remove(&tid);
+        }
+        self.api_clients.remove(&id).is_some()
+    }
+
+    pub fn api_client_by_client_id(&self, client_id: &str) -> Option<ApiClient> {
+        self.api_clients.values().into_iter().find(|c| c.client_id == client_id)
+    }
+
+    pub fn create_oauth_token(&self, input: OAuthTokenRequest) -> Option<OAuthTokenResponse> {
+        let client = self.api_client_by_client_id(&input.client_id)?;
+        if client.client_secret_hash != sha256_hex(input.client_secret.as_bytes()) {
+            return None;
+        }
+        match input.grant_type.as_str() {
+            "client_credentials" => {
+                let scopes = input.scope.map(|s| s.split_whitespace().map(String::from).collect::<Vec<_>>())
+                    .unwrap_or_else(|| client.scopes.clone());
+                let raw_token = Uuid::new_v4().to_string();
+                let token = ApiToken {
+                    id: Uuid::new_v4(),
+                    client_id: client.id,
+                    user_uri: None,
+                    scopes: scopes.clone(),
+                    token_hash: sha256_hex(raw_token.as_bytes()),
+                    expires_at: Utc::now() + Duration::hours(1),
+                    created_at: Utc::now(),
+                };
+                self.api_tokens.insert(token.id, token);
+                Some(OAuthTokenResponse {
+                    access_token: raw_token,
+                    token_type: "Bearer".to_string(),
+                    expires_in: 3600,
+                    scope: scopes.join(" "),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    // ─── Bots ───
+
+    pub fn create_bot(&self, input: CreateBotRequest, owner_uri: &str) -> Bot {
+        let bot = Bot {
+            id: Uuid::new_v4(),
+            name: input.name,
+            webhook_url: input.webhook_url,
+            events: input.events,
+            owner_uri: owner_uri.to_string(),
+            api_token: Uuid::new_v4().to_string(),
+            enabled: true,
+            created_at: Utc::now(),
+        };
+        self.bots.insert(bot.id, bot.clone());
+        bot
+    }
+
+    pub fn list_bots(&self) -> Vec<Bot> {
+        self.bots.values()
+    }
+
+    pub fn update_bot(&self, id: Uuid, input: UpdateBotRequest) -> Option<Bot> {
+        self.bots.with_write(&id, |bots| {
+            let bot = bots.get_mut(&id)?;
+            if let Some(name) = input.name { bot.name = name; }
+            if let Some(url) = input.webhook_url { bot.webhook_url = url; }
+            if let Some(events) = input.events { bot.events = events; }
+            if let Some(enabled) = input.enabled { bot.enabled = enabled; }
+            Some(bot.clone())
+        })
+    }
+
+    pub fn delete_bot(&self, id: Uuid) -> bool {
+        self.bots.remove(&id).is_some()
+    }
+
+    pub fn bot_by_token(&self, token: &str) -> Option<Bot> {
+        self.bots.values().into_iter().find(|b| b.api_token == token && b.enabled)
+    }
+
+    pub fn fire_bot_event(&self, event_type: &str, payload: serde_json::Value) {
+        let bots: Vec<Bot> = self.bots.values().into_iter()
+            .filter(|b| b.enabled && b.events.iter().any(|e| e == event_type || e == "*"))
+            .collect();
+        for bot in bots {
+            let url = bot.webhook_url.clone();
+            let payload = payload.clone();
+            let event = event_type.to_string();
+            tokio::spawn(async move {
+                let client = reqwest::Client::new();
+                let _ = client.post(&url)
+                    .json(&serde_json::json!({ "event": event, "data": payload }))
+                    .timeout(std::time::Duration::from_secs(10))
+                    .send()
+                    .await;
+            });
+        }
+    }
+
+    // ─── Calendar Integration ───
+
+    pub fn create_calendar_integration(&self, user_uri: &str, input: CreateCalendarIntegrationRequest) -> CalendarIntegration {
+        let integration = CalendarIntegration {
+            id: Uuid::new_v4(),
+            user_uri: user_uri.to_string(),
+            provider: input.provider,
+            access_token_enc: input.access_token,
+            refresh_token_enc: input.refresh_token,
+            calendar_id: input.calendar_id,
+            enabled: true,
+            last_sync: None,
+        };
+        self.calendar_integrations.insert(integration.id, integration.clone());
+        integration
+    }
+
+    pub fn list_calendar_integrations(&self, user_uri: &str) -> Vec<CalendarIntegration> {
+        self.calendar_integrations.values().into_iter()
+            .filter(|c| c.user_uri == user_uri)
+            .collect()
+    }
+
+    pub fn delete_calendar_integration(&self, id: Uuid) -> bool {
+        self.calendar_integrations.remove(&id).is_some()
+    }
+
+    pub fn calendar_events(&self, user_uri: &str) -> Vec<CalendarEvent> {
+        // Return local meetings as calendar events
+        let meetings = self.scheduled_meetings.values();
+        meetings.into_iter()
+            .filter(|m| m.organizer_uri == user_uri || m.participants.iter().any(|p| p == user_uri))
+            .map(|m| CalendarEvent {
+                id: m.id.to_string(),
+                title: m.title.clone(),
+                start: m.starts_at,
+                end: m.ends_at,
+                source: "local".to_string(),
+            })
+            .collect()
+    }
+
+    // ─── Contact Sync ───
+
+    pub fn create_contact_sync(&self, user_uri: &str, input: CreateContactSyncRequest) -> ContactSyncConfig {
+        let config = ContactSyncConfig {
+            id: Uuid::new_v4(),
+            user_uri: user_uri.to_string(),
+            provider: input.provider,
+            access_token_enc: input.access_token,
+            last_sync: None,
+            enabled: true,
+        };
+        self.contact_sync_configs.insert(config.id, config.clone());
+        config
+    }
+
+    pub fn list_contact_sync_configs(&self, user_uri: &str) -> Vec<ContactSyncConfig> {
+        self.contact_sync_configs.values().into_iter()
+            .filter(|c| c.user_uri == user_uri)
+            .collect()
+    }
+
+    pub fn delete_contact_sync(&self, id: Uuid) -> bool {
+        self.contact_sync_configs.remove(&id).is_some()
+    }
+
+    pub fn list_contacts_merged(&self, user_uri: &str) -> Vec<SyncedContact> {
+        self.synced_contacts.values().into_iter()
+            .filter(|c| c.user_uri == user_uri)
+            .collect()
+    }
+
+    // ─── Connectors ───
+
+    pub fn create_connector(&self, input: CreateConnectorRequest, principal: &str) -> Connector {
+        let connector = Connector {
+            id: Uuid::new_v4(),
+            name: input.name,
+            connector_type: input.connector_type,
+            webhook_url: input.webhook_url,
+            events: input.events,
+            auth_header: input.auth_header,
+            enabled: true,
+            created_by: principal.to_string(),
+            created_at: Utc::now(),
+        };
+        self.connectors.insert(connector.id, connector.clone());
+        connector
+    }
+
+    pub fn list_connectors(&self) -> Vec<Connector> {
+        self.connectors.values()
+    }
+
+    pub fn update_connector(&self, id: Uuid, input: UpdateConnectorRequest) -> Option<Connector> {
+        self.connectors.with_write(&id, |connectors| {
+            let c = connectors.get_mut(&id)?;
+            if let Some(name) = input.name { c.name = name; }
+            if let Some(url) = input.webhook_url { c.webhook_url = url; }
+            if let Some(events) = input.events { c.events = events; }
+            if let Some(auth) = input.auth_header { c.auth_header = Some(auth); }
+            if let Some(enabled) = input.enabled { c.enabled = enabled; }
+            Some(c.clone())
+        })
+    }
+
+    pub fn delete_connector(&self, id: Uuid) -> bool {
+        self.connectors.remove(&id).is_some()
+    }
+
+    pub fn fire_connector_event(&self, event_type: &str, payload: serde_json::Value) {
+        let connectors: Vec<Connector> = self.connectors.values().into_iter()
+            .filter(|c| c.enabled && c.events.iter().any(|e| e == event_type || e == "*"))
+            .collect();
+        for connector in connectors {
+            let url = connector.webhook_url.clone();
+            let auth = connector.auth_header.clone();
+            let payload = payload.clone();
+            let event = event_type.to_string();
+            tokio::spawn(async move {
+                let client = reqwest::Client::new();
+                let mut req = client.post(&url)
+                    .json(&serde_json::json!({ "event": event, "data": payload }))
+                    .timeout(std::time::Duration::from_secs(10));
+                if let Some(header) = auth {
+                    req = req.header("Authorization", header);
+                }
+                let _ = req.send().await;
+            });
+        }
     }
 
     // ─── Call Analytics ───
@@ -10379,6 +10656,198 @@ pub struct CreatePersonalCallGroupRequest {
     pub name: String,
     pub numbers: Vec<String>,
     pub ring_duration: Option<i32>,
+    pub enabled: Option<bool>,
+}
+
+// ─── OAuth API Clients ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiClient {
+    pub id: Uuid,
+    pub name: String,
+    pub client_id: String,
+    pub client_secret_hash: String,
+    pub scopes: Vec<String>,
+    pub redirect_uris: Vec<String>,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateApiClientRequest {
+    pub name: String,
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub redirect_uris: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateApiClientResponse {
+    pub client: ApiClient,
+    pub client_secret: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiToken {
+    pub id: Uuid,
+    pub client_id: Uuid,
+    pub user_uri: Option<String>,
+    pub scopes: Vec<String>,
+    pub token_hash: String,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OAuthTokenRequest {
+    pub grant_type: String,
+    pub client_id: String,
+    pub client_secret: String,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub redirect_uri: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OAuthTokenResponse {
+    pub access_token: String,
+    pub token_type: String,
+    pub expires_in: i64,
+    pub scope: String,
+}
+
+// ─── Bots ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Bot {
+    pub id: Uuid,
+    pub name: String,
+    pub webhook_url: String,
+    pub events: Vec<String>,
+    pub owner_uri: String,
+    pub api_token: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateBotRequest {
+    pub name: String,
+    pub webhook_url: String,
+    #[serde(default)]
+    pub events: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateBotRequest {
+    pub name: Option<String>,
+    pub webhook_url: Option<String>,
+    pub events: Option<Vec<String>>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BotMessageRequest {
+    pub room_id: Uuid,
+    pub body: String,
+}
+
+// ─── Calendar Integration ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalendarIntegration {
+    pub id: Uuid,
+    pub user_uri: String,
+    pub provider: String,
+    pub access_token_enc: String,
+    pub refresh_token_enc: Option<String>,
+    pub calendar_id: Option<String>,
+    pub enabled: bool,
+    pub last_sync: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateCalendarIntegrationRequest {
+    pub provider: String,
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub calendar_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CalendarEvent {
+    pub id: String,
+    pub title: String,
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    pub source: String,
+}
+
+// ─── Contact Sync ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContactSyncConfig {
+    pub id: Uuid,
+    pub user_uri: String,
+    pub provider: String,
+    pub access_token_enc: String,
+    pub last_sync: Option<DateTime<Utc>>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateContactSyncRequest {
+    pub provider: String,
+    pub access_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncedContact {
+    pub id: Uuid,
+    pub user_uri: String,
+    pub name: String,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    pub source: String,
+    pub external_id: Option<String>,
+    pub synced_at: DateTime<Utc>,
+}
+
+// ─── Outbound Connectors ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Connector {
+    pub id: Uuid,
+    pub name: String,
+    pub connector_type: String,
+    pub webhook_url: String,
+    pub events: Vec<String>,
+    pub auth_header: Option<String>,
+    pub enabled: bool,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateConnectorRequest {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub connector_type: String,
+    pub webhook_url: String,
+    #[serde(default)]
+    pub events: Vec<String>,
+    pub auth_header: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateConnectorRequest {
+    pub name: Option<String>,
+    pub webhook_url: Option<String>,
+    pub events: Option<Vec<String>>,
+    pub auth_header: Option<String>,
     pub enabled: Option<bool>,
 }
 

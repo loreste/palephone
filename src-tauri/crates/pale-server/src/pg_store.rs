@@ -99,6 +99,7 @@ impl PgStore {
             include_str!("../migrations/033_approvals.sql"),
             include_str!("../migrations/034_recording_policies_hold_music.sql"),
             include_str!("../migrations/035_personal_call_groups.sql"),
+            include_str!("../migrations/036_platform_integrations.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {

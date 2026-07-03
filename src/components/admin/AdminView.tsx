@@ -54,7 +54,7 @@ async function api<T = any>(baseUrl: string, token: string, path: string, opts?:
   return paleServerApi<T>(baseUrl, token, path, opts);
 }
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music" | "api_clients" | "bots" | "connectors";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -92,6 +92,9 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "meeting_templates", label: "Meeting Templates", icon: ClipboardList },
   { id: "recording_policies", label: "Rec. Policies", icon: Mic },
   { id: "hold_music", label: "Hold Music", icon: RadioTower },
+  { id: "api_clients", label: "API Clients", icon: Shield },
+  { id: "bots", label: "Bots", icon: Router },
+  { id: "connectors", label: "Connectors", icon: GitBranch },
 ];
 
 export function AdminView() {
@@ -315,6 +318,9 @@ export function AdminView() {
         {activeTab === "meeting_templates" && <MeetingTemplatesPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "recording_policies" && <RecordingPoliciesPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "hold_music" && <HoldMusicPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "api_clients" && <ApiClientsPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "bots" && <BotsPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "connectors" && <ConnectorsPanel baseUrl={baseUrl} token={token} />}
       </div>
     </div>
   );
@@ -5165,6 +5171,425 @@ function MeetingTemplatesPanel({ baseUrl, token }: { baseUrl: string; token: str
                 {t.max_participants && <span className="px-1.5 py-0.5 bg-purple-500/10 text-purple-600 rounded">Max: {t.max_participants}</span>}
               </div>
               <div className="text-[10px] text-tertiary">Created by {t.created_by} on {shortDate(t.created_at)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── API Clients Panel ───────────────────────────────────────
+
+interface ApiClientData {
+  id: string;
+  name: string;
+  client_id: string;
+  scopes: string[];
+  redirect_uris: string[];
+  created_by: string;
+  created_at: string;
+}
+
+function ApiClientsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [clients, setClients] = useState<ApiClientData[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [scopes, setScopes] = useState("");
+  const [lastSecret, setLastSecret] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api<ApiClientData[]>(baseUrl, token, "/v1/admin/api-clients");
+      setClients(data);
+    } catch { /* ignore */ }
+  }, [baseUrl, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const create = async () => {
+    if (!name.trim()) return;
+    try {
+      const resp = await api<{ client: ApiClientData; client_secret: string }>(baseUrl, token, "/v1/admin/api-clients", {
+        method: "POST",
+        body: {
+          name: name.trim(),
+          scopes: scopes.split(",").map(s => s.trim()).filter(Boolean),
+        },
+      });
+      setLastSecret(resp.client_secret);
+      setCreating(false);
+      setName("");
+      setScopes("");
+      load();
+      toast({ type: "success", title: "API client created" });
+    } catch { toast({ type: "error", title: "Failed to create API client" }); }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/api-clients/${id}`, { method: "DELETE" });
+      load();
+      toast({ type: "success", title: "API client deleted" });
+    } catch { toast({ type: "error", title: "Failed to delete API client" }); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold">API Clients (OAuth)</h2>
+        <button
+          onClick={() => { setCreating(!creating); setLastSecret(null); }}
+          className="flex items-center gap-1 text-xs px-2 py-1 bg-accent text-white rounded hover:bg-accent/90"
+        >
+          <Plus size={12} />
+          {creating ? "Cancel" : "New Client"}
+        </button>
+      </div>
+
+      {lastSecret && (
+        <div className="p-3 bg-green-500/10 border border-green-500/20 rounded">
+          <p className="text-xs font-medium text-green-700 mb-1">Client secret (copy now, shown once):</p>
+          <code className="text-xs break-all select-all">{lastSecret}</code>
+        </div>
+      )}
+
+      {creating && (
+        <div className="space-y-2 p-3 border border-border-subtle rounded">
+          <input
+            className="w-full text-sm rounded border border-border-subtle bg-input px-2 py-1.5"
+            placeholder="Client name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+          <input
+            className="w-full text-sm rounded border border-border-subtle bg-input px-2 py-1.5"
+            placeholder="Scopes (comma-separated, e.g. read,write)"
+            value={scopes}
+            onChange={(e) => setScopes(e.target.value)}
+          />
+          <button onClick={create} className="w-full py-1.5 bg-accent text-white rounded text-sm">
+            Create Client
+          </button>
+        </div>
+      )}
+
+      {clients.length === 0 ? (
+        <p className="text-xs text-secondary text-center py-4">No API clients configured</p>
+      ) : (
+        <div className="space-y-2">
+          {clients.map((c) => (
+            <div key={c.id} className="p-3 border border-border-subtle rounded space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">{c.name}</span>
+                <button onClick={() => remove(c.id)} className="text-xs text-destructive hover:underline">
+                  <Trash2 size={12} className="inline mr-1" />Delete
+                </button>
+              </div>
+              <div className="text-xs text-secondary">Client ID: <code>{c.client_id}</code></div>
+              {c.scopes.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {c.scopes.map(s => (
+                    <span key={s} className="text-[10px] px-1.5 py-0.5 bg-blue-500/10 text-blue-600 rounded">{s}</span>
+                  ))}
+                </div>
+              )}
+              <div className="text-[10px] text-tertiary">Created by {c.created_by} on {shortDate(c.created_at)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Bots Panel ───────────────────────────────────────
+
+interface BotData {
+  id: string;
+  name: string;
+  webhook_url: string;
+  events: string[];
+  api_token: string;
+  enabled: boolean;
+  owner_uri: string;
+  created_at: string;
+}
+
+function BotsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [bots, setBots] = useState<BotData[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [webhookUrl, setWebhookUrl] = useState("");
+  const [events, setEvents] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api<BotData[]>(baseUrl, token, "/v1/admin/bots");
+      setBots(data);
+    } catch { /* ignore */ }
+  }, [baseUrl, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const create = async () => {
+    if (!name.trim() || !webhookUrl.trim()) return;
+    try {
+      await api(baseUrl, token, "/v1/admin/bots", {
+        method: "POST",
+        body: {
+          name: name.trim(),
+          webhook_url: webhookUrl.trim(),
+          events: events.split(",").map(s => s.trim()).filter(Boolean),
+        },
+      });
+      setCreating(false);
+      setName("");
+      setWebhookUrl("");
+      setEvents("");
+      load();
+      toast({ type: "success", title: "Bot created" });
+    } catch { toast({ type: "error", title: "Failed to create bot" }); }
+  };
+
+  const toggle = async (bot: BotData) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/bots/${bot.id}`, {
+        method: "PUT",
+        body: { enabled: !bot.enabled },
+      });
+      load();
+    } catch { toast({ type: "error", title: "Failed to update bot" }); }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/bots/${id}`, { method: "DELETE" });
+      load();
+      toast({ type: "success", title: "Bot deleted" });
+    } catch { toast({ type: "error", title: "Failed to delete bot" }); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold">Bots</h2>
+        <button
+          onClick={() => setCreating(!creating)}
+          className="flex items-center gap-1 text-xs px-2 py-1 bg-accent text-white rounded hover:bg-accent/90"
+        >
+          <Plus size={12} />
+          {creating ? "Cancel" : "New Bot"}
+        </button>
+      </div>
+
+      {creating && (
+        <div className="space-y-2 p-3 border border-border-subtle rounded">
+          <input
+            className="w-full text-sm rounded border border-border-subtle bg-input px-2 py-1.5"
+            placeholder="Bot name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+          <input
+            className="w-full text-sm rounded border border-border-subtle bg-input px-2 py-1.5"
+            placeholder="Webhook URL"
+            value={webhookUrl}
+            onChange={(e) => setWebhookUrl(e.target.value)}
+          />
+          <input
+            className="w-full text-sm rounded border border-border-subtle bg-input px-2 py-1.5"
+            placeholder="Events (comma-separated, e.g. message,call,meeting or *)"
+            value={events}
+            onChange={(e) => setEvents(e.target.value)}
+          />
+          <button onClick={create} className="w-full py-1.5 bg-accent text-white rounded text-sm">
+            Create Bot
+          </button>
+        </div>
+      )}
+
+      {bots.length === 0 ? (
+        <p className="text-xs text-secondary text-center py-4">No bots configured</p>
+      ) : (
+        <div className="space-y-2">
+          {bots.map((b) => (
+            <div key={b.id} className="p-3 border border-border-subtle rounded space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">{b.name}</span>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => toggle(b)} className={cn("text-xs px-2 py-0.5 rounded", b.enabled ? "bg-green-500/10 text-green-600" : "bg-red-500/10 text-red-600")}>
+                    {b.enabled ? "Enabled" : "Disabled"}
+                  </button>
+                  <button onClick={() => remove(b.id)} className="text-xs text-destructive hover:underline">
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              </div>
+              <div className="text-xs text-secondary truncate">Webhook: {b.webhook_url}</div>
+              {b.events.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {b.events.map(e => (
+                    <span key={e} className="text-[10px] px-1.5 py-0.5 bg-purple-500/10 text-purple-600 rounded">{e}</span>
+                  ))}
+                </div>
+              )}
+              <div className="text-[10px] text-tertiary">Token: <code className="select-all">{b.api_token}</code></div>
+              <div className="text-[10px] text-tertiary">Owner: {b.owner_uri} | {shortDate(b.created_at)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Connectors Panel ───────────────────────────────────────
+
+interface ConnectorData {
+  id: string;
+  name: string;
+  connector_type: string;
+  webhook_url: string;
+  events: string[];
+  enabled: boolean;
+  created_by: string;
+  created_at: string;
+}
+
+function ConnectorsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [connectors, setConnectors] = useState<ConnectorData[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [connectorType, setConnectorType] = useState("webhook");
+  const [webhookUrl, setWebhookUrl] = useState("");
+  const [events, setEvents] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api<ConnectorData[]>(baseUrl, token, "/v1/admin/connectors");
+      setConnectors(data);
+    } catch { /* ignore */ }
+  }, [baseUrl, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const create = async () => {
+    if (!name.trim() || !webhookUrl.trim()) return;
+    try {
+      await api(baseUrl, token, "/v1/admin/connectors", {
+        method: "POST",
+        body: {
+          name: name.trim(),
+          type: connectorType,
+          webhook_url: webhookUrl.trim(),
+          events: events.split(",").map(s => s.trim()).filter(Boolean),
+        },
+      });
+      setCreating(false);
+      setName("");
+      setWebhookUrl("");
+      setEvents("");
+      load();
+      toast({ type: "success", title: "Connector created" });
+    } catch { toast({ type: "error", title: "Failed to create connector" }); }
+  };
+
+  const toggle = async (c: ConnectorData) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/connectors/${c.id}`, {
+        method: "PUT",
+        body: { enabled: !c.enabled },
+      });
+      load();
+    } catch { toast({ type: "error", title: "Failed to update connector" }); }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/connectors/${id}`, { method: "DELETE" });
+      load();
+      toast({ type: "success", title: "Connector deleted" });
+    } catch { toast({ type: "error", title: "Failed to delete connector" }); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold">Outbound Connectors</h2>
+        <button
+          onClick={() => setCreating(!creating)}
+          className="flex items-center gap-1 text-xs px-2 py-1 bg-accent text-white rounded hover:bg-accent/90"
+        >
+          <Plus size={12} />
+          {creating ? "Cancel" : "New Connector"}
+        </button>
+      </div>
+
+      {creating && (
+        <div className="space-y-2 p-3 border border-border-subtle rounded">
+          <input
+            className="w-full text-sm rounded border border-border-subtle bg-input px-2 py-1.5"
+            placeholder="Connector name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+          <select
+            className="w-full text-sm rounded border border-border-subtle bg-input px-2 py-1.5"
+            value={connectorType}
+            onChange={(e) => setConnectorType(e.target.value)}
+          >
+            <option value="webhook">Webhook</option>
+            <option value="slack">Slack</option>
+            <option value="teams">Teams</option>
+            <option value="jira">Jira</option>
+            <option value="custom">Custom</option>
+          </select>
+          <input
+            className="w-full text-sm rounded border border-border-subtle bg-input px-2 py-1.5"
+            placeholder="Webhook URL"
+            value={webhookUrl}
+            onChange={(e) => setWebhookUrl(e.target.value)}
+          />
+          <input
+            className="w-full text-sm rounded border border-border-subtle bg-input px-2 py-1.5"
+            placeholder="Events (comma-separated, e.g. call.ended,message.sent or *)"
+            value={events}
+            onChange={(e) => setEvents(e.target.value)}
+          />
+          <button onClick={create} className="w-full py-1.5 bg-accent text-white rounded text-sm">
+            Create Connector
+          </button>
+        </div>
+      )}
+
+      {connectors.length === 0 ? (
+        <p className="text-xs text-secondary text-center py-4">No connectors configured</p>
+      ) : (
+        <div className="space-y-2">
+          {connectors.map((c) => (
+            <div key={c.id} className="p-3 border border-border-subtle rounded space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">{c.name}</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] px-1.5 py-0.5 bg-gray-500/10 text-gray-600 rounded">{c.connector_type}</span>
+                  <button onClick={() => toggle(c)} className={cn("text-xs px-2 py-0.5 rounded", c.enabled ? "bg-green-500/10 text-green-600" : "bg-red-500/10 text-red-600")}>
+                    {c.enabled ? "Enabled" : "Disabled"}
+                  </button>
+                  <button onClick={() => remove(c.id)} className="text-xs text-destructive hover:underline">
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              </div>
+              <div className="text-xs text-secondary truncate">URL: {c.webhook_url}</div>
+              {c.events.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {c.events.map(e => (
+                    <span key={e} className="text-[10px] px-1.5 py-0.5 bg-amber-500/10 text-amber-600 rounded">{e}</span>
+                  ))}
+                </div>
+              )}
+              <div className="text-[10px] text-tertiary">Created by {c.created_by} on {shortDate(c.created_at)}</div>
             </div>
           ))}
         </div>

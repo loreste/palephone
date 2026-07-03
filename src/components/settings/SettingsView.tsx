@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { User, Volume2, Globe, Info, Server, Bell, Phone, LogOut, Sun, Moon, Palette, Shield, Monitor, Smartphone, Laptop, Trash2, Clock } from "lucide-react";
+import { User, Volume2, Globe, Info, Server, Bell, Phone, LogOut, Sun, Moon, Palette, Shield, Monitor, Smartphone, Laptop, Trash2, Clock, Calendar, Users, Plus } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useAccountStore } from "@/store/accountStore";
 import { useServerStore } from "@/store/serverStore";
@@ -13,7 +13,7 @@ import { disconnectServer, signOut } from "@/lib/session";
 import { toast } from "@/components/ui/Toast";
 import type { SipAccount } from "@/types";
 
-type SettingsTab = "account" | "audio" | "network" | "server" | "calls" | "call_analytics" | "call_groups" | "notifications" | "security" | "appearance" | "ooo" | "about";
+type SettingsTab = "account" | "audio" | "network" | "server" | "calls" | "call_analytics" | "call_groups" | "notifications" | "security" | "appearance" | "ooo" | "calendar" | "contacts" | "about";
 
 const settingsTabs: { id: SettingsTab; label: string; icon: typeof User }[] = [
   { id: "account", label: "Account", icon: User },
@@ -27,6 +27,8 @@ const settingsTabs: { id: SettingsTab; label: string; icon: typeof User }[] = [
   { id: "notifications", label: "Notifications", icon: Bell },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "ooo", label: "Out of Office", icon: Clock },
+  { id: "calendar", label: "Calendar", icon: Calendar },
+  { id: "contacts", label: "Contacts", icon: Users },
   { id: "about", label: "About", icon: Info },
 ];
 
@@ -73,6 +75,8 @@ export function SettingsView() {
         {activeTab === "notifications" && <NotificationSettingsPanel />}
         {activeTab === "appearance" && <AppearancePanel />}
         {activeTab === "ooo" && <OutOfOfficePanel />}
+        {activeTab === "calendar" && <CalendarIntegrationPanel />}
+        {activeTab === "contacts" && <ContactSyncPanel />}
         {activeTab === "about" && <AboutPanel />}
       </div>
 
@@ -1513,6 +1517,286 @@ function FormField({
           "transition-colors"
         )}
       />
+    </div>
+  );
+}
+
+// ── Calendar Integration Panel ───────────────────────────────
+
+interface CalendarIntegrationData {
+  id: string;
+  provider: string;
+  calendar_id?: string;
+  enabled: boolean;
+  last_sync?: string;
+}
+
+function CalendarIntegrationPanel() {
+  const serverBaseUrl = useServerStore((s) => s.baseUrl);
+  const serverToken = useServerStore((s) => s.token);
+  const [integrations, setIntegrations] = useState<CalendarIntegrationData[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [provider, setProvider] = useState("google");
+  const [accessToken, setAccessToken] = useState("");
+  const [calendarId, setCalendarId] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    if (!serverBaseUrl || !serverToken) return;
+    setLoading(true);
+    try {
+      const data = await paleServerApi<CalendarIntegrationData[]>(serverBaseUrl, serverToken, "/v1/users/calendar-integration");
+      setIntegrations(data);
+    } catch { /* ignore */ }
+    setLoading(false);
+  }, [serverBaseUrl, serverToken]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const create = async () => {
+    if (!accessToken.trim() || !serverBaseUrl || !serverToken) return;
+    try {
+      await paleServerApi(serverBaseUrl, serverToken, "/v1/users/calendar-integration", {
+        method: "POST",
+        body: {
+          provider,
+          access_token: accessToken.trim(),
+          calendar_id: calendarId.trim() || undefined,
+        },
+      });
+      setCreating(false);
+      setAccessToken("");
+      setCalendarId("");
+      load();
+      toast({ type: "success", title: "Calendar connected" });
+    } catch { toast({ type: "error", title: "Failed to connect calendar" }); }
+  };
+
+  const remove = async (id: string) => {
+    if (!serverBaseUrl || !serverToken) return;
+    try {
+      await paleServerApi(serverBaseUrl, serverToken, `/v1/users/calendar-integration/${id}`, { method: "DELETE" });
+      load();
+      toast({ type: "success", title: "Calendar disconnected" });
+    } catch { toast({ type: "error", title: "Failed to disconnect calendar" }); }
+  };
+
+  if (loading) return <p className="text-sm text-secondary">Loading...</p>;
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-sm font-semibold">Calendar Integration</h2>
+      <p className="text-xs text-secondary">
+        Connect external calendars to sync meetings and availability.
+      </p>
+
+      <button
+        onClick={() => setCreating(!creating)}
+        className={cn(
+          "flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md",
+          "bg-accent text-white hover:bg-accent/90 transition-colors"
+        )}
+      >
+        <Plus size={12} />
+        {creating ? "Cancel" : "Add Calendar"}
+      </button>
+
+      {creating && (
+        <div className="space-y-3 p-3 border border-border-subtle rounded-md">
+          <div>
+            <label className="text-xs font-medium text-secondary mb-1 block">Provider</label>
+            <select
+              className={cn("w-full bg-surface border border-border-subtle rounded-md px-3 py-2 text-sm")}
+              value={provider}
+              onChange={(e) => setProvider(e.target.value)}
+            >
+              <option value="google">Google Calendar</option>
+              <option value="exchange">Microsoft Exchange</option>
+              <option value="caldav">CalDAV</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-secondary mb-1 block">Access Token</label>
+            <input
+              type="password"
+              className={cn("w-full bg-surface border border-border-subtle rounded-md px-3 py-2 text-sm")}
+              placeholder="OAuth access token"
+              value={accessToken}
+              onChange={(e) => setAccessToken(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-secondary mb-1 block">Calendar ID (optional)</label>
+            <input
+              className={cn("w-full bg-surface border border-border-subtle rounded-md px-3 py-2 text-sm")}
+              placeholder="primary"
+              value={calendarId}
+              onChange={(e) => setCalendarId(e.target.value)}
+            />
+          </div>
+          <button
+            onClick={create}
+            className={cn("w-full px-4 py-2 rounded-md text-sm font-medium bg-accent text-white hover:bg-accent/90")}
+          >
+            Connect Calendar
+          </button>
+        </div>
+      )}
+
+      {integrations.length === 0 ? (
+        <p className="text-xs text-tertiary text-center py-3">No calendars connected</p>
+      ) : (
+        <div className="space-y-2">
+          {integrations.map((i) => (
+            <div key={i.id} className="flex items-center justify-between p-3 border border-border-subtle rounded-md">
+              <div>
+                <div className="text-sm font-medium capitalize">{i.provider}</div>
+                {i.calendar_id && <div className="text-xs text-secondary">{i.calendar_id}</div>}
+                {i.last_sync && <div className="text-[10px] text-tertiary">Last sync: {new Date(i.last_sync).toLocaleString()}</div>}
+              </div>
+              <button
+                onClick={() => remove(i.id)}
+                className="text-xs text-destructive hover:underline flex items-center gap-1"
+              >
+                <Trash2 size={12} />
+                Disconnect
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Contact Sync Panel ───────────────────────────────
+
+interface ContactSyncData {
+  id: string;
+  provider: string;
+  enabled: boolean;
+  last_sync?: string;
+}
+
+function ContactSyncPanel() {
+  const serverBaseUrl = useServerStore((s) => s.baseUrl);
+  const serverToken = useServerStore((s) => s.token);
+  const [configs, setConfigs] = useState<ContactSyncData[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [provider, setProvider] = useState("google");
+  const [accessToken, setAccessToken] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    if (!serverBaseUrl || !serverToken) return;
+    setLoading(true);
+    try {
+      const data = await paleServerApi<ContactSyncData[]>(serverBaseUrl, serverToken, "/v1/users/contact-sync");
+      setConfigs(data);
+    } catch { /* ignore */ }
+    setLoading(false);
+  }, [serverBaseUrl, serverToken]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const create = async () => {
+    if (!accessToken.trim() || !serverBaseUrl || !serverToken) return;
+    try {
+      await paleServerApi(serverBaseUrl, serverToken, "/v1/users/contact-sync", {
+        method: "POST",
+        body: { provider, access_token: accessToken.trim() },
+      });
+      setCreating(false);
+      setAccessToken("");
+      load();
+      toast({ type: "success", title: "Contact sync connected" });
+    } catch { toast({ type: "error", title: "Failed to connect contact sync" }); }
+  };
+
+  const remove = async (id: string) => {
+    if (!serverBaseUrl || !serverToken) return;
+    try {
+      await paleServerApi(serverBaseUrl, serverToken, `/v1/users/contact-sync/${id}`, { method: "DELETE" });
+      load();
+      toast({ type: "success", title: "Contact sync disconnected" });
+    } catch { toast({ type: "error", title: "Failed to disconnect" }); }
+  };
+
+  if (loading) return <p className="text-sm text-secondary">Loading...</p>;
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-sm font-semibold">Contact Sync</h2>
+      <p className="text-xs text-secondary">
+        Sync your address book from external providers.
+      </p>
+
+      <button
+        onClick={() => setCreating(!creating)}
+        className={cn(
+          "flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md",
+          "bg-accent text-white hover:bg-accent/90 transition-colors"
+        )}
+      >
+        <Plus size={12} />
+        {creating ? "Cancel" : "Add Provider"}
+      </button>
+
+      {creating && (
+        <div className="space-y-3 p-3 border border-border-subtle rounded-md">
+          <div>
+            <label className="text-xs font-medium text-secondary mb-1 block">Provider</label>
+            <select
+              className={cn("w-full bg-surface border border-border-subtle rounded-md px-3 py-2 text-sm")}
+              value={provider}
+              onChange={(e) => setProvider(e.target.value)}
+            >
+              <option value="google">Google Contacts</option>
+              <option value="exchange">Microsoft Exchange</option>
+              <option value="carddav">CardDAV</option>
+              <option value="ldap">LDAP</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-secondary mb-1 block">Access Token</label>
+            <input
+              type="password"
+              className={cn("w-full bg-surface border border-border-subtle rounded-md px-3 py-2 text-sm")}
+              placeholder="OAuth access token or API key"
+              value={accessToken}
+              onChange={(e) => setAccessToken(e.target.value)}
+            />
+          </div>
+          <button
+            onClick={create}
+            className={cn("w-full px-4 py-2 rounded-md text-sm font-medium bg-accent text-white hover:bg-accent/90")}
+          >
+            Connect Provider
+          </button>
+        </div>
+      )}
+
+      {configs.length === 0 ? (
+        <p className="text-xs text-tertiary text-center py-3">No contact sync configured</p>
+      ) : (
+        <div className="space-y-2">
+          {configs.map((c) => (
+            <div key={c.id} className="flex items-center justify-between p-3 border border-border-subtle rounded-md">
+              <div>
+                <div className="text-sm font-medium capitalize">{c.provider}</div>
+                {c.last_sync && <div className="text-[10px] text-tertiary">Last sync: {new Date(c.last_sync).toLocaleString()}</div>}
+              </div>
+              <button
+                onClick={() => remove(c.id)}
+                className="text-xs text-destructive hover:underline flex items-center gap-1"
+              >
+                <Trash2 size={12} />
+                Disconnect
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
