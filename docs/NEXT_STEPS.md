@@ -98,3 +98,13 @@ VERDICT ON THE PRIOR REVIEWER'S CLAIM: verified on every substantive clause; I c
 - **[qa/medium]** storage.rs ChaCha20Poly1305 encrypt/decrypt and pg_store.rs (778 lines) have zero tests — silent data-loss/corruption path for persisted secrets
   - File: /Users/loreste/palephone/src-tauri/crates/pale-server/src/storage.rs:167-215 (no mod tests in file); /Users/loreste/palephone/src-tauri/crates/pale-server/src/pg_store.rs (no tests)
   - Fix: First test: in storage.rs add `mod tests` with `fn encrypt_decrypt_roundtrip()` (construct the store with a fixed key, assert decrypt(encrypt(s)) == s) and `fn decrypt_rejects_tampered_ciphertext()` (flip one byte, assert Err not panic/garbage). For pg_store, add a #[ignore]-by-default tokio test gated on PALE_TEST_PG_URL that roundtrips upsert_registration, runnable in CI against the compose post
+
+## 4. Teams Enterprise Parity Features — LANDED 2026-07-03
+
+- [x] **Meeting attendance CSV export** — GET `/v1/conferences/{id}/attendance/export?format=csv`, "Export CSV" button in MeetingPanel attendance section
+- [x] **Meeting templates** — Admin-configurable meeting defaults (migration 024), CRUD at `/v1/admin/meeting-templates`, "Meeting Templates" tab in AdminView
+- [x] **Spotlight** — Organizer pins a participant's video for all via POST `/v1/conferences/{id}/spotlight`, SSE `spotlight_changed`, spotlight star button on participants
+- [x] **Live animated reactions** — POST `/v1/conferences/{id}/reactions`, SSE `meeting_reaction`, reaction bar with 8 emoji buttons + floating reaction overlay
+- [x] **Persistent meeting chat** — `chat_room_id` on conferences (migration 025), auto-created chat room linked to meeting, "Chat" tab in MeetingPanel
+- [x] **Green room / presenter staging** — `green_room_enabled` on conferences, join/ready endpoints, SSE `green_room_updated`, "Green Room" tab in MeetingPanel
+- [x] **Out-of-office auto-reply** — `out_of_office_message`/`out_of_office_until` on users (migration 025), GET/PUT `/v1/users/out-of-office`, "Out of Office" tab in Settings

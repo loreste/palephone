@@ -53,7 +53,7 @@ async function api<T = any>(baseUrl: string, token: string, path: string, opts?:
   return paleServerApi<T>(baseUrl, token, path, opts);
 }
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "meeting_templates";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -83,6 +83,7 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "policy", label: "Policy", icon: Shield },
   { id: "retention", label: "Retention", icon: Archive },
   { id: "dlp", label: "DLP", icon: Shield },
+  { id: "meeting_templates", label: "Meeting Templates", icon: ClipboardList },
 ];
 
 export function AdminView() {
@@ -298,6 +299,7 @@ export function AdminView() {
         {activeTab === "policy" && <CollaborationPolicyPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "retention" && <RetentionPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "dlp" && <DlpPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "meeting_templates" && <MeetingTemplatesPanel baseUrl={baseUrl} token={token} />}
       </div>
     </div>
   );
@@ -4274,4 +4276,167 @@ function shortDate(value: string) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+// ── Meeting Templates Panel ───────────────────────────────────────
+
+interface MeetingTemplateData {
+  id: string;
+  name: string;
+  description: string;
+  default_lobby: boolean;
+  default_mute_on_join: boolean;
+  default_allow_reactions: boolean;
+  default_recording: boolean;
+  max_participants: number | null;
+  allowed_roles: string[];
+  created_at: string;
+  created_by: string;
+}
+
+function MeetingTemplatesPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [templates, setTemplates] = useState<MeetingTemplateData[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [defaultLobby, setDefaultLobby] = useState(false);
+  const [defaultMuteOnJoin, setDefaultMuteOnJoin] = useState(false);
+  const [defaultAllowReactions, setDefaultAllowReactions] = useState(true);
+  const [defaultRecording, setDefaultRecording] = useState(false);
+  const [maxParticipants, setMaxParticipants] = useState<string>("");
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api<MeetingTemplateData[]>(baseUrl, token, "/v1/admin/meeting-templates");
+      setTemplates(data);
+    } catch { /* ignore */ }
+  }, [baseUrl, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const create = async () => {
+    if (!name.trim()) return;
+    try {
+      await api(baseUrl, token, "/v1/admin/meeting-templates", {
+        method: "POST",
+        body: {
+          name: name.trim(),
+          description: description.trim(),
+          default_lobby: defaultLobby,
+          default_mute_on_join: defaultMuteOnJoin,
+          default_allow_reactions: defaultAllowReactions,
+          default_recording: defaultRecording,
+          max_participants: maxParticipants ? Number(maxParticipants) : null,
+        },
+      });
+      setCreating(false);
+      setName("");
+      setDescription("");
+      setDefaultLobby(false);
+      setDefaultMuteOnJoin(false);
+      setDefaultAllowReactions(true);
+      setDefaultRecording(false);
+      setMaxParticipants("");
+      load();
+      toast({ type: "success", title: "Template created" });
+    } catch { toast({ type: "error", title: "Failed to create template" }); }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/meeting-templates/${id}`, { method: "DELETE" });
+      load();
+      toast({ type: "success", title: "Template deleted" });
+    } catch { toast({ type: "error", title: "Failed to delete template" }); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold">Meeting Templates</h2>
+        <button
+          onClick={() => setCreating(!creating)}
+          className="flex items-center gap-1 text-xs px-2 py-1 bg-accent text-white rounded hover:bg-accent/90"
+        >
+          <Plus size={12} />
+          {creating ? "Cancel" : "New Template"}
+        </button>
+      </div>
+
+      {creating && (
+        <div className="space-y-2 p-3 border border-border-subtle rounded">
+          <input
+            className="w-full text-sm rounded border border-border-subtle bg-input px-2 py-1.5"
+            placeholder="Template name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+          <input
+            className="w-full text-sm rounded border border-border-subtle bg-input px-2 py-1.5"
+            placeholder="Description"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+          />
+          <input
+            className="w-full text-sm rounded border border-border-subtle bg-input px-2 py-1.5"
+            placeholder="Max participants (optional)"
+            type="number"
+            value={maxParticipants}
+            onChange={(e) => setMaxParticipants(e.target.value)}
+          />
+          <div className="grid grid-cols-2 gap-2">
+            <label className="flex items-center gap-2 text-xs">
+              <input type="checkbox" checked={defaultLobby} onChange={(e) => setDefaultLobby(e.target.checked)} />
+              Lobby enabled
+            </label>
+            <label className="flex items-center gap-2 text-xs">
+              <input type="checkbox" checked={defaultMuteOnJoin} onChange={(e) => setDefaultMuteOnJoin(e.target.checked)} />
+              Mute on join
+            </label>
+            <label className="flex items-center gap-2 text-xs">
+              <input type="checkbox" checked={defaultAllowReactions} onChange={(e) => setDefaultAllowReactions(e.target.checked)} />
+              Allow reactions
+            </label>
+            <label className="flex items-center gap-2 text-xs">
+              <input type="checkbox" checked={defaultRecording} onChange={(e) => setDefaultRecording(e.target.checked)} />
+              Auto-record
+            </label>
+          </div>
+          <button onClick={create} className="w-full py-1.5 bg-accent text-white rounded text-sm">
+            Create Template
+          </button>
+        </div>
+      )}
+
+      {templates.length === 0 ? (
+        <p className="text-xs text-secondary text-center py-4">No meeting templates configured</p>
+      ) : (
+        <div className="space-y-2">
+          {templates.map((t) => (
+            <div key={t.id} className="p-3 border border-border-subtle rounded space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">{t.name}</span>
+                <button
+                  onClick={() => remove(t.id)}
+                  className="text-xs text-destructive hover:underline"
+                >
+                  <Trash2 size={12} className="inline mr-1" />
+                  Delete
+                </button>
+              </div>
+              {t.description && <p className="text-xs text-secondary">{t.description}</p>}
+              <div className="flex flex-wrap gap-2 text-[10px]">
+                {t.default_lobby && <span className="px-1.5 py-0.5 bg-blue-500/10 text-blue-600 rounded">Lobby</span>}
+                {t.default_mute_on_join && <span className="px-1.5 py-0.5 bg-amber-500/10 text-amber-600 rounded">Mute on join</span>}
+                {t.default_allow_reactions && <span className="px-1.5 py-0.5 bg-green-500/10 text-green-600 rounded">Reactions</span>}
+                {t.default_recording && <span className="px-1.5 py-0.5 bg-red-500/10 text-red-600 rounded">Recording</span>}
+                {t.max_participants && <span className="px-1.5 py-0.5 bg-purple-500/10 text-purple-600 rounded">Max: {t.max_participants}</span>}
+              </div>
+              <div className="text-[10px] text-tertiary">Created by {t.created_by} on {shortDate(t.created_at)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }

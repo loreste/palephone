@@ -29,6 +29,9 @@ use crate::{
     SetPresenceRequest, StartMonitorRequest, SyncCallHistoryRequest, UpdateCallStatusRequest,
     UpdateCollaborationPolicyRequest, UpdateConferenceParticipantRequest,
     UpdateScheduledMeetingRequest, UpdateSipAccountStatusRequest, UpsertRetentionPolicyRequest,
+    CreateMeetingTemplateRequest, UpdateMeetingTemplateRequest,
+    SetSpotlightRequest, SendMeetingReactionRequest,
+    SetOutOfOfficeRequest,
 };
 
 type SharedState = Arc<AppState>;
@@ -74,6 +77,34 @@ pub fn router(state: SharedState) -> Router {
         .route(
             "/v1/conferences/{id}/attendance",
             get(get_conference_attendance),
+        )
+        .route(
+            "/v1/conferences/{id}/attendance/export",
+            get(export_conference_attendance_csv),
+        )
+        .route(
+            "/v1/conferences/{id}/spotlight",
+            post(set_spotlight),
+        )
+        .route(
+            "/v1/conferences/{id}/reactions",
+            post(send_meeting_reaction),
+        )
+        .route(
+            "/v1/conferences/{id}/chat-room",
+            get(get_meeting_chat_room),
+        )
+        .route(
+            "/v1/conferences/{id}/green-room",
+            get(get_green_room).put(set_green_room_enabled),
+        )
+        .route(
+            "/v1/conferences/{id}/green-room/join",
+            post(join_green_room),
+        )
+        .route(
+            "/v1/conferences/{id}/green-room/ready",
+            post(green_room_ready),
         )
         .route("/v1/media/config", get(media_config))
         .route("/v1/calls", get(list_calls).post(create_call))
@@ -342,6 +373,20 @@ pub fn router(state: SharedState) -> Router {
             get(export_dlp_violations_csv),
         )
         .route("/v1/admin/dlp/scan", post(scan_content_dlp))
+        // Meeting templates
+        .route(
+            "/v1/admin/meeting-templates",
+            get(list_meeting_templates).post(create_meeting_template),
+        )
+        .route(
+            "/v1/admin/meeting-templates/{id}",
+            put(update_meeting_template).delete(delete_meeting_template),
+        )
+        // Out-of-office
+        .route(
+            "/v1/users/out-of-office",
+            get(get_out_of_office).put(set_out_of_office),
+        )
         .route("/v1/events", get(sse_stream))
         .layer(from_fn(crate::metrics::request_metrics))
         .layer(from_fn(cors))
@@ -966,6 +1011,248 @@ async fn get_conference_attendance(
         Some(format!("{}:{}", id, records.len())),
     );
     Ok(Json(records))
+}
+
+// ── Attendance CSV export ──────────────────────────────────────────
+
+async fn export_conference_attendance_csv(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Response, ApiError> {
+    let (principal, role) = authenticated_principal_role(&headers, &state)?;
+    if !state.can_moderate_conference(id, &principal, role == crate::ROLE_ADMIN) {
+        return Err(ApiError::Forbidden);
+    }
+    let format = params.get("format").map(|s| s.as_str()).unwrap_or("csv");
+    if format != "csv" {
+        return Err(ApiError::Conflict("only csv format supported".to_string()));
+    }
+    let csv = state.export_attendance_csv(id);
+    state.record_audit_event(
+        &principal,
+        "conference.attendance_exported_csv",
+        Some(id.to_string()),
+    );
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/csv; charset=utf-8"),
+    );
+    resp_headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"attendance-{}.csv\"", id))
+            .unwrap_or_else(|_| HeaderValue::from_static("attachment; filename=\"attendance.csv\"")),
+    );
+    Ok((resp_headers, csv).into_response())
+}
+
+// ── Spotlight ─────────────────────────────────────────────────────
+
+async fn set_spotlight(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<SetSpotlightRequest>,
+) -> Result<Json<crate::Conference>, ApiError> {
+    let (principal, role) = authenticated_principal_role(&headers, &state)?;
+    if !state.can_moderate_conference(id, &principal, role == crate::ROLE_ADMIN) {
+        return Err(ApiError::Forbidden);
+    }
+    let conference = state
+        .set_spotlight(id, input.participant_id)
+        .ok_or(ApiError::NotFound)?;
+    state.record_audit_event(
+        &principal,
+        "conference.spotlight_set",
+        Some(format!("{id}:{:?}", input.participant_id)),
+    );
+    Ok(Json(conference))
+}
+
+// ── Meeting reactions ─────────────────────────────────────────────
+
+async fn send_meeting_reaction(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<SendMeetingReactionRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    state.broadcast_meeting_reaction(id, &principal, &input.emoji);
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ── Meeting chat room ─────────────────────────────────────────────
+
+async fn get_meeting_chat_room(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let conference = state
+        .get_conference(id)
+        .ok_or(ApiError::NotFound)?;
+    let chat_room_id = state.ensure_meeting_chat_room(
+        id,
+        &conference.title,
+        &principal,
+    );
+    Ok(Json(json!({ "chat_room_id": chat_room_id })))
+}
+
+// ── Green room handlers ───────────────────────────────────────────
+
+async fn get_green_room(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::GreenRoomState>, ApiError> {
+    require_bearer(&headers, &state)?;
+    Ok(Json(state.get_green_room(id)))
+}
+
+async fn set_green_room_enabled(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<serde_json::Value>,
+) -> Result<Json<crate::Conference>, ApiError> {
+    let (principal, role) = authenticated_principal_role(&headers, &state)?;
+    if !state.can_moderate_conference(id, &principal, role == crate::ROLE_ADMIN) {
+        return Err(ApiError::Forbidden);
+    }
+    let enabled = input.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let conference = state
+        .set_green_room_enabled(id, enabled)
+        .ok_or(ApiError::NotFound)?;
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "green_room_updated".to_string(),
+        payload: serde_json::to_value(&state.get_green_room(id)).unwrap_or_default(),
+    });
+    Ok(Json(conference))
+}
+
+async fn join_green_room(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::JoinConferenceRequest>,
+) -> Result<Json<crate::GreenRoomState>, ApiError> {
+    require_bearer(&headers, &state)?;
+    let green_room = state.join_green_room(id, input.user_id, input.sip_uri);
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "green_room_updated".to_string(),
+        payload: serde_json::to_value(&green_room).unwrap_or_default(),
+    });
+    Ok(Json(green_room))
+}
+
+async fn green_room_ready(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<serde_json::Value>,
+) -> Result<Json<crate::GreenRoomState>, ApiError> {
+    require_bearer(&headers, &state)?;
+    let user_id = input
+        .get("user_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .ok_or(ApiError::Conflict("user_id required".to_string()))?;
+    let green_room = state.set_green_room_ready(id, user_id);
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "green_room_updated".to_string(),
+        payload: serde_json::to_value(&green_room).unwrap_or_default(),
+    });
+    Ok(Json(green_room))
+}
+
+// ── Meeting template handlers ─────────────────────────────────────
+
+async fn list_meeting_templates(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::MeetingTemplate>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_meeting_templates()))
+}
+
+async fn create_meeting_template(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateMeetingTemplateRequest>,
+) -> Result<Json<crate::MeetingTemplate>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let template = state.create_meeting_template(&principal, input);
+    state.record_audit_event(
+        &principal,
+        "meeting_template.created",
+        Some(template.id.to_string()),
+    );
+    Ok(Json(template))
+}
+
+async fn update_meeting_template(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<UpdateMeetingTemplateRequest>,
+) -> Result<Json<crate::MeetingTemplate>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let template = state
+        .update_meeting_template(id, input)
+        .ok_or(ApiError::NotFound)?;
+    state.record_audit_event(
+        &principal,
+        "meeting_template.updated",
+        Some(id.to_string()),
+    );
+    Ok(Json(template))
+}
+
+async fn delete_meeting_template(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if !state.delete_meeting_template(id) {
+        return Err(ApiError::NotFound);
+    }
+    state.record_audit_event(
+        &principal,
+        "meeting_template.deleted",
+        Some(id.to_string()),
+    );
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ── Out-of-office handlers ────────────────────────────────────────
+
+async fn get_out_of_office(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::OutOfOfficeSettings>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    Ok(Json(state.get_out_of_office(&principal)))
+}
+
+async fn set_out_of_office(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<SetOutOfOfficeRequest>,
+) -> Result<Json<crate::OutOfOfficeSettings>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let result = state.set_out_of_office(&principal, input);
+    state.record_audit_event(
+        &principal,
+        "user.out_of_office_updated",
+        None,
+    );
+    Ok(Json(result))
 }
 
 // ── Meeting lobby handlers ─────────────────────────────────────────

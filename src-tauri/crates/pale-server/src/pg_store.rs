@@ -87,6 +87,8 @@ impl PgStore {
             include_str!("../migrations/021_message_priority_saved.sql"),
             include_str!("../migrations/022_identity_lifecycle.sql"),
             include_str!("../migrations/023_call_policy.sql"),
+            include_str!("../migrations/024_meeting_templates.sql"),
+            include_str!("../migrations/025_meeting_enterprise_parity.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {
@@ -102,8 +104,8 @@ impl PgStore {
     pub async fn insert_user(&self, user: &User) -> Result<(), PgError> {
         let client = self.pool.get().await?;
         client.execute(
-            "INSERT INTO users (id, display_name, sip_uri, matrix_user_id, password_hash, role, created_at, active, deactivated_at, deactivated_by)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "INSERT INTO users (id, display_name, sip_uri, matrix_user_id, password_hash, role, created_at, active, deactivated_at, deactivated_by, out_of_office_message, out_of_office_until)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
              ON CONFLICT (id) DO UPDATE SET
                 display_name = EXCLUDED.display_name,
                 sip_uri = EXCLUDED.sip_uri,
@@ -112,8 +114,10 @@ impl PgStore {
                 role = EXCLUDED.role,
                 active = EXCLUDED.active,
                 deactivated_at = EXCLUDED.deactivated_at,
-                deactivated_by = EXCLUDED.deactivated_by",
-            &[&user.id, &user.display_name, &user.sip_uri, &user.matrix_user_id, &user.password_hash, &user.role, &user.created_at, &user.active, &user.deactivated_at, &user.deactivated_by],
+                deactivated_by = EXCLUDED.deactivated_by,
+                out_of_office_message = EXCLUDED.out_of_office_message,
+                out_of_office_until = EXCLUDED.out_of_office_until",
+            &[&user.id, &user.display_name, &user.sip_uri, &user.matrix_user_id, &user.password_hash, &user.role, &user.created_at, &user.active, &user.deactivated_at, &user.deactivated_by, &user.out_of_office_message, &user.out_of_office_until],
         ).await?;
         Ok(())
     }
@@ -140,7 +144,7 @@ impl PgStore {
     pub async fn load_users(&self) -> Result<Vec<User>, PgError> {
         let client = self.pool.get().await?;
         let rows = client.query(
-            "SELECT id, display_name, sip_uri, matrix_user_id, password_hash, role, created_at, active, deactivated_at, deactivated_by, email, title, department, phone_number, status_message FROM users ORDER BY created_at",
+            "SELECT id, display_name, sip_uri, matrix_user_id, password_hash, role, created_at, active, deactivated_at, deactivated_by, email, title, department, phone_number, status_message, out_of_office_message, out_of_office_until FROM users ORDER BY created_at",
             &[],
         ).await?;
 
@@ -162,6 +166,8 @@ impl PgStore {
                 department: r.try_get("department").ok().flatten(),
                 phone_number: r.try_get("phone_number").ok().flatten(),
                 status_message: r.try_get("status_message").ok().flatten(),
+                out_of_office_message: r.try_get("out_of_office_message").ok().flatten(),
+                out_of_office_until: r.try_get("out_of_office_until").ok().flatten(),
             })
             .collect())
     }

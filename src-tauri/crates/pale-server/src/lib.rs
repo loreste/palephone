@@ -266,6 +266,10 @@ pub struct AppState {
     // DLP policies and violations
     dlp_policies: ShardedMap<Uuid, DlpPolicy>,
     dlp_violations: RwLock<Vec<DlpViolation>>,
+    // Meeting templates
+    meeting_templates: ShardedMap<Uuid, MeetingTemplate>,
+    // Green room state keyed by conference_id
+    green_rooms: ShardedMap<Uuid, GreenRoomState>,
     user_create_lock: std::sync::Mutex<()>,
     agent_assignment_lock: std::sync::Mutex<()>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
@@ -420,6 +424,8 @@ impl AppState {
             call_quality_reports: RwLock::new(Vec::new()),
             dlp_policies: ShardedMap::new(),
             dlp_violations: RwLock::new(Vec::new()),
+            meeting_templates: ShardedMap::new(),
+            green_rooms: ShardedMap::new(),
             user_create_lock: std::sync::Mutex::new(()),
             agent_assignment_lock: std::sync::Mutex::new(()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
@@ -1126,6 +1132,8 @@ impl AppState {
             department: None,
             phone_number: None,
             status_message: None,
+            out_of_office_message: None,
+            out_of_office_until: None,
         };
         self.users.insert(user.id, user.clone());
         self.users.trim_to_len(MAX_USERS);
@@ -1821,6 +1829,9 @@ impl AppState {
             locked: false,
             active: false,
             created_at: Utc::now(),
+            spotlight_participant_id: None,
+            green_room_enabled: false,
+            chat_room_id: None,
         };
         self.conferences.insert(conference.id, conference.clone());
         self.conferences.trim_to_len(MAX_CONFERENCES);
@@ -1830,6 +1841,10 @@ impl AppState {
 
     pub fn list_conferences(&self) -> Vec<Conference> {
         self.conferences.values()
+    }
+
+    pub fn get_conference(&self, id: Uuid) -> Option<Conference> {
+        self.conferences.get(&id)
     }
 
     pub fn join_conference(
@@ -2140,6 +2155,399 @@ impl AppState {
         let uuid_str = user_part.strip_prefix("conf-")?;
         let id = Uuid::parse_str(uuid_str).ok()?;
         self.conferences.get(&id)
+    }
+
+    // ── Meeting templates ──────────────────────────────────────────
+
+    pub fn list_meeting_templates(&self) -> Vec<MeetingTemplate> {
+        self.meeting_templates.values()
+    }
+
+    pub fn get_meeting_template(&self, id: Uuid) -> Option<MeetingTemplate> {
+        self.meeting_templates.get(&id)
+    }
+
+    pub fn create_meeting_template(
+        &self,
+        principal: &str,
+        input: CreateMeetingTemplateRequest,
+    ) -> MeetingTemplate {
+        let template = MeetingTemplate {
+            id: Uuid::new_v4(),
+            name: input.name,
+            description: input.description.unwrap_or_default(),
+            default_lobby: input.default_lobby,
+            default_mute_on_join: input.default_mute_on_join,
+            default_allow_reactions: input.default_allow_reactions,
+            default_recording: input.default_recording,
+            max_participants: input.max_participants,
+            allowed_roles: input.allowed_roles,
+            created_at: Utc::now(),
+            created_by: principal.to_string(),
+        };
+        self.meeting_templates
+            .insert(template.id, template.clone());
+        self.persist(&template);
+        let template_for_pg = template.clone();
+        self.pg_spawn(move |pg| {
+            Box::pin(async move {
+                pg.upsert_business_object(
+                    MeetingTemplate::collection(),
+                    template_for_pg.key(),
+                    &template_for_pg,
+                )
+                .await
+            })
+        });
+        template
+    }
+
+    pub fn update_meeting_template(
+        &self,
+        id: Uuid,
+        input: UpdateMeetingTemplateRequest,
+    ) -> Option<MeetingTemplate> {
+        let template = {
+            let mut t = self.meeting_templates.get(&id)?;
+            if let Some(name) = input.name {
+                t.name = name;
+            }
+            if let Some(description) = input.description {
+                t.description = description;
+            }
+            if let Some(v) = input.default_lobby {
+                t.default_lobby = v;
+            }
+            if let Some(v) = input.default_mute_on_join {
+                t.default_mute_on_join = v;
+            }
+            if let Some(v) = input.default_allow_reactions {
+                t.default_allow_reactions = v;
+            }
+            if let Some(v) = input.default_recording {
+                t.default_recording = v;
+            }
+            if let Some(v) = input.max_participants {
+                t.max_participants = v;
+            }
+            if let Some(v) = input.allowed_roles {
+                t.allowed_roles = v;
+            }
+            t
+        };
+        self.meeting_templates
+            .insert(template.id, template.clone());
+        self.persist(&template);
+        let template_for_pg = template.clone();
+        self.pg_spawn(move |pg| {
+            Box::pin(async move {
+                pg.upsert_business_object(
+                    MeetingTemplate::collection(),
+                    template_for_pg.key(),
+                    &template_for_pg,
+                )
+                .await
+            })
+        });
+        Some(template)
+    }
+
+    pub fn delete_meeting_template(&self, id: Uuid) -> bool {
+        self.meeting_templates.remove(&id).is_some()
+    }
+
+    // ── Spotlight ─────────────────────────────────────────────────
+
+    pub fn set_spotlight(
+        &self,
+        conference_id: Uuid,
+        participant_id: Option<Uuid>,
+    ) -> Option<Conference> {
+        let conference = self
+            .conferences
+            .with_write(&conference_id, |conferences| {
+                let conference = conferences.get_mut(&conference_id)?;
+                conference.spotlight_participant_id = participant_id;
+                Some(conference.clone())
+            });
+        if let Some(conference) = &conference {
+            self.persist(conference);
+            self.broadcast_sse(SseEvent {
+                event_type: "spotlight_changed".to_string(),
+                payload: serde_json::json!({
+                    "conference_id": conference_id,
+                    "participant_id": participant_id,
+                }),
+            });
+        }
+        conference
+    }
+
+    // ── Meeting reactions ─────────────────────────────────────────
+
+    pub fn broadcast_meeting_reaction(
+        &self,
+        conference_id: Uuid,
+        user_uri: &str,
+        emoji: &str,
+    ) {
+        let reaction = MeetingReaction {
+            user_id: user_uri.to_string(),
+            user_name: user_uri
+                .strip_prefix("sip:")
+                .unwrap_or(user_uri)
+                .to_string(),
+            emoji: emoji.to_string(),
+            timestamp: Utc::now(),
+        };
+        self.broadcast_sse(SseEvent {
+            event_type: "meeting_reaction".to_string(),
+            payload: serde_json::json!({
+                "conference_id": conference_id,
+                "reaction": reaction,
+            }),
+        });
+    }
+
+    // ── Persistent meeting chat ───────────────────────────────────
+
+    pub fn ensure_meeting_chat_room(
+        &self,
+        conference_id: Uuid,
+        title: &str,
+        organizer_uri: &str,
+    ) -> Uuid {
+        // Check if conference already has a linked chat room
+        if let Some(conference) = self.conferences.get(&conference_id) {
+            if let Some(room_id) = conference.chat_room_id {
+                return room_id;
+            }
+        }
+        // Create a new room for the meeting chat
+        let room_id = Uuid::new_v4();
+        let room = Room {
+            id: room_id,
+            name: format!("Meeting: {}", title),
+            description: format!("Chat for meeting: {}", title),
+            is_direct: false,
+            created_by: organizer_uri.to_string(),
+            members: vec![RoomMember {
+                user_sip_uri: organizer_uri.to_string(),
+                role: "owner".to_string(),
+                joined_at: Utc::now(),
+            }],
+            conference_id: Some(conference_id),
+            call_uri: None,
+            team_id: None,
+            channel_name: None,
+            channel_type: "standard".to_string(),
+            channel_owners: Vec::new(),
+            posting_policy: "members".to_string(),
+            created_at: Utc::now(),
+        };
+        self.rooms.insert(room_id, room.clone());
+        self.persist(&room);
+        let room_for_pg = room.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.upsert_room(&room_for_pg).await }));
+
+        // Link the chat room to the conference
+        self.conferences
+            .with_write(&conference_id, |conferences| {
+                if let Some(conference) = conferences.get_mut(&conference_id) {
+                    conference.chat_room_id = Some(room_id);
+                }
+            });
+        if let Some(conference) = self.conferences.get(&conference_id) {
+            self.persist(&conference);
+        }
+
+        room_id
+    }
+
+    // ── Green room ────────────────────────────────────────────────
+
+    pub fn get_green_room(&self, conference_id: Uuid) -> GreenRoomState {
+        let conference = self.conferences.get(&conference_id);
+        let enabled = conference
+            .as_ref()
+            .map(|c| c.green_room_enabled)
+            .unwrap_or(false);
+        self.green_rooms
+            .get(&conference_id)
+            .unwrap_or_else(|| GreenRoomState {
+                conference_id,
+                enabled,
+                participants: Vec::new(),
+            })
+    }
+
+    pub fn set_green_room_enabled(
+        &self,
+        conference_id: Uuid,
+        enabled: bool,
+    ) -> Option<Conference> {
+        let conference = self
+            .conferences
+            .with_write(&conference_id, |conferences| {
+                let conference = conferences.get_mut(&conference_id)?;
+                conference.green_room_enabled = enabled;
+                Some(conference.clone())
+            });
+        if let Some(conference) = &conference {
+            self.persist(conference);
+        }
+        conference
+    }
+
+    pub fn join_green_room(
+        &self,
+        conference_id: Uuid,
+        user_id: Uuid,
+        sip_uri: String,
+    ) -> GreenRoomState {
+        self.green_rooms
+            .with_write(&conference_id, |rooms| {
+                let state = rooms
+                    .entry(conference_id)
+                    .or_insert_with(|| GreenRoomState {
+                        conference_id,
+                        enabled: true,
+                        participants: Vec::new(),
+                    });
+                if !state
+                    .participants
+                    .iter()
+                    .any(|p| p.user_id == user_id)
+                {
+                    state.participants.push(GreenRoomParticipant {
+                        user_id,
+                        sip_uri,
+                        ready: false,
+                        joined_at: Utc::now(),
+                    });
+                }
+                state.clone()
+            })
+    }
+
+    pub fn set_green_room_ready(
+        &self,
+        conference_id: Uuid,
+        user_id: Uuid,
+    ) -> GreenRoomState {
+        self.green_rooms
+            .with_write(&conference_id, |rooms| {
+                let state = rooms
+                    .entry(conference_id)
+                    .or_insert_with(|| GreenRoomState {
+                        conference_id,
+                        enabled: true,
+                        participants: Vec::new(),
+                    });
+                if let Some(p) = state
+                    .participants
+                    .iter_mut()
+                    .find(|p| p.user_id == user_id)
+                {
+                    p.ready = true;
+                }
+                state.clone()
+            })
+    }
+
+    // ── Out-of-office ─────────────────────────────────────────────
+
+    pub fn get_out_of_office(&self, user_uri: &str) -> OutOfOfficeSettings {
+        // Find user by SIP URI to get OOO settings
+        let users = self.users.values();
+        let user = users
+            .into_iter()
+            .find(|u| u.sip_uri == user_uri);
+        match user {
+            Some(u) => OutOfOfficeSettings {
+                message: u.out_of_office_message,
+                until: u.out_of_office_until,
+            },
+            None => OutOfOfficeSettings {
+                message: None,
+                until: None,
+            },
+        }
+    }
+
+    pub fn set_out_of_office(
+        &self,
+        user_uri: &str,
+        input: SetOutOfOfficeRequest,
+    ) -> OutOfOfficeSettings {
+        let users = self.users.values();
+        if let Some(mut user) = users
+            .into_iter()
+            .find(|u| u.sip_uri == user_uri)
+        {
+            user.out_of_office_message = input.message.clone();
+            user.out_of_office_until = input.until;
+            self.users.insert(user.id, user.clone());
+            self.persist(&user);
+            let user_for_pg = user.clone();
+            self.pg_spawn(move |pg| {
+                Box::pin(async move { pg.insert_user(&user_for_pg).await })
+            });
+        }
+        OutOfOfficeSettings {
+            message: input.message,
+            until: input.until,
+        }
+    }
+
+    pub fn check_out_of_office_auto_reply(&self, recipient_uri: &str) -> Option<String> {
+        let ooo = self.get_out_of_office(recipient_uri);
+        if let Some(message) = &ooo.message {
+            if !message.is_empty() {
+                // Check if OOO has expired
+                if let Some(until) = ooo.until {
+                    if Utc::now() > until {
+                        return None;
+                    }
+                }
+                return Some(message.clone());
+            }
+        }
+        None
+    }
+
+    // ── Attendance CSV export ─────────────────────────────────────
+
+    pub fn export_attendance_csv(&self, conference_id: Uuid) -> String {
+        let records = self.conference_attendance(conference_id);
+        let mut csv = String::from("participant,join_time,leave_time,duration,leave_reason\n");
+        for record in &records {
+            let participant = record
+                .sip_uri
+                .strip_prefix("sip:")
+                .unwrap_or(&record.sip_uri);
+            let join_time = record.joined_at.to_rfc3339();
+            let leave_time = record
+                .left_at
+                .map(|t| t.to_rfc3339())
+                .unwrap_or_default();
+            let duration = record.duration_secs.unwrap_or(0);
+            let leave_reason = record
+                .leave_reason
+                .as_ref()
+                .map(|r| {
+                    serde_json::to_value(r)
+                        .ok()
+                        .and_then(|v| v.as_str().map(String::from))
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            csv.push_str(&format!(
+                "\"{}\",\"{}\",\"{}\",{},\"{}\"\n",
+                participant, join_time, leave_time, duration, leave_reason
+            ));
+        }
+        csv
     }
 
     // ── Lobby methods ──────────────────────────────────────────────
@@ -6568,6 +6976,10 @@ pub struct User {
     pub department: Option<String>,
     pub phone_number: Option<String>,
     pub status_message: Option<String>,
+    #[serde(default)]
+    pub out_of_office_message: Option<String>,
+    #[serde(default)]
+    pub out_of_office_until: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7532,6 +7944,12 @@ pub struct Conference {
     #[serde(default)]
     pub active: bool,
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub spotlight_participant_id: Option<Uuid>,
+    #[serde(default)]
+    pub green_room_enabled: bool,
+    #[serde(default)]
+    pub chat_room_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -8070,6 +8488,115 @@ pub struct DlpViolationQuery {
 pub struct DlpScanResult {
     pub allowed: bool,
     pub violations: Vec<DlpViolation>,
+}
+
+// ── Meeting templates ─────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeetingTemplate {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub default_lobby: bool,
+    pub default_mute_on_join: bool,
+    pub default_allow_reactions: bool,
+    pub default_recording: bool,
+    pub max_participants: Option<i32>,
+    pub allowed_roles: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub created_by: String,
+}
+
+impl StoredObject for MeetingTemplate {
+    fn collection() -> &'static str {
+        "meeting_templates"
+    }
+    fn key(&self) -> String {
+        self.id.to_string()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateMeetingTemplateRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub default_lobby: bool,
+    #[serde(default)]
+    pub default_mute_on_join: bool,
+    #[serde(default = "default_true")]
+    pub default_allow_reactions: bool,
+    #[serde(default)]
+    pub default_recording: bool,
+    pub max_participants: Option<i32>,
+    #[serde(default)]
+    pub allowed_roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateMeetingTemplateRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub default_lobby: Option<bool>,
+    pub default_mute_on_join: Option<bool>,
+    pub default_allow_reactions: Option<bool>,
+    pub default_recording: Option<bool>,
+    pub max_participants: Option<Option<i32>>,
+    pub allowed_roles: Option<Vec<String>>,
+}
+
+// ── Spotlight ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SetSpotlightRequest {
+    pub participant_id: Option<Uuid>,
+}
+
+// ── Live meeting reactions ────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeetingReaction {
+    pub user_id: String,
+    pub user_name: String,
+    pub emoji: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SendMeetingReactionRequest {
+    pub emoji: String,
+}
+
+// ── Green room ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GreenRoomParticipant {
+    pub user_id: Uuid,
+    pub sip_uri: String,
+    pub ready: bool,
+    pub joined_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GreenRoomState {
+    pub conference_id: Uuid,
+    pub enabled: bool,
+    pub participants: Vec<GreenRoomParticipant>,
+}
+
+// ── Out-of-office ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutOfOfficeSettings {
+    pub message: Option<String>,
+    pub until: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SetOutOfOfficeRequest {
+    pub message: Option<String>,
+    pub until: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
