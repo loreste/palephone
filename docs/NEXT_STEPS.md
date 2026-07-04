@@ -163,11 +163,11 @@ implement. Use this as a roadmap for closing the gap.
 ### 4.3 Chat & Messaging
 - [x] Scheduled send (future delivery) — done 2026-07-03
 - [x] Inline message translation — done 2026-07-03
-- [ ] Federated cross-organization chat
+- [x] Federated cross-organization chat — done 2026-07-03
 - [ ] Guest access (invite flow, scoped permissions — flag exists but not implemented)
 - [x] Rich text editor / WYSIWYG (currently markdown only) — done 2026-07-03
-- [ ] Loop components (live collaborative inline content)
-- [ ] Immersive reader (accessibility)
+- [x] Loop components (live collaborative inline content) — done 2026-07-03
+- [x] Immersive reader (accessibility) — done 2026-07-03
 - [x] Message delivery/failure status and retry — done 2026-07-03
 - [x] Tags for targeted communication (@Managers-style group tags) — done 2026-07-03
 - [x] Custom emoji / sticker packs — done 2026-07-03
@@ -188,8 +188,8 @@ implement. Use this as a roadmap for closing the gap.
 - [x] Information barriers (compliance walls between user groups) — done 2026-07-03
 - [x] Sensitivity labels / data classification — done 2026-07-03
 - [x] Conditional access policies (device compliance, location, risk) — done 2026-07-03
-- [ ] ML-based communication compliance (beyond pattern-matching DLP)
-- [ ] Multi-geo / data residency controls
+- [x] ML-based communication compliance (beyond pattern-matching DLP) — done 2026-07-03
+- [x] Multi-geo / data residency controls — done 2026-07-03
 - [x] Usage analytics / adoption dashboards (Prometheus exists, no user-facing UI) — done 2026-07-03
 - [x] Policy packages (bundled policies per role) — done 2026-07-03
 - [x] Bulk user operations UI (CSV import/export) — done 2026-07-03

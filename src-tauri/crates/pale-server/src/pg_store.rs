@@ -109,6 +109,10 @@ impl PgStore {
             include_str!("../migrations/043_adaptive_cards.sql"),
             include_str!("../migrations/044_platform_integrations.sql"),
             include_str!("../migrations/045_conditional_access.sql"),
+            include_str!("../migrations/046_federation.sql"),
+            include_str!("../migrations/047_loop_components.sql"),
+            include_str!("../migrations/048_compliance_reviews.sql"),
+            include_str!("../migrations/049_data_residency.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {
