@@ -51,3 +51,5 @@ Thumbs.db
 *.aab
 *.keystore
 local.properties
+CLAUDE.md
+UI_UX_SPEC.md
