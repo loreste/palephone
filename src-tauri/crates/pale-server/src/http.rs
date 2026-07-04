@@ -904,6 +904,14 @@ pub fn router(state: SharedState) -> Router {
             get(enterprise_integration_health_report),
         )
         .route(
+            "/v1/admin/enterprise-integrations/provider-probes",
+            get(enterprise_provider_probe_report),
+        )
+        .route(
+            "/v1/admin/enterprise-integrations/validation",
+            get(enterprise_validation_report),
+        )
+        .route(
             "/v1/admin/enterprise-integrations/deployment-plan",
             get(enterprise_deployment_plan),
         )
@@ -9835,6 +9843,22 @@ async fn enterprise_integration_health_report(
 ) -> Result<Json<crate::EnterpriseIntegrationHealthReport>, ApiError> {
     authenticated_admin(&headers, &state)?;
     Ok(Json(state.enterprise_integration_health_report()))
+}
+
+async fn enterprise_provider_probe_report(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::EnterpriseProviderProbeReport>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.enterprise_provider_probe_report().await))
+}
+
+async fn enterprise_validation_report(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::EnterpriseValidationReport>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.enterprise_validation_report().await))
 }
 
 async fn enterprise_deployment_plan(

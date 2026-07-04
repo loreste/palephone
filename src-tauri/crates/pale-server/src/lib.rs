@@ -13406,6 +13406,25 @@ fn push_security_control(
     });
 }
 
+fn push_validation_check(
+    checks: &mut Vec<EnterpriseValidationCheck>,
+    id: &str,
+    area: &str,
+    passed: bool,
+    summary: &str,
+    evidence: Vec<String>,
+    blockers: Vec<String>,
+) {
+    checks.push(EnterpriseValidationCheck {
+        id: id.to_string(),
+        area: area.to_string(),
+        status: if passed { "pass" } else { "fail" }.to_string(),
+        summary: summary.to_string(),
+        evidence,
+        blockers,
+    });
+}
+
 // ── Meeting templates ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15894,6 +15913,52 @@ pub struct EnterpriseIntegrationHealthReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnterpriseProviderProbe {
+    pub id: String,
+    pub category: String,
+    pub name: String,
+    pub adapter: String,
+    pub target: Option<String>,
+    pub status: String,
+    pub latency_ms: Option<u128>,
+    pub checked_at: DateTime<Utc>,
+    pub evidence: Vec<String>,
+    pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnterpriseProviderProbeReport {
+    pub checked_at: DateTime<Utc>,
+    pub reachable: usize,
+    pub warning: usize,
+    pub blocked: usize,
+    pub probes: Vec<EnterpriseProviderProbe>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnterpriseValidationCheck {
+    pub id: String,
+    pub area: String,
+    pub status: String,
+    pub summary: String,
+    pub evidence: Vec<String>,
+    pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnterpriseValidationReport {
+    pub generated_at: DateTime<Utc>,
+    pub ready: bool,
+    pub score: u8,
+    pub passed: usize,
+    pub warning: usize,
+    pub failed: usize,
+    pub checks: Vec<EnterpriseValidationCheck>,
+    pub consensus: Vec<String>,
+    pub next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnterpriseDeploymentPlanItem {
     pub id: String,
     pub category: String,
@@ -16088,6 +16153,213 @@ fn enterprise_integration_health(integration: EnterpriseIntegration) -> Enterpri
         status: status.to_string(),
         checked_at,
         checks,
+        blockers,
+    }
+}
+
+fn enterprise_probe_adapter(integration: &EnterpriseIntegration) -> &'static str {
+    match integration.integration_kind.as_str() {
+        "ai_service" => "http_ai_provider",
+        "storage_service" => "storage_provider",
+        "security_service" => "security_scanner",
+        "security_policy_service" => "policy_engine",
+        "media_gateway" | "broadcast_service" | "sfu_layout_service" => "media_gateway",
+        "document_render_service" => "document_renderer",
+        "carrier_service" => "carrier_or_sbc",
+        "client_media_runtime"
+        | "client_platform"
+        | "desktop_runtime"
+        | "local_or_media_runtime" => "local_runtime",
+        _ => "generic_provider",
+    }
+}
+
+fn endpoint_target(integration: &EnterpriseIntegration) -> Option<String> {
+    integration
+        .endpoint_url
+        .clone()
+        .or_else(|| integration.admin_url.clone())
+}
+
+fn parse_tcp_endpoint(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let without_scheme = trimmed
+        .strip_prefix("tcp://")
+        .or_else(|| trimmed.strip_prefix("udp://"))
+        .unwrap_or(trimmed);
+    if without_scheme.contains(':') {
+        Some(without_scheme.trim_end_matches('/').to_string())
+    } else {
+        None
+    }
+}
+
+async fn probe_http_target(target: &str) -> (String, Option<u128>, Vec<String>, Vec<String>) {
+    let started = std::time::Instant::now();
+    let mut evidence = Vec::new();
+    let mut blockers = Vec::new();
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            blockers.push(format!("http_client_error:{err}"));
+            return ("blocked".to_string(), None, evidence, blockers);
+        }
+    };
+    match client.get(target).send().await {
+        Ok(response) => {
+            let latency_ms = started.elapsed().as_millis();
+            let status = response.status();
+            evidence.push(format!("http_status:{}", status.as_u16()));
+            evidence.push(format!("latency_ms:{latency_ms}"));
+            if status.is_success()
+                || status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                ("reachable".to_string(), Some(latency_ms), evidence, blockers)
+            } else if status.is_server_error() {
+                blockers.push(format!("provider_server_error:{}", status.as_u16()));
+                ("blocked".to_string(), Some(latency_ms), evidence, blockers)
+            } else {
+                blockers.push(format!("provider_unexpected_status:{}", status.as_u16()));
+                ("warning".to_string(), Some(latency_ms), evidence, blockers)
+            }
+        }
+        Err(err) => {
+            blockers.push(format!("http_probe_failed:{err}"));
+            ("blocked".to_string(), None, evidence, blockers)
+        }
+    }
+}
+
+async fn probe_tcp_target(target: &str) -> (String, Option<u128>, Vec<String>, Vec<String>) {
+    let mut evidence = Vec::new();
+    let mut blockers = Vec::new();
+    let Some(address) = parse_tcp_endpoint(target) else {
+        blockers.push("tcp_endpoint_missing_host_port".to_string());
+        return ("blocked".to_string(), None, evidence, blockers);
+    };
+    let started = std::time::Instant::now();
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::TcpStream::connect(&address),
+    )
+    .await
+    {
+        Ok(Ok(_stream)) => {
+            let latency_ms = started.elapsed().as_millis();
+            evidence.push(format!("tcp_connect:{address}"));
+            evidence.push(format!("latency_ms:{latency_ms}"));
+            ("reachable".to_string(), Some(latency_ms), evidence, blockers)
+        }
+        Ok(Err(err)) => {
+            blockers.push(format!("tcp_connect_failed:{err}"));
+            ("blocked".to_string(), None, evidence, blockers)
+        }
+        Err(_) => {
+            blockers.push("tcp_probe_timeout".to_string());
+            ("blocked".to_string(), None, evidence, blockers)
+        }
+    }
+}
+
+async fn probe_enterprise_integration(integration: EnterpriseIntegration) -> EnterpriseProviderProbe {
+    let checked_at = Utc::now();
+    let adapter = enterprise_probe_adapter(&integration).to_string();
+    let target = endpoint_target(&integration);
+    let mut evidence = Vec::new();
+    let mut blockers = Vec::new();
+
+    if !integration.enabled {
+        blockers.push("integration_disabled".to_string());
+        return EnterpriseProviderProbe {
+            id: integration.id,
+            category: integration.category,
+            name: integration.name,
+            adapter,
+            target,
+            status: "blocked".to_string(),
+            latency_ms: None,
+            checked_at,
+            evidence,
+            blockers,
+        };
+    }
+
+    if integration_uses_local_runtime(&integration) {
+        evidence.push("local_runtime_declared".to_string());
+        return EnterpriseProviderProbe {
+            id: integration.id,
+            category: integration.category,
+            name: integration.name,
+            adapter,
+            target,
+            status: "warning".to_string(),
+            latency_ms: None,
+            checked_at,
+            evidence,
+            blockers: vec!["local_runtime_requires_client_certification".to_string()],
+        };
+    }
+
+    let Some(target_value) = target.clone() else {
+        blockers.push("provider_endpoint_missing".to_string());
+        return EnterpriseProviderProbe {
+            id: integration.id,
+            category: integration.category,
+            name: integration.name,
+            adapter,
+            target,
+            status: "blocked".to_string(),
+            latency_ms: None,
+            checked_at,
+            evidence,
+            blockers,
+        };
+    };
+
+    let lower = target_value.trim().to_ascii_lowercase();
+    let (status, latency_ms, probe_evidence, probe_blockers) = if lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("webdav://")
+        || lower.starts_with("webdavs://")
+        || lower.starts_with("grpc://")
+        || lower.starts_with("grpcs://")
+    {
+        let http_target = target_value
+            .replacen("webdav://", "http://", 1)
+            .replacen("webdavs://", "https://", 1)
+            .replacen("grpc://", "http://", 1)
+            .replacen("grpcs://", "https://", 1);
+        probe_http_target(&http_target).await
+    } else if lower.starts_with("tcp://") || lower.starts_with("udp://") {
+        probe_tcp_target(&target_value).await
+    } else if lower.starts_with("rtmp://")
+        || lower.starts_with("rtmps://")
+        || lower.starts_with("s3://")
+    {
+        evidence.push("provider_specific_scheme_detected".to_string());
+        blockers.push("provider_specific_adapter_required".to_string());
+        ("warning".to_string(), None, Vec::new(), Vec::new())
+    } else {
+        blockers.push("endpoint_scheme_unsupported".to_string());
+        ("blocked".to_string(), None, Vec::new(), Vec::new())
+    };
+    evidence.extend(probe_evidence);
+    blockers.extend(probe_blockers);
+
+    EnterpriseProviderProbe {
+        id: integration.id,
+        category: integration.category,
+        name: integration.name,
+        adapter,
+        target,
+        status,
+        latency_ms,
+        checked_at,
+        evidence,
         blockers,
     }
 }
@@ -16628,6 +16900,217 @@ impl AppState {
             blocked,
             checked_at,
             integrations,
+        }
+    }
+
+    pub async fn enterprise_provider_probe_report(&self) -> EnterpriseProviderProbeReport {
+        let checked_at = Utc::now();
+        let handles: Vec<_> = self
+            .list_enterprise_integrations()
+            .into_iter()
+            .map(|integration| tokio::spawn(probe_enterprise_integration(integration)))
+            .collect();
+        let mut probes = Vec::new();
+        for handle in handles {
+            if let Ok(probe) = handle.await {
+                probes.push(probe);
+            }
+        }
+        probes.sort_by(|left, right| {
+            left.category
+                .cmp(&right.category)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        let reachable = probes
+            .iter()
+            .filter(|probe| probe.status == "reachable")
+            .count();
+        let warning = probes
+            .iter()
+            .filter(|probe| probe.status == "warning")
+            .count();
+        let blocked = probes
+            .iter()
+            .filter(|probe| probe.status == "blocked")
+            .count();
+        EnterpriseProviderProbeReport {
+            checked_at,
+            reachable,
+            warning,
+            blocked,
+            probes,
+        }
+    }
+
+    pub async fn enterprise_validation_report(&self) -> EnterpriseValidationReport {
+        let generated_at = Utc::now();
+        let capability_report = self.enterprise_capability_report();
+        let security = self.security_posture_report();
+        let probes = self.enterprise_provider_probe_report().await;
+        let capability_by_id: HashMap<_, _> = capability_report
+            .capabilities
+            .iter()
+            .map(|capability| (capability.id.as_str(), capability))
+            .collect();
+        let probe_by_id: HashMap<_, _> = probes
+            .probes
+            .iter()
+            .map(|probe| (probe.id.as_str(), probe))
+            .collect();
+
+        let mut checks = Vec::new();
+        push_validation_check(
+            &mut checks,
+            "core.calling_pbx",
+            "Calling",
+            true,
+            "Core SIP registrar, PBX routing, queues, IVR, voicemail, and call center APIs are present.",
+            vec![
+                format!("users:{}", self.users.len()),
+                format!("sip_accounts:{}", self.sip_accounts.len()),
+                format!("routing_rules:{}", self.routing_rules.len()),
+            ],
+            Vec::new(),
+        );
+        push_validation_check(
+            &mut checks,
+            "core.meetings",
+            "Meetings",
+            true,
+            "Meeting, conference, recording, template, poll, reaction, transcription, and town hall models are present.",
+            vec![
+                format!("conferences:{}", self.conferences.len()),
+                format!("scheduled_meetings:{}", self.scheduled_meetings.len()),
+            ],
+            Vec::new(),
+        );
+        push_validation_check(
+            &mut checks,
+            "core.files",
+            "Files",
+            true,
+            "File APIs, governance metadata, DLP hooks, and storage-provider readiness are present.",
+            vec![format!("files:{}", self.files.len())],
+            Vec::new(),
+        );
+        push_validation_check(
+            &mut checks,
+            "compliance.security_posture",
+            "Compliance",
+            security.score * 100 >= security.max_score * 60,
+            "Security score, recommendations, and compliance controls are available.",
+            vec![
+                format!("security_score:{}/{}", security.score, security.max_score),
+                format!("posture:{}", security.posture),
+            ],
+            if security.score * 100 >= security.max_score * 60 {
+                Vec::new()
+            } else {
+                vec!["security_posture_needs_attention".to_string()]
+            },
+        );
+
+        for (id, area, summary) in [
+            ("advanced_threat_protection", "Security", "Malware/ATP scanning provider must be configured and reachable."),
+            ("casb", "Security", "CASB or policy-engine provider must be configured and reachable."),
+            ("cloud_storage", "Files", "External storage backend must be configured and reachable."),
+            ("e911", "Calling", "Certified E911 provider must be configured and reachable."),
+            ("pstn_sbc_operator_connect", "Calling", "PSTN/SBC provider must be configured and reachable."),
+            ("auto_transcription", "AI", "STT provider must be configured and reachable."),
+            ("text_to_speech", "AI", "TTS provider must be configured and reachable."),
+            ("meeting_assistant", "AI", "LLM meeting assistant provider must be configured and reachable."),
+            ("copilot", "AI", "LLM workspace assistant provider must be configured and reachable."),
+            ("town_hall_broadcast", "Scale", "Broadcast/SFU provider must be configured and reachable for large town halls."),
+        ] {
+            let capability = capability_by_id.get(id).copied();
+            let probe = probe_by_id.get(id).copied();
+            let mut evidence = Vec::new();
+            let mut blockers = Vec::new();
+            if let Some(capability) = capability {
+                evidence.push(format!("capability_status:{}", capability.status));
+                if capability.status != "available" {
+                    blockers.push(format!("capability_not_available:{}", capability.status));
+                }
+            } else {
+                blockers.push("capability_missing".to_string());
+            }
+            if let Some(probe) = probe {
+                evidence.push(format!("probe_status:{}", probe.status));
+                evidence.extend(probe.evidence.clone());
+                if probe.status != "reachable" {
+                    blockers.extend(probe.blockers.clone());
+                    if probe.status == "warning" {
+                        blockers.push("provider_requires_deeper_adapter_or_certification".to_string());
+                    }
+                }
+            } else {
+                blockers.push("provider_probe_missing".to_string());
+            }
+            let passed = blockers.is_empty();
+            checks.push(EnterpriseValidationCheck {
+                id: id.to_string(),
+                area: area.to_string(),
+                status: if passed { "pass" } else { "fail" }.to_string(),
+                summary: summary.to_string(),
+                evidence,
+                blockers,
+            });
+        }
+
+        for (id, area, summary) in [
+            ("mobile_app", "Client Runtime", "Android/mobile packaging and device capability path must be validated."),
+            ("web_client", "Client Runtime", "Browser deployment and browser media compatibility must be validated."),
+            ("popout_multi_window", "Client Runtime", "Desktop multi-window lifecycle must be validated."),
+            ("virtual_backgrounds", "Media", "Virtual background runtime must be certified on target clients."),
+            ("together_gallery", "Media", "Gallery/together layout runtime must be certified."),
+            ("ndi_rtmp_streaming", "Media", "Streaming gateway must be configured and reachable."),
+            ("powerpoint_live", "Media", "Presentation renderer must be configured and reachable."),
+        ] {
+            let capability = capability_by_id.get(id).copied();
+            let status = capability
+                .map(|capability| capability.status.as_str())
+                .unwrap_or("missing");
+            let passed = status == "available";
+            checks.push(EnterpriseValidationCheck {
+                id: id.to_string(),
+                area: area.to_string(),
+                status: if passed { "pass" } else { "fail" }.to_string(),
+                summary: summary.to_string(),
+                evidence: vec![format!("capability_status:{status}")],
+                blockers: if passed {
+                    Vec::new()
+                } else {
+                    vec![format!("runtime_not_available:{status}")]
+                },
+            });
+        }
+
+        let passed = checks.iter().filter(|check| check.status == "pass").count();
+        let warning = checks.iter().filter(|check| check.status == "warning").count();
+        let failed = checks.iter().filter(|check| check.status == "fail").count();
+        let total = checks.len().max(1);
+        let score = ((passed * 100) / total).min(100) as u8;
+        let ready = failed == 0 && warning == 0;
+        let next_actions = checks
+            .iter()
+            .filter(|check| check.status != "pass")
+            .take(10)
+            .map(|check| format!("{}: {}", check.area, check.summary))
+            .collect();
+        EnterpriseValidationReport {
+            generated_at,
+            ready,
+            score,
+            passed,
+            warning,
+            failed,
+            checks,
+            consensus: vec![
+                "A configured integration must be enabled and backed by provider details.".to_string(),
+                "Network-reachable providers are stronger evidence than readiness toggles.".to_string(),
+                "Provider-specific schemes such as S3, RTMP, and carrier services still require deeper adapters or certification before enterprise parity is declared.".to_string(),
+            ],
+            next_actions,
         }
     }
 
@@ -19892,6 +20375,120 @@ mod tests {
         assert!(backgrounds
             .checks
             .contains(&"local_runtime_capability".to_string()));
+    }
+
+    #[tokio::test]
+    async fn enterprise_provider_probe_checks_real_tcp_reachability() {
+        let state = AppState::new(
+            PathBuf::from(format!(
+                "/tmp/pale-enterprise-provider-probe-{}",
+                Uuid::new_v4()
+            )),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let accept_task = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+        state
+            .update_enterprise_integration(
+                "advanced_threat_protection",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some(format!("tcp://{address}")),
+                    admin_url: None,
+                    api_key: None,
+                    clear_api_key: None,
+                    notes: Some("test ClamAV endpoint".to_string()),
+                },
+                "admin",
+            )
+            .unwrap();
+
+        let report = state.enterprise_provider_probe_report().await;
+        let atp = report
+            .probes
+            .iter()
+            .find(|probe| probe.id == "advanced_threat_protection")
+            .unwrap();
+        assert_eq!(atp.status, "reachable");
+        assert_eq!(atp.adapter, "security_scanner");
+        assert!(atp.latency_ms.is_some());
+        assert!(atp
+            .evidence
+            .iter()
+            .any(|line| line.starts_with("tcp_connect:")));
+        accept_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn enterprise_validation_report_refuses_readiness_without_reachable_providers() {
+        let state = AppState::new(
+            PathBuf::from(format!(
+                "/tmp/pale-enterprise-validation-{}",
+                Uuid::new_v4()
+            )),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        state
+            .update_enterprise_integration(
+                "cloud_storage",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some("s3://tenant-files".to_string()),
+                    admin_url: None,
+                    api_key: Some("storage-secret".to_string()),
+                    clear_api_key: None,
+                    notes: Some("MinIO requires provider-specific probe".to_string()),
+                },
+                "admin",
+            )
+            .unwrap();
+        state
+            .update_enterprise_integration(
+                "virtual_backgrounds",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: None,
+                    admin_url: None,
+                    api_key: None,
+                    clear_api_key: None,
+                    notes: Some("client runtime declared".to_string()),
+                },
+                "admin",
+            )
+            .unwrap();
+
+        let report = state.enterprise_validation_report().await;
+        assert!(!report.ready);
+        assert!(report.failed > 0);
+        assert!(report
+            .consensus
+            .iter()
+            .any(|line| line.contains("Network-reachable providers")));
+        let storage = report
+            .checks
+            .iter()
+            .find(|check| check.id == "cloud_storage")
+            .unwrap();
+        assert_eq!(storage.status, "fail");
+        assert!(storage
+            .blockers
+            .contains(&"provider_specific_adapter_required".to_string()));
+        assert!(storage
+            .blockers
+            .contains(&"provider_requires_deeper_adapter_or_certification".to_string()));
+        let background = report
+            .checks
+            .iter()
+            .find(|check| check.id == "virtual_backgrounds")
+            .unwrap();
+        assert_eq!(background.status, "pass");
     }
 
     #[test]

@@ -8218,6 +8218,48 @@ interface EnterpriseIntegrationHealthReport {
   integrations: EnterpriseIntegrationHealthCheck[];
 }
 
+interface EnterpriseProviderProbe {
+  id: string;
+  category: string;
+  name: string;
+  adapter: string;
+  target?: string | null;
+  status: "reachable" | "warning" | "blocked";
+  latency_ms?: number | null;
+  checked_at: string;
+  evidence: string[];
+  blockers: string[];
+}
+
+interface EnterpriseProviderProbeReport {
+  checked_at: string;
+  reachable: number;
+  warning: number;
+  blocked: number;
+  probes: EnterpriseProviderProbe[];
+}
+
+interface EnterpriseValidationCheck {
+  id: string;
+  area: string;
+  status: "pass" | "warning" | "fail";
+  summary: string;
+  evidence: string[];
+  blockers: string[];
+}
+
+interface EnterpriseValidationReport {
+  generated_at: string;
+  ready: boolean;
+  score: number;
+  passed: number;
+  warning: number;
+  failed: number;
+  checks: EnterpriseValidationCheck[];
+  consensus: string[];
+  next_actions: string[];
+}
+
 interface EnterpriseDeploymentPlanItem {
   id: string;
   category: string;
@@ -8247,22 +8289,28 @@ function EnterpriseIntegrationsPanel({ baseUrl, token }: { baseUrl: string; toke
   const [report, setReport] = useState<EnterpriseCapabilityReport | null>(null);
   const [readiness, setReadiness] = useState<EnterpriseParityReadinessReport | null>(null);
   const [health, setHealth] = useState<EnterpriseIntegrationHealthReport | null>(null);
+  const [probes, setProbes] = useState<EnterpriseProviderProbeReport | null>(null);
+  const [validation, setValidation] = useState<EnterpriseValidationReport | null>(null);
   const [deploymentPlan, setDeploymentPlan] = useState<EnterpriseDeploymentPlan | null>(null);
   const [drafts, setDrafts] = useState<Record<string, Partial<EnterpriseIntegration> & { api_key?: string }>>({});
 
   const load = useCallback(async () => {
     try {
-      const [integrations, status, parity, healthReport, plan] = await Promise.all([
+      const [integrations, status, parity, healthReport, probeReport, validationReport, plan] = await Promise.all([
         api<EnterpriseIntegration[]>(baseUrl, token, "/v1/admin/enterprise-integrations"),
         api<EnterpriseCapabilityReport>(baseUrl, token, "/v1/admin/enterprise-integrations/status"),
         api<EnterpriseParityReadinessReport>(baseUrl, token, "/v1/admin/enterprise-integrations/readiness"),
         api<EnterpriseIntegrationHealthReport>(baseUrl, token, "/v1/admin/enterprise-integrations/health"),
+        api<EnterpriseProviderProbeReport>(baseUrl, token, "/v1/admin/enterprise-integrations/provider-probes"),
+        api<EnterpriseValidationReport>(baseUrl, token, "/v1/admin/enterprise-integrations/validation"),
         api<EnterpriseDeploymentPlan>(baseUrl, token, "/v1/admin/enterprise-integrations/deployment-plan"),
       ]);
       setItems(integrations);
       setReport(status);
       setReadiness(parity);
       setHealth(healthReport);
+      setProbes(probeReport);
+      setValidation(validationReport);
       setDeploymentPlan(plan);
       setDrafts(Object.fromEntries(integrations.map((item) => [item.id, {
         enabled: item.enabled,
@@ -8381,6 +8429,64 @@ function EnterpriseIntegrationsPanel({ baseUrl, token }: { baseUrl: string; toke
           </div>
         </section>
       )}
+      {validation && (
+        <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+          <div className="p-3 border-b border-border-subtle flex items-center justify-between gap-3">
+            <div>
+              <h4 className="text-sm font-semibold">Enterprise Validation</h4>
+              <p className="text-xs text-secondary">Generated {shortDate(validation.generated_at)}</p>
+            </div>
+            <div className={cn(
+              "px-2 py-1 rounded text-xs font-medium",
+              validation.ready ? "bg-green-500/10 text-green-600" : "bg-red-500/10 text-red-600"
+            )}>
+              {validation.ready ? "Validated" : `${validation.score}% validated`}
+            </div>
+          </div>
+          <div className="p-3 grid lg:grid-cols-[1.2fr_1fr] gap-3">
+            <div className="space-y-2">
+              <div className="grid grid-cols-3 gap-2">
+                <Metric label="Passed" value={validation.passed} />
+                <Metric label="Warnings" value={validation.warning} />
+                <Metric label="Failed" value={validation.failed} />
+              </div>
+              {validation.checks.filter((check) => check.status !== "pass").slice(0, 8).map((check) => (
+                <div key={check.id} className="rounded border border-border-subtle bg-base p-2 text-sm">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium">{check.area}</span>
+                    <span className={cn(
+                      "px-1.5 py-0.5 rounded text-[10px] uppercase tracking-normal",
+                      check.status === "warning" ? "bg-amber-500/10 text-amber-600" : "bg-red-500/10 text-red-600"
+                    )}>
+                      {check.status}
+                    </span>
+                  </div>
+                  <div className="text-xs text-secondary mt-1">{check.summary}</div>
+                  {check.blockers.length > 0 && (
+                    <div className="text-xs text-tertiary mt-1">{check.blockers.slice(0, 3).map((blocker) => blocker.replace(/_/g, " ")).join(", ")}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div className="space-y-3">
+              <div>
+                <h5 className="text-xs font-semibold text-secondary uppercase tracking-normal">Validation Consensus</h5>
+                <ul className="mt-2 space-y-1 text-xs text-secondary">
+                  {validation.consensus.map((line) => <li key={line}>{line}</li>)}
+                </ul>
+              </div>
+              <div>
+                <h5 className="text-xs font-semibold text-secondary uppercase tracking-normal">Validation Actions</h5>
+                <ul className="mt-2 space-y-1 text-xs text-secondary">
+                  {validation.next_actions.length === 0 ? (
+                    <li>No open validation actions.</li>
+                  ) : validation.next_actions.map((line) => <li key={line}>{line}</li>)}
+                </ul>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
       {health && (
         <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
           <div className="p-3 border-b border-border-subtle flex items-center justify-between gap-3">
@@ -8413,6 +8519,43 @@ function EnterpriseIntegrationsPanel({ baseUrl, token }: { baseUrl: string; toke
                   ) : (
                     <span>{item.checks.map((check) => check.replace(/_/g, " ")).join(", ") || "No checks reported"}</span>
                   )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+      {probes && (
+        <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+          <div className="p-3 border-b border-border-subtle flex items-center justify-between gap-3">
+            <div>
+              <h4 className="text-sm font-semibold">Provider Probes</h4>
+              <p className="text-xs text-secondary">Network reachability checked {shortDate(probes.checked_at)}</p>
+            </div>
+            <div className="flex items-center gap-2 text-xs">
+              <span className="px-2 py-1 rounded bg-green-500/10 text-green-600">{probes.reachable} reachable</span>
+              <span className="px-2 py-1 rounded bg-amber-500/10 text-amber-600">{probes.warning} warning</span>
+              <span className="px-2 py-1 rounded bg-red-500/10 text-red-600">{probes.blocked} blocked</span>
+            </div>
+          </div>
+          <div className="divide-y divide-border-subtle">
+            {probes.probes.slice(0, 10).map((probe) => (
+              <div key={probe.id} className="p-3 grid md:grid-cols-[220px_120px_1fr] gap-3 text-sm">
+                <div className="min-w-0">
+                  <div className="font-medium truncate">{probe.name}</div>
+                  <div className="text-xs text-tertiary">{probe.adapter.replace(/_/g, " ")}</div>
+                </div>
+                <div className={cn(
+                  "h-6 px-2 rounded text-xs inline-flex items-center justify-center capitalize",
+                  probe.status === "reachable" ? "bg-green-500/10 text-green-600" : probe.status === "warning" ? "bg-amber-500/10 text-amber-600" : "bg-red-500/10 text-red-600"
+                )}>
+                  {probe.status}
+                </div>
+                <div className="min-w-0 text-xs text-secondary">
+                  <div className="truncate">{probe.target || "No endpoint configured"}</div>
+                  <div className="text-tertiary">
+                    {probe.latency_ms != null ? `${probe.latency_ms} ms` : probe.blockers.slice(0, 2).map((blocker) => blocker.replace(/_/g, " ")).join(", ") || "No probe evidence"}
+                  </div>
                 </div>
               </div>
             ))}
