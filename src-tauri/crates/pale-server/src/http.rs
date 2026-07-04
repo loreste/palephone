@@ -35,6 +35,9 @@ use crate::{
     SetSpotlightRequest, SendMeetingReactionRequest,
     SetOutOfOfficeRequest,
     UpdateNotificationPreferenceRequest, UpdateTagRequest,
+    CreateCustomEmojiRequest, CreateWikiPageRequest, UpdateWikiPageRequest,
+    CreateTaskBoardRequest, CreateTaskRequest, UpdateTaskRequest,
+    TranslateRequest,
 };
 
 type SharedState = Arc<AppState>;
@@ -584,6 +587,43 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/hotdesk/login", post(hotdesk_login))
         .route("/v1/hotdesk/logout", post(hotdesk_logout))
         .route("/v1/hotdesk/status/{device_id}", get(hotdesk_status))
+        // Custom emojis
+        .route(
+            "/v1/teams/{id}/emojis",
+            get(list_custom_emojis).post(create_custom_emoji),
+        )
+        .route(
+            "/v1/teams/{id}/emojis/{emoji_id}",
+            delete(delete_custom_emoji_handler),
+        )
+        // Wiki pages
+        .route(
+            "/v1/teams/{id}/wiki",
+            get(list_wiki_pages).post(create_wiki_page),
+        )
+        .route(
+            "/v1/wiki/{id}",
+            get(get_wiki_page).put(update_wiki_page).delete(delete_wiki_page_handler),
+        )
+        // Task boards
+        .route(
+            "/v1/teams/{id}/boards",
+            get(list_task_boards).post(create_task_board),
+        )
+        .route(
+            "/v1/boards/{id}",
+            delete(delete_task_board_handler),
+        )
+        .route(
+            "/v1/boards/{id}/tasks",
+            get(list_tasks).post(create_task),
+        )
+        .route(
+            "/v1/tasks/{id}",
+            put(update_task).delete(delete_task_handler),
+        )
+        // Inline translation
+        .route("/v1/translate", post(translate_text))
         .route("/v1/events", get(sse_stream))
         .layer(from_fn(crate::metrics::request_metrics))
         .layer(from_fn(cors))
@@ -3744,7 +3784,7 @@ async fn send_room_message(
     let principal = authenticated_principal(&headers, &state)?;
     require_room_member(&state, id, &principal)?;
     state
-        .send_room_message(id, &principal, &input.body, input.reply_to, input.priority)
+        .send_room_message_with_card(id, &principal, &input.body, input.reply_to, input.priority, input.card_payload)
         .map(Json)
         .map_err(ApiError::Conflict)
 }
@@ -6209,6 +6249,390 @@ async fn revoke_admin_elevation(
         Some(id.to_string()),
     );
     Ok(Json(elevation))
+}
+
+// ─── Custom Emojis ───
+
+async fn list_custom_emojis(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::CustomEmoji>>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    Ok(Json(state.custom_emojis_for_team(id)))
+}
+
+async fn create_custom_emoji(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<CreateCustomEmojiRequest>,
+) -> Result<Json<crate::CustomEmoji>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let emoji = crate::CustomEmoji {
+        id: Uuid::new_v4(),
+        team_id: id,
+        shortcode: input.shortcode,
+        image_url: input.image_url,
+        uploaded_by: principal,
+        created_at: Utc::now(),
+    };
+    state.put_custom_emoji(emoji.clone());
+    if let Some(pg) = state.pg_store() {
+        let e = emoji.clone();
+        let pg = pg.clone();
+        tokio::spawn(async move {
+            if let Err(err) = pg.insert_custom_emoji(&e).await {
+                log::warn!("Failed to persist custom emoji: {}", err);
+            }
+        });
+    }
+    Ok(Json(emoji))
+}
+
+async fn delete_custom_emoji_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path((_team_id, emoji_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<crate::CustomEmoji>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    let emoji = state.delete_custom_emoji(emoji_id).ok_or(ApiError::NotFound)?;
+    if let Some(pg) = state.pg_store() {
+        let pg = pg.clone();
+        tokio::spawn(async move {
+            if let Err(err) = pg.delete_custom_emoji(emoji_id).await {
+                log::warn!("Failed to delete custom emoji from pg: {}", err);
+            }
+        });
+    }
+    Ok(Json(emoji))
+}
+
+// ─── Wiki Pages ───
+
+async fn list_wiki_pages(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::WikiPage>>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    Ok(Json(state.wiki_pages_for_team(id)))
+}
+
+async fn create_wiki_page(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<CreateWikiPageRequest>,
+) -> Result<Json<crate::WikiPage>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let now = Utc::now();
+    let page = crate::WikiPage {
+        id: Uuid::new_v4(),
+        team_id: id,
+        title: input.title,
+        body: input.body.unwrap_or_default(),
+        created_by: principal.clone(),
+        updated_by: principal,
+        created_at: now,
+        updated_at: now,
+        parent_id: input.parent_id,
+    };
+    state.put_wiki_page(page.clone());
+    if let Some(pg) = state.pg_store() {
+        let p = page.clone();
+        let pg = pg.clone();
+        tokio::spawn(async move {
+            if let Err(err) = pg.upsert_wiki_page(&p).await {
+                log::warn!("Failed to persist wiki page: {}", err);
+            }
+        });
+    }
+    Ok(Json(page))
+}
+
+async fn get_wiki_page(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::WikiPage>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    state.wiki_page(id).map(Json).ok_or(ApiError::NotFound)
+}
+
+async fn update_wiki_page(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<UpdateWikiPageRequest>,
+) -> Result<Json<crate::WikiPage>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let mut page = state.wiki_page(id).ok_or(ApiError::NotFound)?;
+    if let Some(title) = input.title {
+        page.title = title;
+    }
+    if let Some(body) = input.body {
+        page.body = body;
+    }
+    if let Some(parent_id) = input.parent_id {
+        page.parent_id = Some(parent_id);
+    }
+    page.updated_by = principal;
+    page.updated_at = Utc::now();
+    state.put_wiki_page(page.clone());
+    if let Some(pg) = state.pg_store() {
+        let p = page.clone();
+        let pg = pg.clone();
+        tokio::spawn(async move {
+            if let Err(err) = pg.upsert_wiki_page(&p).await {
+                log::warn!("Failed to persist wiki page: {}", err);
+            }
+        });
+    }
+    Ok(Json(page))
+}
+
+async fn delete_wiki_page_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::WikiPage>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    let page = state.delete_wiki_page(id).ok_or(ApiError::NotFound)?;
+    if let Some(pg) = state.pg_store() {
+        let pg = pg.clone();
+        tokio::spawn(async move {
+            if let Err(err) = pg.delete_wiki_page(id).await {
+                log::warn!("Failed to delete wiki page from pg: {}", err);
+            }
+        });
+    }
+    Ok(Json(page))
+}
+
+// ─── Task Boards ───
+
+async fn list_task_boards(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::TaskBoard>>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    Ok(Json(state.task_boards_for_team(id)))
+}
+
+async fn create_task_board(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<CreateTaskBoardRequest>,
+) -> Result<Json<crate::TaskBoard>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let board = crate::TaskBoard {
+        id: Uuid::new_v4(),
+        team_id: id,
+        name: input.name,
+        created_by: principal,
+        created_at: Utc::now(),
+    };
+    state.put_task_board(board.clone());
+    if let Some(pg) = state.pg_store() {
+        let b = board.clone();
+        let pg = pg.clone();
+        tokio::spawn(async move {
+            if let Err(err) = pg.upsert_task_board(&b).await {
+                log::warn!("Failed to persist task board: {}", err);
+            }
+        });
+    }
+    Ok(Json(board))
+}
+
+async fn delete_task_board_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::TaskBoard>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    let board = state.delete_task_board(id).ok_or(ApiError::NotFound)?;
+    // Also delete tasks for this board
+    let tasks = state.tasks_for_board(id);
+    for task in &tasks {
+        state.delete_task(task.id);
+    }
+    if let Some(pg) = state.pg_store() {
+        let pg = pg.clone();
+        tokio::spawn(async move {
+            if let Err(err) = pg.delete_task_board(id).await {
+                log::warn!("Failed to delete task board from pg: {}", err);
+            }
+        });
+    }
+    Ok(Json(board))
+}
+
+async fn list_tasks(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::Task>>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    Ok(Json(state.tasks_for_board(id)))
+}
+
+async fn create_task(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<CreateTaskRequest>,
+) -> Result<Json<crate::Task>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let now = Utc::now();
+    let task = crate::Task {
+        id: Uuid::new_v4(),
+        board_id: id,
+        title: input.title,
+        description: input.description.unwrap_or_default(),
+        assignee: input.assignee,
+        status: input.status.unwrap_or_else(|| "todo".to_string()),
+        priority: input.priority.unwrap_or_else(|| "medium".to_string()),
+        due_date: input.due_date,
+        created_by: principal,
+        created_at: now,
+        updated_at: now,
+    };
+    state.put_task(task.clone());
+    if let Some(pg) = state.pg_store() {
+        let t = task.clone();
+        let pg = pg.clone();
+        tokio::spawn(async move {
+            if let Err(err) = pg.upsert_task(&t).await {
+                log::warn!("Failed to persist task: {}", err);
+            }
+        });
+    }
+    Ok(Json(task))
+}
+
+async fn update_task(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<UpdateTaskRequest>,
+) -> Result<Json<crate::Task>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    let mut task = state.task(id).ok_or(ApiError::NotFound)?;
+    if let Some(title) = input.title {
+        task.title = title;
+    }
+    if let Some(description) = input.description {
+        task.description = description;
+    }
+    if let Some(assignee) = input.assignee {
+        task.assignee = Some(assignee);
+    }
+    if let Some(status) = input.status {
+        task.status = status;
+    }
+    if let Some(priority) = input.priority {
+        task.priority = priority;
+    }
+    if let Some(due_date) = input.due_date {
+        task.due_date = Some(due_date);
+    }
+    task.updated_at = Utc::now();
+    state.put_task(task.clone());
+    if let Some(pg) = state.pg_store() {
+        let t = task.clone();
+        let pg = pg.clone();
+        tokio::spawn(async move {
+            if let Err(err) = pg.upsert_task(&t).await {
+                log::warn!("Failed to persist task: {}", err);
+            }
+        });
+    }
+    Ok(Json(task))
+}
+
+async fn delete_task_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::Task>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    let task = state.delete_task(id).ok_or(ApiError::NotFound)?;
+    if let Some(pg) = state.pg_store() {
+        let pg = pg.clone();
+        tokio::spawn(async move {
+            if let Err(err) = pg.delete_task(id).await {
+                log::warn!("Failed to delete task from pg: {}", err);
+            }
+        });
+    }
+    Ok(Json(task))
+}
+
+// ─── Inline Translation ───
+
+async fn translate_text(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<TranslateRequest>,
+) -> Result<Json<crate::TranslateResponse>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    let api_key = std::env::var("PALE_TRANSLATION_API_KEY").unwrap_or_default();
+    let api_url = std::env::var("PALE_TRANSLATION_API_URL")
+        .unwrap_or_else(|_| "https://libretranslate.com/translate".to_string());
+
+    if api_key.is_empty() {
+        return Err(ApiError::Conflict(
+            "Translation API key not configured (PALE_TRANSLATION_API_KEY)".to_string(),
+        ));
+    }
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&api_url)
+        .json(&serde_json::json!({
+            "q": input.text,
+            "target": input.target_language,
+            "api_key": api_key,
+        }))
+        .send()
+        .await
+        .map_err(|e| ApiError::Conflict(format!("Translation API error: {}", e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(ApiError::Conflict(format!(
+            "Translation API returned {}: {}",
+            status, body
+        )));
+    }
+
+    let result: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| ApiError::Conflict(format!("Translation API parse error: {}", e)))?;
+
+    let translated_text = result
+        .get("translatedText")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&input.text)
+        .to_string();
+
+    let source_language = result
+        .get("detectedLanguage")
+        .and_then(|v| v.get("language"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    Ok(Json(crate::TranslateResponse {
+        translated_text,
+        source_language,
+        target_language: input.target_language,
+    }))
 }
 
 // ─── Server-Sent Events ───

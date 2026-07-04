@@ -103,6 +103,10 @@ impl PgStore {
             include_str!("../migrations/037_encryption_config.sql"),
             include_str!("../migrations/038_admin_elevations.sql"),
             include_str!("../migrations/036_devices_rooms_delegation.sql"),
+            include_str!("../migrations/036_custom_emojis.sql"),
+            include_str!("../migrations/037_wiki_pages.sql"),
+            include_str!("../migrations/038_task_boards.sql"),
+            include_str!("../migrations/039_adaptive_cards.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {
@@ -1164,11 +1168,12 @@ impl PgStore {
         let client = self.pool.get().await?;
         let mentions = serde_json::to_value(&msg.mentions)?;
         let mentioned_user_uris = serde_json::to_value(&msg.mentioned_user_uris)?;
+        let card_json = msg.card_payload.as_ref().map(|c| serde_json::to_value(c).unwrap_or_default());
         client.execute(
-            "INSERT INTO room_messages (id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned, mentions, mentioned_user_uris, priority, saved_by, scheduled_at, delivered, delivery_status)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-             ON CONFLICT (id) DO UPDATE SET body = $4, edited_at = $8, pinned = $9, mentions = $10, mentioned_user_uris = $11, priority = $12, saved_by = $13, scheduled_at = $14, delivered = $15, delivery_status = $16",
-            &[&msg.id, &msg.room_id, &msg.sender_uri, &msg.body, &msg.content_type, &msg.created_at, &msg.reply_to, &msg.edited_at, &msg.pinned, &Json(mentions), &Json(mentioned_user_uris), &msg.priority, &msg.saved_by, &msg.scheduled_at, &msg.delivered, &msg.delivery_status],
+            "INSERT INTO room_messages (id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned, mentions, mentioned_user_uris, priority, saved_by, scheduled_at, delivered, delivery_status, card_payload)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+             ON CONFLICT (id) DO UPDATE SET body = $4, edited_at = $8, pinned = $9, mentions = $10, mentioned_user_uris = $11, priority = $12, saved_by = $13, scheduled_at = $14, delivered = $15, delivery_status = $16, card_payload = $17",
+            &[&msg.id, &msg.room_id, &msg.sender_uri, &msg.body, &msg.content_type, &msg.created_at, &msg.reply_to, &msg.edited_at, &msg.pinned, &Json(mentions), &Json(mentioned_user_uris), &msg.priority, &msg.saved_by, &msg.scheduled_at, &msg.delivered, &msg.delivery_status, &card_json],
         ).await?;
         Ok(())
     }
@@ -1176,7 +1181,7 @@ impl PgStore {
     pub async fn load_room_messages(&self) -> Result<Vec<RoomMessage>, PgError> {
         let client = self.pool.get().await?;
         let rows = client.query(
-            "SELECT id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned, mentions, mentioned_user_uris, priority, saved_by, scheduled_at, delivered, delivery_status FROM room_messages ORDER BY created_at",
+            "SELECT id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned, mentions, mentioned_user_uris, priority, saved_by, scheduled_at, delivered, delivery_status, card_payload FROM room_messages ORDER BY created_at",
             &[],
         ).await?;
         Ok(rows
@@ -1208,6 +1213,11 @@ impl PgStore {
                 delivery_status: r
                     .try_get("delivery_status")
                     .unwrap_or_else(|_| "sent".to_string()),
+                card_payload: r
+                    .try_get::<_, Option<serde_json::Value>>("card_payload")
+                    .ok()
+                    .flatten()
+                    .and_then(|v| serde_json::from_value(v).ok()),
             })
             .collect())
     }
@@ -1773,6 +1783,19 @@ impl PgStore {
         Ok(())
     }
 
+    // ─── Custom Emojis ───
+
+    pub async fn insert_custom_emoji(&self, emoji: &crate::CustomEmoji) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO custom_emojis (id, team_id, shortcode, image_url, uploaded_by, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (id) DO UPDATE SET shortcode=$3, image_url=$4",
+            &[&emoji.id, &emoji.team_id, &emoji.shortcode, &emoji.image_url, &emoji.uploaded_by, &emoji.created_at],
+        ).await?;
+        Ok(())
+    }
+
     pub async fn delete_line_delegation(&self, id: Uuid) -> Result<(), PgError> {
         let client = self.pool.get().await?;
         client.execute("DELETE FROM line_delegations WHERE id = $1", &[&id]).await?;
@@ -1796,6 +1819,28 @@ impl PgStore {
         }).collect())
     }
 
+    pub async fn delete_custom_emoji(&self, id: Uuid) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute("DELETE FROM custom_emojis WHERE id = $1", &[&id]).await?;
+        Ok(())
+    }
+
+    pub async fn load_custom_emojis(&self) -> Result<Vec<crate::CustomEmoji>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT id, team_id, shortcode, image_url, uploaded_by, created_at FROM custom_emojis ORDER BY created_at",
+            &[],
+        ).await?;
+        Ok(rows.iter().map(|r| crate::CustomEmoji {
+            id: r.get("id"),
+            team_id: r.get("team_id"),
+            shortcode: r.get("shortcode"),
+            image_url: r.get("image_url"),
+            uploaded_by: r.get("uploaded_by"),
+            created_at: r.get("created_at"),
+        }).collect())
+    }
+
     // ─── Common Area Phones ───
 
     pub async fn upsert_common_area_phone(&self, p: &crate::CommonAreaPhone) -> Result<(), PgError> {
@@ -1805,6 +1850,19 @@ impl PgStore {
              VALUES ($1,$2,$3,$4,$5,$6,$7)
              ON CONFLICT (id) DO UPDATE SET name=$2, extension=$3, location=$4, features=$5, enabled=$6",
             &[&p.id, &p.name, &p.extension, &p.location, &p.features, &p.enabled, &p.created_at],
+        ).await?;
+        Ok(())
+    }
+
+    // ─── Wiki Pages ───
+
+    pub async fn upsert_wiki_page(&self, page: &crate::WikiPage) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO wiki_pages (id, team_id, title, body, created_by, updated_by, created_at, updated_at, parent_id)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+             ON CONFLICT (id) DO UPDATE SET title=$3, body=$4, updated_by=$6, updated_at=$8, parent_id=$9",
+            &[&page.id, &page.team_id, &page.title, &page.body, &page.created_by, &page.updated_by, &page.created_at, &page.updated_at, &page.parent_id],
         ).await?;
         Ok(())
     }
@@ -1964,5 +2022,66 @@ impl PgStore {
             logged_in_at: r.get("logged_in_at"),
             logged_out_at: r.try_get("logged_out_at").ok().flatten(),
         }).collect())
+    }
+
+    pub async fn delete_wiki_page(&self, id: Uuid) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute("DELETE FROM wiki_pages WHERE id = $1", &[&id]).await?;
+        Ok(())
+    }
+
+    pub async fn load_wiki_pages(&self) -> Result<Vec<crate::WikiPage>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client.query(
+            "SELECT id, team_id, title, body, created_by, updated_by, created_at, updated_at, parent_id FROM wiki_pages ORDER BY created_at",
+            &[],
+        ).await?;
+        Ok(rows.iter().map(|r| crate::WikiPage {
+            id: r.get("id"),
+            team_id: r.get("team_id"),
+            title: r.get("title"),
+            body: r.get("body"),
+            created_by: r.get("created_by"),
+            updated_by: r.get("updated_by"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
+            parent_id: r.try_get("parent_id").ok().flatten(),
+        }).collect())
+    }
+
+    // ─── Task Boards & Tasks ───
+
+    pub async fn upsert_task_board(&self, board: &crate::TaskBoard) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO task_boards (id, team_id, name, created_by, created_at)
+             VALUES ($1,$2,$3,$4,$5)
+             ON CONFLICT (id) DO UPDATE SET name=$3",
+            &[&board.id, &board.team_id, &board.name, &board.created_by, &board.created_at],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn delete_task_board(&self, id: Uuid) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute("DELETE FROM task_boards WHERE id = $1", &[&id]).await?;
+        Ok(())
+    }
+
+    pub async fn upsert_task(&self, task: &crate::Task) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute(
+            "INSERT INTO tasks (id, board_id, title, description, assignee, status, priority, due_date, created_by, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+             ON CONFLICT (id) DO UPDATE SET title=$3, description=$4, assignee=$5, status=$6, priority=$7, due_date=$8, updated_at=$11",
+            &[&task.id, &task.board_id, &task.title, &task.description, &task.assignee, &task.status, &task.priority, &task.due_date, &task.created_by, &task.created_at, &task.updated_at],
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn delete_task(&self, id: Uuid) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client.execute("DELETE FROM tasks WHERE id = $1", &[&id]).await?;
+        Ok(())
     }
 }
