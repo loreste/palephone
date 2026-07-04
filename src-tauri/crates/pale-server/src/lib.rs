@@ -351,6 +351,16 @@ pub struct AppState {
     compliance_reviews: ShardedMap<Uuid, ComplianceReview>,
     // Data residency
     data_residency_configs: ShardedMap<Uuid, DataResidencyConfig>,
+    // Channel tabs
+    channel_tabs: ShardedMap<Uuid, ChannelTab>,
+    // Message extensions
+    message_extensions: ShardedMap<Uuid, MessageExtension>,
+    // App catalog
+    app_catalog: ShardedMap<Uuid, AppCatalogEntry>,
+    // Bandwidth policies
+    bandwidth_policies: ShardedMap<Uuid, BandwidthPolicy>,
+    // Signage displays
+    signage_displays: ShardedMap<Uuid, SignageDisplay>,
     user_create_lock: std::sync::Mutex<()>,
     agent_assignment_lock: std::sync::Mutex<()>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
@@ -555,6 +565,11 @@ impl AppState {
             loop_components: ShardedMap::new(),
             compliance_reviews: ShardedMap::new(),
             data_residency_configs: ShardedMap::new(),
+            channel_tabs: ShardedMap::new(),
+            message_extensions: ShardedMap::new(),
+            app_catalog: ShardedMap::new(),
+            bandwidth_policies: ShardedMap::new(),
+            signage_displays: ShardedMap::new(),
             user_create_lock: std::sync::Mutex::new(()),
             agent_assignment_lock: std::sync::Mutex::new(()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
@@ -12069,47 +12084,6 @@ impl AppState {
         Some(reg)
     }
 
-    // ─── Guest Users ───
-
-    pub fn invite_guest(
-        &self,
-        team_id: Uuid,
-        req: InviteGuestRequest,
-        invited_by: &str,
-    ) -> GuestUser {
-        let token = format!("guest_{}", Uuid::new_v4().simple());
-        let guest = GuestUser {
-            id: Uuid::new_v4(),
-            email: req.email,
-            display_name: req.display_name,
-            invited_by: invited_by.to_string(),
-            team_id,
-            permissions: req.permissions.unwrap_or_default(),
-            token,
-            expires_at: Utc::now() + Duration::days(30),
-            created_at: Utc::now(),
-        };
-        self.guest_users.insert(guest.id, guest.clone());
-        guest
-    }
-
-    pub fn list_guests(&self, team_id: Uuid) -> Vec<GuestUser> {
-        self.guest_users.values()
-            .into_iter()
-            .filter(|g| g.team_id == team_id)
-            .collect()
-    }
-
-    pub fn delete_guest(&self, _team_id: Uuid, guest_id: Uuid) -> bool {
-        self.guest_users.remove(&guest_id).is_some()
-    }
-
-    pub fn authenticate_guest(&self, token: &str) -> Option<GuestUser> {
-        self.guest_users.values()
-            .into_iter()
-            .find(|g| g.token == token && g.expires_at > Utc::now())
-    }
-
     // ─── CNAM Lookup ───
 
     pub fn cnam_lookup(&self, number: &str) -> CnamLookupResult {
@@ -12298,6 +12272,111 @@ pub struct UpdateRegistrationRequest {
     pub status: Option<String>,
 }
 
+// ─── Channel Tabs ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelTab {
+    pub id: Uuid,
+    pub room_id: Uuid,
+    pub name: String,
+    pub url: String,
+    pub icon: Option<String>,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub position: i32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateChannelTabRequest {
+    pub name: String,
+    pub url: String,
+    pub icon: Option<String>,
+    pub position: Option<i32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateChannelTabRequest {
+    pub name: Option<String>,
+    pub url: Option<String>,
+    pub icon: Option<String>,
+    pub position: Option<i32>,
+}
+
+// ─── Message Extensions ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageExtension {
+    pub id: Uuid,
+    pub name: String,
+    pub command: String,
+    pub description: String,
+    pub handler_url: String,
+    pub icon: Option<String>,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateMessageExtensionRequest {
+    pub name: String,
+    pub command: String,
+    pub description: Option<String>,
+    pub handler_url: String,
+    pub icon: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateMessageExtensionRequest {
+    pub name: Option<String>,
+    pub command: Option<String>,
+    pub description: Option<String>,
+    pub handler_url: Option<String>,
+    pub icon: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InvokeMessageExtensionRequest {
+    pub input: String,
+}
+
+// ─── App Catalog ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppCatalogEntry {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub category: String,
+    pub icon_url: Option<String>,
+    pub manifest_url: Option<String>,
+    pub installed: bool,
+    pub installed_by: Option<String>,
+    pub installed_at: Option<DateTime<Utc>>,
+    pub version: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateAppCatalogEntryRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub category: Option<String>,
+    pub icon_url: Option<String>,
+    pub manifest_url: Option<String>,
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateAppCatalogEntryRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub category: Option<String>,
+    pub icon_url: Option<String>,
+    pub manifest_url: Option<String>,
+    pub version: Option<String>,
+}
+
 // ─── Guest Users ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -12309,7 +12388,7 @@ pub struct GuestUser {
     pub team_id: Uuid,
     #[serde(default)]
     pub permissions: serde_json::Value,
-    pub token: String,
+    pub token_hash: String,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
 }
@@ -12319,6 +12398,7 @@ pub struct InviteGuestRequest {
     pub email: String,
     pub display_name: String,
     pub permissions: Option<serde_json::Value>,
+    pub expires_hours: Option<i64>,
 }
 
 // ─── CNAM Cache ───
@@ -12548,12 +12628,34 @@ pub struct SchedulingPanel {
     pub created_at: DateTime<Utc>,
 }
 
+// ─── Bandwidth Policies ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BandwidthPolicy {
+    pub id: Uuid,
+    pub name: String,
+    pub max_concurrent_calls: i32,
+    pub max_bandwidth_kbps: i32,
+    pub location_pattern: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateSchedulingPanelRequest {
     pub name: String,
     pub meeting_room_id: Uuid,
     pub device_identifier: String,
     pub display_mode: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateBandwidthPolicyRequest {
+    pub name: String,
+    pub max_concurrent_calls: Option<i32>,
+    pub max_bandwidth_kbps: Option<i32>,
+    pub location_pattern: Option<String>,
     pub enabled: Option<bool>,
 }
 
@@ -12719,6 +12821,315 @@ impl AppState {
                 }
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateBandwidthPolicyRequest {
+    pub name: Option<String>,
+    pub max_concurrent_calls: Option<i32>,
+    pub max_bandwidth_kbps: Option<i32>,
+    pub location_pattern: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+// ─── Signage Displays ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignageDisplay {
+    pub id: Uuid,
+    pub name: String,
+    pub location: String,
+    pub content_url: String,
+    pub schedule: serde_json::Value,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateSignageDisplayRequest {
+    pub name: String,
+    pub location: Option<String>,
+    pub content_url: Option<String>,
+    pub schedule: Option<serde_json::Value>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateSignageDisplayRequest {
+    pub name: Option<String>,
+    pub location: Option<String>,
+    pub content_url: Option<String>,
+    pub schedule: Option<serde_json::Value>,
+    pub enabled: Option<bool>,
+}
+
+// ─── AppState methods for new features ───
+
+impl AppState {
+    // Channel Tabs
+    pub fn list_channel_tabs(&self, room_id: Uuid) -> Vec<ChannelTab> {
+        let mut tabs: Vec<ChannelTab> = self.channel_tabs.values()
+            .into_iter()
+            .filter(|t| t.room_id == room_id)
+            .collect();
+        tabs.sort_by_key(|t| t.position);
+        tabs
+    }
+
+    pub fn create_channel_tab(&self, room_id: Uuid, req: CreateChannelTabRequest, created_by: &str) -> ChannelTab {
+        let tab = ChannelTab {
+            id: Uuid::new_v4(),
+            room_id,
+            name: req.name,
+            url: req.url,
+            icon: req.icon,
+            created_by: created_by.to_string(),
+            created_at: Utc::now(),
+            position: req.position.unwrap_or(0),
+        };
+        self.channel_tabs.insert(tab.id, tab.clone());
+        tab
+    }
+
+    pub fn update_channel_tab(&self, id: Uuid, req: UpdateChannelTabRequest) -> Option<ChannelTab> {
+        let mut tab = self.channel_tabs.get(&id)?;
+        if let Some(name) = req.name { tab.name = name; }
+        if let Some(url) = req.url { tab.url = url; }
+        if let Some(icon) = req.icon { tab.icon = Some(icon); }
+        if let Some(position) = req.position { tab.position = position; }
+        self.channel_tabs.insert(id, tab.clone());
+        Some(tab)
+    }
+
+    pub fn delete_channel_tab(&self, id: Uuid) -> bool {
+        self.channel_tabs.remove(&id).is_some()
+    }
+
+    // Message Extensions
+    pub fn list_message_extensions(&self) -> Vec<MessageExtension> {
+        let mut exts = self.message_extensions.values();
+        exts.sort_by(|a, b| a.name.cmp(&b.name));
+        exts
+    }
+
+    pub fn create_message_extension(&self, req: CreateMessageExtensionRequest) -> MessageExtension {
+        let ext = MessageExtension {
+            id: Uuid::new_v4(),
+            name: req.name,
+            command: req.command,
+            description: req.description.unwrap_or_default(),
+            handler_url: req.handler_url,
+            icon: req.icon,
+            enabled: true,
+            created_at: Utc::now(),
+        };
+        self.message_extensions.insert(ext.id, ext.clone());
+        ext
+    }
+
+    pub fn update_message_extension(&self, id: Uuid, req: UpdateMessageExtensionRequest) -> Option<MessageExtension> {
+        let mut ext = self.message_extensions.get(&id)?;
+        if let Some(name) = req.name { ext.name = name; }
+        if let Some(command) = req.command { ext.command = command; }
+        if let Some(description) = req.description { ext.description = description; }
+        if let Some(handler_url) = req.handler_url { ext.handler_url = handler_url; }
+        if let Some(icon) = req.icon { ext.icon = Some(icon); }
+        if let Some(enabled) = req.enabled { ext.enabled = enabled; }
+        self.message_extensions.insert(id, ext.clone());
+        Some(ext)
+    }
+
+    pub fn delete_message_extension(&self, id: Uuid) -> bool {
+        self.message_extensions.remove(&id).is_some()
+    }
+
+    pub fn get_message_extension_by_command(&self, command: &str) -> Option<MessageExtension> {
+        self.message_extensions.values().into_iter().find(|e| e.command == command && e.enabled)
+    }
+
+    // App Catalog
+    pub fn list_app_catalog(&self) -> Vec<AppCatalogEntry> {
+        let mut apps = self.app_catalog.values();
+        apps.sort_by(|a, b| a.name.cmp(&b.name));
+        apps
+    }
+
+    pub fn create_app_catalog_entry(&self, req: CreateAppCatalogEntryRequest) -> AppCatalogEntry {
+        let entry = AppCatalogEntry {
+            id: Uuid::new_v4(),
+            name: req.name,
+            description: req.description.unwrap_or_default(),
+            category: req.category.unwrap_or_else(|| "other".to_string()),
+            icon_url: req.icon_url,
+            manifest_url: req.manifest_url,
+            installed: false,
+            installed_by: None,
+            installed_at: None,
+            version: req.version,
+            created_at: Utc::now(),
+        };
+        self.app_catalog.insert(entry.id, entry.clone());
+        entry
+    }
+
+    pub fn update_app_catalog_entry(&self, id: Uuid, req: UpdateAppCatalogEntryRequest) -> Option<AppCatalogEntry> {
+        let mut entry = self.app_catalog.get(&id)?;
+        if let Some(name) = req.name { entry.name = name; }
+        if let Some(description) = req.description { entry.description = description; }
+        if let Some(category) = req.category { entry.category = category; }
+        if let Some(icon_url) = req.icon_url { entry.icon_url = Some(icon_url); }
+        if let Some(manifest_url) = req.manifest_url { entry.manifest_url = Some(manifest_url); }
+        if let Some(version) = req.version { entry.version = Some(version); }
+        self.app_catalog.insert(id, entry.clone());
+        Some(entry)
+    }
+
+    pub fn install_app(&self, id: Uuid, installed_by: &str) -> Option<AppCatalogEntry> {
+        let mut entry = self.app_catalog.get(&id)?;
+        entry.installed = true;
+        entry.installed_by = Some(installed_by.to_string());
+        entry.installed_at = Some(Utc::now());
+        self.app_catalog.insert(id, entry.clone());
+        Some(entry)
+    }
+
+    pub fn uninstall_app(&self, id: Uuid) -> Option<AppCatalogEntry> {
+        let mut entry = self.app_catalog.get(&id)?;
+        entry.installed = false;
+        entry.installed_by = None;
+        entry.installed_at = None;
+        self.app_catalog.insert(id, entry.clone());
+        Some(entry)
+    }
+
+    pub fn delete_app_catalog_entry(&self, id: Uuid) -> bool {
+        self.app_catalog.remove(&id).is_some()
+    }
+
+    // Guest Users
+    pub fn list_guest_users(&self, team_id: Uuid) -> Vec<GuestUser> {
+        let mut guests: Vec<GuestUser> = self.guest_users.values()
+            .into_iter()
+            .filter(|g| g.team_id == team_id)
+            .collect();
+        guests.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        guests
+    }
+
+    pub fn invite_guest(&self, team_id: Uuid, req: InviteGuestRequest, invited_by: &str) -> GuestUser {
+        let token = Uuid::new_v4().to_string();
+        let token_hash = format!("{:x}", Sha256::digest(token.as_bytes()));
+        let expires_at = Utc::now() + Duration::hours(req.expires_hours.unwrap_or(72));
+        let guest = GuestUser {
+            id: Uuid::new_v4(),
+            email: req.email,
+            display_name: req.display_name,
+            invited_by: invited_by.to_string(),
+            team_id,
+            permissions: req.permissions.unwrap_or_default(),
+            token_hash,
+            expires_at,
+            created_at: Utc::now(),
+        };
+        self.guest_users.insert(guest.id, guest.clone());
+        guest
+    }
+
+    pub fn delete_guest(&self, id: Uuid) -> bool {
+        self.guest_users.remove(&id).is_some()
+    }
+
+    // Bandwidth Policies
+    pub fn list_bandwidth_policies(&self) -> Vec<BandwidthPolicy> {
+        let mut policies = self.bandwidth_policies.values();
+        policies.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        policies
+    }
+
+    pub fn create_bandwidth_policy(&self, req: CreateBandwidthPolicyRequest) -> BandwidthPolicy {
+        let policy = BandwidthPolicy {
+            id: Uuid::new_v4(),
+            name: req.name,
+            max_concurrent_calls: req.max_concurrent_calls.unwrap_or(0),
+            max_bandwidth_kbps: req.max_bandwidth_kbps.unwrap_or(0),
+            location_pattern: req.location_pattern.unwrap_or_else(|| "*".to_string()),
+            enabled: req.enabled.unwrap_or(true),
+            created_at: Utc::now(),
+        };
+        self.bandwidth_policies.insert(policy.id, policy.clone());
+        policy
+    }
+
+    pub fn update_bandwidth_policy(&self, id: Uuid, req: UpdateBandwidthPolicyRequest) -> Option<BandwidthPolicy> {
+        let mut policy = self.bandwidth_policies.get(&id)?;
+        if let Some(name) = req.name { policy.name = name; }
+        if let Some(max_concurrent_calls) = req.max_concurrent_calls { policy.max_concurrent_calls = max_concurrent_calls; }
+        if let Some(max_bandwidth_kbps) = req.max_bandwidth_kbps { policy.max_bandwidth_kbps = max_bandwidth_kbps; }
+        if let Some(location_pattern) = req.location_pattern { policy.location_pattern = location_pattern; }
+        if let Some(enabled) = req.enabled { policy.enabled = enabled; }
+        self.bandwidth_policies.insert(id, policy.clone());
+        Some(policy)
+    }
+
+    pub fn delete_bandwidth_policy(&self, id: Uuid) -> bool {
+        self.bandwidth_policies.remove(&id).is_some()
+    }
+
+    /// Check if a new call can be admitted based on bandwidth policies.
+    pub fn check_call_admission(&self, location: &str) -> bool {
+        let active_call_count = self.calls.len();
+        for policy in self.bandwidth_policies.values() {
+            if !policy.enabled { continue; }
+            if policy.location_pattern == "*" || location.contains(&policy.location_pattern) {
+                if policy.max_concurrent_calls > 0 && active_call_count >= policy.max_concurrent_calls as usize {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    // Signage Displays
+    pub fn list_signage_displays(&self) -> Vec<SignageDisplay> {
+        let mut displays = self.signage_displays.values();
+        displays.sort_by(|a, b| a.name.cmp(&b.name));
+        displays
+    }
+
+    pub fn create_signage_display(&self, req: CreateSignageDisplayRequest) -> SignageDisplay {
+        let display = SignageDisplay {
+            id: Uuid::new_v4(),
+            name: req.name,
+            location: req.location.unwrap_or_default(),
+            content_url: req.content_url.unwrap_or_default(),
+            schedule: req.schedule.unwrap_or(serde_json::json!({})),
+            enabled: req.enabled.unwrap_or(true),
+            created_at: Utc::now(),
+        };
+        self.signage_displays.insert(display.id, display.clone());
+        display
+    }
+
+    pub fn update_signage_display(&self, id: Uuid, req: UpdateSignageDisplayRequest) -> Option<SignageDisplay> {
+        let mut display = self.signage_displays.get(&id)?;
+        if let Some(name) = req.name { display.name = name; }
+        if let Some(location) = req.location { display.location = location; }
+        if let Some(content_url) = req.content_url { display.content_url = content_url; }
+        if let Some(schedule) = req.schedule { display.schedule = schedule; }
+        if let Some(enabled) = req.enabled { display.enabled = enabled; }
+        self.signage_displays.insert(id, display.clone());
+        Some(display)
+    }
+
+    pub fn delete_signage_display(&self, id: Uuid) -> bool {
+        self.signage_displays.remove(&id).is_some()
+    }
+
+    pub fn get_signage_content(&self, id: Uuid) -> Option<String> {
+        let display = self.signage_displays.get(&id)?;
+        if !display.enabled { return None; }
+        Some(display.content_url.clone())
     }
 }
 

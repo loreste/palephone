@@ -118,6 +118,12 @@ impl PgStore {
             include_str!("../migrations/052_loop_components.sql"),
             include_str!("../migrations/053_compliance_reviews.sql"),
             include_str!("../migrations/054_data_residency.sql"),
+            include_str!("../migrations/046_channel_tabs.sql"),
+            include_str!("../migrations/047_message_extensions.sql"),
+            include_str!("../migrations/048_app_catalog.sql"),
+            include_str!("../migrations/049_guest_users.sql"),
+            include_str!("../migrations/050_bandwidth_policies.sql"),
+            include_str!("../migrations/051_signage_displays.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {
