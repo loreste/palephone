@@ -1,8 +1,16 @@
 # Pale
 
-Pale means “to speak” in Haitian Creole.
+Pale means “to speak” in Haitian Creole. That is the point of the project: people should be able to speak, meet, call, and work together without handing the whole conversation to someone else's cloud.
 
 A self-hosted communications platform for voice, video, messaging, meetings, files, compliance workflows, and PBX. Pale is building toward Microsoft Teams-style enterprise coverage while keeping the infrastructure under the tenant's control.
+
+## Why We Are Here
+
+Communication is where work actually happens. It is the call with a customer, the message that unblocks a team, the meeting where a decision gets made, and the record an organization may need years later. That should not be trapped inside one vendor's cloud, pricing model, policy changes, or roadmap.
+
+Pale exists for teams that want to own that layer. To speak freely here means you can run the system yourself, choose the providers you trust, keep control of your records, and decide how your communication data moves through your organization.
+
+We are also not pretending the hard parts are magic. Speech, AI, malware scanning, storage, broadcast media, PSTN, E911, and policy enforcement all need real systems behind them. Pale makes those dependencies visible, lets administrators check whether they are ready, and keeps the core communications stack under your control.
 
 ## Why Pale?
 
