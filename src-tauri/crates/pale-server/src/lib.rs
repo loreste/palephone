@@ -342,6 +342,15 @@ pub struct AppState {
     scheduling_panels: ShardedMap<Uuid, SchedulingPanel>,
     // Automation rules
     automation_rules: ShardedMap<Uuid, AutomationRule>,
+    // Federation
+    federation_peers: ShardedMap<Uuid, FederationPeer>,
+    federated_messages: RwLock<Vec<FederatedMessage>>,
+    // Loop components
+    loop_components: ShardedMap<Uuid, LoopComponent>,
+    // Compliance
+    compliance_reviews: ShardedMap<Uuid, ComplianceReview>,
+    // Data residency
+    data_residency_configs: ShardedMap<Uuid, DataResidencyConfig>,
     user_create_lock: std::sync::Mutex<()>,
     agent_assignment_lock: std::sync::Mutex<()>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
@@ -541,6 +550,11 @@ impl AppState {
             whiteboards: ShardedMap::new(),
             scheduling_panels: ShardedMap::new(),
             automation_rules: ShardedMap::new(),
+            federation_peers: ShardedMap::new(),
+            federated_messages: RwLock::new(Vec::new()),
+            loop_components: ShardedMap::new(),
+            compliance_reviews: ShardedMap::new(),
+            data_residency_configs: ShardedMap::new(),
             user_create_lock: std::sync::Mutex::new(()),
             agent_assignment_lock: std::sync::Mutex::new(()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
@@ -15889,5 +15903,328 @@ mod tests {
         assert_eq!(updated.name, "disabled");
         assert_eq!(updated.priority, 50);
         assert!(!updated.enabled);
+    }
+}
+
+
+// ─── Federation ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FederationPeer {
+    pub id: Uuid,
+    pub domain: String,
+    pub server_url: String,
+    pub shared_key_enc: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateFederationPeerRequest {
+    pub domain: String,
+    pub server_url: String,
+    pub shared_key: String,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateFederationPeerRequest {
+    pub server_url: Option<String>,
+    pub shared_key: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FederatedMessage {
+    pub id: Uuid,
+    pub from_domain: String,
+    pub from_user: String,
+    pub to_domain: String,
+    pub to_user: String,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FederationSendRequest {
+    pub to_domain: String,
+    pub to_user: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FederationReceiveRequest {
+    pub from_domain: String,
+    pub from_user: String,
+    pub to_user: String,
+    pub body: String,
+    pub shared_key: String,
+}
+
+// ─── Loop Components ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoopComponent {
+    pub id: Uuid,
+    pub room_id: Uuid,
+    pub component_type: String,
+    pub data: serde_json::Value,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateLoopComponentRequest {
+    pub component_type: String,
+    pub data: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateLoopComponentRequest {
+    pub data: serde_json::Value,
+}
+
+// ─── Compliance Reviews ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplianceReview {
+    pub id: Uuid,
+    pub message_id: Uuid,
+    pub policy_id: Option<Uuid>,
+    pub category: String,
+    pub severity: String,
+    pub flagged_content: String,
+    pub status: String,
+    pub reviewer: Option<String>,
+    pub reviewed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ComplianceScanRequest {
+    pub message_id: Uuid,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateComplianceReviewRequest {
+    pub status: String,
+}
+
+// ─── Data Residency ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataResidencyConfig {
+    pub id: Uuid,
+    pub region: String,
+    pub pg_connection_string_enc: String,
+    pub file_storage_path: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateDataResidencyConfigRequest {
+    pub region: String,
+    pub pg_connection_string: String,
+    pub file_storage_path: String,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateDataResidencyConfigRequest {
+    pub pg_connection_string: Option<String>,
+    pub file_storage_path: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+impl AppState {
+    // ─── Federation methods ───
+
+    pub fn list_federation_peers(&self) -> Vec<FederationPeer> {
+        let mut peers = self.federation_peers.values();
+        peers.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        peers
+    }
+
+    pub fn create_federation_peer(&self, req: CreateFederationPeerRequest) -> FederationPeer {
+        let peer = FederationPeer {
+            id: Uuid::new_v4(),
+            domain: req.domain,
+            server_url: req.server_url,
+            shared_key_enc: req.shared_key,
+            enabled: req.enabled.unwrap_or(true),
+            created_at: Utc::now(),
+        };
+        self.federation_peers.insert(peer.id, peer.clone());
+        peer
+    }
+
+    pub fn update_federation_peer(&self, id: Uuid, req: UpdateFederationPeerRequest) -> Option<FederationPeer> {
+        let mut peer = self.federation_peers.get(&id)?;
+        if let Some(url) = req.server_url { peer.server_url = url; }
+        if let Some(key) = req.shared_key { peer.shared_key_enc = key; }
+        if let Some(enabled) = req.enabled { peer.enabled = enabled; }
+        self.federation_peers.insert(id, peer.clone());
+        Some(peer)
+    }
+
+    pub fn delete_federation_peer(&self, id: Uuid) -> bool {
+        self.federation_peers.remove(&id).is_some()
+    }
+
+    pub fn get_federation_peer_by_domain(&self, domain: &str) -> Option<FederationPeer> {
+        self.federation_peers.values().into_iter().find(|p| p.domain == domain)
+    }
+
+    pub fn store_federated_message(&self, msg: FederatedMessage) {
+        self.federated_messages.write().expect("lock").push(msg);
+    }
+
+    pub fn list_federated_messages(&self) -> Vec<FederatedMessage> {
+        self.federated_messages.read().expect("lock").clone()
+    }
+
+    pub fn list_federated_messages_for_user(&self, user: &str) -> Vec<FederatedMessage> {
+        self.federated_messages.read().expect("lock")
+            .iter()
+            .filter(|m| m.to_user == user || m.from_user == user)
+            .cloned()
+            .collect()
+    }
+
+    // ─── Loop Component methods ───
+
+    pub fn list_loop_components(&self, room_id: Uuid) -> Vec<LoopComponent> {
+        let mut components: Vec<_> = self.loop_components.values().into_iter()
+            .filter(|c| c.room_id == room_id)
+            .collect();
+        components.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        components
+    }
+
+    pub fn create_loop_component(&self, room_id: Uuid, created_by: &str, req: CreateLoopComponentRequest) -> LoopComponent {
+        let now = Utc::now();
+        let component = LoopComponent {
+            id: Uuid::new_v4(),
+            room_id,
+            component_type: req.component_type,
+            data: req.data.unwrap_or(serde_json::json!({})),
+            created_by: created_by.to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        self.loop_components.insert(component.id, component.clone());
+        component
+    }
+
+    pub fn update_loop_component(&self, id: Uuid, req: UpdateLoopComponentRequest) -> Option<LoopComponent> {
+        let mut component = self.loop_components.get(&id)?;
+        component.data = req.data;
+        component.updated_at = Utc::now();
+        self.loop_components.insert(id, component.clone());
+        Some(component)
+    }
+
+    pub fn delete_loop_component(&self, id: Uuid) -> bool {
+        self.loop_components.remove(&id).is_some()
+    }
+
+    // ─── Compliance methods ───
+
+    pub fn list_compliance_reviews(&self) -> Vec<ComplianceReview> {
+        let mut reviews = self.compliance_reviews.values();
+        reviews.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        reviews
+    }
+
+    pub fn scan_message_compliance(&self, req: ComplianceScanRequest) -> Vec<ComplianceReview> {
+        let mut flagged = Vec::new();
+        // Keyword patterns
+        let keywords = ["confidential", "secret", "password", "ssn", "credit card"];
+        let lower_body = req.body.to_lowercase();
+        for keyword in &keywords {
+            if lower_body.contains(keyword) {
+                let review = ComplianceReview {
+                    id: Uuid::new_v4(),
+                    message_id: req.message_id,
+                    policy_id: None,
+                    category: "keyword".to_string(),
+                    severity: "medium".to_string(),
+                    flagged_content: keyword.to_string(),
+                    status: "pending".to_string(),
+                    reviewer: None,
+                    reviewed_at: None,
+                    created_at: Utc::now(),
+                };
+                self.compliance_reviews.insert(review.id, review.clone());
+                flagged.push(review);
+            }
+        }
+        // Basic toxicity heuristic
+        let toxic_terms = ["hate", "kill", "threat", "attack", "bomb"];
+        for term in &toxic_terms {
+            if lower_body.contains(term) {
+                let review = ComplianceReview {
+                    id: Uuid::new_v4(),
+                    message_id: req.message_id,
+                    policy_id: None,
+                    category: "toxicity".to_string(),
+                    severity: "high".to_string(),
+                    flagged_content: term.to_string(),
+                    status: "pending".to_string(),
+                    reviewer: None,
+                    reviewed_at: None,
+                    created_at: Utc::now(),
+                };
+                self.compliance_reviews.insert(review.id, review.clone());
+                flagged.push(review);
+            }
+        }
+        flagged
+    }
+
+    pub fn update_compliance_review(&self, id: Uuid, reviewer: &str, req: UpdateComplianceReviewRequest) -> Option<ComplianceReview> {
+        let mut review = self.compliance_reviews.get(&id)?;
+        review.status = req.status;
+        review.reviewer = Some(reviewer.to_string());
+        review.reviewed_at = Some(Utc::now());
+        self.compliance_reviews.insert(id, review.clone());
+        Some(review)
+    }
+
+    // ─── Data Residency methods ───
+
+    pub fn list_data_residency_configs(&self) -> Vec<DataResidencyConfig> {
+        let mut configs = self.data_residency_configs.values();
+        configs.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        configs
+    }
+
+    pub fn create_data_residency_config(&self, req: CreateDataResidencyConfigRequest) -> DataResidencyConfig {
+        let config = DataResidencyConfig {
+            id: Uuid::new_v4(),
+            region: req.region,
+            pg_connection_string_enc: req.pg_connection_string,
+            file_storage_path: req.file_storage_path,
+            enabled: req.enabled.unwrap_or(true),
+            created_at: Utc::now(),
+        };
+        self.data_residency_configs.insert(config.id, config.clone());
+        config
+    }
+
+    pub fn update_data_residency_config(&self, id: Uuid, req: UpdateDataResidencyConfigRequest) -> Option<DataResidencyConfig> {
+        let mut config = self.data_residency_configs.get(&id)?;
+        if let Some(conn) = req.pg_connection_string { config.pg_connection_string_enc = conn; }
+        if let Some(path) = req.file_storage_path { config.file_storage_path = path; }
+        if let Some(enabled) = req.enabled { config.enabled = enabled; }
+        self.data_residency_configs.insert(id, config.clone());
+        Some(config)
+    }
+
+    pub fn delete_data_residency_config(&self, id: Uuid) -> bool {
+        self.data_residency_configs.remove(&id).is_some()
     }
 }

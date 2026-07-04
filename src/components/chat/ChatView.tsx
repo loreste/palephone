@@ -14,6 +14,31 @@ import { EncryptionBadge } from "@/components/encryption/EncryptionBadge";
 import { MatrixLoginView } from "@/components/auth/MatrixLoginView";
 
 const QUICK_REACTIONS = ["\u{1F44D}", "\u{2764}\u{FE0F}", "\u{1F602}", "\u{1F44F}", "\u{1F914}"];
+
+interface LoopComponentItem {
+  id: string;
+  room_id: string;
+  component_type: "checklist" | "table" | "paragraph";
+  data: any;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+type ImmersiveFontSize = "small" | "medium" | "large" | "xlarge";
+type ImmersiveColumnWidth = "narrow" | "medium" | "wide";
+
+function getImmersivePrefs() {
+  try {
+    const stored = localStorage.getItem("pale.immersiveReader");
+    if (stored) return JSON.parse(stored);
+  } catch { /* ignore */ }
+  return { fontSize: "medium", lineSpacing: 1.6, dyslexiaFont: false, columnWidth: "medium", highContrast: false };
+}
+
+function setImmersivePrefs(prefs: any) {
+  localStorage.setItem("pale.immersiveReader", JSON.stringify(prefs));
+}
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 const ROOM_HISTORY_PAGE_SIZE = 50;
 
@@ -973,6 +998,9 @@ function ChatRoom({
   const [teamTags, setTeamTags] = useState<ServerTag[]>([]);
   const [customEmojis, setCustomEmojis] = useState<CustomEmoji[]>([]);
   const [subTab, setSubTab] = useState<"chat" | "wiki" | "tasks">("chat");
+  const [immersiveReaderMessage, setImmersiveReaderMessage] = useState<ChatMessage | null>(null);
+  const [loopComponents, setLoopComponents] = useState<LoopComponentItem[]>([]);
+  const [showLoopInsert, setShowLoopInsert] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<number | null>(null);
@@ -1017,6 +1045,14 @@ function ChatRoom({
       .then(setCustomEmojis)
       .catch(() => {});
   }, [room.team_id, isServerRoom, connected, baseUrl, token]);
+
+  // Load loop components for room
+  useEffect(() => {
+    if (!isServerRoom || !connected || !baseUrl || !token) return;
+    paleServerApi<LoopComponentItem[]>(baseUrl, token, `/v1/rooms/${room.room_id}/loops`)
+      .then(setLoopComponents)
+      .catch(() => {});
+  }, [room.room_id, isServerRoom, connected, baseUrl, token]);
 
   // Load server room messages on mount (stable deps only — no addMessage to avoid re-render loop)
   useEffect(() => {
@@ -1673,10 +1709,26 @@ function ChatRoom({
             onPin={handlePin}
             onSave={handleSave}
             onTranslate={handleTranslate}
+            onImmersiveReader={(m) => setImmersiveReaderMessage(m)}
             customEmojis={customEmojis}
           />
         ))}
         <div ref={messagesEndRef} />
+
+        {/* Loop Components */}
+        {loopComponents.length > 0 && (
+          <div className="space-y-2 mt-3 mb-2">
+            {loopComponents.map((loop) => (
+              <LoopComponentRenderer
+                key={loop.id}
+                component={loop}
+                baseUrl={baseUrl ?? ""}
+                token={token ?? ""}
+                onUpdate={(updated) => setLoopComponents((prev) => prev.map((c) => c.id === updated.id ? updated : c))}
+              />
+            ))}
+          </div>
+        )}
       </div>
 
       {typingUsers.length > 0 && <TypingIndicator users={typingUsers} />}
@@ -1742,6 +1794,64 @@ function ChatRoom({
                 <span className="text-tertiary text-xs ml-auto">{u.sip_uri}</span>
               </button>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Loop component insert panel */}
+      {showLoopInsert && isServerRoom && connected && baseUrl && token && (
+        <div className="px-3 py-2 border-t border-border-subtle bg-elevated/50">
+          <div className="flex items-center gap-2">
+            <ListTodo size={14} className="text-accent shrink-0" />
+            <span className="text-xs text-secondary">Insert live component:</span>
+            <button
+              onClick={async () => {
+                try {
+                  await paleServerApi(baseUrl, token, `/v1/rooms/${room.room_id}/loops`, {
+                    method: "POST", body: { component_type: "checklist", data: { items: [{ text: "Item 1", checked: false }] } },
+                  });
+                  const loops = await paleServerApi<LoopComponentItem[]>(baseUrl, token, `/v1/rooms/${room.room_id}/loops`);
+                  setLoopComponents(loops);
+                  setShowLoopInsert(false);
+                  toast({ type: "success", title: "Checklist created" });
+                } catch { toast({ type: "error", title: "Failed to create checklist" }); }
+              }}
+              className="px-2 py-1 rounded text-xs bg-accent/10 text-accent hover:bg-accent/20"
+            >
+              Checklist
+            </button>
+            <button
+              onClick={async () => {
+                try {
+                  await paleServerApi(baseUrl, token, `/v1/rooms/${room.room_id}/loops`, {
+                    method: "POST", body: { component_type: "table", data: { columns: ["Column 1", "Column 2"], rows: [["", ""]] } },
+                  });
+                  const loops = await paleServerApi<LoopComponentItem[]>(baseUrl, token, `/v1/rooms/${room.room_id}/loops`);
+                  setLoopComponents(loops);
+                  setShowLoopInsert(false);
+                  toast({ type: "success", title: "Table created" });
+                } catch { toast({ type: "error", title: "Failed to create table" }); }
+              }}
+              className="px-2 py-1 rounded text-xs bg-accent/10 text-accent hover:bg-accent/20"
+            >
+              Table
+            </button>
+            <button
+              onClick={async () => {
+                try {
+                  await paleServerApi(baseUrl, token, `/v1/rooms/${room.room_id}/loops`, {
+                    method: "POST", body: { component_type: "paragraph", data: { text: "" } },
+                  });
+                  const loops = await paleServerApi<LoopComponentItem[]>(baseUrl, token, `/v1/rooms/${room.room_id}/loops`);
+                  setLoopComponents(loops);
+                  setShowLoopInsert(false);
+                  toast({ type: "success", title: "Paragraph created" });
+                } catch { toast({ type: "error", title: "Failed to create paragraph" }); }
+              }}
+              className="px-2 py-1 rounded text-xs bg-accent/10 text-accent hover:bg-accent/20"
+            >
+              Paragraph
+            </button>
           </div>
         </div>
       )}
@@ -1836,6 +1946,19 @@ function ChatRoom({
         </button>
         {isServerRoom && !editingMessage && (
           <button
+            onClick={() => setShowLoopInsert(!showLoopInsert)}
+            className={cn(
+              "p-2 rounded-md transition-colors",
+              showLoopInsert ? "text-accent bg-accent/10" : "text-tertiary hover:text-secondary hover:bg-elevated"
+            )}
+            aria-label="Insert loop component"
+            title="Insert a live component (checklist, table, paragraph)"
+          >
+            <ListTodo size={18} />
+          </button>
+        )}
+        {isServerRoom && !editingMessage && (
+          <button
             onClick={() => { setShowGifPicker(!showGifPicker); setShowScheduleSend(false); }}
             className={cn(
               "p-2 rounded-md transition-colors",
@@ -1921,6 +2044,238 @@ function ChatRoom({
         </button>
       </div>
       </>}
+
+      {/* Immersive Reader Modal */}
+      {immersiveReaderMessage && (
+        <ImmersiveReaderModal
+          message={immersiveReaderMessage}
+          onClose={() => setImmersiveReaderMessage(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function ImmersiveReaderModal({ message, onClose }: { message: ChatMessage; onClose: () => void }) {
+  const [prefs, setPrefs] = useState(getImmersivePrefs);
+
+  const update = (key: string, value: any) => {
+    const next = { ...prefs, [key]: value };
+    setPrefs(next);
+    setImmersivePrefs(next);
+  };
+
+  const fontSizeMap: Record<ImmersiveFontSize, string> = {
+    small: "text-base", medium: "text-lg", large: "text-2xl", xlarge: "text-4xl",
+  };
+  const widthMap: Record<ImmersiveColumnWidth, string> = {
+    narrow: "max-w-sm", medium: "max-w-lg", wide: "max-w-3xl",
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+      <div
+        className={cn(
+          "relative w-full mx-4 rounded-xl shadow-2xl overflow-auto max-h-[90vh] p-8",
+          prefs.highContrast ? "bg-black text-white" : "bg-white text-zinc-900 dark:bg-zinc-900 dark:text-zinc-100",
+          widthMap[prefs.columnWidth as ImmersiveColumnWidth] || "max-w-lg"
+        )}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Close */}
+        <button onClick={onClose} className="absolute top-3 right-3 p-1 rounded hover:bg-zinc-200 dark:hover:bg-zinc-700" aria-label="Close">
+          <X size={18} />
+        </button>
+
+        {/* Controls */}
+        <div className="flex flex-wrap items-center gap-3 mb-6 pb-4 border-b border-zinc-200 dark:border-zinc-700">
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs font-medium">Size:</span>
+            {(["small", "medium", "large", "xlarge"] as ImmersiveFontSize[]).map((s) => (
+              <button key={s} onClick={() => update("fontSize", s)}
+                className={cn("px-2 py-0.5 rounded text-xs", prefs.fontSize === s ? "bg-accent text-white" : "bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700")}>
+                {s === "xlarge" ? "XL" : s.charAt(0).toUpperCase() + s.slice(1)}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs font-medium">Spacing:</span>
+            {[1.2, 1.6, 2.0, 2.5].map((s) => (
+              <button key={s} onClick={() => update("lineSpacing", s)}
+                className={cn("px-2 py-0.5 rounded text-xs", prefs.lineSpacing === s ? "bg-accent text-white" : "bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700")}>
+                {s}x
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs font-medium">Width:</span>
+            {(["narrow", "medium", "wide"] as ImmersiveColumnWidth[]).map((w) => (
+              <button key={w} onClick={() => update("columnWidth", w)}
+                className={cn("px-2 py-0.5 rounded text-xs", prefs.columnWidth === w ? "bg-accent text-white" : "bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700")}>
+                {w.charAt(0).toUpperCase() + w.slice(1)}
+              </button>
+            ))}
+          </div>
+          <label className="flex items-center gap-1.5 text-xs">
+            <input type="checkbox" checked={prefs.dyslexiaFont} onChange={(e) => update("dyslexiaFont", e.target.checked)} className="accent-accent" />
+            Dyslexia-friendly font
+          </label>
+          <label className="flex items-center gap-1.5 text-xs">
+            <input type="checkbox" checked={prefs.highContrast} onChange={(e) => update("highContrast", e.target.checked)} className="accent-accent" />
+            High contrast
+          </label>
+        </div>
+
+        {/* Content */}
+        <div
+          className={cn(fontSizeMap[prefs.fontSize as ImmersiveFontSize] || "text-lg")}
+          style={{
+            lineHeight: prefs.lineSpacing,
+            fontFamily: prefs.dyslexiaFont ? "'OpenDyslexic', 'Comic Sans MS', sans-serif" : "inherit",
+          }}
+        >
+          <p className="text-[10px] text-zinc-400 mb-2">
+            {message.sender_name ?? message.sender} - {new Date(message.timestamp * 1000).toLocaleString()}
+          </p>
+          <div className="whitespace-pre-wrap">{message.body}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LoopComponentRenderer({ component, baseUrl, token, onUpdate }: {
+  component: LoopComponentItem;
+  baseUrl: string;
+  token: string;
+  onUpdate: (updated: LoopComponentItem) => void;
+}) {
+  const saveData = async (data: any) => {
+    try {
+      const updated = await paleServerApi<LoopComponentItem>(baseUrl, token, `/v1/loops/${component.id}`, {
+        method: "PUT", body: { data },
+      });
+      onUpdate(updated);
+    } catch {
+      toast({ type: "error", title: "Failed to update component" });
+    }
+  };
+
+  if (component.component_type === "checklist") {
+    const items: { text: string; checked: boolean }[] = component.data?.items ?? [];
+    return (
+      <div className="p-3 rounded-lg border border-accent/20 bg-accent/5">
+        <div className="flex items-center gap-1.5 mb-2">
+          <ListTodo size={14} className="text-accent" />
+          <span className="text-xs font-semibold text-accent">Live Checklist</span>
+          <span className="text-[10px] text-tertiary ml-auto">by {component.created_by.replace("sip:", "")}</span>
+        </div>
+        {items.map((item, idx) => (
+          <div key={idx} className="flex items-center gap-2 py-0.5">
+            <input
+              type="checkbox"
+              checked={item.checked}
+              onChange={() => {
+                const newItems = [...items];
+                newItems[idx] = { ...item, checked: !item.checked };
+                saveData({ items: newItems });
+              }}
+              className="accent-accent"
+            />
+            <input
+              type="text"
+              value={item.text}
+              onChange={(e) => {
+                const newItems = [...items];
+                newItems[idx] = { ...item, text: e.target.value };
+                saveData({ items: newItems });
+              }}
+              className="flex-1 text-sm bg-transparent border-none outline-none text-primary"
+            />
+          </div>
+        ))}
+        <button
+          onClick={() => saveData({ items: [...items, { text: "", checked: false }] })}
+          className="mt-1 text-[10px] text-accent hover:underline"
+        >
+          + Add item
+        </button>
+      </div>
+    );
+  }
+
+  if (component.component_type === "table") {
+    const columns: string[] = component.data?.columns ?? [];
+    const rows: string[][] = component.data?.rows ?? [];
+    return (
+      <div className="p-3 rounded-lg border border-accent/20 bg-accent/5 overflow-x-auto">
+        <div className="flex items-center gap-1.5 mb-2">
+          <ExternalLink size={14} className="text-accent" />
+          <span className="text-xs font-semibold text-accent">Live Table</span>
+          <span className="text-[10px] text-tertiary ml-auto">by {component.created_by.replace("sip:", "")}</span>
+        </div>
+        <table className="w-full text-xs">
+          <thead>
+            <tr>
+              {columns.map((col, ci) => (
+                <th key={ci} className="text-left px-2 py-1 border-b border-accent/20 text-secondary font-medium">
+                  <input
+                    type="text" value={col}
+                    onChange={(e) => {
+                      const newCols = [...columns]; newCols[ci] = e.target.value;
+                      saveData({ columns: newCols, rows });
+                    }}
+                    className="w-full bg-transparent border-none outline-none text-secondary font-medium"
+                  />
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, ri) => (
+              <tr key={ri}>
+                {row.map((cell, ci) => (
+                  <td key={ci} className="px-2 py-1 border-b border-accent/10">
+                    <input
+                      type="text" value={cell}
+                      onChange={(e) => {
+                        const newRows = rows.map((r) => [...r]);
+                        newRows[ri][ci] = e.target.value;
+                        saveData({ columns, rows: newRows });
+                      }}
+                      className="w-full bg-transparent border-none outline-none text-primary text-xs"
+                    />
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <button
+          onClick={() => saveData({ columns, rows: [...rows, columns.map(() => "")] })}
+          className="mt-1 text-[10px] text-accent hover:underline"
+        >
+          + Add row
+        </button>
+      </div>
+    );
+  }
+
+  // paragraph
+  const text = component.data?.text ?? "";
+  return (
+    <div className="p-3 rounded-lg border border-accent/20 bg-accent/5">
+      <div className="flex items-center gap-1.5 mb-2">
+        <FileIcon size={14} className="text-accent" />
+        <span className="text-xs font-semibold text-accent">Live Paragraph</span>
+        <span className="text-[10px] text-tertiary ml-auto">by {component.created_by.replace("sip:", "")}</span>
+      </div>
+      <textarea
+        value={text}
+        onChange={(e) => saveData({ text: e.target.value })}
+        className="w-full text-sm bg-transparent border-none outline-none text-primary resize-none min-h-[60px]"
+        placeholder="Start typing..."
+      />
     </div>
   );
 }
@@ -2715,6 +3070,7 @@ function MessageBubble({
   onPin,
   onSave,
   onTranslate,
+  onImmersiveReader,
   customEmojis,
 }: {
   message: ChatMessage;
@@ -2724,6 +3080,7 @@ function MessageBubble({
   onPin?: (msg: ChatMessage) => void;
   onSave?: (msg: ChatMessage) => void;
   onTranslate?: (msg: ChatMessage, targetLang: string) => void;
+  onImmersiveReader?: (msg: ChatMessage) => void;
   customEmojis?: CustomEmoji[];
 }) {
   const time = new Date(message.timestamp * 1000).toLocaleTimeString([], {
@@ -2823,6 +3180,14 @@ function MessageBubble({
             title="Forward"
           >
             <Forward size={12} />
+          </button>
+          {/* Immersive Reader */}
+          <button
+            onClick={() => onImmersiveReader?.(message)}
+            className="p-0.5 rounded text-tertiary hover:text-accent"
+            title="Immersive Reader"
+          >
+            <BookOpen size={12} />
           </button>
           {/* Translate */}
           {!message.is_own && onTranslate && (

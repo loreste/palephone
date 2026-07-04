@@ -47,6 +47,10 @@ use crate::{
     CreateAnnotationRequest, CreateWhiteboardRequest, AddWhiteboardElementRequest,
     CreateSchedulingPanelRequest, UpdateSchedulingPanelRequest,
     CreateAutomationRuleRequest, UpdateAutomationRuleRequest,
+    CreateFederationPeerRequest, UpdateFederationPeerRequest, FederationSendRequest, FederationReceiveRequest,
+    CreateLoopComponentRequest, UpdateLoopComponentRequest,
+    ComplianceScanRequest, UpdateComplianceReviewRequest,
+    CreateDataResidencyConfigRequest, UpdateDataResidencyConfigRequest,
 };
 
 type SharedState = Arc<AppState>;
@@ -775,6 +779,44 @@ pub fn router(state: SharedState) -> Router {
             "/v1/admin/automations/{id}",
             put(update_automation_rule).delete(delete_automation_rule),
         )
+        // Federation
+        .route(
+            "/v1/admin/federation",
+            get(list_federation_peers).post(create_federation_peer),
+        )
+        .route(
+            "/v1/admin/federation/{id}",
+            put(update_federation_peer).delete(delete_federation_peer),
+        )
+        .route("/v1/federation/send", post(federation_send))
+        .route("/v1/federation/receive", post(federation_receive))
+        .route("/v1/federation/messages", get(list_federated_messages))
+        // Loop components
+        .route(
+            "/v1/loop-components",
+            get(list_loop_components).post(create_loop_component),
+        )
+        .route(
+            "/v1/loop-components/{id}",
+            put(update_loop_component).delete(delete_loop_component),
+        )
+        // Compliance
+        .route("/v1/admin/compliance/scan", post(compliance_scan))
+        .route("/v1/admin/compliance/reviews", get(list_compliance_reviews))
+        .route(
+            "/v1/admin/compliance/reviews/{id}",
+            put(update_compliance_review),
+        )
+        // Data residency
+        .route(
+            "/v1/admin/data-residency",
+            get(list_data_residency).post(create_data_residency),
+        )
+        .route(
+            "/v1/admin/data-residency/{id}",
+            put(update_data_residency).delete(delete_data_residency),
+        )
+        .route("/v1/admin/data-residency/status", get(data_residency_status))
         .route("/v1/events", get(sse_stream))
         .layer(from_fn(crate::metrics::request_metrics))
         .layer(from_fn(cors))
@@ -8082,4 +8124,266 @@ mod auth_tests {
             .authenticate_user("sip:carol@example.com", "carol-password")
             .is_ok());
     }
+}
+
+// ─── Federation ───
+
+async fn list_federation_peers(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::FederationPeer>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_federation_peers()))
+}
+async fn create_federation_peer(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<CreateFederationPeerRequest>,
+) -> Result<(StatusCode, Json<crate::FederationPeer>), ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let peer = state.create_federation_peer(req);
+    state.record_audit_event(
+        &principal,
+        "federation.peer_created",
+        Some(format!("id={} domain={}", peer.id, peer.domain)),
+    );
+    Ok((StatusCode::CREATED, Json(peer)))
+}
+async fn update_federation_peer(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateFederationPeerRequest>,
+) -> Result<Json<crate::FederationPeer>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    match state.update_federation_peer(id, req) {
+        Some(peer) => {
+            state.record_audit_event(&principal, "federation.peer_updated", Some(format!("id={}", id)));
+            Ok(Json(peer))
+        }
+        None => Err(ApiError::NotFound),
+    }
+}
+async fn delete_federation_peer(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if state.delete_federation_peer(id) {
+        state.record_audit_event(&principal, "federation.peer_deleted", Some(format!("id={}", id)));
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+async fn federation_send(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<FederationSendRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let peer = state.get_federation_peer_by_domain(&req.to_domain)
+        .ok_or(ApiError::NotFound)?;
+    if !peer.enabled {
+        return Err(ApiError::Forbidden);
+    }
+    let msg = crate::FederatedMessage {
+        id: Uuid::new_v4(),
+        from_domain: "local".to_string(),
+        from_user: principal.clone(),
+        to_domain: req.to_domain.clone(),
+        to_user: req.to_user.clone(),
+        body: req.body.clone(),
+        created_at: chrono::Utc::now(),
+    };
+    state.store_federated_message(msg.clone());
+    let _ = state.broadcast_sse(crate::SseEvent {
+        event_type: "federated_message".to_string(),
+        payload: serde_json::to_value(&msg).unwrap_or_default(),
+    });
+    Ok((StatusCode::CREATED, Json(serde_json::to_value(&msg).unwrap_or_default())))
+}
+async fn federation_receive(
+    State(state): State<SharedState>,
+    Json(req): Json<FederationReceiveRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let peer = state.get_federation_peer_by_domain(&req.from_domain)
+        .ok_or(ApiError::Forbidden)?;
+    if !peer.enabled || peer.shared_key_enc != req.shared_key {
+        return Err(ApiError::Forbidden);
+    }
+    let msg = crate::FederatedMessage {
+        id: Uuid::new_v4(),
+        from_domain: req.from_domain,
+        from_user: req.from_user,
+        to_domain: "local".to_string(),
+        to_user: req.to_user,
+        body: req.body,
+        created_at: chrono::Utc::now(),
+    };
+    state.store_federated_message(msg.clone());
+    let _ = state.broadcast_sse(crate::SseEvent {
+        event_type: "federated_message".to_string(),
+        payload: serde_json::to_value(&msg).unwrap_or_default(),
+    });
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "ok": true }))))
+}
+async fn list_federated_messages(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::FederatedMessage>>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    Ok(Json(state.list_federated_messages_for_user(&principal)))
+}
+// ─── Loop Components ───
+
+async fn list_loop_components(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(room_id): Path<Uuid>,
+) -> Result<Json<Vec<crate::LoopComponent>>, ApiError> {
+    require_bearer(&headers, &state)?;
+    Ok(Json(state.list_loop_components(room_id)))
+}
+async fn create_loop_component(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(room_id): Path<Uuid>,
+    Json(req): Json<CreateLoopComponentRequest>,
+) -> Result<(StatusCode, Json<crate::LoopComponent>), ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let component = state.create_loop_component(room_id, &principal, req);
+    let _ = state.broadcast_sse(crate::SseEvent {
+        event_type: "loop_created".to_string(),
+        payload: serde_json::to_value(&component).unwrap_or_default(),
+    });
+    Ok((StatusCode::CREATED, Json(component)))
+}
+async fn update_loop_component(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(loop_id): Path<Uuid>,
+    Json(req): Json<UpdateLoopComponentRequest>,
+) -> Result<Json<crate::LoopComponent>, ApiError> {
+    require_bearer(&headers, &state)?;
+    match state.update_loop_component(loop_id, req) {
+        Some(component) => {
+            let _ = state.broadcast_sse(crate::SseEvent {
+                event_type: "loop_updated".to_string(),
+                payload: serde_json::to_value(&component).unwrap_or_default(),
+            });
+            Ok(Json(component))
+        }
+        None => Err(ApiError::NotFound),
+    }
+}
+async fn delete_loop_component(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(loop_id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    require_bearer(&headers, &state)?;
+    if state.delete_loop_component(loop_id) {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+// ─── Compliance ───
+
+async fn compliance_scan(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<ComplianceScanRequest>,
+) -> Result<Json<Vec<crate::ComplianceReview>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.scan_message_compliance(req)))
+}
+async fn list_compliance_reviews(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::ComplianceReview>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_compliance_reviews()))
+}
+async fn update_compliance_review(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateComplianceReviewRequest>,
+) -> Result<Json<crate::ComplianceReview>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    match state.update_compliance_review(id, &principal, req) {
+        Some(review) => {
+            state.record_audit_event(&principal, "compliance.reviewed", Some(format!("id={} status={}", id, review.status)));
+            Ok(Json(review))
+        }
+        None => Err(ApiError::NotFound),
+    }
+}
+// ─── Data Residency ───
+
+async fn list_data_residency(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::DataResidencyConfig>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_data_residency_configs()))
+}
+async fn create_data_residency(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<CreateDataResidencyConfigRequest>,
+) -> Result<(StatusCode, Json<crate::DataResidencyConfig>), ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let config = state.create_data_residency_config(req);
+    state.record_audit_event(&principal, "data_residency.created", Some(format!("id={} region={}", config.id, config.region)));
+    Ok((StatusCode::CREATED, Json(config)))
+}
+async fn update_data_residency(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateDataResidencyConfigRequest>,
+) -> Result<Json<crate::DataResidencyConfig>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    match state.update_data_residency_config(id, req) {
+        Some(config) => {
+            state.record_audit_event(&principal, "data_residency.updated", Some(format!("id={}", id)));
+            Ok(Json(config))
+        }
+        None => Err(ApiError::NotFound),
+    }
+}
+async fn delete_data_residency(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if state.delete_data_residency_config(id) {
+        state.record_audit_event(&principal, "data_residency.deleted", Some(format!("id={}", id)));
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+async fn data_residency_status(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    let configs = state.list_data_residency_configs();
+    let regions: Vec<_> = configs.iter().map(|c| serde_json::json!({
+        "id": c.id,
+        "region": c.region,
+        "enabled": c.enabled,
+        "file_storage_path": c.file_storage_path,
+    })).collect();
+    Ok(Json(serde_json::json!({
+        "regions": regions,
+        "total": configs.len(),
+        "active": configs.iter().filter(|c| c.enabled).count(),
+    })))
 }

@@ -56,7 +56,7 @@ async function api<T = any>(baseUrl: string, token: string, path: string, opts?:
   return paleServerApi<T>(baseUrl, token, path, opts);
 }
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music" | "sso" | "encryption" | "pam" | "common_area_phones" | "meeting_rooms_admin" | "devices" | "custom_emojis" | "api_clients" | "bots" | "connectors" | "conditional_access" | "sip_gateways" | "location_routing" | "guests" | "scheduling_panels" | "automations";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music" | "sso" | "encryption" | "pam" | "common_area_phones" | "meeting_rooms_admin" | "devices" | "custom_emojis" | "api_clients" | "bots" | "connectors" | "conditional_access" | "sip_gateways" | "location_routing" | "guests" | "scheduling_panels" | "automations" | "federation" | "compliance" | "data_residency";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -110,6 +110,9 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "guests", label: "Guests", icon: UserPlus },
   { id: "scheduling_panels", label: "Scheduling Panels", icon: Monitor },
   { id: "automations", label: "Automations", icon: GitBranch },
+  { id: "federation", label: "Federation", icon: GitBranch },
+  { id: "compliance", label: "Compliance", icon: Shield },
+  { id: "data_residency", label: "Data Residency", icon: Server },
 ];
 
 export function AdminView() {
@@ -360,6 +363,9 @@ export function AdminView() {
         {activeTab === "guests" && <GuestsPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "scheduling_panels" && <SchedulingPanelsPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "automations" && <AutomationsPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "federation" && <FederationPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "compliance" && <CompliancePanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "data_residency" && <DataResidencyPanel baseUrl={baseUrl} token={token} />}
       </div>
     </div>
   );
@@ -6912,6 +6918,336 @@ function AutomationsPanel({ baseUrl, token }: { baseUrl: string; token: string }
           </div>
         ))}
         {rules.length === 0 && <p className="text-sm text-tertiary">No automation rules configured.</p>}
+      </div>
+    </div>
+  );
+}
+
+// ─── Federation Panel ───
+
+interface FederationPeer {
+  id: string;
+  domain: string;
+  server_url: string;
+  enabled: boolean;
+  created_at: string;
+}
+
+function FederationPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [peers, setPeers] = useState<FederationPeer[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [domain, setDomain] = useState("");
+  const [serverUrl, setServerUrl] = useState("");
+  const [sharedKey, setSharedKey] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api<FederationPeer[]>(baseUrl, token, "/v1/admin/federation");
+      setPeers(data);
+    } catch { /* ignore */ }
+    setLoading(false);
+  }, [baseUrl, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleCreate = async () => {
+    if (!domain.trim() || !serverUrl.trim() || !sharedKey.trim()) return;
+    try {
+      await api(baseUrl, token, "/v1/admin/federation", {
+        method: "POST",
+        body: { domain: domain.trim(), server_url: serverUrl.trim(), shared_key: sharedKey.trim() },
+      });
+      setDomain(""); setServerUrl(""); setSharedKey("");
+      load();
+      toast({ type: "success", title: "Federation peer created" });
+    } catch {
+      toast({ type: "error", title: "Failed to create peer" });
+    }
+  };
+
+  const handleToggle = async (id: string, enabled: boolean) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/federation/${id}`, { method: "PUT", body: { enabled: !enabled } });
+      load();
+    } catch {
+      toast({ type: "error", title: "Failed to update peer" });
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/federation/${id}`, { method: "DELETE" });
+      load();
+      toast({ type: "success", title: "Peer deleted" });
+    } catch {
+      toast({ type: "error", title: "Failed to delete peer" });
+    }
+  };
+
+  if (loading) return <p className="text-sm text-tertiary py-8 text-center">Loading...</p>;
+
+  return (
+    <div className="space-y-4">
+      <h3 className="text-sm font-semibold">Federation Peers</h3>
+      <p className="text-xs text-secondary">
+        Manage cross-organization federation. Each peer represents a trusted external Pale server.
+      </p>
+
+      <div className="space-y-2 p-3 bg-elevated rounded-lg">
+        <input value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="Domain (e.g. partner.com)"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <input value={serverUrl} onChange={(e) => setServerUrl(e.target.value)} placeholder="Server URL (e.g. https://pale.partner.com)"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <input value={sharedKey} onChange={(e) => setSharedKey(e.target.value)} placeholder="Shared key" type="password"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <button onClick={handleCreate} disabled={!domain.trim() || !serverUrl.trim() || !sharedKey.trim()}
+          className={cn("px-4 py-2 rounded-md text-sm font-medium bg-accent text-inverse hover:bg-accent-hover transition-colors disabled:opacity-50")}>
+          Add Peer
+        </button>
+      </div>
+
+      <div className="space-y-2">
+        {peers.length === 0 && <p className="text-xs text-tertiary">No federation peers configured.</p>}
+        {peers.map((p) => (
+          <div key={p.id} className={cn("p-3 rounded-lg border", p.enabled ? "border-accent/30 bg-accent/5" : "border-border-subtle bg-surface")}>
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-sm font-medium text-primary">{p.domain}</span>
+                <span className={cn("ml-2 text-[10px] px-1.5 py-0.5 rounded", p.enabled ? "bg-green-500/10 text-green-600" : "bg-zinc-500/10 text-zinc-500")}>
+                  {p.enabled ? "Enabled" : "Disabled"}
+                </span>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => handleToggle(p.id, p.enabled)} className="text-xs text-accent hover:underline">
+                  {p.enabled ? "Disable" : "Enable"}
+                </button>
+                <button onClick={() => handleDelete(p.id)} className="text-xs text-destructive hover:underline">Delete</button>
+              </div>
+            </div>
+            <div className="mt-1 text-[10px] text-tertiary">{p.server_url}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Compliance Panel ───
+
+interface ComplianceReviewItem {
+  id: string;
+  message_id: string;
+  category: string;
+  severity: string;
+  flagged_content: string;
+  status: string;
+  reviewer: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+}
+
+function CompliancePanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [reviews, setReviews] = useState<ComplianceReviewItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [scanMessageId, setScanMessageId] = useState("");
+  const [scanBody, setScanBody] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api<ComplianceReviewItem[]>(baseUrl, token, "/v1/admin/compliance/reviews");
+      setReviews(data);
+    } catch { /* ignore */ }
+    setLoading(false);
+  }, [baseUrl, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleScan = async () => {
+    if (!scanBody.trim()) return;
+    try {
+      const msgId = scanMessageId.trim() || "00000000-0000-0000-0000-000000000000";
+      await api(baseUrl, token, "/v1/admin/compliance/scan", {
+        method: "POST",
+        body: { message_id: msgId, body: scanBody.trim() },
+      });
+      setScanBody(""); setScanMessageId("");
+      load();
+      toast({ type: "success", title: "Scan complete" });
+    } catch {
+      toast({ type: "error", title: "Scan failed" });
+    }
+  };
+
+  const handleReview = async (id: string, status: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/compliance/reviews/${id}`, {
+        method: "PUT",
+        body: { status },
+      });
+      load();
+      toast({ type: "success", title: `Review ${status}` });
+    } catch {
+      toast({ type: "error", title: "Failed to update review" });
+    }
+  };
+
+  if (loading) return <p className="text-sm text-tertiary py-8 text-center">Loading...</p>;
+
+  return (
+    <div className="space-y-4">
+      <h3 className="text-sm font-semibold">Communication Compliance</h3>
+      <p className="text-xs text-secondary">
+        Scan messages for policy violations, review and action flagged content.
+      </p>
+
+      <div className="space-y-2 p-3 bg-elevated rounded-lg">
+        <input value={scanMessageId} onChange={(e) => setScanMessageId(e.target.value)} placeholder="Message ID (optional)"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <textarea value={scanBody} onChange={(e) => setScanBody(e.target.value)} placeholder="Message body to scan..."
+          rows={3} className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none resize-none" />
+        <button onClick={handleScan} disabled={!scanBody.trim()}
+          className={cn("px-4 py-2 rounded-md text-sm font-medium bg-accent text-inverse hover:bg-accent-hover transition-colors disabled:opacity-50")}>
+          Scan Message
+        </button>
+      </div>
+
+      <div className="space-y-2">
+        <h4 className="text-xs font-semibold text-secondary">Review Queue ({reviews.filter((r) => r.status === "pending").length} pending)</h4>
+        {reviews.length === 0 && <p className="text-xs text-tertiary">No flagged content.</p>}
+        {reviews.map((r) => (
+          <div key={r.id} className={cn("p-3 rounded-lg border", r.status === "pending" ? "border-amber-500/30 bg-amber-500/5" : "border-border-subtle bg-surface")}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium",
+                  r.severity === "high" ? "bg-red-500/10 text-red-600" : "bg-amber-500/10 text-amber-600"
+                )}>{r.severity}</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-500/10 text-zinc-500">{r.category}</span>
+                <span className={cn("text-[10px] px-1.5 py-0.5 rounded",
+                  r.status === "pending" ? "bg-amber-500/10 text-amber-600" :
+                  r.status === "approved" ? "bg-green-500/10 text-green-600" : "bg-zinc-500/10 text-zinc-500"
+                )}>{r.status}</span>
+              </div>
+              {r.status === "pending" && (
+                <div className="flex gap-2">
+                  <button onClick={() => handleReview(r.id, "approved")} className="text-xs text-green-600 hover:underline">Approve</button>
+                  <button onClick={() => handleReview(r.id, "dismissed")} className="text-xs text-zinc-500 hover:underline">Dismiss</button>
+                </div>
+              )}
+            </div>
+            <p className="mt-1 text-xs text-primary">Flagged: &quot;{r.flagged_content}&quot;</p>
+            <p className="mt-0.5 text-[10px] text-tertiary">Message: {r.message_id.slice(0, 8)}... | {new Date(r.created_at).toLocaleString()}</p>
+            {r.reviewer && <p className="text-[10px] text-tertiary">Reviewed by: {r.reviewer}</p>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Data Residency Panel ───
+
+interface DataResidencyItem {
+  id: string;
+  region: string;
+  file_storage_path: string;
+  enabled: boolean;
+  created_at: string;
+}
+
+function DataResidencyPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [configs, setConfigs] = useState<DataResidencyItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [region, setRegion] = useState("");
+  const [connString, setConnString] = useState("");
+  const [storagePath, setStoragePath] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api<DataResidencyItem[]>(baseUrl, token, "/v1/admin/data-residency");
+      setConfigs(data);
+    } catch { /* ignore */ }
+    setLoading(false);
+  }, [baseUrl, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleCreate = async () => {
+    if (!region.trim() || !connString.trim() || !storagePath.trim()) return;
+    try {
+      await api(baseUrl, token, "/v1/admin/data-residency", {
+        method: "POST",
+        body: { region: region.trim(), pg_connection_string: connString.trim(), file_storage_path: storagePath.trim() },
+      });
+      setRegion(""); setConnString(""); setStoragePath("");
+      load();
+      toast({ type: "success", title: "Region created" });
+    } catch {
+      toast({ type: "error", title: "Failed to create region" });
+    }
+  };
+
+  const handleToggle = async (id: string, enabled: boolean) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/data-residency/${id}`, { method: "PUT", body: { enabled: !enabled } });
+      load();
+    } catch {
+      toast({ type: "error", title: "Failed to update region" });
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/data-residency/${id}`, { method: "DELETE" });
+      load();
+      toast({ type: "success", title: "Region deleted" });
+    } catch {
+      toast({ type: "error", title: "Failed to delete region" });
+    }
+  };
+
+  if (loading) return <p className="text-sm text-tertiary py-8 text-center">Loading...</p>;
+
+  return (
+    <div className="space-y-4">
+      <h3 className="text-sm font-semibold">Data Residency</h3>
+      <p className="text-xs text-secondary">
+        Configure multi-geo data storage regions. Each region has its own database and file storage path.
+      </p>
+
+      <div className="space-y-2 p-3 bg-elevated rounded-lg">
+        <input value={region} onChange={(e) => setRegion(e.target.value)} placeholder="Region name (e.g. eu-west, us-east)"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <input value={connString} onChange={(e) => setConnString(e.target.value)} placeholder="PostgreSQL connection string" type="password"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <input value={storagePath} onChange={(e) => setStoragePath(e.target.value)} placeholder="File storage path (e.g. /data/eu-west/files)"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <button onClick={handleCreate} disabled={!region.trim() || !connString.trim() || !storagePath.trim()}
+          className={cn("px-4 py-2 rounded-md text-sm font-medium bg-accent text-inverse hover:bg-accent-hover transition-colors disabled:opacity-50")}>
+          Add Region
+        </button>
+      </div>
+
+      <div className="space-y-2">
+        {configs.length === 0 && <p className="text-xs text-tertiary">No data residency regions configured.</p>}
+        {configs.map((c) => (
+          <div key={c.id} className={cn("p-3 rounded-lg border", c.enabled ? "border-accent/30 bg-accent/5" : "border-border-subtle bg-surface")}>
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-sm font-medium text-primary">{c.region}</span>
+                <span className={cn("ml-2 text-[10px] px-1.5 py-0.5 rounded", c.enabled ? "bg-green-500/10 text-green-600" : "bg-zinc-500/10 text-zinc-500")}>
+                  {c.enabled ? "Active" : "Disabled"}
+                </span>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => handleToggle(c.id, c.enabled)} className="text-xs text-accent hover:underline">
+                  {c.enabled ? "Disable" : "Enable"}
+                </button>
+                <button onClick={() => handleDelete(c.id)} className="text-xs text-destructive hover:underline">Delete</button>
+              </div>
+            </div>
+            <div className="mt-1 text-[10px] text-tertiary">Storage: {c.file_storage_path}</div>
+          </div>
+        ))}
       </div>
     </div>
   );
