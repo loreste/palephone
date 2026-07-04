@@ -13,10 +13,11 @@ use uuid::Uuid;
 
 use crate::{
     AdminAuditEvent, CallQualityReport, CallSession, ChannelWebhook, CollaborationPolicy,
-    Conference, ConferenceAttendanceRecord, CustomRole, DlpPolicy, DlpViolation, FileRecord,
-    InformationBarrier, MessageReactionRecord, MessageRead, PolicyPackage, RetentionPolicy, Room,
-    RoomMessage, RoutingRule, ScheduledMeeting, SensitivityLabel, SipAccount, SipDialog,
-    SipMessage, SipRegistration, SipTransaction, Team, User,
+    Conference, ConferenceAttendanceRecord, CustomRole, DlpPolicy, DlpViolation, EDiscoveryCase,
+    FileRecord, InformationBarrier, MalwareQuarantineItem, MessageReactionRecord, MessageRead,
+    PolicyPackage, RetentionPolicy, Room, RoomMessage, RoutingRule, ScheduledMeeting,
+    SensitivityLabel, SipAccount, SipDialog, SipMessage, SipRegistration, SipTransaction, Team,
+    User,
 };
 
 const SCHEMA: &str = r#"
@@ -336,6 +337,16 @@ impl StoredObject for FileRecord {
     }
 }
 
+impl StoredObject for MalwareQuarantineItem {
+    fn collection() -> &'static str {
+        "malware_quarantine"
+    }
+
+    fn key(&self) -> String {
+        self.id.to_string()
+    }
+}
+
 impl StoredObject for RoutingRule {
     fn collection() -> &'static str {
         "routing_rules"
@@ -379,6 +390,16 @@ impl StoredObject for ScheduledMeeting {
 impl StoredObject for RetentionPolicy {
     fn collection() -> &'static str {
         "retention_policies"
+    }
+
+    fn key(&self) -> String {
+        self.id.to_string()
+    }
+}
+
+impl StoredObject for EDiscoveryCase {
+    fn collection() -> &'static str {
+        "ediscovery_cases"
     }
 
     fn key(&self) -> String {

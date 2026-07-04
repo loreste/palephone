@@ -41,10 +41,12 @@ import {
   deleteFile,
   deleteRoutingRule,
   loadAdminSnapshot,
+  loadSecurityPosture,
   setAdminUserActive,
   setAdminSipAccountEnabled,
   updateRoutingRule,
   type AdminSnapshot,
+  type SecurityPostureReport,
 } from "@/lib/adminApi";
 import { toast } from "@/components/ui/Toast";
 import { useServerStore } from "@/store/serverStore";
@@ -57,7 +59,7 @@ async function api<T = any>(baseUrl: string, token: string, path: string, opts?:
   return paleServerApi<T>(baseUrl, token, path, opts);
 }
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music" | "sso" | "encryption" | "pam" | "common_area_phones" | "meeting_rooms_admin" | "devices" | "custom_emojis" | "api_clients" | "bots" | "connectors" | "conditional_access" | "sip_gateways" | "location_routing" | "guests" | "scheduling_panels" | "automations" | "federation" | "compliance" | "data_residency" | "message_extensions" | "app_store" | "bandwidth" | "signage";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "security_score" | "retention" | "ediscovery" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music" | "sso" | "encryption" | "pam" | "common_area_phones" | "meeting_rooms_admin" | "devices" | "custom_emojis" | "api_clients" | "bots" | "connectors" | "conditional_access" | "sip_gateways" | "location_routing" | "emergency" | "guests" | "scheduling_panels" | "automations" | "federation" | "compliance" | "data_residency" | "enterprise_integrations" | "message_extensions" | "app_store" | "bandwidth" | "signage";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -85,7 +87,9 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "audit", label: "Audit", icon: ClipboardList },
   { id: "cqd", label: "Call Quality", icon: BarChart3 },
   { id: "policy", label: "Policy", icon: Shield },
+  { id: "security_score", label: "Security Score", icon: Shield },
   { id: "retention", label: "Retention", icon: Archive },
+  { id: "ediscovery", label: "eDiscovery", icon: Search },
   { id: "dlp", label: "DLP", icon: Shield },
   { id: "barriers", label: "Barriers", icon: Shield },
   { id: "labels", label: "Labels", icon: FileText },
@@ -108,12 +112,14 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "conditional_access", label: "Conditional Access", icon: Lock },
   { id: "sip_gateways", label: "SIP Gateways", icon: Router },
   { id: "location_routing", label: "Location Routing", icon: GitBranch },
+  { id: "emergency", label: "Emergency", icon: Shield },
   { id: "guests", label: "Guests", icon: UserPlus },
   { id: "scheduling_panels", label: "Scheduling Panels", icon: Monitor },
   { id: "automations", label: "Automations", icon: GitBranch },
   { id: "federation", label: "Federation", icon: GitBranch },
   { id: "compliance", label: "Compliance", icon: Shield },
   { id: "data_residency", label: "Data Residency", icon: Server },
+  { id: "enterprise_integrations", label: "Integrations", icon: Plug },
   { id: "message_extensions", label: "Extensions", icon: Plug },
   { id: "app_store", label: "App Store", icon: Download },
   { id: "bandwidth", label: "Bandwidth", icon: BarChart3 },
@@ -342,7 +348,9 @@ export function AdminView() {
         {activeTab === "audit" && <AuditPanel baseUrl={baseUrl} token={token} snapshot={snapshot} />}
         {activeTab === "cqd" && <CqdPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "policy" && <CollaborationPolicyPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "security_score" && <SecurityScorePanel baseUrl={baseUrl} token={token} />}
         {activeTab === "retention" && <RetentionPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "ediscovery" && <EDiscoveryCasesPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "dlp" && <DlpPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "barriers" && <BarriersPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "labels" && <LabelsPanel baseUrl={baseUrl} token={token} />}
@@ -365,12 +373,14 @@ export function AdminView() {
         {activeTab === "conditional_access" && <ConditionalAccessPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "sip_gateways" && <SipGatewaysPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "location_routing" && <LocationRoutingPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "emergency" && <EmergencyPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "guests" && <GuestsPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "scheduling_panels" && <SchedulingPanelsPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "automations" && <AutomationsPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "federation" && <FederationPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "compliance" && <CompliancePanel baseUrl={baseUrl} token={token} />}
         {activeTab === "data_residency" && <DataResidencyPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "enterprise_integrations" && <EnterpriseIntegrationsPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "message_extensions" && <MessageExtensionsPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "app_store" && <AppStorePanel baseUrl={baseUrl} token={token} />}
         {activeTab === "bandwidth" && <BandwidthPanel baseUrl={baseUrl} token={token} />}
@@ -1373,13 +1383,15 @@ function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
   const [name, setName] = useState("");
   const [extension, setExtension] = useState("");
   const [greeting, setGreeting] = useState("");
-  const [options, setOptions] = useState<{ digit: string; label: string; destination: string; destination_type: string }[]>([
-    { digit: "1", label: "Sales", destination: "", destination_type: "ring_group" },
-    { digit: "2", label: "Support", destination: "", destination_type: "ring_group" },
-    { digit: "0", label: "Operator", destination: "", destination_type: "user" },
+  const [options, setOptions] = useState<{ digit: string; label: string; destination: string; destination_type: string; speech_phrases: string }[]>([
+    { digit: "1", label: "Sales", destination: "", destination_type: "ring_group", speech_phrases: "sales, talk to sales" },
+    { digit: "2", label: "Support", destination: "", destination_type: "ring_group", speech_phrases: "support, help, technical support" },
+    { digit: "0", label: "Operator", destination: "", destination_type: "user", speech_phrases: "operator, receptionist, human" },
   ]);
   const [timeoutDest, setTimeoutDest] = useState("");
   const [invalidDest, setInvalidDest] = useState("");
+  const [speechEnabled, setSpeechEnabled] = useState(false);
+  const [speechLanguage, setSpeechLanguage] = useState("en-US");
   const [greetingMode, setGreetingMode] = useState<"text" | "upload">("text");
   const [greetingFileId, setGreetingFileId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -1405,7 +1417,7 @@ function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
   useEffect(() => { load(); }, [load]);
 
   const addOption = () => {
-    setOptions([...options, { digit: String(options.length + 1), label: "", destination: "", destination_type: "user" }]);
+    setOptions([...options, { digit: String(options.length + 1), label: "", destination: "", destination_type: "user", speech_phrases: "" }]);
   };
 
   const updateOption = (idx: number, field: string, value: string) => {
@@ -1430,9 +1442,12 @@ function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
           greeting_file_id: greetingMode === "upload" ? greetingFileId : null,
           timeout_destination: timeoutDest || null,
           invalid_destination: invalidDest || null,
+          speech_enabled: speechEnabled,
+          speech_language: speechLanguage || "en-US",
           options: options.filter((o) => o.destination).map((o) => ({
             ...o,
             destination: o.destination.startsWith("sip:") ? o.destination : `sip:${o.destination}`,
+            speech_phrases: o.speech_phrases.split(",").map((phrase) => phrase.trim()).filter(Boolean),
           })),
         },
       });
@@ -1515,7 +1530,7 @@ function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
           </div>
           <div className="space-y-2">
             {options.map((opt, idx) => (
-              <div key={idx} className="grid grid-cols-5 gap-2 items-end">
+              <div key={idx} className="grid grid-cols-6 gap-2 items-end">
                 <label className="block">
                   <span className="block text-xs text-tertiary mb-1">Digit</span>
                   <input value={opt.digit} onChange={(e) => updateOption(idx, "digit", e.target.value)}
@@ -1530,6 +1545,12 @@ function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
                   <span className="block text-xs text-tertiary mb-1">Destination</span>
                   <input value={opt.destination} onChange={(e) => updateOption(idx, "destination", e.target.value)}
                     placeholder="user@pale.local or group extension"
+                    className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus" />
+                </label>
+                <label className="block">
+                  <span className="block text-xs text-tertiary mb-1">Speech phrases</span>
+                  <input value={opt.speech_phrases} onChange={(e) => updateOption(idx, "speech_phrases", e.target.value)}
+                    placeholder="sales, support, operator"
                     className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus" />
                 </label>
                 <label className="block">
@@ -1555,6 +1576,14 @@ function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
           <Field label="Invalid input destination" value={invalidDest} onChange={setInvalidDest} />
         </div>
 
+        <div className="grid md:grid-cols-[160px_1fr] gap-2 items-end">
+          <label className="flex items-center gap-2 h-10 text-sm text-secondary">
+            <input type="checkbox" checked={speechEnabled} onChange={(e) => setSpeechEnabled(e.target.checked)} />
+            Speech IVR
+          </label>
+          <Field label="Speech language" value={speechLanguage} onChange={setSpeechLanguage} />
+        </div>
+
         <button className="h-10 rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium flex items-center justify-center gap-2 px-4">
           <Plus size={16} /> Create IVR
         </button>
@@ -1574,7 +1603,14 @@ function IvrPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
             ) : ivrs.map((ivr) => (
               <tr key={ivr.id} className="border-b border-border-subtle">
                 <td className="py-2 px-2">{ivr.name}</td>
-                <td className="py-2 px-2 text-secondary">{ivr.extension}</td>
+                <td className="py-2 px-2 text-secondary">
+                  <div>{ivr.extension}</div>
+                  {ivr.speech_enabled && (
+                    <span className={cn("text-[10px]", ivr.speech_provider_configured ? "text-success" : "text-warning")}>
+                      speech {ivr.speech_provider_configured ? "ready" : "needs provider"}
+                    </span>
+                  )}
+                </td>
                 <td className="py-2 px-2 text-secondary max-w-[200px]">
                   {ivr.greeting_file_id ? (
                     <div className="flex items-center gap-2">
@@ -4023,7 +4059,8 @@ function DlpPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
   const [pattern, setPattern] = useState("");
   const [action, setAction] = useState("block");
   const [enabled, setEnabled] = useState(true);
-  const [tab, setTab] = useState<"policies" | "violations">("policies");
+  const [tab, setTab] = useState<"policies" | "violations" | "quarantine">("policies");
+  const [quarantine, setQuarantine] = useState<any[]>([]);
   const [violationPolicy, setViolationPolicy] = useState("");
   const [violationUser, setViolationUser] = useState("");
   const [violationAction, setViolationAction] = useState<"all" | "block" | "warn" | "audit">("all");
@@ -4047,6 +4084,7 @@ function DlpPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
     if (!token) return;
     api(baseUrl, token, "/v1/admin/dlp/policies").then(setPolicies).catch(() => {});
     api(baseUrl, token, `/v1/admin/dlp/violations${violationQuery()}`).then(setViolations).catch(() => {});
+    api(baseUrl, token, "/v1/admin/atp/quarantine").then(setQuarantine).catch(() => {});
   };
 
   useEffect(load, [baseUrl, token, violationQuery]);
@@ -4154,6 +4192,22 @@ function DlpPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
     } catch { toast({ type: "error", title: "Failed" }); }
   };
 
+  const reviewQuarantineItem = async (id: string, status: "released" | "deleted") => {
+    try {
+      await api(baseUrl, token, `/v1/admin/atp/quarantine/${id}`, {
+        method: "PUT",
+        body: {
+          status,
+          notes: status === "released" ? "Reviewed and released by administrator" : "Reviewed and deleted by administrator",
+        },
+      });
+      load();
+      toast({ type: "success", title: status === "released" ? "Quarantine item released" : "Quarantine item deleted" });
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Quarantine review failed" });
+    }
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
@@ -4168,6 +4222,12 @@ function DlpPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
           className={cn("px-3 py-1.5 rounded text-sm", tab === "violations" ? "bg-accent text-white" : "hover:bg-hover")}
         >
           Violations ({violations.length})
+        </button>
+        <button
+          onClick={() => setTab("quarantine")}
+          className={cn("px-3 py-1.5 rounded text-sm", tab === "quarantine" ? "bg-accent text-white" : "hover:bg-hover")}
+        >
+          ATP Quarantine ({quarantine.length})
         </button>
         <button onClick={() => creating ? resetPolicyForm() : setCreating(true)} className="ml-auto flex items-center gap-1 px-3 py-1.5 bg-accent text-white rounded text-sm">
           <Plus size={14} /> New Policy
@@ -4339,6 +4399,68 @@ function DlpPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
             ])}
           />
         </div>
+      )}
+
+      {tab === "quarantine" && (
+        <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+          <div className="p-3 border-b border-border-subtle flex items-center justify-between gap-3">
+            <h2 className="font-medium">ATP Quarantine</h2>
+            <button onClick={load} className="h-8 px-3 rounded-md border border-border-default hover:bg-elevated text-sm">
+              Refresh
+            </button>
+          </div>
+          <table className="w-full text-sm">
+            <thead className="text-tertiary">
+              <tr className="border-b border-border-subtle">
+                {["File", "Owner", "Reason", "Status", "Detected", "Reviewed", ""].map((col) => (
+                  <th key={col} className="text-left py-2 px-2 font-medium">{col}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {quarantine.length === 0 ? (
+                <tr><td className="py-4 px-2 text-secondary" colSpan={7}>No quarantined malware uploads</td></tr>
+              ) : (
+                quarantine.map((item: any) => (
+                  <tr key={item.id} className="border-b border-border-subtle last:border-b-0 align-top">
+                    <td className="py-2 px-2">
+                      <div className="font-medium">{item.filename}</div>
+                      <div className="text-xs text-tertiary font-mono truncate max-w-[220px]">{item.sha256}</div>
+                    </td>
+                    <td className="py-2 px-2">{item.owner?.replace(/^sip:/, "")}</td>
+                    <td className="py-2 px-2">{item.reason?.replaceAll("_", " ")}</td>
+                    <td className="py-2 px-2 capitalize">{item.status}</td>
+                    <td className="py-2 px-2">{shortDate(item.detected_at)}</td>
+                    <td className="py-2 px-2">
+                      {item.reviewed_at ? (
+                        <div>
+                          <div>{shortDate(item.reviewed_at)}</div>
+                          <div className="text-xs text-tertiary">{item.reviewed_by}</div>
+                        </div>
+                      ) : (
+                        <span className="text-secondary">Pending</span>
+                      )}
+                    </td>
+                    <td className="py-2 px-2">
+                      {item.status === "quarantined" ? (
+                        <div className="flex items-center gap-2">
+                          <button onClick={() => reviewQuarantineItem(item.id, "released")} className="text-xs text-accent hover:underline">
+                            Release
+                          </button>
+                          <button onClick={() => reviewQuarantineItem(item.id, "deleted")} className="text-xs text-destructive hover:underline">
+                            Delete
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-secondary">Closed</span>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </section>
       )}
     </div>
   );
@@ -4857,6 +4979,395 @@ function AnalyticsPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
         </div>
         <div className="p-3 text-sm text-secondary">
           CSV format for import: <code className="bg-base px-1 rounded">display_name,sip_uri,password,role</code>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function SecurityScorePanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [report, setReport] = useState<SecurityPostureReport | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setReport(await loadSecurityPosture(baseUrl, token));
+    } catch {
+      toast({ type: "error", title: "Failed to load security score" });
+    } finally {
+      setLoading(false);
+    }
+  }, [baseUrl, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  if (!report) {
+    return (
+      <section className="border border-border-subtle bg-surface rounded-md p-6 text-center text-secondary">
+        {loading ? "Loading security score..." : "No security score available"}
+      </section>
+    );
+  }
+
+  const percent = report.max_score > 0 ? Math.round((report.score / report.max_score) * 100) : 0;
+  const postureClass =
+    report.posture === "strong"
+      ? "text-green-600 bg-green-500/10"
+      : report.posture === "moderate"
+        ? "text-amber-600 bg-amber-500/10"
+        : "text-red-600 bg-red-500/10";
+
+  return (
+    <section className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Shield size={17} className="text-accent" />
+          <h2 className="font-medium text-lg">Security Score</h2>
+          <span className={cn("text-xs px-2 py-1 rounded capitalize", postureClass)}>
+            {report.posture.replace("_", " ")}
+          </span>
+        </div>
+        <button onClick={load} disabled={loading} className="h-9 px-3 rounded-md border border-border-default hover:bg-elevated text-sm flex items-center gap-2 disabled:opacity-60">
+          <RefreshCw size={16} className={loading ? "animate-spin" : ""} /> Refresh
+        </button>
+      </div>
+
+      <div className="grid lg:grid-cols-[280px_minmax(0,1fr)] gap-3">
+        <div className="border border-border-subtle bg-surface rounded-md p-4 space-y-4">
+          <div>
+            <div className="text-4xl font-semibold">{percent}%</div>
+            <div className="text-sm text-secondary">{report.score} / {report.max_score} points</div>
+          </div>
+          <div className="h-2 bg-elevated rounded-full overflow-hidden">
+            <div className="h-full bg-accent" style={{ width: `${percent}%` }} />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Metric label="Active users" value={report.counts.active_users} />
+            <Metric label="MFA users" value={report.counts.mfa_enabled_users} />
+            <Metric label="DLP policies" value={report.counts.enabled_dlp_policies} />
+            <Metric label="Audit events" value={report.counts.audit_events} />
+          </div>
+          <p className="text-xs text-tertiary">Generated {shortDate(report.generated_at)}</p>
+        </div>
+
+        <div className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+          <div className="p-3 border-b border-border-subtle">
+            <h3 className="font-medium">Controls</h3>
+          </div>
+          <div className="divide-y divide-border-subtle">
+            {report.controls.map((control) => {
+              const statusClass =
+                control.status === "pass"
+                  ? "text-green-600 bg-green-500/10"
+                  : control.status === "warning"
+                    ? "text-amber-600 bg-amber-500/10"
+                    : "text-red-600 bg-red-500/10";
+              return (
+                <div key={control.id} className="p-3 grid md:grid-cols-[minmax(0,1fr)_120px] gap-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className={cn("text-[10px] px-1.5 py-0.5 rounded uppercase", statusClass)}>
+                        {control.status}
+                      </span>
+                      <span className="text-xs text-tertiary">{control.category}</span>
+                    </div>
+                    <div className="mt-1 text-sm font-medium text-primary">{control.title}</div>
+                    <div className="text-xs text-secondary">{control.summary}</div>
+                    {control.status !== "pass" && (
+                      <div className="mt-1 text-xs text-tertiary">{control.remediation}</div>
+                    )}
+                  </div>
+                  <div className="text-right">
+                    <div className="text-sm font-medium">{control.score}/{control.max_score}</div>
+                    <div className="mt-1 h-1.5 bg-elevated rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-accent"
+                        style={{ width: `${control.max_score ? Math.round((control.score / control.max_score) * 100) : 0}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      <div className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+        <div className="p-3 border-b border-border-subtle flex items-center gap-2">
+          <CheckCircle2 size={16} className="text-accent" />
+          <h3 className="font-medium">Recommended Actions</h3>
+        </div>
+        {report.recommendations.length === 0 ? (
+          <p className="p-3 text-sm text-secondary">No open recommendations.</p>
+        ) : (
+          <div className="divide-y divide-border-subtle">
+            {report.recommendations.map((rec) => (
+              <div key={rec.control_id} className="p-3 flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium">{rec.title}</div>
+                  <div className="text-xs text-secondary">{rec.action}</div>
+                </div>
+                <span className={cn("text-[10px] px-1.5 py-0.5 rounded uppercase", rec.priority === "high" ? "text-red-600 bg-red-500/10" : "text-amber-600 bg-amber-500/10")}>
+                  {rec.priority}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+type EDiscoveryCase = {
+  id: string;
+  name: string;
+  description: string;
+  status: "open" | "on_hold" | "closed";
+  custodians: string[];
+  query: {
+    q?: string | null;
+    user_uri?: string | null;
+    room_id?: string | null;
+    from?: string | null;
+    to?: string | null;
+    limit?: number | null;
+  };
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  last_exported_at?: string | null;
+  last_exported_by?: string | null;
+  last_export_count: number;
+};
+
+function EDiscoveryCasesPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [cases, setCases] = useState<EDiscoveryCase[]>([]);
+  const [selected, setSelected] = useState<EDiscoveryCase | null>(null);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [custodians, setCustodians] = useState("");
+  const [keyword, setKeyword] = useState("");
+  const [userUri, setUserUri] = useState("");
+  const [roomId, setRoomId] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [limit, setLimit] = useState("250");
+  const [status, setStatus] = useState<EDiscoveryCase["status"]>("open");
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setCases(await api<EDiscoveryCase[]>(baseUrl, token, "/v1/admin/ediscovery/cases"));
+    } catch {
+      toast({ type: "error", title: "Failed to load eDiscovery cases" });
+    } finally {
+      setLoading(false);
+    }
+  }, [baseUrl, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const reset = () => {
+    setSelected(null);
+    setName("");
+    setDescription("");
+    setCustodians("");
+    setKeyword("");
+    setUserUri("");
+    setRoomId("");
+    setFrom("");
+    setTo("");
+    setLimit("250");
+    setStatus("open");
+  };
+
+  const edit = (item: EDiscoveryCase) => {
+    setSelected(item);
+    setName(item.name);
+    setDescription(item.description || "");
+    setCustodians(item.custodians.join(", "));
+    setKeyword(item.query.q || "");
+    setUserUri(item.query.user_uri || "");
+    setRoomId(item.query.room_id || "");
+    setFrom(item.query.from ? item.query.from.slice(0, 16) : "");
+    setTo(item.query.to ? item.query.to.slice(0, 16) : "");
+    setLimit(String(item.query.limit || 250));
+    setStatus(item.status);
+  };
+
+  const payload = () => ({
+    name: name.trim(),
+    description: description.trim(),
+    status,
+    custodians: custodians.split(",").map((value) => value.trim()).filter(Boolean),
+    query: {
+      q: keyword.trim() || null,
+      user_uri: userUri.trim() || null,
+      room_id: roomId.trim() || null,
+      from: from ? new Date(from).toISOString() : null,
+      to: to ? new Date(to).toISOString() : null,
+      limit: Math.max(1, Math.min(1000, Number.parseInt(limit, 10) || 250)),
+    },
+  });
+
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      if (selected) {
+        await api(baseUrl, token, `/v1/admin/ediscovery/cases/${selected.id}`, {
+          method: "PUT",
+          body: payload(),
+        });
+        toast({ type: "success", title: "Case updated" });
+      } else {
+        const { status: _status, ...body } = payload();
+        await api(baseUrl, token, "/v1/admin/ediscovery/cases", { method: "POST", body });
+        toast({ type: "success", title: "Case created" });
+      }
+      reset();
+      load();
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Unable to save case" });
+    }
+  };
+
+  const exportCase = async (item: EDiscoveryCase) => {
+    try {
+      const data = await api<{ exported_at: string; messages: any[]; files: any[]; recordings: any[] }>(
+        baseUrl,
+        token,
+        `/v1/admin/ediscovery/cases/${item.id}/export`,
+        { method: "POST" }
+      );
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ediscovery-case-${item.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast({ type: "success", title: `Exported ${data.messages.length + data.files.length + data.recordings.length} items` });
+      load();
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "Unable to export case" });
+    }
+  };
+
+  const remove = async (item: EDiscoveryCase) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/ediscovery/cases/${item.id}`, { method: "DELETE" });
+      if (selected?.id === item.id) reset();
+      toast({ type: "success", title: "Case deleted" });
+      load();
+    } catch {
+      toast({ type: "error", title: "Unable to delete case" });
+    }
+  };
+
+  return (
+    <section className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Search size={17} className="text-accent" />
+          <h2 className="font-medium text-lg">eDiscovery Cases</h2>
+        </div>
+        <button onClick={reset} className="h-9 px-3 rounded-md border border-border-default hover:bg-elevated text-sm flex items-center gap-2">
+          <Plus size={15} /> New
+        </button>
+      </div>
+
+      <form onSubmit={save} className="border border-border-subtle bg-surface rounded-md p-3 grid md:grid-cols-2 xl:grid-cols-4 gap-3">
+        <label className="block xl:col-span-2">
+          <span className="block text-xs text-tertiary mb-1">Case name</span>
+          <input value={name} onChange={(event) => setName(event.target.value)} required className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus" />
+        </label>
+        <label className="block">
+          <span className="block text-xs text-tertiary mb-1">Status</span>
+          <select value={status} onChange={(event) => setStatus(event.target.value as EDiscoveryCase["status"])} disabled={!selected} className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus disabled:opacity-60">
+            <option value="open">Open</option>
+            <option value="on_hold">On hold</option>
+            <option value="closed">Closed</option>
+          </select>
+        </label>
+        <label className="block">
+          <span className="block text-xs text-tertiary mb-1">Limit</span>
+          <input value={limit} onChange={(event) => setLimit(event.target.value)} type="number" min={1} max={1000} className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus" />
+        </label>
+        <label className="block xl:col-span-2">
+          <span className="block text-xs text-tertiary mb-1">Description</span>
+          <input value={description} onChange={(event) => setDescription(event.target.value)} className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus" />
+        </label>
+        <label className="block xl:col-span-2">
+          <span className="block text-xs text-tertiary mb-1">Custodians</span>
+          <input value={custodians} onChange={(event) => setCustodians(event.target.value)} placeholder="sip:alice@example.com, sip:bob@example.com" className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus" />
+        </label>
+        <label className="block">
+          <span className="block text-xs text-tertiary mb-1">Keyword</span>
+          <input value={keyword} onChange={(event) => setKeyword(event.target.value)} className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus" />
+        </label>
+        <label className="block">
+          <span className="block text-xs text-tertiary mb-1">User filter</span>
+          <input value={userUri} onChange={(event) => setUserUri(event.target.value)} className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus" />
+        </label>
+        <label className="block">
+          <span className="block text-xs text-tertiary mb-1">Room ID</span>
+          <input value={roomId} onChange={(event) => setRoomId(event.target.value)} className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus" />
+        </label>
+        <div className="grid grid-cols-2 gap-2">
+          <label className="block">
+            <span className="block text-xs text-tertiary mb-1">From</span>
+            <input type="datetime-local" value={from} onChange={(event) => setFrom(event.target.value)} className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus" />
+          </label>
+          <label className="block">
+            <span className="block text-xs text-tertiary mb-1">To</span>
+            <input type="datetime-local" value={to} onChange={(event) => setTo(event.target.value)} className="w-full h-10 rounded-md bg-base border border-border-default px-3 text-sm outline-none focus:border-border-focus" />
+          </label>
+        </div>
+        <button className="h-10 self-end rounded-md bg-accent hover:bg-accent-hover text-white text-sm font-medium flex items-center justify-center gap-2">
+          <Save size={16} /> {selected ? "Update case" : "Create case"}
+        </button>
+      </form>
+
+      <div className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+        <div className="p-3 border-b border-border-subtle flex items-center justify-between">
+          <h3 className="font-medium">Cases</h3>
+          {loading && <span className="text-xs text-tertiary">Loading...</span>}
+        </div>
+        <div className="divide-y divide-border-subtle">
+          {cases.length === 0 ? (
+            <p className="p-3 text-sm text-secondary">No eDiscovery cases.</p>
+          ) : cases.map((item) => (
+            <div key={item.id} className="p-3 grid lg:grid-cols-[minmax(0,1fr)_auto] gap-3">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-medium">{item.name}</span>
+                  <Badge tone={item.status === "open" ? "ok" : "warn"}>{item.status.replace("_", " ")}</Badge>
+                  <span className="text-xs text-tertiary">{item.custodians.length} custodians</span>
+                </div>
+                <p className="text-xs text-secondary mt-1">{item.description || "No description"}</p>
+                <div className="text-[10px] text-tertiary mt-1">
+                  Query: {item.query.q || "-"} | User: {item.query.user_uri || "-"} | Room: {item.query.room_id || "-"}
+                </div>
+                <div className="text-[10px] text-tertiary">
+                  Updated {shortDate(item.updated_at)}
+                  {item.last_exported_at ? ` | Last export ${item.last_export_count} items by ${item.last_exported_by || "-"} on ${shortDate(item.last_exported_at)}` : ""}
+                </div>
+              </div>
+              <div className="flex items-center gap-2 justify-end">
+                <button onClick={() => edit(item)} className="h-8 px-3 rounded-md border border-border-default hover:bg-elevated text-sm">Edit</button>
+                <button onClick={() => exportCase(item)} className="h-8 px-3 rounded-md bg-accent hover:bg-accent-hover text-white text-sm inline-flex items-center gap-1">
+                  <Download size={14} /> Export
+                </button>
+                <button onClick={() => remove(item)} className="h-8 w-8 rounded-md text-destructive hover:bg-destructive/10 inline-flex items-center justify-center">
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     </section>
@@ -6474,6 +6985,19 @@ interface SipGateway {
   created_at: string;
 }
 
+interface PstnOperatorConnectStatus {
+  provider_available: boolean;
+  routable: boolean;
+  gateway_count: number;
+  enabled_gateway_count: number;
+  tls_gateway_count: number;
+  authenticated_gateway_count: number;
+  e164_prefix_route_count: number;
+  enabled_location_route_count: number;
+  emergency_route_ready: boolean;
+  blockers: string[];
+}
+
 // ── Scheduling Panels ────────────────────────────────────────────
 
 interface SchedulingPanelItem {
@@ -6488,15 +7012,24 @@ interface SchedulingPanelItem {
 
 function SipGatewaysPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
   const [gateways, setGateways] = useState<SipGateway[]>([]);
+  const [status, setStatus] = useState<PstnOperatorConnectStatus | null>(null);
   const [name, setName] = useState("");
   const [host, setHost] = useState("");
   const [port, setPort] = useState("5060");
-  const [transport, setTransport] = useState("udp");
+  const [transport, setTransport] = useState("tls");
   const [prefix, setPrefix] = useState("");
   const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
 
   const load = useCallback(async () => {
-    try { setGateways(await api<SipGateway[]>(baseUrl, token, "/v1/admin/sip-gateways")); } catch {}
+    try {
+      const [nextGateways, nextStatus] = await Promise.all([
+        api<SipGateway[]>(baseUrl, token, "/v1/admin/sip-gateways"),
+        api<PstnOperatorConnectStatus>(baseUrl, token, "/v1/admin/pstn/status"),
+      ]);
+      setGateways(nextGateways);
+      setStatus(nextStatus);
+    } catch {}
   }, [baseUrl, token]);
   useEffect(() => { load(); }, [load]);
 
@@ -6505,9 +7038,9 @@ function SipGatewaysPanel({ baseUrl, token }: { baseUrl: string; token: string }
     try {
       await api(baseUrl, token, "/v1/admin/sip-gateways", {
         method: "POST",
-        body: { name, host, port: parseInt(port), transport, prefix, username: username || null },
+        body: { name, host, port: parseInt(port), transport, prefix, username: username || null, password: password || null },
       });
-      setName(""); setHost(""); setPort("5060"); setPrefix(""); setUsername("");
+      setName(""); setHost(""); setPort("5060"); setTransport("tls"); setPrefix(""); setUsername(""); setPassword("");
       load();
     } catch { toast({ type: "error", title: "Failed to create gateway" }); }
   };
@@ -6522,6 +7055,21 @@ function SipGatewaysPanel({ baseUrl, token }: { baseUrl: string; token: string }
   return (
     <div className="space-y-4">
       <h2 className="text-lg font-semibold">SIP Gateways</h2>
+      {status && (
+        <div className="grid grid-cols-2 gap-2">
+          <div className={cn("rounded-md border px-3 py-2", status.routable ? "border-green-500/30 bg-green-500/10" : "border-warning/30 bg-warning/10")}>
+            <p className="text-sm font-medium">{status.routable ? "PSTN routable" : "PSTN not ready"}</p>
+            <p className="text-xs text-secondary">Provider {status.provider_available ? "ready" : "missing"} · TLS {status.tls_gateway_count} · E.164 routes {status.e164_prefix_route_count}</p>
+          </div>
+          <div className="rounded-md border border-border-subtle bg-hover px-3 py-2">
+            <p className="text-sm font-medium">Gateway posture</p>
+            <p className="text-xs text-secondary">{status.enabled_gateway_count}/{status.gateway_count} enabled · {status.authenticated_gateway_count} authenticated · Emergency {status.emergency_route_ready ? "ready" : "not ready"}</p>
+          </div>
+          {status.blockers.length > 0 && (
+            <p className="col-span-2 text-xs text-tertiary">Blockers: {status.blockers.join(", ")}</p>
+          )}
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-2">
         <input placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
         <input placeholder="Host" value={host} onChange={(e) => setHost(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
@@ -6533,6 +7081,7 @@ function SipGatewaysPanel({ baseUrl, token }: { baseUrl: string; token: string }
         </select>
         <input placeholder="Prefix (e.g. 9)" value={prefix} onChange={(e) => setPrefix(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
         <input placeholder="Username (optional)" value={username} onChange={(e) => setUsername(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+        <input placeholder="Password (optional)" type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
       </div>
       <button onClick={handleCreate} disabled={!name || !host} className="flex items-center gap-1 text-sm px-3 py-1.5 bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-40">
         <Plus size={14} /> Add Gateway
@@ -6630,6 +7179,260 @@ function LocationRoutingPanel({ baseUrl, token }: { baseUrl: string; token: stri
           </div>
         ))}
         {rules.length === 0 && <p className="text-sm text-secondary text-center py-4">No location routing rules</p>}
+      </div>
+    </div>
+  );
+}
+
+// ── Emergency Calling Panel ───────────────────────────────────────
+
+interface EmergencyLocation {
+  id: string;
+  name: string;
+  address_line1: string;
+  address_line2: string | null;
+  city: string;
+  region: string;
+  postal_code: string;
+  country: string;
+  elin: string | null;
+  callback_number: string | null;
+  provider_location_id: string | null;
+  validated: boolean;
+  created_at: string;
+}
+
+interface EmergencyAssignment {
+  user_uri: string;
+  location_id: string;
+  emergency_numbers: string[];
+  updated_by: string;
+  updated_at: string;
+}
+
+interface EmergencyCallPlan {
+  caller_uri: string;
+  dialed_number: string;
+  emergency: boolean;
+  allowed: boolean;
+  reason: string;
+  location: EmergencyLocation | null;
+  gateway: SipGateway | null;
+  e911_provider_available: boolean;
+  pstn_provider_available: boolean;
+}
+
+function EmergencyPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [locations, setLocations] = useState<EmergencyLocation[]>([]);
+  const [assignments, setAssignments] = useState<EmergencyAssignment[]>([]);
+  const [name, setName] = useState("");
+  const [addressLine1, setAddressLine1] = useState("");
+  const [city, setCity] = useState("");
+  const [region, setRegion] = useState("");
+  const [postalCode, setPostalCode] = useState("");
+  const [country, setCountry] = useState("US");
+  const [elin, setElin] = useState("");
+  const [callbackNumber, setCallbackNumber] = useState("");
+  const [providerLocationId, setProviderLocationId] = useState("");
+  const [validated, setValidated] = useState(false);
+  const [userUri, setUserUri] = useState("");
+  const [locationId, setLocationId] = useState("");
+  const [numbers, setNumbers] = useState("911,112,933");
+  const [planCaller, setPlanCaller] = useState("");
+  const [planNumber, setPlanNumber] = useState("911");
+  const [plan, setPlan] = useState<EmergencyCallPlan | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [nextLocations, nextAssignments] = await Promise.all([
+        api<EmergencyLocation[]>(baseUrl, token, "/v1/admin/emergency/locations"),
+        api<EmergencyAssignment[]>(baseUrl, token, "/v1/admin/emergency/assignments"),
+      ]);
+      setLocations(nextLocations);
+      setAssignments(nextAssignments);
+      if (!nextLocations.some((location) => location.id === locationId)) {
+        setLocationId(nextLocations[0]?.id || "");
+      }
+    } catch {
+      toast({ type: "error", title: "Failed to load emergency calling" });
+    }
+  }, [baseUrl, token, locationId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleCreateLocation = async () => {
+    if (!name || !addressLine1 || !city || !region || !postalCode) return;
+    try {
+      await api(baseUrl, token, "/v1/admin/emergency/locations", {
+        method: "POST",
+        body: {
+          name,
+          address_line1: addressLine1,
+          address_line2: null,
+          city,
+          region,
+          postal_code: postalCode,
+          country,
+          elin: elin || null,
+          callback_number: callbackNumber || null,
+          provider_location_id: providerLocationId || null,
+          validated,
+        },
+      });
+      setName("");
+      setAddressLine1("");
+      setCity("");
+      setRegion("");
+      setPostalCode("");
+      setElin("");
+      setCallbackNumber("");
+      setProviderLocationId("");
+      setValidated(false);
+      load();
+    } catch {
+      toast({ type: "error", title: "Failed to create emergency location" });
+    }
+  };
+
+  const handleDeleteLocation = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/emergency/locations/${id}`, { method: "DELETE" });
+      load();
+    } catch {
+      toast({ type: "error", title: "Location is assigned or cannot be deleted" });
+    }
+  };
+
+  const handleAssign = async () => {
+    if (!userUri || !locationId) return;
+    try {
+      await api(baseUrl, token, "/v1/admin/emergency/assignments", {
+        method: "POST",
+        body: {
+          user_uri: userUri,
+          location_id: locationId,
+          emergency_numbers: numbers.split(",").map((value) => value.trim()).filter(Boolean),
+        },
+      });
+      setUserUri("");
+      load();
+    } catch {
+      toast({ type: "error", title: "Failed to assign emergency location" });
+    }
+  };
+
+  const handleRemoveAssignment = async (uri: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/emergency/assignments/${encodeURIComponent(uri)}`, { method: "DELETE" });
+      load();
+    } catch {
+      toast({ type: "error", title: "Failed to remove assignment" });
+    }
+  };
+
+  const handlePlan = async () => {
+    if (!planCaller || !planNumber) return;
+    try {
+      const query = new URLSearchParams({ caller: planCaller, number: planNumber });
+      setPlan(await api<EmergencyCallPlan>(baseUrl, token, `/v1/emergency/plan?${query.toString()}`));
+    } catch {
+      toast({ type: "error", title: "Emergency plan check failed" });
+    }
+  };
+
+  const locationName = (id: string) => locations.find((location) => location.id === id)?.name || "Unknown location";
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2 className="text-lg font-semibold">Emergency Calling</h2>
+        <p className="text-sm text-secondary">Validated dispatchable locations, user assignments, and fail-closed E911 route checks.</p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-2">
+          <h3 className="text-sm font-semibold">Dispatchable Location</h3>
+          <div className="grid grid-cols-2 gap-2">
+            <input placeholder="Location name" value={name} onChange={(e) => setName(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+            <input placeholder="Address" value={addressLine1} onChange={(e) => setAddressLine1(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+            <input placeholder="City" value={city} onChange={(e) => setCity(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+            <input placeholder="State/region" value={region} onChange={(e) => setRegion(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+            <input placeholder="Postal code" value={postalCode} onChange={(e) => setPostalCode(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+            <input placeholder="Country" value={country} onChange={(e) => setCountry(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+            <input placeholder="ELIN" value={elin} onChange={(e) => setElin(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+            <input placeholder="Callback number" value={callbackNumber} onChange={(e) => setCallbackNumber(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+            <input placeholder="Provider location ID" value={providerLocationId} onChange={(e) => setProviderLocationId(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+            <label className="flex items-center gap-2 text-sm px-2 py-1 rounded bg-hover border border-border-subtle">
+              <input type="checkbox" checked={validated} onChange={(e) => setValidated(e.target.checked)} />
+              Validated
+            </label>
+          </div>
+          <button onClick={handleCreateLocation} disabled={!name || !addressLine1 || !city || !region || !postalCode} className="flex items-center gap-1 text-sm px-3 py-1.5 bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-40">
+            <Plus size={14} /> Add Location
+          </button>
+        </div>
+
+        <div className="space-y-2">
+          <h3 className="text-sm font-semibold">User Assignment</h3>
+          <div className="grid grid-cols-2 gap-2">
+            <input placeholder="sip:user@example.com" value={userUri} onChange={(e) => setUserUri(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+            <select value={locationId} onChange={(e) => setLocationId(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle">
+              <option value="">Select location...</option>
+              {locations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}
+            </select>
+            <input placeholder="Emergency numbers" value={numbers} onChange={(e) => setNumbers(e.target.value)} className="col-span-2 px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+          </div>
+          <button onClick={handleAssign} disabled={!userUri || !locationId} className="flex items-center gap-1 text-sm px-3 py-1.5 bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-40">
+            <Save size={14} /> Assign
+          </button>
+
+          <h3 className="text-sm font-semibold pt-2">Route Check</h3>
+          <div className="grid grid-cols-2 gap-2">
+            <input placeholder="Caller URI" value={planCaller} onChange={(e) => setPlanCaller(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+            <input placeholder="Number" value={planNumber} onChange={(e) => setPlanNumber(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+          </div>
+          <button onClick={handlePlan} disabled={!planCaller || !planNumber} className="flex items-center gap-1 text-sm px-3 py-1.5 bg-hover border border-border-subtle rounded hover:bg-hover/80 disabled:opacity-40">
+            <Shield size={14} /> Check Plan
+          </button>
+          {plan && (
+            <div className={cn("text-sm rounded border px-3 py-2", plan.allowed ? "border-green-500/40 bg-green-500/10" : "border-red-500/40 bg-red-500/10")}>
+              <div className="font-medium">{plan.allowed ? "Allowed" : "Blocked"} · {plan.reason}</div>
+              <div className="text-secondary">E911 {plan.e911_provider_available ? "ready" : "missing"} · PSTN {plan.pstn_provider_available ? "ready" : "missing"} · Gateway {plan.gateway?.name || "none"}</div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1">
+          <h3 className="text-sm font-semibold">Locations</h3>
+          {locations.map((location) => (
+            <div key={location.id} className="flex items-center justify-between py-2 px-3 bg-hover rounded text-sm">
+              <div>
+                <span className="font-medium">{location.name}</span>
+                <span className="text-secondary ml-2">{location.city}, {location.region} {location.postal_code}</span>
+                <span className={cn("ml-2 text-xs", location.validated ? "text-green-400" : "text-yellow-400")}>{location.validated ? "validated" : "pending"}</span>
+              </div>
+              <button onClick={() => handleDeleteLocation(location.id)} className="text-red-400 hover:text-red-300"><Trash2 size={14} /></button>
+            </div>
+          ))}
+          {locations.length === 0 && <p className="text-sm text-secondary text-center py-4">No emergency locations</p>}
+        </div>
+
+        <div className="space-y-1">
+          <h3 className="text-sm font-semibold">Assignments</h3>
+          {assignments.map((assignment) => (
+            <div key={assignment.user_uri} className="flex items-center justify-between py-2 px-3 bg-hover rounded text-sm">
+              <div>
+                <span className="font-medium">{assignment.user_uri}</span>
+                <span className="text-secondary ml-2">{locationName(assignment.location_id)}</span>
+                <span className="text-accent ml-2">{assignment.emergency_numbers.join(", ")}</span>
+              </div>
+              <button onClick={() => handleRemoveAssignment(assignment.user_uri)} className="text-red-400 hover:text-red-300"><Trash2 size={14} /></button>
+            </div>
+          ))}
+          {assignments.length === 0 && <p className="text-sm text-secondary text-center py-4">No emergency assignments</p>}
+        </div>
       </div>
     </div>
   );
@@ -7348,6 +8151,406 @@ function DataResidencyPanel({ baseUrl, token }: { baseUrl: string; token: string
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// ─── Enterprise Integrations Panel ───
+
+interface EnterpriseIntegration {
+  id: string;
+  category: string;
+  name: string;
+  description: string;
+  integration_kind: string;
+  default_provider: string;
+  open_source_option: string;
+  required_dependency: string;
+  enabled: boolean;
+  endpoint_url?: string | null;
+  admin_url?: string | null;
+  api_key_configured: boolean;
+  notes: string;
+}
+
+interface EnterpriseCapabilityReport {
+  total: number;
+  available: number;
+  configured: number;
+  blocked: number;
+}
+
+interface EnterpriseParityBlocker {
+  id: string;
+  category: string;
+  name: string;
+  status: string;
+  required_dependency: string;
+  recommendation: string;
+}
+
+interface EnterpriseParityReadinessReport {
+  ready: boolean;
+  score: number;
+  available: number;
+  total: number;
+  critical_blockers: EnterpriseParityBlocker[];
+  warnings: string[];
+  consensus: string[];
+  next_actions: string[];
+}
+
+interface EnterpriseIntegrationHealthCheck {
+  id: string;
+  category: string;
+  name: string;
+  status: "healthy" | "warning" | "blocked";
+  checked_at: string;
+  checks: string[];
+  blockers: string[];
+}
+
+interface EnterpriseIntegrationHealthReport {
+  healthy: number;
+  warning: number;
+  blocked: number;
+  checked_at: string;
+  integrations: EnterpriseIntegrationHealthCheck[];
+}
+
+interface EnterpriseDeploymentPlanItem {
+  id: string;
+  category: string;
+  name: string;
+  priority: "critical" | "high" | "standard";
+  status: string;
+  required_dependency: string;
+  open_source_option: string;
+  default_provider: string;
+  endpoint_required: boolean;
+  credentials_required: boolean;
+  action: string;
+}
+
+interface EnterpriseDeploymentPlan {
+  generated_at: string;
+  ready_to_deploy: boolean;
+  total: number;
+  completed: number;
+  remaining: number;
+  items: EnterpriseDeploymentPlanItem[];
+  summary: string[];
+}
+
+function EnterpriseIntegrationsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [items, setItems] = useState<EnterpriseIntegration[]>([]);
+  const [report, setReport] = useState<EnterpriseCapabilityReport | null>(null);
+  const [readiness, setReadiness] = useState<EnterpriseParityReadinessReport | null>(null);
+  const [health, setHealth] = useState<EnterpriseIntegrationHealthReport | null>(null);
+  const [deploymentPlan, setDeploymentPlan] = useState<EnterpriseDeploymentPlan | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, Partial<EnterpriseIntegration> & { api_key?: string }>>({});
+
+  const load = useCallback(async () => {
+    try {
+      const [integrations, status, parity, healthReport, plan] = await Promise.all([
+        api<EnterpriseIntegration[]>(baseUrl, token, "/v1/admin/enterprise-integrations"),
+        api<EnterpriseCapabilityReport>(baseUrl, token, "/v1/admin/enterprise-integrations/status"),
+        api<EnterpriseParityReadinessReport>(baseUrl, token, "/v1/admin/enterprise-integrations/readiness"),
+        api<EnterpriseIntegrationHealthReport>(baseUrl, token, "/v1/admin/enterprise-integrations/health"),
+        api<EnterpriseDeploymentPlan>(baseUrl, token, "/v1/admin/enterprise-integrations/deployment-plan"),
+      ]);
+      setItems(integrations);
+      setReport(status);
+      setReadiness(parity);
+      setHealth(healthReport);
+      setDeploymentPlan(plan);
+      setDrafts(Object.fromEntries(integrations.map((item) => [item.id, {
+        enabled: item.enabled,
+        endpoint_url: item.endpoint_url ?? "",
+        admin_url: item.admin_url ?? "",
+        notes: item.notes ?? "",
+      }])));
+    } catch {
+      toast({ type: "error", title: "Failed to load enterprise integrations" });
+    }
+  }, [baseUrl, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const updateDraft = (id: string, patch: Partial<EnterpriseIntegration> & { api_key?: string }) => {
+    setDrafts((current) => ({ ...current, [id]: { ...current[id], ...patch } }));
+  };
+
+  const save = async (item: EnterpriseIntegration) => {
+    const draft = drafts[item.id] ?? {};
+    try {
+      await api(baseUrl, token, `/v1/admin/enterprise-integrations/${item.id}`, {
+        method: "PUT",
+        body: {
+          enabled: Boolean(draft.enabled),
+          endpoint_url: draft.endpoint_url ?? "",
+          admin_url: draft.admin_url ?? "",
+          api_key: draft.api_key || undefined,
+          notes: draft.notes ?? "",
+        },
+      });
+      toast({ type: "success", title: `${item.name} updated` });
+      load();
+    } catch {
+      toast({ type: "error", title: `Failed to update ${item.name}` });
+    }
+  };
+
+  const grouped = useMemo(() => {
+    return items.reduce<Record<string, EnterpriseIntegration[]>>((acc, item) => {
+      (acc[item.category] ||= []).push(item);
+      return acc;
+    }, {});
+  }, [items]);
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="text-sm font-semibold">Enterprise Capability Integrations</h3>
+        <p className="text-xs text-secondary">Track and configure the external systems required for Teams Enterprise parity.</p>
+      </div>
+      {report && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+          <Metric label="Capabilities" value={report.total} />
+          <Metric label="Available" value={report.available} />
+          <Metric label="Configured" value={report.configured} />
+          <Metric label="Blocked" value={report.blocked} />
+        </div>
+      )}
+      {readiness && (
+        <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+          <div className="p-3 border-b border-border-subtle flex items-center justify-between gap-3">
+            <div>
+              <h4 className="text-sm font-semibold">Teams Enterprise Readiness</h4>
+              <p className="text-xs text-secondary">
+                {readiness.available} of {readiness.total} critical external capabilities available
+              </p>
+            </div>
+            <div className={cn(
+              "px-2 py-1 rounded text-xs font-medium",
+              readiness.ready ? "bg-green-500/10 text-green-600" : "bg-amber-500/10 text-amber-600"
+            )}>
+              {readiness.ready ? "Ready" : `${readiness.score}% ready`}
+            </div>
+          </div>
+          <div className="p-3 grid lg:grid-cols-[1.2fr_1fr] gap-3">
+            <div className="space-y-2">
+              <h5 className="text-xs font-semibold text-secondary uppercase tracking-normal">Critical Blockers</h5>
+              {readiness.critical_blockers.length === 0 ? (
+                <div className="text-sm text-success">No critical blockers</div>
+              ) : (
+                readiness.critical_blockers.slice(0, 8).map((blocker) => (
+                  <div key={blocker.id} className="rounded border border-border-subtle bg-base p-2 text-sm">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium">{blocker.name}</span>
+                      <span className="text-xs text-tertiary capitalize">{blocker.status.replace(/_/g, " ")}</span>
+                    </div>
+                    <div className="text-xs text-secondary mt-1">{blocker.required_dependency}</div>
+                    <div className="text-xs text-tertiary mt-1">{blocker.recommendation}</div>
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="space-y-3">
+              <div>
+                <h5 className="text-xs font-semibold text-secondary uppercase tracking-normal">Consensus Rules</h5>
+                <ul className="mt-2 space-y-1 text-xs text-secondary">
+                  {readiness.consensus.map((line) => <li key={line}>{line}</li>)}
+                </ul>
+              </div>
+              <div>
+                <h5 className="text-xs font-semibold text-secondary uppercase tracking-normal">Next Actions</h5>
+                <ul className="mt-2 space-y-1 text-xs text-secondary">
+                  {readiness.next_actions.map((line) => <li key={line}>{line}</li>)}
+                </ul>
+              </div>
+              {readiness.warnings.length > 0 && (
+                <div>
+                  <h5 className="text-xs font-semibold text-secondary uppercase tracking-normal">Warnings</h5>
+                  <ul className="mt-2 space-y-1 text-xs text-amber-600">
+                    {readiness.warnings.slice(0, 6).map((line) => <li key={line}>{line}</li>)}
+                  </ul>
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
+      {health && (
+        <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+          <div className="p-3 border-b border-border-subtle flex items-center justify-between gap-3">
+            <div>
+              <h4 className="text-sm font-semibold">Integration Health</h4>
+              <p className="text-xs text-secondary">Last evaluated {shortDate(health.checked_at)}</p>
+            </div>
+            <div className="flex items-center gap-2 text-xs">
+              <span className="px-2 py-1 rounded bg-green-500/10 text-green-600">{health.healthy} healthy</span>
+              <span className="px-2 py-1 rounded bg-amber-500/10 text-amber-600">{health.warning} warning</span>
+              <span className="px-2 py-1 rounded bg-red-500/10 text-red-600">{health.blocked} blocked</span>
+            </div>
+          </div>
+          <div className="divide-y divide-border-subtle">
+            {health.integrations.slice(0, 10).map((item) => (
+              <div key={item.id} className="p-3 grid md:grid-cols-[220px_120px_1fr] gap-3 text-sm">
+                <div>
+                  <div className="font-medium">{item.name}</div>
+                  <div className="text-xs text-tertiary">{item.category}</div>
+                </div>
+                <div className={cn(
+                  "h-6 px-2 rounded text-xs inline-flex items-center justify-center capitalize",
+                  item.status === "healthy" ? "bg-green-500/10 text-green-600" : item.status === "warning" ? "bg-amber-500/10 text-amber-600" : "bg-red-500/10 text-red-600"
+                )}>
+                  {item.status}
+                </div>
+                <div className="text-xs text-secondary">
+                  {item.blockers.length > 0 ? (
+                    <span>{item.blockers.map((blocker) => blocker.replace(/_/g, " ")).join(", ")}</span>
+                  ) : (
+                    <span>{item.checks.map((check) => check.replace(/_/g, " ")).join(", ") || "No checks reported"}</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+      {deploymentPlan && (
+        <section className="border border-border-subtle bg-surface rounded-md overflow-hidden">
+          <div className="p-3 border-b border-border-subtle flex items-center justify-between gap-3">
+            <div>
+              <h4 className="text-sm font-semibold">Open-Source Deployment Plan</h4>
+              <p className="text-xs text-secondary">
+                {deploymentPlan.completed} complete · {deploymentPlan.remaining} remaining · generated {shortDate(deploymentPlan.generated_at)}
+              </p>
+            </div>
+            <div className={cn(
+              "px-2 py-1 rounded text-xs font-medium",
+              deploymentPlan.ready_to_deploy ? "bg-green-500/10 text-green-600" : "bg-amber-500/10 text-amber-600"
+            )}>
+              {deploymentPlan.ready_to_deploy ? "Deployment ready" : "Action required"}
+            </div>
+          </div>
+          <div className="p-3 grid lg:grid-cols-[1fr_300px] gap-3">
+            <div className="space-y-2">
+              {deploymentPlan.items.slice(0, 8).map((item) => (
+                <div key={item.id} className="rounded border border-border-subtle bg-base p-2 text-sm">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium">{item.name}</span>
+                    <span className={cn(
+                      "px-1.5 py-0.5 rounded text-[10px] uppercase tracking-normal",
+                      item.priority === "critical" ? "bg-red-500/10 text-red-600" : item.priority === "high" ? "bg-amber-500/10 text-amber-600" : "bg-secondary/10 text-secondary"
+                    )}>
+                      {item.priority}
+                    </span>
+                  </div>
+                  <div className="text-xs text-secondary mt-1">{item.open_source_option}</div>
+                  <div className="text-xs text-tertiary mt-1">{item.action}</div>
+                </div>
+              ))}
+            </div>
+            <div className="space-y-3">
+              <div>
+                <h5 className="text-xs font-semibold text-secondary uppercase tracking-normal">Install Rules</h5>
+                <ul className="mt-2 space-y-1 text-xs text-secondary">
+                  {deploymentPlan.summary.map((line) => <li key={line}>{line}</li>)}
+                </ul>
+              </div>
+              <div>
+                <h5 className="text-xs font-semibold text-secondary uppercase tracking-normal">Current Scope</h5>
+                <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                  <div className="rounded border border-border-subtle p-2">
+                    <div className="text-tertiary">Total</div>
+                    <div className="text-lg font-semibold">{deploymentPlan.total}</div>
+                  </div>
+                  <div className="rounded border border-border-subtle p-2">
+                    <div className="text-tertiary">Remaining</div>
+                    <div className="text-lg font-semibold">{deploymentPlan.remaining}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+      {Object.entries(grouped).map(([category, integrations]) => (
+        <div key={category} className="space-y-2">
+          <h4 className="text-xs font-semibold text-secondary uppercase tracking-normal">{category}</h4>
+          <div className="space-y-2">
+            {integrations.map((item) => {
+              const draft = drafts[item.id] ?? {};
+              const available = Boolean(draft.enabled) && (
+                Boolean(draft.endpoint_url) ||
+                Boolean(draft.admin_url) ||
+                ["client_media_runtime", "client_platform", "desktop_runtime", "local_or_media_runtime"].includes(item.integration_kind)
+              );
+              return (
+                <div key={item.id} className="p-3 bg-elevated rounded-lg border border-border-subtle">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <h5 className="text-sm font-medium text-primary">{item.name}</h5>
+                        <span className={cn(
+                          "px-1.5 py-0.5 rounded text-[10px]",
+                          available ? "bg-green-500/10 text-green-600" : draft.enabled ? "bg-amber-500/10 text-amber-600" : "bg-red-500/10 text-red-600"
+                        )}>
+                          {available ? "available" : draft.enabled ? "needs config" : "blocked"}
+                        </span>
+                      </div>
+                      <p className="text-xs text-secondary mt-1">{item.description}</p>
+                      <div className="mt-1 text-[10px] text-tertiary">
+                        OSS: {item.open_source_option} · Dependency: {item.required_dependency}
+                      </div>
+                    </div>
+                    <label className="flex items-center gap-2 text-xs text-secondary shrink-0">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(draft.enabled)}
+                        onChange={(e) => updateDraft(item.id, { enabled: e.target.checked })}
+                      />
+                      Enabled
+                    </label>
+                  </div>
+                  <div className="grid md:grid-cols-3 gap-2 mt-3">
+                    <input
+                      value={String(draft.endpoint_url ?? "")}
+                      onChange={(e) => updateDraft(item.id, { endpoint_url: e.target.value })}
+                      placeholder="Endpoint URL"
+                      className="px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none"
+                    />
+                    <input
+                      value={String(draft.admin_url ?? "")}
+                      onChange={(e) => updateDraft(item.id, { admin_url: e.target.value })}
+                      placeholder="Admin URL"
+                      className="px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none"
+                    />
+                    <input
+                      value={String(draft.api_key ?? "")}
+                      onChange={(e) => updateDraft(item.id, { api_key: e.target.value })}
+                      placeholder={item.api_key_configured ? "API key configured" : "API key"}
+                      type="password"
+                      className="px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2 mt-2">
+                    <input
+                      value={String(draft.notes ?? "")}
+                      onChange={(e) => updateDraft(item.id, { notes: e.target.value })}
+                      placeholder="Deployment notes"
+                      className="flex-1 px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none"
+                    />
+                    <IconButton label={`Save ${item.name}`} onClick={() => save(item)}><Save size={16} /></IconButton>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

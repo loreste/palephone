@@ -18,39 +18,33 @@ use tokio_stream::StreamExt;
 use uuid::Uuid;
 
 use crate::{
-    safe_filename, sip_ha1, AddRoomMemberRequest, AddTeamMemberRequest, AgentTransitionRequest,
-    AppState, AssignExtensionRequest, AuthError, CallStatus, CreateAgentProfileRequest,
-    CreateBusinessHoursRequest, CreateCallRequest, CreateCannedResponseRequest,
-    CreateConferenceRequest, CreateExtensionRequest, CreateHolidayRequest, CreateIvrRequest,
-    CreatePagingGroupRequest, CreateQueueRequest, CreateRingGroupRequest, CreateRoomRequest,
-    CreateRoutingRuleRequest, CreateScheduledMeetingRequest, CreateScorecardRequest,
-    CreateSipAccountRequest, CreateSpeedDialRequest, CreateTagRequest, CreateTeamRequest,
-    CreateUserRequest, CreateVipCallerRequest, FileRecord, JoinConferenceRequest, ProvisionUserRequest,
-    RequestCallbackInput, RoomCallMode, ScheduleRoomMessageRequest, SendRoomMessageRequest,
-    SetAgentStateRequest,
-    SetPresenceRequest, StartMonitorRequest, SyncCallHistoryRequest, UpdateCallStatusRequest,
-    UpdateCollaborationPolicyRequest, UpdateConferenceParticipantRequest,
-    UpdateScheduledMeetingRequest, UpdateSipAccountStatusRequest, UpsertRetentionPolicyRequest,
-    CreateMeetingTemplateRequest, UpdateMeetingTemplateRequest,
-    SetSpotlightRequest, SendMeetingReactionRequest,
-    SetOutOfOfficeRequest,
-    UpdateNotificationPreferenceRequest, UpdateTagRequest,
-    CreateCustomEmojiRequest, CreateWikiPageRequest, UpdateWikiPageRequest,
-    CreateTaskBoardRequest, CreateTaskRequest, UpdateTaskRequest,
-    TranslateRequest,
-    OAuthTokenRequest, CreateApiClientRequest,
-    CreateBotRequest, UpdateBotRequest, BotMessageRequest,
-    CreateCalendarIntegrationRequest,
-    CreateContactSyncRequest,
-    CreateConnectorRequest, UpdateConnectorRequest,
-    CreateConditionalAccessPolicyRequest, UpdateConditionalAccessPolicyRequest,
-    CreateAnnotationRequest, CreateWhiteboardRequest, AddWhiteboardElementRequest,
-    CreateSchedulingPanelRequest, UpdateSchedulingPanelRequest,
-    CreateAutomationRuleRequest, UpdateAutomationRuleRequest,
-    CreateFederationPeerRequest, UpdateFederationPeerRequest, FederationSendRequest, FederationReceiveRequest,
-    CreateLoopComponentRequest, UpdateLoopComponentRequest,
-    ComplianceScanRequest, UpdateComplianceReviewRequest,
-    CreateDataResidencyConfigRequest, UpdateDataResidencyConfigRequest,
+    safe_filename, sip_ha1, AddRoomMemberRequest, AddTeamMemberRequest,
+    AddWhiteboardElementRequest, AgentTransitionRequest, AppState, AssignExtensionRequest,
+    AuthError, BotMessageRequest, CallStatus, ComplianceScanRequest, CreateAgentProfileRequest,
+    CreateAnnotationRequest, CreateApiClientRequest, CreateAutomationRuleRequest, CreateBotRequest,
+    CreateBusinessHoursRequest, CreateCalendarIntegrationRequest, CreateCallRequest,
+    CreateCannedResponseRequest, CreateConditionalAccessPolicyRequest, CreateConferenceRequest,
+    CreateConnectorRequest, CreateContactSyncRequest, CreateCustomEmojiRequest,
+    CreateDataResidencyConfigRequest, CreateExtensionRequest, CreateFederationPeerRequest,
+    CreateHolidayRequest, CreateIvrRequest, CreateLoopComponentRequest,
+    CreateMeetingTemplateRequest, CreatePagingGroupRequest, CreateQueueRequest,
+    CreateRingGroupRequest, CreateRoomRequest, CreateRoutingRuleRequest,
+    CreateScheduledMeetingRequest, CreateSchedulingPanelRequest, CreateScorecardRequest,
+    CreateSipAccountRequest, CreateSpeedDialRequest, CreateTagRequest, CreateTaskBoardRequest,
+    CreateTaskRequest, CreateTeamRequest, CreateUserRequest, CreateVipCallerRequest,
+    CreateWhiteboardRequest, CreateWikiPageRequest, EmergencyCallingAssignment,
+    FederationReceiveRequest, FederationSendRequest, FileRecord, JoinConferenceRequest,
+    OAuthTokenRequest, ProvisionUserRequest, RequestCallbackInput, RoomCallMode, ScheduleRoomMessageRequest,
+    SendMeetingReactionRequest, SendRoomMessageRequest, SetAgentStateRequest,
+    SetOutOfOfficeRequest, SetPresenceRequest, SetSpotlightRequest, StartMonitorRequest,
+    SyncCallHistoryRequest, TranslateRequest, UpdateAutomationRuleRequest, UpdateBotRequest,
+    UpdateCallStatusRequest, UpdateCollaborationPolicyRequest, UpdateComplianceReviewRequest,
+    UpdateConditionalAccessPolicyRequest, UpdateConferenceParticipantRequest,
+    UpdateConnectorRequest, UpdateDataResidencyConfigRequest, UpdateFederationPeerRequest,
+    UpdateEmergencyLocationRequest, UpdateEnterpriseIntegrationRequest, UpdateLoopComponentRequest, UpdateMeetingTemplateRequest,
+    UpdateNotificationPreferenceRequest, UpdateScheduledMeetingRequest,
+    UpdateSchedulingPanelRequest, UpdateSipAccountStatusRequest, UpdateTagRequest,
+    UpdateTaskRequest, UpdateWikiPageRequest, UpsertRetentionPolicyRequest,
 };
 
 type SharedState = Arc<AppState>;
@@ -101,18 +95,25 @@ pub fn router(state: SharedState) -> Router {
             "/v1/conferences/{id}/attendance/export",
             get(export_conference_attendance_csv),
         )
+        .route("/v1/conferences/{id}/spotlight", post(set_spotlight))
         .route(
-            "/v1/conferences/{id}/spotlight",
-            post(set_spotlight),
+            "/v1/conferences/{id}/layout",
+            get(get_conference_layout).put(update_conference_layout),
+        )
+        .route(
+            "/v1/conferences/{id}/streams",
+            get(list_stream_sessions).post(start_stream_session),
+        )
+        .route("/v1/streams/{id}", delete(stop_stream_session))
+        .route(
+            "/v1/conferences/{id}/town-hall",
+            get(get_town_hall_config).put(update_town_hall_config),
         )
         .route(
             "/v1/conferences/{id}/reactions",
             post(send_meeting_reaction),
         )
-        .route(
-            "/v1/conferences/{id}/chat-room",
-            get(get_meeting_chat_room),
-        )
+        .route("/v1/conferences/{id}/chat-room", get(get_meeting_chat_room))
         .route(
             "/v1/conferences/{id}/green-room",
             get(get_green_room).put(set_green_room_enabled),
@@ -126,6 +127,10 @@ pub fn router(state: SharedState) -> Router {
             post(green_room_ready),
         )
         .route("/v1/media/config", get(media_config))
+        .route(
+            "/v1/media/settings",
+            get(get_meeting_media_settings).put(update_meeting_media_settings),
+        )
         .route("/v1/calls", get(list_calls).post(create_call))
         .route("/v1/calls/{id}/status", put(update_call_status))
         .route(
@@ -137,6 +142,7 @@ pub fn router(state: SharedState) -> Router {
             put(update_routing_rule).delete(delete_routing_rule),
         )
         .route("/v1/files", get(list_files).post(upload_file))
+        .route("/v1/files/cloud-storage/status", get(cloud_storage_status))
         .route("/v1/files/{id}", get(download_file).delete(delete_file))
         .route("/v1/sip/subscriptions", get(list_sip_subscriptions))
         .route("/v1/sip/notifications", get(list_sip_notifications))
@@ -150,10 +156,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/teams/{id}", get(get_team))
         .route("/v1/teams/{id}/members", post(add_team_member))
         .route("/v1/teams/{id}/channels", post(create_team_channel))
-        .route(
-            "/v1/teams/{id}/tags",
-            get(list_tags).post(create_tag),
-        )
+        .route("/v1/teams/{id}/tags", get(list_tags).post(create_tag))
         .route(
             "/v1/teams/{id}/tags/{tag_id}",
             put(update_tag).delete(delete_tag),
@@ -184,6 +187,18 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/v1/admin/ediscovery/export", get(discovery_export))
         .route("/v1/admin/ediscovery/search", get(discovery_search))
+        .route(
+            "/v1/admin/ediscovery/cases",
+            get(list_ediscovery_cases).post(create_ediscovery_case),
+        )
+        .route(
+            "/v1/admin/ediscovery/cases/{id}",
+            put(update_ediscovery_case).delete(delete_ediscovery_case),
+        )
+        .route(
+            "/v1/admin/ediscovery/cases/{id}/export",
+            post(export_ediscovery_case),
+        )
         .route(
             "/v1/admin/conditional-access",
             get(list_conditional_access_policies).post(create_conditional_access_policy),
@@ -233,6 +248,16 @@ pub fn router(state: SharedState) -> Router {
             post(start_room_call).delete(end_room_call),
         )
         .route("/v1/rooms/{id}/typing", post(room_typing))
+        .route("/v1/search", get(unified_search))
+        .route("/v1/copilot/query", post(copilot_query))
+        .route("/v1/ai/providers", get(list_ai_providers))
+        .route(
+            "/v1/ai/providers/{kind}",
+            get(get_ai_provider).put(update_ai_provider),
+        )
+        .route("/v1/ai/llm/chat", post(ai_llm_chat))
+        .route("/v1/ai/stt/transcribe", post(ai_stt_transcribe))
+        .route("/v1/ai/tts/synthesize", post(ai_tts_synthesize))
         .route("/v1/search/messages", get(search_messages))
         .route("/v1/search/collaboration", get(search_collaboration))
         .route("/v1/messages/{id}/read", put(mark_message_read))
@@ -334,6 +359,7 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/v1/ivrs", get(list_ivrs).post(create_ivr))
         .route("/v1/ivrs/{id}", get(get_ivr).delete(delete_ivr))
+        .route("/v1/ivrs/{id}/speech", post(resolve_ivr_speech))
         .route("/v1/routes/resolve/{uri}", get(resolve_route))
         .route("/v1/routes/preview", get(preview_route))
         .route("/v1/voicemail", get(list_voicemails))
@@ -341,6 +367,18 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/voicemail/{id}", delete(delete_voicemail))
         .route("/v1/recordings", get(list_recordings))
         .route("/v1/recordings/{id}", delete(delete_recording))
+        .route(
+            "/v1/recordings/{id}/transcription",
+            get(list_transcription_jobs).post(queue_transcription_job),
+        )
+        .route(
+            "/v1/transcription-jobs/{id}/start",
+            post(start_transcription_job),
+        )
+        .route(
+            "/v1/transcription-jobs/{id}/complete",
+            post(complete_transcription_job),
+        )
         // Meeting lobby
         .route(
             "/v1/conferences/{id}/lobby",
@@ -386,6 +424,15 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/v1/breakouts/{id}/start", post(start_breakout))
         .route("/v1/breakouts/{id}/close", post(close_breakout))
+        // PowerPoint Live / presentation sessions
+        .route(
+            "/v1/conferences/{id}/presentations",
+            get(list_presentations).post(create_presentation),
+        )
+        .route(
+            "/v1/presentations/{id}",
+            put(update_presentation).delete(end_presentation),
+        )
         // Live captions / transcription
         .route(
             "/v1/conferences/{id}/transcript",
@@ -395,6 +442,7 @@ pub fn router(state: SharedState) -> Router {
             "/v1/conferences/{id}/transcript/export",
             get(export_transcript),
         )
+        .route("/v1/conferences/{id}/assistant", get(meeting_assistant))
         // Call quality
         .route(
             "/v1/call-quality",
@@ -417,6 +465,14 @@ pub fn router(state: SharedState) -> Router {
             get(export_dlp_violations_csv),
         )
         .route("/v1/admin/dlp/scan", post(scan_content_dlp))
+        .route(
+            "/v1/admin/atp/quarantine",
+            get(list_malware_quarantine),
+        )
+        .route(
+            "/v1/admin/atp/quarantine/{id}",
+            put(review_malware_quarantine),
+        )
         // MFA / TOTP
         .route("/v1/mfa/status", get(mfa_status))
         .route("/v1/mfa/setup", post(mfa_setup))
@@ -438,23 +494,14 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/v1/admin/barriers/check", get(check_barrier))
         // Sensitivity Labels
-        .route(
-            "/v1/admin/labels",
-            get(list_labels).post(create_label),
-        )
+        .route("/v1/admin/labels", get(list_labels).post(create_label))
         .route(
             "/v1/admin/labels/{id}",
             put(update_label).delete(delete_label),
         )
         // Custom RBAC Roles
-        .route(
-            "/v1/admin/roles",
-            get(list_roles).post(create_role),
-        )
-        .route(
-            "/v1/admin/roles/{id}",
-            put(update_role).delete(delete_role),
-        )
+        .route("/v1/admin/roles", get(list_roles).post(create_role))
+        .route("/v1/admin/roles/{id}", put(update_role).delete(delete_role))
         .route("/v1/admin/roles/permissions", get(list_permissions))
         // Policy Packages
         .route(
@@ -474,6 +521,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/admin/users/export", get(export_users_csv))
         // Usage Analytics
         .route("/v1/admin/analytics", get(get_analytics))
+        .route("/v1/admin/security-score", get(get_security_score))
         // Meeting templates
         .route(
             "/v1/admin/meeting-templates",
@@ -566,10 +614,7 @@ pub fn router(state: SharedState) -> Router {
             "/v1/users/{uri}/delegates",
             get(list_delegations).post(create_delegation),
         )
-        .route(
-            "/v1/users/{uri}/delegates/{id}",
-            delete(delete_delegation),
-        )
+        .route("/v1/users/{uri}/delegates/{id}", delete(delete_delegation))
         // Common area phones
         .route(
             "/v1/admin/common-area-phones",
@@ -589,16 +634,10 @@ pub fn router(state: SharedState) -> Router {
             put(update_meeting_room).delete(delete_meeting_room),
         )
         .route("/v1/meeting-rooms/{id}/book", post(book_meeting_room))
-        .route(
-            "/v1/meeting-rooms/{id}/bookings",
-            get(list_room_bookings),
-        )
+        .route("/v1/meeting-rooms/{id}/bookings", get(list_room_bookings))
         .route("/v1/meeting-rooms/available", get(available_meeting_rooms))
         // Device provisioning
-        .route(
-            "/v1/admin/devices",
-            get(list_devices).post(create_device),
-        )
+        .route("/v1/admin/devices", get(list_devices).post(create_device))
         .route(
             "/v1/admin/devices/{id}",
             put(update_device).delete(delete_device_handler),
@@ -624,21 +663,17 @@ pub fn router(state: SharedState) -> Router {
         )
         .route(
             "/v1/wiki/{id}",
-            get(get_wiki_page).put(update_wiki_page).delete(delete_wiki_page_handler),
+            get(get_wiki_page)
+                .put(update_wiki_page)
+                .delete(delete_wiki_page_handler),
         )
         // Task boards
         .route(
             "/v1/teams/{id}/boards",
             get(list_task_boards).post(create_task_board),
         )
-        .route(
-            "/v1/boards/{id}",
-            delete(delete_task_board_handler),
-        )
-        .route(
-            "/v1/boards/{id}/tasks",
-            get(list_tasks).post(create_task),
-        )
+        .route("/v1/boards/{id}", delete(delete_task_board_handler))
+        .route("/v1/boards/{id}/tasks", get(list_tasks).post(create_task))
         .route(
             "/v1/tasks/{id}",
             put(update_task).delete(delete_task_handler),
@@ -651,19 +686,10 @@ pub fn router(state: SharedState) -> Router {
             "/v1/admin/api-clients",
             get(list_api_clients).post(create_api_client),
         )
-        .route(
-            "/v1/admin/api-clients/{id}",
-            delete(delete_api_client),
-        )
+        .route("/v1/admin/api-clients/{id}", delete(delete_api_client))
         // Bots
-        .route(
-            "/v1/admin/bots",
-            get(list_bots).post(create_bot),
-        )
-        .route(
-            "/v1/admin/bots/{id}",
-            put(update_bot).delete(delete_bot),
-        )
+        .route("/v1/admin/bots", get(list_bots).post(create_bot))
+        .route("/v1/admin/bots/{id}", put(update_bot).delete(delete_bot))
         .route("/v1/bot/message", post(bot_send_message))
         // Calendar integration
         .route(
@@ -680,10 +706,7 @@ pub fn router(state: SharedState) -> Router {
             "/v1/users/contact-sync",
             get(list_contact_sync).post(create_contact_sync),
         )
-        .route(
-            "/v1/users/contact-sync/{id}",
-            delete(delete_contact_sync),
-        )
+        .route("/v1/users/contact-sync/{id}", delete(delete_contact_sync))
         .route("/v1/users/contacts", get(list_contacts_merged))
         // Connectors
         .route(
@@ -695,10 +718,7 @@ pub fn router(state: SharedState) -> Router {
             put(update_connector).delete(delete_connector),
         )
         // Webinar registration
-        .route(
-            "/v1/conferences/{id}/register",
-            post(register_webinar),
-        )
+        .route("/v1/conferences/{id}/register", post(register_webinar))
         .route(
             "/v1/conferences/{id}/registrations",
             get(list_webinar_registrations),
@@ -737,30 +757,18 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/apps", get(list_apps))
         .route("/v1/apps/{id}/install", post(install_app))
         .route("/v1/apps/{id}/uninstall", post(uninstall_app))
-        .route(
-            "/v1/admin/apps",
-            get(list_apps_admin).post(create_app),
-        )
-        .route(
-            "/v1/admin/apps/{id}",
-            put(update_app).delete(delete_app),
-        )
+        .route("/v1/admin/apps", get(list_apps_admin).post(create_app))
+        .route("/v1/admin/apps/{id}", put(update_app).delete(delete_app))
         // Guest access
-        .route(
-            "/v1/teams/{id}/guests/invite",
-            post(invite_guest),
-        )
-        .route(
-            "/v1/teams/{id}/guests",
-            get(list_guests),
-        )
-        .route(
-            "/v1/teams/{id}/guests/{guest_id}",
-            delete(delete_guest),
-        )
+        .route("/v1/teams/{id}/guests/invite", post(invite_guest))
+        .route("/v1/teams/{id}/guests", get(list_guests))
+        .route("/v1/teams/{id}/guests/{guest_id}", delete(delete_guest))
         // CNAM lookup
         .route("/v1/cnam/lookup", get(cnam_lookup))
-        .route("/v1/admin/cnam/providers", get(list_cnam_providers).post(set_cnam_providers))
+        .route(
+            "/v1/admin/cnam/providers",
+            get(list_cnam_providers).post(set_cnam_providers),
+        )
         // Caption language
         .route(
             "/v1/conferences/{id}/captions/language",
@@ -771,6 +779,7 @@ pub fn router(state: SharedState) -> Router {
             "/v1/admin/sip-gateways",
             get(list_sip_gateways).post(create_sip_gateway),
         )
+        .route("/v1/admin/pstn/status", get(pstn_operator_connect_status))
         .route(
             "/v1/admin/sip-gateways/{id}",
             put(update_sip_gateway).delete(delete_sip_gateway),
@@ -784,10 +793,30 @@ pub fn router(state: SharedState) -> Router {
             "/v1/admin/location-routing/{id}",
             put(update_location_routing_rule).delete(delete_location_routing_rule),
         )
+        // Emergency calling / E911
+        .route(
+            "/v1/admin/emergency/locations",
+            get(list_emergency_locations).post(create_emergency_location),
+        )
+        .route(
+            "/v1/admin/emergency/locations/{id}",
+            put(update_emergency_location).delete(delete_emergency_location),
+        )
+        .route(
+            "/v1/admin/emergency/assignments",
+            get(list_emergency_assignments).post(assign_emergency_location),
+        )
+        .route(
+            "/v1/admin/emergency/assignments/{user_uri}",
+            delete(remove_emergency_assignment),
+        )
+        .route("/v1/emergency/plan", get(emergency_call_plan))
         // Screen share annotations
         .route(
             "/v1/conferences/{id}/annotations",
-            get(list_annotations).post(create_annotation).delete(clear_annotations),
+            get(list_annotations)
+                .post(create_annotation)
+                .delete(clear_annotations),
         )
         // Whiteboards
         .route(
@@ -854,7 +883,34 @@ pub fn router(state: SharedState) -> Router {
             "/v1/admin/data-residency/{id}",
             put(update_data_residency).delete(delete_data_residency),
         )
-        .route("/v1/admin/data-residency/status", get(data_residency_status))
+        .route(
+            "/v1/admin/data-residency/status",
+            get(data_residency_status),
+        )
+        .route(
+            "/v1/admin/enterprise-integrations",
+            get(list_enterprise_integrations),
+        )
+        .route(
+            "/v1/admin/enterprise-integrations/status",
+            get(enterprise_capability_report),
+        )
+        .route(
+            "/v1/admin/enterprise-integrations/readiness",
+            get(enterprise_parity_readiness_report),
+        )
+        .route(
+            "/v1/admin/enterprise-integrations/health",
+            get(enterprise_integration_health_report),
+        )
+        .route(
+            "/v1/admin/enterprise-integrations/deployment-plan",
+            get(enterprise_deployment_plan),
+        )
+        .route(
+            "/v1/admin/enterprise-integrations/{id}",
+            put(update_enterprise_integration),
+        )
         // Bandwidth policies
         .route(
             "/v1/admin/bandwidth-policies",
@@ -1377,6 +1433,25 @@ async fn media_config(
     Ok(Json(state.media_config()))
 }
 
+async fn get_meeting_media_settings(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::MeetingMediaSettings>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    Ok(Json(state.meeting_media_settings(&principal)))
+}
+
+async fn update_meeting_media_settings(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::UpdateMeetingMediaSettingsRequest>,
+) -> Result<Json<crate::MeetingMediaSettings>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let settings = state.update_meeting_media_settings(&principal, input);
+    state.record_audit_event(&principal, "media.settings_updated", None);
+    Ok(Json(settings))
+}
+
 async fn join_conference(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -1402,6 +1477,9 @@ async fn join_conference(
             crate::JoinConferenceError::NotFound => ApiError::NotFound,
             crate::JoinConferenceError::Locked => {
                 ApiError::Conflict("meeting is locked".to_string())
+            }
+            crate::JoinConferenceError::CapacityReached => {
+                ApiError::Conflict("town hall capacity reached".to_string())
             }
         })?;
     state.record_audit_event(
@@ -1530,7 +1608,9 @@ async fn export_conference_attendance_csv(
     resp_headers.insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_str(&format!("attachment; filename=\"attendance-{}.csv\"", id))
-            .unwrap_or_else(|_| HeaderValue::from_static("attachment; filename=\"attendance.csv\"")),
+            .unwrap_or_else(|_| {
+                HeaderValue::from_static("attachment; filename=\"attendance.csv\"")
+            }),
     );
     Ok((resp_headers, csv).into_response())
 }
@@ -1558,6 +1638,123 @@ async fn set_spotlight(
     Ok(Json(conference))
 }
 
+async fn get_conference_layout(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::ConferenceLayoutState>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    require_conference_visible(&state, id, &principal)?;
+    Ok(Json(
+        state
+            .conference_layout_state(id)
+            .ok_or(ApiError::NotFound)?,
+    ))
+}
+
+async fn update_conference_layout(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::UpdateConferenceLayoutRequest>,
+) -> Result<Json<crate::ConferenceLayoutState>, ApiError> {
+    let (principal, role) = authenticated_principal_role(&headers, &state)?;
+    if !state.can_moderate_conference(id, &principal, role == crate::ROLE_ADMIN) {
+        return Err(ApiError::Forbidden);
+    }
+    let layout = state
+        .update_conference_layout_state(id, &principal, input)
+        .ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "conference.layout_updated", Some(id.to_string()));
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "conference_layout_updated".to_string(),
+        payload: serde_json::to_value(&layout).unwrap(),
+    });
+    Ok(Json(layout))
+}
+
+async fn list_stream_sessions(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::MeetingStreamSession>>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    require_conference_visible(&state, id, &principal)?;
+    Ok(Json(state.list_stream_sessions(id)))
+}
+
+async fn start_stream_session(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::CreateMeetingStreamRequest>,
+) -> Result<Json<crate::MeetingStreamSession>, ApiError> {
+    let (principal, role) = authenticated_principal_role(&headers, &state)?;
+    if !state.can_moderate_conference(id, &principal, role == crate::ROLE_ADMIN) {
+        return Err(ApiError::Forbidden);
+    }
+    let session = state
+        .start_stream_session(id, &principal, input)
+        .map_err(ApiError::BadRequest)?;
+    state.record_audit_event(&principal, "stream.started", Some(session.id.to_string()));
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "stream_updated".to_string(),
+        payload: serde_json::to_value(&session).unwrap(),
+    });
+    Ok(Json(session))
+}
+
+async fn stop_stream_session(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::MeetingStreamSession>, ApiError> {
+    let (principal, role) = authenticated_principal_role(&headers, &state)?;
+    let existing = state.stream_session(id).ok_or(ApiError::NotFound)?;
+    if !state.can_moderate_conference(existing.conference_id, &principal, role == crate::ROLE_ADMIN)
+    {
+        return Err(ApiError::Forbidden);
+    }
+    let session = state.stop_stream_session(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "stream.stopped", Some(id.to_string()));
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "stream_updated".to_string(),
+        payload: serde_json::to_value(&session).unwrap(),
+    });
+    Ok(Json(session))
+}
+
+async fn get_town_hall_config(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::TownHallConfig>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    require_conference_visible(&state, id, &principal)?;
+    Ok(Json(state.town_hall_config(id).ok_or(ApiError::NotFound)?))
+}
+
+async fn update_town_hall_config(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::UpdateTownHallConfigRequest>,
+) -> Result<Json<crate::TownHallConfig>, ApiError> {
+    let (principal, role) = authenticated_principal_role(&headers, &state)?;
+    if !state.can_moderate_conference(id, &principal, role == crate::ROLE_ADMIN) {
+        return Err(ApiError::Forbidden);
+    }
+    let config = state
+        .update_town_hall_config(id, &principal, input)
+        .map_err(ApiError::BadRequest)?;
+    state.record_audit_event(&principal, "town_hall.updated", Some(id.to_string()));
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "town_hall_updated".to_string(),
+        payload: serde_json::to_value(&config).unwrap(),
+    });
+    Ok(Json(config))
+}
+
 // ── Meeting reactions ─────────────────────────────────────────────
 
 async fn send_meeting_reaction(
@@ -1579,14 +1776,8 @@ async fn get_meeting_chat_room(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let principal = authenticated_principal(&headers, &state)?;
-    let conference = state
-        .get_conference(id)
-        .ok_or(ApiError::NotFound)?;
-    let chat_room_id = state.ensure_meeting_chat_room(
-        id,
-        &conference.title,
-        &principal,
-    );
+    let conference = state.get_conference(id).ok_or(ApiError::NotFound)?;
+    let chat_room_id = state.ensure_meeting_chat_room(id, &conference.title, &principal);
     Ok(Json(json!({ "chat_room_id": chat_room_id })))
 }
 
@@ -1611,7 +1802,10 @@ async fn set_green_room_enabled(
     if !state.can_moderate_conference(id, &principal, role == crate::ROLE_ADMIN) {
         return Err(ApiError::Forbidden);
     }
-    let enabled = input.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let enabled = input
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let conference = state
         .set_green_room_enabled(id, enabled)
         .ok_or(ApiError::NotFound)?;
@@ -1692,11 +1886,7 @@ async fn update_meeting_template(
     let template = state
         .update_meeting_template(id, input)
         .ok_or(ApiError::NotFound)?;
-    state.record_audit_event(
-        &principal,
-        "meeting_template.updated",
-        Some(id.to_string()),
-    );
+    state.record_audit_event(&principal, "meeting_template.updated", Some(id.to_string()));
     Ok(Json(template))
 }
 
@@ -1709,11 +1899,7 @@ async fn delete_meeting_template(
     if !state.delete_meeting_template(id) {
         return Err(ApiError::NotFound);
     }
-    state.record_audit_event(
-        &principal,
-        "meeting_template.deleted",
-        Some(id.to_string()),
-    );
+    state.record_audit_event(&principal, "meeting_template.deleted", Some(id.to_string()));
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -1734,11 +1920,7 @@ async fn set_out_of_office(
 ) -> Result<Json<crate::OutOfOfficeSettings>, ApiError> {
     let principal = authenticated_principal(&headers, &state)?;
     let result = state.set_out_of_office(&principal, input);
-    state.record_audit_event(
-        &principal,
-        "user.out_of_office_updated",
-        None,
-    );
+    state.record_audit_event(&principal, "user.out_of_office_updated", None);
     Ok(Json(result))
 }
 
@@ -2060,6 +2242,88 @@ async fn close_breakout(
     Ok(Json(session))
 }
 
+// ── PowerPoint Live / presentation handlers ───────────────────────
+
+async fn list_presentations(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::PresentationSession>>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    require_conference_visible(&state, id, &principal)?;
+    Ok(Json(state.list_presentation_sessions(id)))
+}
+
+async fn create_presentation(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::CreatePresentationSessionRequest>,
+) -> Result<Json<crate::PresentationSession>, ApiError> {
+    let (principal, role) = authenticated_principal_role(&headers, &state)?;
+    if !state.can_moderate_conference(id, &principal, role == crate::ROLE_ADMIN) {
+        return Err(ApiError::Forbidden);
+    }
+    let session = state
+        .create_presentation_session(id, &principal, input)
+        .ok_or_else(|| ApiError::BadRequest("presentation requires at least one slide".to_string()))?;
+    state.record_audit_event(
+        &principal,
+        "presentation.created",
+        Some(session.id.to_string()),
+    );
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "presentation_updated".to_string(),
+        payload: serde_json::to_value(&session).unwrap(),
+    });
+    Ok(Json(session))
+}
+
+async fn update_presentation(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::UpdatePresentationSessionRequest>,
+) -> Result<Json<crate::PresentationSession>, ApiError> {
+    let (principal, role) = authenticated_principal_role(&headers, &state)?;
+    let existing = state
+        .presentation_session(id)
+        .ok_or(ApiError::NotFound)?;
+    if !state.can_moderate_conference(existing.conference_id, &principal, role == crate::ROLE_ADMIN) {
+        return Err(ApiError::Forbidden);
+    }
+    let session = state
+        .update_presentation_session(id, input)
+        .ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "presentation.updated", Some(id.to_string()));
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "presentation_updated".to_string(),
+        payload: serde_json::to_value(&session).unwrap(),
+    });
+    Ok(Json(session))
+}
+
+async fn end_presentation(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::PresentationSession>, ApiError> {
+    let (principal, role) = authenticated_principal_role(&headers, &state)?;
+    let existing = state
+        .presentation_session(id)
+        .ok_or(ApiError::NotFound)?;
+    if !state.can_moderate_conference(existing.conference_id, &principal, role == crate::ROLE_ADMIN) {
+        return Err(ApiError::Forbidden);
+    }
+    let session = state.end_presentation_session(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "presentation.ended", Some(id.to_string()));
+    state.broadcast_sse(crate::SseEvent {
+        event_type: "presentation_updated".to_string(),
+        payload: serde_json::to_value(&session).unwrap(),
+    });
+    Ok(Json(session))
+}
+
 // ── Transcript / live captions handlers ───────────────────────────
 
 async fn get_transcript(
@@ -2067,7 +2331,8 @@ async fn get_transcript(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<crate::TranscriptSegment>>, ApiError> {
-    require_bearer(&headers, &state)?;
+    let principal = authenticated_principal(&headers, &state)?;
+    require_conference_visible(&state, id, &principal)?;
     Ok(Json(state.get_transcript(id)))
 }
 
@@ -2077,7 +2342,8 @@ async fn post_transcript(
     Path(id): Path<Uuid>,
     Json(input): Json<crate::PostTranscriptRequest>,
 ) -> Result<Json<crate::TranscriptSegment>, ApiError> {
-    require_bearer(&headers, &state)?;
+    let principal = authenticated_principal(&headers, &state)?;
+    require_conference_visible(&state, id, &principal)?;
     if !state.collaboration_policy().meeting_recording_enabled {
         return Err(ApiError::Conflict(
             "meeting recording is disabled by policy".to_string(),
@@ -2096,8 +2362,22 @@ async fn export_transcript(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<crate::TranscriptExport>, ApiError> {
-    require_bearer(&headers, &state)?;
+    let principal = authenticated_principal(&headers, &state)?;
+    require_conference_visible(&state, id, &principal)?;
     Ok(Json(state.export_transcript(id)))
+}
+
+async fn meeting_assistant(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::MeetingAssistantReport>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    require_conference_visible(&state, id, &principal)?;
+    state
+        .meeting_assistant_report(id)
+        .map(Json)
+        .ok_or(ApiError::NotFound)
 }
 
 // ── Call quality handlers ─────────────────────────────────────────
@@ -2367,6 +2647,35 @@ async fn scan_content_dlp(
     Ok(Json(result))
 }
 
+async fn list_malware_quarantine(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::MalwareQuarantineItem>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_malware_quarantine()))
+}
+
+async fn review_malware_quarantine(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::ReviewMalwareQuarantineRequest>,
+) -> Result<Json<crate::MalwareQuarantineItem>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let item = state
+        .review_malware_quarantine(id, &principal, input)
+        .ok_or(ApiError::NotFound)?;
+    if item.status == crate::MalwareQuarantineStatus::Deleted {
+        let _ = tokio::fs::remove_file(state.quarantine_path(item.id)).await;
+    }
+    state.record_audit_event(
+        &principal,
+        "atp.quarantine_reviewed",
+        Some(format!("{}:{:?}", item.id, item.status)),
+    );
+    Ok(Json(item))
+}
+
 // ─── MFA / TOTP Handlers ───
 
 async fn mfa_status(
@@ -2605,9 +2914,11 @@ async fn check_barrier(
     Query(params): Query<BarrierCheckParams>,
 ) -> Result<Json<crate::BarrierCheckResult>, ApiError> {
     authenticated_admin(&headers, &state)?;
-    Ok(Json(
-        state.check_barrier(&params.user_a, &params.user_b, params.is_call),
-    ))
+    Ok(Json(state.check_barrier(
+        &params.user_a,
+        &params.user_b,
+        params.is_call,
+    )))
 }
 
 // ── Sensitivity Labels handlers ─────────────────────────────────
@@ -2840,6 +3151,14 @@ async fn get_analytics(
     Ok(Json(state.usage_analytics()))
 }
 
+async fn get_security_score(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::SecurityPostureReport>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.security_posture_report()))
+}
+
 async fn create_call(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -2936,22 +3255,44 @@ async fn upload_file(
     );
     let content_type = header_string(&headers, header::CONTENT_TYPE.as_str())
         .unwrap_or_else(|| "application/octet-stream".to_string());
-    let governance = state.file_governance_for_upload(&owner, &filename, &content_type, &body);
-    if !governance.allowed {
-        state.record_audit_event(&owner, "file.upload_blocked_dlp", Some(filename));
-        return Err(ApiError::Conflict("file blocked by DLP policy".to_string()));
-    }
-
-    let folder_id = header_string(&headers, "x-pale-folder-id")
-        .and_then(|s| Uuid::parse_str(&s).ok());
-    let room_id = header_string(&headers, "x-pale-room-id")
-        .and_then(|s| Uuid::parse_str(&s).ok());
-
-    tokio::fs::create_dir_all(state.files_dir()).await?;
-
     let mut hasher = Sha256::new();
     hasher.update(&body);
     let sha256 = to_hex(&hasher.finalize());
+    let governance = state.file_governance_for_upload(&owner, &filename, &content_type, &body);
+    if !governance.allowed {
+        let action = if governance.dlp_status == "malware_blocked" {
+            "file.upload_blocked_malware"
+        } else {
+            "file.upload_blocked_dlp"
+        };
+        if governance.dlp_status == "malware_blocked" {
+            tokio::fs::create_dir_all(state.quarantine_dir()).await?;
+            let item = state.quarantine_malware_upload(
+                &owner,
+                &filename,
+                &content_type,
+                body.len() as u64,
+                &sha256,
+                "malware_signature_detected",
+            );
+            tokio::fs::write(state.quarantine_path(item.id), &body).await?;
+        }
+        state.record_audit_event(&owner, action, Some(filename));
+        return Err(ApiError::Conflict(
+            if governance.dlp_status == "malware_blocked" {
+                "file blocked by malware scanning"
+            } else {
+                "file blocked by DLP policy"
+            }
+            .to_string(),
+        ));
+    }
+
+    let folder_id =
+        header_string(&headers, "x-pale-folder-id").and_then(|s| Uuid::parse_str(&s).ok());
+    let room_id = header_string(&headers, "x-pale-room-id").and_then(|s| Uuid::parse_str(&s).ok());
+
+    tokio::fs::create_dir_all(state.files_dir()).await?;
 
     // Check if a file with the same name exists in the same room/folder — if so, create a version
     let existing = room_id.and_then(|_rid| {
@@ -2965,18 +3306,12 @@ async fn upload_file(
         // Check file lock before allowing overwrite
         if let Some(locker) = &existing_file.locked_by {
             if *locker != owner {
-                return Err(ApiError::Conflict(format!(
-                    "file is locked by {}",
-                    locker
-                )));
+                return Err(ApiError::Conflict(format!("file is locked by {}", locker)));
             }
         }
         // Create a new version of the existing file
         let versions = state.file_versions(existing_file.id);
-        let next_version = versions
-            .last()
-            .map(|v| v.version_number + 1)
-            .unwrap_or(2); // first versioned upload is v2
+        let next_version = versions.last().map(|v| v.version_number + 1).unwrap_or(2); // first versioned upload is v2
 
         // Save current file as a version if this is the first time versioning
         if versions.is_empty() {
@@ -3072,17 +3407,32 @@ async fn list_files(
     Ok(Json(records))
 }
 
+async fn cloud_storage_status(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::CloudStorageStatus>, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    state.record_audit_event(&requester, "cloud_storage.status_viewed", None);
+    Ok(Json(state.cloud_storage_status()))
+}
+
 async fn download_file(
     State(state): State<SharedState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
     let requester = authenticated_principal(&headers, &state)?;
-    let record = state.file_record(id).ok_or(ApiError::NotFound)?;
+    let record = require_file_reader(&state, id, &requester)?;
     if record.deleted_at.is_some() {
         return Err(ApiError::NotFound);
     }
-    if !state.is_admin_principal(&requester) && requester != record.owner {
+    let casb = state.casb_file_access_decision(&requester, "download", &record);
+    if !casb.allowed {
+        state.record_audit_event(
+            &requester,
+            "casb.file_download_blocked",
+            Some(format!("{}:{}", id, casb.reason)),
+        );
         return Err(ApiError::Forbidden);
     }
     let bytes = tokio::fs::read(state.file_path(id)).await?;
@@ -3420,11 +3770,12 @@ async fn gif_search(
         Ok(resp) => match resp.json::<serde_json::Value>().await {
             Ok(body) => {
                 // Normalize response to a uniform shape
-                let results = if is_tenor {
-                    body.get("results")
-                        .and_then(|r| r.as_array())
-                        .map(|arr| {
-                            arr.iter()
+                let results =
+                    if is_tenor {
+                        body.get("results")
+                            .and_then(|r| r.as_array())
+                            .map(|arr| {
+                                arr.iter()
                                 .filter_map(|item| {
                                     let title = item.get("content_description")
                                         .and_then(|v| v.as_str())
@@ -3439,13 +3790,13 @@ async fn gif_search(
                                     Some(json!({ "title": title, "url": url, "preview": preview }))
                                 })
                                 .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default()
-                } else {
-                    body.get("data")
-                        .and_then(|d| d.as_array())
-                        .map(|arr| {
-                            arr.iter()
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        body.get("data")
+                            .and_then(|d| d.as_array())
+                            .map(|arr| {
+                                arr.iter()
                                 .filter_map(|item| {
                                     let title = item.get("title")
                                         .and_then(|v| v.as_str())
@@ -3460,9 +3811,9 @@ async fn gif_search(
                                     Some(json!({ "title": title, "url": url, "preview": preview }))
                                 })
                                 .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default()
-                };
+                            })
+                            .unwrap_or_default()
+                    };
                 Ok(Json(json!({ "results": results })))
             }
             Err(_) => Ok(Json(json!({ "results": [] }))),
@@ -3699,6 +4050,79 @@ async fn discovery_search(
             "ediscovery.searched"
         },
         Some(format!("matches={count}")),
+    );
+    Ok(Json(result))
+}
+
+async fn list_ediscovery_cases(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::EDiscoveryCase>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_ediscovery_cases()))
+}
+
+async fn create_ediscovery_case(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::CreateEDiscoveryCaseRequest>,
+) -> Result<Json<crate::EDiscoveryCase>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let case = state
+        .create_ediscovery_case(&principal, input)
+        .map_err(ApiError::BadRequest)?;
+    state.record_audit_event(&principal, "ediscovery.case_created", Some(case.id.to_string()));
+    Ok(Json(case))
+}
+
+async fn update_ediscovery_case(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::UpdateEDiscoveryCaseRequest>,
+) -> Result<Json<crate::EDiscoveryCase>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let case = state
+        .update_ediscovery_case(id, input)
+        .map_err(|err| {
+            if err.contains("not found") {
+                ApiError::NotFound
+            } else {
+                ApiError::BadRequest(err)
+            }
+        })?;
+    state.record_audit_event(&principal, "ediscovery.case_updated", Some(id.to_string()));
+    Ok(Json(case))
+}
+
+async fn delete_ediscovery_case(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if state.delete_ediscovery_case(id) {
+        state.record_audit_event(&principal, "ediscovery.case_deleted", Some(id.to_string()));
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
+async fn export_ediscovery_case(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::DiscoveryExport>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let result = state
+        .export_ediscovery_case(id, &principal)
+        .map_err(|_| ApiError::NotFound)?;
+    let count = result.messages.len() + result.files.len() + result.recordings.len();
+    state.record_audit_event(
+        &principal,
+        "ediscovery.case_exported",
+        Some(format!("case={id} matches={count}")),
     );
     Ok(Json(result))
 }
@@ -3965,11 +4389,7 @@ async fn update_automation_rule(
     let principal = authenticated_admin(&headers, &state)?;
     match state.update_automation_rule(id, req) {
         Some(rule) => {
-            state.record_audit_event(
-                &principal,
-                "automation.updated",
-                Some(format!("id={}", id)),
-            );
+            state.record_audit_event(&principal, "automation.updated", Some(format!("id={}", id)));
             Ok(Json(rule))
         }
         None => Err(ApiError::NotFound),
@@ -3983,11 +4403,7 @@ async fn delete_automation_rule(
 ) -> Result<StatusCode, ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
     if state.delete_automation_rule(id) {
-        state.record_audit_event(
-            &principal,
-            "automation.deleted",
-            Some(format!("id={}", id)),
-        );
+        state.record_audit_event(&principal, "automation.deleted", Some(format!("id={}", id)));
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)
@@ -4316,7 +4732,14 @@ async fn send_room_message(
     let principal = authenticated_principal(&headers, &state)?;
     require_room_member(&state, id, &principal)?;
     state
-        .send_room_message_with_card(id, &principal, &input.body, input.reply_to, input.priority, input.card_payload)
+        .send_room_message_with_card(
+            id,
+            &principal,
+            &input.body,
+            input.reply_to,
+            input.priority,
+            input.card_payload,
+        )
         .map(Json)
         .map_err(ApiError::Conflict)
 }
@@ -4481,6 +4904,7 @@ async fn search_messages(
     let mut results: Vec<crate::SearchResult> = state
         .sip_messages()
         .into_iter()
+        .filter(|m| state.is_admin_principal(&principal) || m.from_uri == principal || m.to_uri == principal)
         .filter(|m| m.body.to_lowercase().contains(&term))
         .take(limit)
         .map(|m| crate::SearchResult {
@@ -4500,16 +4924,18 @@ async fn search_messages(
         .expect("room messages lock poisoned")
         .iter()
         .filter(|m| room_member(&state, m.room_id, &principal))
-        .filter(|m| m.body.to_lowercase().contains(&term))
-        .take(limit)
-        .map(|m| crate::SearchResult {
-            id: m.id,
-            source: "room".to_string(),
-            from_uri: m.sender_uri.clone(),
-            body: m.body.clone(),
-            timestamp: m.created_at,
-            room_id: Some(m.room_id),
+        .filter_map(|m| {
+            let body = state.decrypt_field(&m.body);
+            body.to_lowercase().contains(&term).then(|| crate::SearchResult {
+                id: m.id,
+                source: "room".to_string(),
+                from_uri: m.sender_uri.clone(),
+                body,
+                timestamp: m.created_at,
+                room_id: Some(m.room_id),
+            })
         })
+        .take(limit)
         .collect();
 
     results.extend(room_results);
@@ -4517,6 +4943,106 @@ async fn search_messages(
     results.truncate(limit);
 
     Ok(Json(results))
+}
+
+async fn unified_search(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<SearchQuery>,
+) -> Result<Json<Vec<crate::UnifiedSearchResult>>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let limit = query.limit.unwrap_or(25).min(100);
+    Ok(Json(state.unified_search(&principal, &query.q, limit)))
+}
+
+async fn copilot_query(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::CreateCopilotQueryRequest>,
+) -> Result<Json<crate::CopilotAnswer>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let answer = state
+        .copilot_query(&principal, input)
+        .map_err(ApiError::Conflict)?;
+    state.record_audit_event(&principal, "copilot.query", Some(answer.question.clone()));
+    Ok(Json(answer))
+}
+
+async fn list_ai_providers(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::AiProviderStatus>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.ai_provider_statuses()))
+}
+
+async fn get_ai_provider(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(kind): Path<String>,
+) -> Result<Json<crate::AiProviderStatus>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    state
+        .ai_provider_status(&kind)
+        .map(Json)
+        .ok_or(ApiError::NotFound)
+}
+
+async fn update_ai_provider(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(kind): Path<String>,
+    Json(input): Json<crate::UpdateAiProviderRequest>,
+) -> Result<Json<crate::AiProviderStatus>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let status = state
+        .update_ai_provider(&kind, input, &principal)
+        .ok_or(ApiError::NotFound)?;
+    state.record_audit_event(
+        &principal,
+        "ai_provider.updated",
+        Some(format!("kind={} configured={}", status.kind, status.configured)),
+    );
+    Ok(Json(status))
+}
+
+async fn ai_llm_chat(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::LlmChatRequest>,
+) -> Result<Json<crate::AiProviderDispatch>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let dispatch = state
+        .llm_chat_dispatch(&principal, input)
+        .map_err(ApiError::Conflict)?;
+    state.record_audit_event(&principal, "ai.llm.dispatch", Some(dispatch.status.clone()));
+    Ok(Json(dispatch))
+}
+
+async fn ai_stt_transcribe(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::SttTranscriptionRequest>,
+) -> Result<Json<crate::AiProviderDispatch>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let dispatch = state
+        .stt_transcription_dispatch(&principal, input)
+        .map_err(ApiError::Conflict)?;
+    state.record_audit_event(&principal, "ai.stt.dispatch", Some(dispatch.status.clone()));
+    Ok(Json(dispatch))
+}
+
+async fn ai_tts_synthesize(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::TtsSynthesisRequest>,
+) -> Result<Json<crate::AiProviderDispatch>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let dispatch = state
+        .tts_synthesis_dispatch(&principal, input)
+        .map_err(ApiError::Conflict)?;
+    state.record_audit_event(&principal, "ai.tts.dispatch", Some(dispatch.status.clone()));
+    Ok(Json(dispatch))
 }
 
 async fn search_collaboration(
@@ -5583,6 +6109,22 @@ async fn get_ivr(
     state.ivr(id).map(Json).ok_or(ApiError::NotFound)
 }
 
+async fn resolve_ivr_speech(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::ResolveIvrSpeechRequest>,
+) -> Result<Json<crate::IvrSpeechResolution>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let resolution = state.resolve_ivr_speech(id, input).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(
+        &principal,
+        "ivr.speech_resolved",
+        Some(format!("{}:{}", id, resolution.reason)),
+    );
+    Ok(Json(resolution))
+}
+
 async fn delete_ivr(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -5704,6 +6246,59 @@ async fn delete_recording(
     Ok(Json(json!({ "ok": true })))
 }
 
+async fn list_transcription_jobs(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::TranscriptionJob>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    state.recording(id).ok_or(ApiError::NotFound)?;
+    Ok(Json(state.transcription_jobs_for_recording(id)))
+}
+
+async fn queue_transcription_job(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::CreateTranscriptionJobRequest>,
+) -> Result<Json<crate::TranscriptionJob>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let job = state
+        .queue_transcription_job(id, &principal, input.language)
+        .ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "transcription.queued", Some(job.id.to_string()));
+    Ok(Json(job))
+}
+
+async fn start_transcription_job(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::TranscriptionJob>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let job = state.start_transcription_job(id).ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "transcription.started", Some(id.to_string()));
+    Ok(Json(job))
+}
+
+async fn complete_transcription_job(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::CompleteTranscriptionJobRequest>,
+) -> Result<Json<crate::TranscriptionJob>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let job = state
+        .complete_transcription_job(id, input.segments)
+        .ok_or(ApiError::NotFound)?;
+    state.record_audit_event(
+        &principal,
+        "transcription.completed",
+        Some(format!("{}:{}", id, job.transcript_segment_count)),
+    );
+    Ok(Json(job))
+}
+
 // ─── File Versioning ───
 
 async fn list_file_versions(
@@ -5711,7 +6306,8 @@ async fn list_file_versions(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<crate::FileVersion>>, ApiError> {
-    authenticated_principal(&headers, &state)?;
+    let requester = authenticated_principal(&headers, &state)?;
+    require_file_reader(&state, id, &requester)?;
     let versions = state.file_versions(id);
     Ok(Json(versions))
 }
@@ -5722,10 +6318,7 @@ async fn download_file_version(
     Path((id, version)): Path<(Uuid, i32)>,
 ) -> Result<Response, ApiError> {
     let requester = authenticated_principal(&headers, &state)?;
-    let record = state.file_record(id).ok_or(ApiError::NotFound)?;
-    if !state.is_admin_principal(&requester) && requester != record.owner {
-        return Err(ApiError::Forbidden);
-    }
+    let record = require_file_reader(&state, id, &requester)?;
     let versions = state.file_versions(id);
     let ver = versions
         .iter()
@@ -5745,8 +6338,7 @@ async fn download_file_version(
     );
     headers.insert(
         header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(disposition.trim())
-            .unwrap_or(HeaderValue::from_static("attachment")),
+        HeaderValue::from_str(disposition.trim()).unwrap_or(HeaderValue::from_static("attachment")),
     );
     Ok((headers, bytes).into_response())
 }
@@ -5787,9 +6379,7 @@ async fn unlock_file_handler(
     } else {
         state
             .unlock_file(id, &requester)
-            .ok_or(ApiError::Conflict(
-                "file not locked by you".to_string(),
-            ))?
+            .ok_or(ApiError::Conflict("file not locked by you".to_string()))?
     };
     state.persist(&record);
     state.record_audit_event(&requester, "file.unlocked", Some(id.to_string()));
@@ -5804,7 +6394,8 @@ async fn list_folders(
     Path(id): Path<Uuid>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Vec<crate::Folder>>, ApiError> {
-    authenticated_principal(&headers, &state)?;
+    let requester = authenticated_principal(&headers, &state)?;
+    require_room_member(&state, id, &requester)?;
     let parent_id = params
         .get("parent_id")
         .and_then(|s| Uuid::parse_str(s).ok());
@@ -5819,6 +6410,7 @@ async fn create_folder(
     Json(input): Json<crate::CreateFolderRequest>,
 ) -> Result<Json<crate::Folder>, ApiError> {
     let requester = authenticated_principal(&headers, &state)?;
+    require_room_member(&state, id, &requester)?;
     let folder = crate::Folder {
         id: Uuid::new_v4(),
         room_id: id,
@@ -5838,6 +6430,8 @@ async fn delete_folder(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let requester = authenticated_principal(&headers, &state)?;
+    let folder = state.folder(id).ok_or(ApiError::NotFound)?;
+    require_room_member(&state, folder.room_id, &requester)?;
     state.delete_folder(id).ok_or(ApiError::NotFound)?;
     state.record_audit_event(&requester, "folder.deleted", Some(id.to_string()));
     Ok(Json(json!({ "ok": true })))
@@ -5885,7 +6479,11 @@ async fn create_approval(
         event_type: "approval_created".to_string(),
         payload: serde_json::to_value(&approval).unwrap_or_default(),
     });
-    state.record_audit_event(&requester, "approval.created", Some(approval.id.to_string()));
+    state.record_audit_event(
+        &requester,
+        "approval.created",
+        Some(approval.id.to_string()),
+    );
     Ok(Json(approval))
 }
 
@@ -5958,7 +6556,11 @@ async fn create_recording_policy(
         created_at: Utc::now(),
     };
     state.put_recording_policy(policy.clone());
-    state.record_audit_event(&admin, "recording_policy.created", Some(policy.id.to_string()));
+    state.record_audit_event(
+        &admin,
+        "recording_policy.created",
+        Some(policy.id.to_string()),
+    );
     Ok(Json(policy))
 }
 
@@ -6014,8 +6616,8 @@ async fn upload_hold_music(
     let admin = authenticated_admin(&headers, &state)?;
     let name =
         header_string(&headers, "x-pale-filename").unwrap_or_else(|| "hold_music".to_string());
-    let queue_id = header_string(&headers, "x-pale-queue-id")
-        .and_then(|s| Uuid::parse_str(&s).ok());
+    let queue_id =
+        header_string(&headers, "x-pale-queue-id").and_then(|s| Uuid::parse_str(&s).ok());
     let is_default = header_string(&headers, "x-pale-default")
         .map(|s| s == "true")
         .unwrap_or(false);
@@ -6088,9 +6690,7 @@ async fn update_call_group(
     Json(input): Json<crate::CreatePersonalCallGroupRequest>,
 ) -> Result<Json<crate::PersonalCallGroup>, ApiError> {
     let requester = authenticated_principal(&headers, &state)?;
-    let existing = state
-        .personal_call_group(id)
-        .ok_or(ApiError::NotFound)?;
+    let existing = state.personal_call_group(id).ok_or(ApiError::NotFound)?;
     if existing.user_id != requester {
         return Err(ApiError::Forbidden);
     }
@@ -6112,9 +6712,7 @@ async fn delete_call_group(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let requester = authenticated_principal(&headers, &state)?;
-    let existing = state
-        .personal_call_group(id)
-        .ok_or(ApiError::NotFound)?;
+    let existing = state.personal_call_group(id).ok_or(ApiError::NotFound)?;
     if existing.user_id != requester && !state.is_admin_principal(&requester) {
         return Err(ApiError::Forbidden);
     }
@@ -6164,9 +6762,15 @@ async fn create_delegation(
     if let Some(pg) = state.pg_store() {
         let d = delegation.clone();
         let pg = pg.clone();
-        tokio::spawn(async move { let _ = pg.upsert_line_delegation(&d).await; });
+        tokio::spawn(async move {
+            let _ = pg.upsert_line_delegation(&d).await;
+        });
     }
-    state.record_audit_event(&requester, "delegation.created", Some(delegation.id.to_string()));
+    state.record_audit_event(
+        &requester,
+        "delegation.created",
+        Some(delegation.id.to_string()),
+    );
     Ok(Json(delegation))
 }
 
@@ -6183,7 +6787,9 @@ async fn delete_delegation(
     state.delete_line_delegation(id).ok_or(ApiError::NotFound)?;
     if let Some(pg) = state.pg_store() {
         let pg = pg.clone();
-        tokio::spawn(async move { let _ = pg.delete_line_delegation(id).await; });
+        tokio::spawn(async move {
+            let _ = pg.delete_line_delegation(id).await;
+        });
     }
     state.record_audit_event(&requester, "delegation.deleted", Some(id.to_string()));
     Ok(Json(json!({ "ok": true })))
@@ -6218,9 +6824,15 @@ async fn create_common_area_phone(
     if let Some(pg) = state.pg_store() {
         let p = phone.clone();
         let pg = pg.clone();
-        tokio::spawn(async move { let _ = pg.upsert_common_area_phone(&p).await; });
+        tokio::spawn(async move {
+            let _ = pg.upsert_common_area_phone(&p).await;
+        });
     }
-    state.record_audit_event(&admin, "common_area_phone.created", Some(phone.id.to_string()));
+    state.record_audit_event(
+        &admin,
+        "common_area_phone.created",
+        Some(phone.id.to_string()),
+    );
     Ok(Json(phone))
 }
 
@@ -6245,7 +6857,9 @@ async fn update_common_area_phone(
     if let Some(pg) = state.pg_store() {
         let p = phone.clone();
         let pg = pg.clone();
-        tokio::spawn(async move { let _ = pg.upsert_common_area_phone(&p).await; });
+        tokio::spawn(async move {
+            let _ = pg.upsert_common_area_phone(&p).await;
+        });
     }
     state.record_audit_event(&admin, "common_area_phone.updated", Some(id.to_string()));
     Ok(Json(phone))
@@ -6257,10 +6871,14 @@ async fn delete_common_area_phone(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let admin = authenticated_admin(&headers, &state)?;
-    state.delete_common_area_phone(id).ok_or(ApiError::NotFound)?;
+    state
+        .delete_common_area_phone(id)
+        .ok_or(ApiError::NotFound)?;
     if let Some(pg) = state.pg_store() {
         let pg = pg.clone();
-        tokio::spawn(async move { let _ = pg.delete_common_area_phone(id).await; });
+        tokio::spawn(async move {
+            let _ = pg.delete_common_area_phone(id).await;
+        });
     }
     state.record_audit_event(&admin, "common_area_phone.deleted", Some(id.to_string()));
     Ok(Json(json!({ "ok": true })))
@@ -6295,7 +6913,9 @@ async fn create_meeting_room(
     if let Some(pg) = state.pg_store() {
         let r = room.clone();
         let pg = pg.clone();
-        tokio::spawn(async move { let _ = pg.upsert_meeting_room(&r).await; });
+        tokio::spawn(async move {
+            let _ = pg.upsert_meeting_room(&r).await;
+        });
     }
     state.record_audit_event(&admin, "meeting_room.created", Some(room.id.to_string()));
     Ok(Json(room))
@@ -6322,7 +6942,9 @@ async fn update_meeting_room(
     if let Some(pg) = state.pg_store() {
         let r = room.clone();
         let pg = pg.clone();
-        tokio::spawn(async move { let _ = pg.upsert_meeting_room(&r).await; });
+        tokio::spawn(async move {
+            let _ = pg.upsert_meeting_room(&r).await;
+        });
     }
     state.record_audit_event(&admin, "meeting_room.updated", Some(id.to_string()));
     Ok(Json(room))
@@ -6337,7 +6959,9 @@ async fn delete_meeting_room(
     state.delete_meeting_room(id).ok_or(ApiError::NotFound)?;
     if let Some(pg) = state.pg_store() {
         let pg = pg.clone();
-        tokio::spawn(async move { let _ = pg.delete_meeting_room(id).await; });
+        tokio::spawn(async move {
+            let _ = pg.delete_meeting_room(id).await;
+        });
     }
     state.record_audit_event(&admin, "meeting_room.deleted", Some(id.to_string()));
     Ok(Json(json!({ "ok": true })))
@@ -6356,7 +6980,9 @@ async fn book_meeting_room(
     }
     // Check for overlapping bookings
     let existing = state.room_bookings_for_room(id);
-    let overlap = existing.iter().any(|b| b.start_time < input.end_time && b.end_time > input.start_time);
+    let overlap = existing
+        .iter()
+        .any(|b| b.start_time < input.end_time && b.end_time > input.start_time);
     if overlap {
         return Err(ApiError::Conflict("Time slot already booked".to_string()));
     }
@@ -6373,9 +6999,15 @@ async fn book_meeting_room(
     if let Some(pg) = state.pg_store() {
         let b = booking.clone();
         let pg = pg.clone();
-        tokio::spawn(async move { let _ = pg.upsert_room_booking(&b).await; });
+        tokio::spawn(async move {
+            let _ = pg.upsert_room_booking(&b).await;
+        });
     }
-    state.record_audit_event(&requester, "room_booking.created", Some(booking.id.to_string()));
+    state.record_audit_event(
+        &requester,
+        "room_booking.created",
+        Some(booking.id.to_string()),
+    );
     Ok(Json(booking))
 }
 
@@ -6432,7 +7064,9 @@ async fn create_device(
     if let Some(pg) = state.pg_store() {
         let d = device.clone();
         let pg = pg.clone();
-        tokio::spawn(async move { let _ = pg.upsert_provisioned_device(&d).await; });
+        tokio::spawn(async move {
+            let _ = pg.upsert_provisioned_device(&d).await;
+        });
     }
     state.record_audit_event(&admin, "device.created", Some(device.id.to_string()));
     Ok(Json(device))
@@ -6459,7 +7093,9 @@ async fn update_device(
     if let Some(pg) = state.pg_store() {
         let d = device.clone();
         let pg = pg.clone();
-        tokio::spawn(async move { let _ = pg.upsert_provisioned_device(&d).await; });
+        tokio::spawn(async move {
+            let _ = pg.upsert_provisioned_device(&d).await;
+        });
     }
     state.record_audit_event(&admin, "device.updated", Some(id.to_string()));
     Ok(Json(device))
@@ -6471,10 +7107,14 @@ async fn delete_device_handler(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let admin = authenticated_admin(&headers, &state)?;
-    state.delete_provisioned_device(id).ok_or(ApiError::NotFound)?;
+    state
+        .delete_provisioned_device(id)
+        .ok_or(ApiError::NotFound)?;
     if let Some(pg) = state.pg_store() {
         let pg = pg.clone();
-        tokio::spawn(async move { let _ = pg.delete_provisioned_device(id).await; });
+        tokio::spawn(async move {
+            let _ = pg.delete_provisioned_device(id).await;
+        });
     }
     state.record_audit_event(&admin, "device.deleted", Some(id.to_string()));
     Ok(Json(json!({ "ok": true })))
@@ -6484,7 +7124,9 @@ async fn get_device_config(
     State(state): State<SharedState>,
     Path(mac): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let device = state.provisioned_device_by_mac(&mac).ok_or(ApiError::NotFound)?;
+    let device = state
+        .provisioned_device_by_mac(&mac)
+        .ok_or(ApiError::NotFound)?;
     // Update last_seen
     let mut updated = device.clone();
     updated.last_seen = Some(Utc::now());
@@ -6492,7 +7134,9 @@ async fn get_device_config(
     if let Some(pg) = state.pg_store() {
         let d = updated;
         let pg = pg.clone();
-        tokio::spawn(async move { let _ = pg.upsert_provisioned_device(&d).await; });
+        tokio::spawn(async move {
+            let _ = pg.upsert_provisioned_device(&d).await;
+        });
     }
     // If template is empty, return a basic config
     let config = if device.config_template.is_empty() {
@@ -6503,7 +7147,8 @@ async fn get_device_config(
         )
     } else {
         // Substitute variables in the template
-        device.config_template
+        device
+            .config_template
             .replace("{{mac}}", &device.mac_address)
             .replace("{{model}}", &device.model)
             .replace("{{user}}", device.assigned_user.as_deref().unwrap_or(""))
@@ -6524,7 +7169,9 @@ async fn hotdesk_login(
 ) -> Result<Json<crate::HotdeskSession>, ApiError> {
     let requester = authenticated_principal(&headers, &state)?;
     // Verify device exists
-    state.provisioned_device(input.device_id).ok_or(ApiError::NotFound)?;
+    state
+        .provisioned_device(input.device_id)
+        .ok_or(ApiError::NotFound)?;
     // Log out any existing session on this device
     if let Some(existing) = state.active_hotdesk_for_device(input.device_id) {
         let mut updated = existing;
@@ -6533,7 +7180,9 @@ async fn hotdesk_login(
         if let Some(pg) = state.pg_store() {
             let s = updated;
             let pg = pg.clone();
-            tokio::spawn(async move { let _ = pg.upsert_hotdesk_session(&s).await; });
+            tokio::spawn(async move {
+                let _ = pg.upsert_hotdesk_session(&s).await;
+            });
         }
     }
     let session = crate::HotdeskSession {
@@ -6551,13 +7200,17 @@ async fn hotdesk_login(
         if let Some(pg) = state.pg_store() {
             let d = device;
             let pg = pg.clone();
-            tokio::spawn(async move { let _ = pg.upsert_provisioned_device(&d).await; });
+            tokio::spawn(async move {
+                let _ = pg.upsert_provisioned_device(&d).await;
+            });
         }
     }
     if let Some(pg) = state.pg_store() {
         let s = session.clone();
         let pg = pg.clone();
-        tokio::spawn(async move { let _ = pg.upsert_hotdesk_session(&s).await; });
+        tokio::spawn(async move {
+            let _ = pg.upsert_hotdesk_session(&s).await;
+        });
     }
     state.record_audit_event(&requester, "hotdesk.login", Some(session.id.to_string()));
     Ok(Json(session))
@@ -6582,13 +7235,17 @@ async fn hotdesk_logout(
         if let Some(pg) = state.pg_store() {
             let d = device;
             let pg = pg.clone();
-            tokio::spawn(async move { let _ = pg.upsert_provisioned_device(&d).await; });
+            tokio::spawn(async move {
+                let _ = pg.upsert_provisioned_device(&d).await;
+            });
         }
     }
     if let Some(pg) = state.pg_store() {
         let s = session;
         let pg = pg.clone();
-        tokio::spawn(async move { let _ = pg.upsert_hotdesk_session(&s).await; });
+        tokio::spawn(async move {
+            let _ = pg.upsert_hotdesk_session(&s).await;
+        });
     }
     state.record_audit_event(&requester, "hotdesk.logout", Some(device_id.to_string()));
     Ok(Json(json!({ "ok": true })))
@@ -6651,7 +7308,11 @@ async fn create_sso_provider(
 ) -> Result<Json<crate::SsoProvider>, ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
     let provider = state.create_sso_provider(input);
-    state.record_audit_event(&principal, "sso_provider.created", Some(provider.id.to_string()));
+    state.record_audit_event(
+        &principal,
+        "sso_provider.created",
+        Some(provider.id.to_string()),
+    );
     Ok(Json(provider))
 }
 
@@ -6662,7 +7323,9 @@ async fn update_sso_provider(
     Json(input): Json<crate::UpdateSsoProviderRequest>,
 ) -> Result<Json<crate::SsoProvider>, ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
-    let provider = state.update_sso_provider(id, input).ok_or(ApiError::NotFound)?;
+    let provider = state
+        .update_sso_provider(id, input)
+        .ok_or(ApiError::NotFound)?;
     state.record_audit_event(&principal, "sso_provider.updated", Some(id.to_string()));
     Ok(Json(provider))
 }
@@ -6684,9 +7347,7 @@ async fn sso_login(
     State(state): State<SharedState>,
     Path(provider_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let (url, sso_state, nonce) = state
-        .sso_login_url(provider_id)
-        .ok_or(ApiError::NotFound)?;
+    let (url, sso_state, nonce) = state.sso_login_url(provider_id).ok_or(ApiError::NotFound)?;
     Ok(Json(json!({
         "redirect_url": url,
         "state": sso_state,
@@ -6717,6 +7378,7 @@ async fn sso_callback(
         "status": "sso_callback_received",
         "code": input.code,
         "state": input.state,
+        "provider_id": input.provider_id,
     })))
 }
 
@@ -6737,7 +7399,11 @@ async fn rotate_encryption_key(
 ) -> Result<Json<crate::EncryptionConfig>, ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
     let config = state.rotate_encryption_key(input);
-    state.record_audit_event(&principal, "encryption.key_rotated", Some(config.key_id.clone()));
+    state.record_audit_event(
+        &principal,
+        "encryption.key_rotated",
+        Some(config.key_id.clone()),
+    );
     Ok(Json(config))
 }
 
@@ -6775,11 +7441,7 @@ async fn revoke_admin_elevation(
 ) -> Result<Json<crate::AdminElevation>, ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
     let elevation = state.revoke_admin_elevation(id).ok_or(ApiError::NotFound)?;
-    state.record_audit_event(
-        &principal,
-        "admin.elevation_revoked",
-        Some(id.to_string()),
-    );
+    state.record_audit_event(&principal, "admin.elevation_revoked", Some(id.to_string()));
     Ok(Json(elevation))
 }
 
@@ -6828,7 +7490,9 @@ async fn delete_custom_emoji_handler(
     Path((_team_id, emoji_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<crate::CustomEmoji>, ApiError> {
     authenticated_principal(&headers, &state)?;
-    let emoji = state.delete_custom_emoji(emoji_id).ok_or(ApiError::NotFound)?;
+    let emoji = state
+        .delete_custom_emoji(emoji_id)
+        .ok_or(ApiError::NotFound)?;
     if let Some(pg) = state.pg_store() {
         let pg = pg.clone();
         tokio::spawn(async move {
@@ -7173,7 +7837,10 @@ async fn oauth_token(
     State(state): State<SharedState>,
     Json(input): Json<OAuthTokenRequest>,
 ) -> Result<Json<crate::OAuthTokenResponse>, ApiError> {
-    state.create_oauth_token(input).map(Json).ok_or(ApiError::Unauthorized)
+    state
+        .create_oauth_token(input)
+        .map(Json)
+        .ok_or(ApiError::Unauthorized)
 }
 
 async fn list_api_clients(
@@ -7191,7 +7858,11 @@ async fn create_api_client(
 ) -> Result<Json<crate::CreateApiClientResponse>, ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
     let resp = state.create_api_client(input, &principal);
-    state.record_audit_event(&principal, "api_client.created", Some(resp.client.id.to_string()));
+    state.record_audit_event(
+        &principal,
+        "api_client.created",
+        Some(resp.client.id.to_string()),
+    );
     Ok(Json(resp))
 }
 
@@ -7371,7 +8042,11 @@ async fn create_connector(
 ) -> Result<Json<crate::Connector>, ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
     let connector = state.create_connector(input, &principal);
-    state.record_audit_event(&principal, "connector.created", Some(connector.id.to_string()));
+    state.record_audit_event(
+        &principal,
+        "connector.created",
+        Some(connector.id.to_string()),
+    );
     Ok(Json(connector))
 }
 
@@ -7382,7 +8057,9 @@ async fn update_connector(
     Json(input): Json<UpdateConnectorRequest>,
 ) -> Result<Json<crate::Connector>, ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
-    let connector = state.update_connector(id, input).ok_or(ApiError::NotFound)?;
+    let connector = state
+        .update_connector(id, input)
+        .ok_or(ApiError::NotFound)?;
     state.record_audit_event(&principal, "connector.updated", Some(id.to_string()));
     Ok(Json(connector))
 }
@@ -7475,6 +8152,34 @@ fn require_room_member(state: &AppState, room_id: Uuid, principal: &str) -> Resu
     }
 }
 
+fn require_conference_visible(
+    state: &AppState,
+    conference_id: Uuid,
+    principal: &str,
+) -> Result<(), ApiError> {
+    if state.get_conference(conference_id).is_none() {
+        return Err(ApiError::NotFound);
+    }
+    if state.conference_visible_to(conference_id, principal) {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
+fn require_file_reader(
+    state: &AppState,
+    file_id: Uuid,
+    principal: &str,
+) -> Result<FileRecord, ApiError> {
+    let record = state.file_record(file_id).ok_or(ApiError::NotFound)?;
+    if state.is_admin_principal(principal) || principal == record.owner {
+        Ok(record)
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
 fn event_visible_to(state: &AppState, event: &crate::SseEvent, principal: &str) -> bool {
     match event.event_type.as_str() {
         "room_created" => event
@@ -7486,7 +8191,10 @@ fn event_visible_to(state: &AppState, event: &crate::SseEvent, principal: &str) 
                     member.get("user_sip_uri").and_then(|uri| uri.as_str()) == Some(principal)
                 })
             }),
-        "room_message" | "typing" | "room_call_started" | "room_call_ended"
+        "room_message"
+        | "typing"
+        | "room_call_started"
+        | "room_call_ended"
         | "scheduled_message_delivered" => event
             .payload
             .get("room_id")
@@ -7749,7 +8457,11 @@ async fn create_channel_tab(
 ) -> Result<(StatusCode, Json<crate::ChannelTab>), ApiError> {
     let principal = authenticated_principal(&headers, &state)?;
     let tab = state.create_channel_tab(id, req, &principal);
-    state.record_audit_event(&principal, "channel_tab.created", Some(format!("room={} tab={}", id, tab.id)));
+    state.record_audit_event(
+        &principal,
+        "channel_tab.created",
+        Some(format!("room={} tab={}", id, tab.id)),
+    );
     Ok((StatusCode::CREATED, Json(tab)))
 }
 
@@ -7762,7 +8474,11 @@ async fn update_channel_tab(
     let principal = authenticated_principal(&headers, &state)?;
     match state.update_channel_tab(tab_id, req) {
         Some(tab) => {
-            state.record_audit_event(&principal, "channel_tab.updated", Some(format!("tab={}", tab_id)));
+            state.record_audit_event(
+                &principal,
+                "channel_tab.updated",
+                Some(format!("tab={}", tab_id)),
+            );
             Ok(Json(tab))
         }
         None => Err(ApiError::NotFound),
@@ -7776,7 +8492,11 @@ async fn delete_channel_tab(
 ) -> Result<StatusCode, ApiError> {
     let principal = authenticated_principal(&headers, &state)?;
     if state.delete_channel_tab(tab_id) {
-        state.record_audit_event(&principal, "channel_tab.deleted", Some(format!("tab={}", tab_id)));
+        state.record_audit_event(
+            &principal,
+            "channel_tab.deleted",
+            Some(format!("tab={}", tab_id)),
+        );
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)
@@ -7798,7 +8518,8 @@ async fn list_enabled_message_extensions(
     headers: HeaderMap,
 ) -> Result<Json<Vec<crate::MessageExtension>>, ApiError> {
     authenticated_principal(&headers, &state)?;
-    let exts: Vec<crate::MessageExtension> = state.list_message_extensions()
+    let exts: Vec<crate::MessageExtension> = state
+        .list_message_extensions()
         .into_iter()
         .filter(|e| e.enabled)
         .collect();
@@ -7812,7 +8533,11 @@ async fn create_message_extension(
 ) -> Result<(StatusCode, Json<crate::MessageExtension>), ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
     let ext = state.create_message_extension(req);
-    state.record_audit_event(&principal, "message_extension.created", Some(format!("id={} cmd={}", ext.id, ext.command)));
+    state.record_audit_event(
+        &principal,
+        "message_extension.created",
+        Some(format!("id={} cmd={}", ext.id, ext.command)),
+    );
     Ok((StatusCode::CREATED, Json(ext)))
 }
 
@@ -7825,7 +8550,11 @@ async fn update_message_extension(
     let principal = authenticated_admin(&headers, &state)?;
     match state.update_message_extension(id, req) {
         Some(ext) => {
-            state.record_audit_event(&principal, "message_extension.updated", Some(format!("id={}", id)));
+            state.record_audit_event(
+                &principal,
+                "message_extension.updated",
+                Some(format!("id={}", id)),
+            );
             Ok(Json(ext))
         }
         None => Err(ApiError::NotFound),
@@ -7839,7 +8568,11 @@ async fn delete_message_extension(
 ) -> Result<StatusCode, ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
     if state.delete_message_extension(id) {
-        state.record_audit_event(&principal, "message_extension.deleted", Some(format!("id={}", id)));
+        state.record_audit_event(
+            &principal,
+            "message_extension.deleted",
+            Some(format!("id={}", id)),
+        );
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)
@@ -7853,7 +8586,8 @@ async fn invoke_message_extension(
     Json(req): Json<crate::InvokeMessageExtensionRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     authenticated_principal(&headers, &state)?;
-    let ext = state.get_message_extension_by_command(&command)
+    let ext = state
+        .get_message_extension_by_command(&command)
         .ok_or(ApiError::NotFound)?;
     // Proxy to handler_url
     let client = reqwest::Client::new();
@@ -7864,7 +8598,9 @@ async fn invoke_message_extension(
         .send()
         .await
         .map_err(|e| ApiError::Internal(format!("Extension handler error: {}", e)))?;
-    let body: serde_json::Value = resp.json().await
+    let body: serde_json::Value = resp
+        .json()
+        .await
         .unwrap_or(serde_json::json!({ "result": "ok" }));
     Ok(Json(body))
 }
@@ -7894,7 +8630,11 @@ async fn create_app(
 ) -> Result<(StatusCode, Json<crate::AppCatalogEntry>), ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
     let app = state.create_app_catalog_entry(req);
-    state.record_audit_event(&principal, "app.created", Some(format!("id={} name={}", app.id, app.name)));
+    state.record_audit_event(
+        &principal,
+        "app.created",
+        Some(format!("id={} name={}", app.id, app.name)),
+    );
     Ok((StatusCode::CREATED, Json(app)))
 }
 
@@ -7968,24 +8708,21 @@ async fn invite_guest(
 ) -> Result<(StatusCode, Json<crate::GuestUser>), ApiError> {
     let principal = authenticated_principal(&headers, &state)?;
     let guest = state.invite_guest(team_id, req, &principal);
-    state.record_audit_event(&principal, "guest.invited", Some(format!("team={} guest={}", team_id, guest.email)));
+    state.record_audit_event(
+        &principal,
+        "guest.invited",
+        Some(format!("team={} guest={}", team_id, guest.email)),
+    );
     Ok((StatusCode::CREATED, Json(guest)))
 }
 
 async fn list_guests(
     State(state): State<SharedState>,
-    Path(id): Path<Uuid>,
-) -> Json<serde_json::Value> {
-    Json(json!(state.list_guest_users(id)))
-}
-
-async fn list_guest_users(
-    State(state): State<SharedState>,
     headers: HeaderMap,
-    Path(team_id): Path<Uuid>,
+    Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<crate::GuestUser>>, ApiError> {
     authenticated_principal(&headers, &state)?;
-    Ok(Json(state.list_guest_users(team_id)))
+    Ok(Json(state.list_guest_users(id)))
 }
 
 // ─── CNAM Lookup Handlers ───
@@ -7996,14 +8733,16 @@ async fn cnam_lookup(
 ) -> impl IntoResponse {
     let number = params.get("number").cloned().unwrap_or_default();
     if number.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": "number required"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "number required"})),
+        )
+            .into_response();
     }
     Json(json!(state.cnam_lookup(&number))).into_response()
 }
 
-async fn list_cnam_providers(
-    State(state): State<SharedState>,
-) -> Json<serde_json::Value> {
+async fn list_cnam_providers(State(state): State<SharedState>) -> Json<serde_json::Value> {
     Json(json!(state.list_cnam_providers()))
 }
 
@@ -8033,68 +8772,236 @@ async fn set_caption_language(
 
 async fn list_sip_gateways(
     State(state): State<SharedState>,
-) -> Json<serde_json::Value> {
-    Json(json!(state.list_sip_gateways()))
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::SipGateway>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_sip_gateways()))
+}
+
+async fn pstn_operator_connect_status(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::PstnOperatorConnectStatus>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    state.record_audit_event(&principal, "pstn.status_viewed", None);
+    Ok(Json(state.pstn_operator_connect_status()))
 }
 
 async fn create_sip_gateway(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Json(input): Json<crate::CreateSipGatewayRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> Result<(StatusCode, Json<crate::SipGateway>), ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
     let gw = state.create_sip_gateway(input);
-    (StatusCode::CREATED, Json(json!(gw)))
+    state.record_audit_event(&principal, "sip_gateway.created", Some(gw.id.to_string()));
+    Ok((StatusCode::CREATED, Json(gw)))
 }
 
 async fn update_sip_gateway(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(input): Json<crate::UpdateSipGatewayRequest>,
-) -> impl IntoResponse {
-    match state.update_sip_gateway(id, input) {
-        Some(gw) => Json(json!(gw)).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
+) -> Result<Json<crate::SipGateway>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let gw = state
+        .update_sip_gateway(id, input)
+        .ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "sip_gateway.updated", Some(id.to_string()));
+    Ok(Json(gw))
 }
 
 async fn delete_sip_gateway(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> StatusCode {
-    if state.delete_sip_gateway(id) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+) -> Result<StatusCode, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if state.delete_sip_gateway(id) {
+        state.record_audit_event(&principal, "sip_gateway.deleted", Some(id.to_string()));
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
 }
 
 // ─── Location Routing Handlers ───
 
 async fn list_location_routing_rules(
     State(state): State<SharedState>,
-) -> Json<serde_json::Value> {
-    Json(json!(state.list_location_routing_rules()))
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::LocationRoutingRule>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_location_routing_rules()))
 }
 
 async fn create_location_routing_rule(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Json(input): Json<crate::CreateLocationRoutingRuleRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> Result<(StatusCode, Json<crate::LocationRoutingRule>), ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
     let rule = state.create_location_routing_rule(input);
-    (StatusCode::CREATED, Json(json!(rule)))
+    state.record_audit_event(
+        &principal,
+        "location_routing.created",
+        Some(rule.id.to_string()),
+    );
+    Ok((StatusCode::CREATED, Json(rule)))
 }
 
 async fn update_location_routing_rule(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(input): Json<crate::UpdateLocationRoutingRuleRequest>,
-) -> impl IntoResponse {
-    match state.update_location_routing_rule(id, input) {
-        Some(rule) => Json(json!(rule)).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
+) -> Result<Json<crate::LocationRoutingRule>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let rule = state
+        .update_location_routing_rule(id, input)
+        .ok_or(ApiError::NotFound)?;
+    state.record_audit_event(&principal, "location_routing.updated", Some(id.to_string()));
+    Ok(Json(rule))
 }
 
 async fn delete_location_routing_rule(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> StatusCode {
-    if state.delete_location_routing_rule(id) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+) -> Result<StatusCode, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if state.delete_location_routing_rule(id) {
+        state.record_audit_event(&principal, "location_routing.deleted", Some(id.to_string()));
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
+// ─── Emergency Calling / E911 Handlers ───
+
+async fn list_emergency_locations(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::EmergencyLocation>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_emergency_locations()))
+}
+
+async fn create_emergency_location(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::CreateEmergencyLocationRequest>,
+) -> Result<(StatusCode, Json<crate::EmergencyLocation>), ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let location = state.create_emergency_location(input);
+    state.record_audit_event(
+        &principal,
+        "emergency_location.created",
+        Some(location.id.to_string()),
+    );
+    Ok((StatusCode::CREATED, Json(location)))
+}
+
+async fn update_emergency_location(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<UpdateEmergencyLocationRequest>,
+) -> Result<Json<crate::EmergencyLocation>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let location = state
+        .update_emergency_location(id, input)
+        .ok_or(ApiError::NotFound)?;
+    state.record_audit_event(
+        &principal,
+        "emergency_location.updated",
+        Some(id.to_string()),
+    );
+    Ok(Json(location))
+}
+
+async fn delete_emergency_location(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if state.delete_emergency_location(id) {
+        state.record_audit_event(
+            &principal,
+            "emergency_location.deleted",
+            Some(id.to_string()),
+        );
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::Conflict(
+            "location not found or still assigned".to_string(),
+        ))
+    }
+}
+
+async fn list_emergency_assignments(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<EmergencyCallingAssignment>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_emergency_assignments()))
+}
+
+async fn assign_emergency_location(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::AssignEmergencyLocationRequest>,
+) -> Result<Json<EmergencyCallingAssignment>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let assignment = state
+        .assign_emergency_location(input, &principal)
+        .ok_or(ApiError::BadRequest(
+            "invalid user URI or emergency location".to_string(),
+        ))?;
+    state.record_audit_event(
+        &principal,
+        "emergency_assignment.updated",
+        Some(assignment.user_uri.clone()),
+    );
+    Ok(Json(assignment))
+}
+
+async fn remove_emergency_assignment(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(user_uri): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if state.remove_emergency_assignment(&user_uri) {
+        state.record_audit_event(&principal, "emergency_assignment.deleted", Some(user_uri));
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct EmergencyPlanQuery {
+    number: String,
+    caller: Option<String>,
+}
+
+async fn emergency_call_plan(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<EmergencyPlanQuery>,
+) -> Result<Json<crate::EmergencyCallPlan>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let caller = if let Some(caller) = query.caller {
+        authenticated_admin(&headers, &state)?;
+        caller
+    } else {
+        principal
+    };
+    Ok(Json(state.emergency_call_plan(&caller, &query.number)))
 }
 
 async fn delete_guest(
@@ -8104,7 +9011,11 @@ async fn delete_guest(
 ) -> Result<StatusCode, ApiError> {
     let principal = authenticated_principal(&headers, &state)?;
     if state.delete_guest(guest_id) {
-        state.record_audit_event(&principal, "guest.deleted", Some(format!("team={} guest={}", team_id, guest_id)));
+        state.record_audit_event(
+            &principal,
+            "guest.deleted",
+            Some(format!("team={} guest={}", team_id, guest_id)),
+        );
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)
@@ -8128,7 +9039,11 @@ async fn create_bandwidth_policy(
 ) -> Result<(StatusCode, Json<crate::BandwidthPolicy>), ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
     let policy = state.create_bandwidth_policy(req);
-    state.record_audit_event(&principal, "bandwidth_policy.created", Some(format!("id={}", policy.id)));
+    state.record_audit_event(
+        &principal,
+        "bandwidth_policy.created",
+        Some(format!("id={}", policy.id)),
+    );
     Ok((StatusCode::CREATED, Json(policy)))
 }
 
@@ -8141,7 +9056,11 @@ async fn update_bandwidth_policy(
     let principal = authenticated_admin(&headers, &state)?;
     match state.update_bandwidth_policy(id, req) {
         Some(policy) => {
-            state.record_audit_event(&principal, "bandwidth_policy.updated", Some(format!("id={}", id)));
+            state.record_audit_event(
+                &principal,
+                "bandwidth_policy.updated",
+                Some(format!("id={}", id)),
+            );
             Ok(Json(policy))
         }
         None => Err(ApiError::NotFound),
@@ -8155,7 +9074,11 @@ async fn delete_bandwidth_policy(
 ) -> Result<StatusCode, ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
     if state.delete_bandwidth_policy(id) {
-        state.record_audit_event(&principal, "bandwidth_policy.deleted", Some(format!("id={}", id)));
+        state.record_audit_event(
+            &principal,
+            "bandwidth_policy.deleted",
+            Some(format!("id={}", id)),
+        );
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)
@@ -8179,7 +9102,11 @@ async fn create_signage_display(
 ) -> Result<(StatusCode, Json<crate::SignageDisplay>), ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
     let display = state.create_signage_display(req);
-    state.record_audit_event(&principal, "signage.created", Some(format!("id={}", display.id)));
+    state.record_audit_event(
+        &principal,
+        "signage.created",
+        Some(format!("id={}", display.id)),
+    );
     Ok((StatusCode::CREATED, Json(display)))
 }
 
@@ -8503,6 +9430,41 @@ mod auth_tests {
     }
 
     #[test]
+    fn file_reader_access_is_limited_to_owner_or_admin() {
+        let state = crate::AppState::new(
+            PathBuf::from("/tmp/pale-test-http-file-reader"),
+            "012345678901234567890128".to_string(),
+            crate::hash_password("admin-password-equally-long"),
+        );
+        let file = crate::FileRecord {
+            id: Uuid::new_v4(),
+            owner: "sip:alice@example.com".to_string(),
+            filename: "roadmap.docx".to_string(),
+            content_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                .to_string(),
+            size: 42,
+            sha256: "abc123".to_string(),
+            created_at: Utc::now(),
+            dlp_status: "clean".to_string(),
+            dlp_violation_count: 0,
+            legal_hold: false,
+            deleted_at: None,
+            deleted_by: None,
+            folder_id: None,
+            locked_by: None,
+            locked_at: None,
+        };
+        state.put_file_record(file.clone());
+
+        assert!(require_file_reader(&state, file.id, "sip:alice@example.com").is_ok());
+        assert!(require_file_reader(&state, file.id, "admin").is_ok());
+        assert!(matches!(
+            require_file_reader(&state, file.id, "sip:mallory@example.com"),
+            Err(ApiError::Forbidden)
+        ));
+    }
+
+    #[test]
     fn ldap_enabled_but_unverifiable_still_requires_local_password() {
         let state = crate::AppState::new(
             PathBuf::from("/tmp/pale-test-http-ldap"),
@@ -8577,7 +9539,11 @@ async fn update_federation_peer(
     let principal = authenticated_admin(&headers, &state)?;
     match state.update_federation_peer(id, req) {
         Some(peer) => {
-            state.record_audit_event(&principal, "federation.peer_updated", Some(format!("id={}", id)));
+            state.record_audit_event(
+                &principal,
+                "federation.peer_updated",
+                Some(format!("id={}", id)),
+            );
             Ok(Json(peer))
         }
         None => Err(ApiError::NotFound),
@@ -8590,7 +9556,11 @@ async fn delete_federation_peer(
 ) -> Result<StatusCode, ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
     if state.delete_federation_peer(id) {
-        state.record_audit_event(&principal, "federation.peer_deleted", Some(format!("id={}", id)));
+        state.record_audit_event(
+            &principal,
+            "federation.peer_deleted",
+            Some(format!("id={}", id)),
+        );
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)
@@ -8602,7 +9572,8 @@ async fn federation_send(
     Json(req): Json<FederationSendRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let principal = authenticated_principal(&headers, &state)?;
-    let peer = state.get_federation_peer_by_domain(&req.to_domain)
+    let peer = state
+        .get_federation_peer_by_domain(&req.to_domain)
         .ok_or(ApiError::NotFound)?;
     if !peer.enabled {
         return Err(ApiError::Forbidden);
@@ -8621,13 +9592,17 @@ async fn federation_send(
         event_type: "federated_message".to_string(),
         payload: serde_json::to_value(&msg).unwrap_or_default(),
     });
-    Ok((StatusCode::CREATED, Json(serde_json::to_value(&msg).unwrap_or_default())))
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::to_value(&msg).unwrap_or_default()),
+    ))
 }
 async fn federation_receive(
     State(state): State<SharedState>,
     Json(req): Json<FederationReceiveRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let peer = state.get_federation_peer_by_domain(&req.from_domain)
+    let peer = state
+        .get_federation_peer_by_domain(&req.from_domain)
         .ok_or(ApiError::Forbidden)?;
     if !peer.enabled || peer.shared_key_enc != req.shared_key {
         return Err(ApiError::Forbidden);
@@ -8735,7 +9710,11 @@ async fn update_compliance_review(
     let principal = authenticated_admin(&headers, &state)?;
     match state.update_compliance_review(id, &principal, req) {
         Some(review) => {
-            state.record_audit_event(&principal, "compliance.reviewed", Some(format!("id={} status={}", id, review.status)));
+            state.record_audit_event(
+                &principal,
+                "compliance.reviewed",
+                Some(format!("id={} status={}", id, review.status)),
+            );
             Ok(Json(review))
         }
         None => Err(ApiError::NotFound),
@@ -8757,7 +9736,11 @@ async fn create_data_residency(
 ) -> Result<(StatusCode, Json<crate::DataResidencyConfig>), ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
     let config = state.create_data_residency_config(req);
-    state.record_audit_event(&principal, "data_residency.created", Some(format!("id={} region={}", config.id, config.region)));
+    state.record_audit_event(
+        &principal,
+        "data_residency.created",
+        Some(format!("id={} region={}", config.id, config.region)),
+    );
     Ok((StatusCode::CREATED, Json(config)))
 }
 async fn update_data_residency(
@@ -8769,7 +9752,11 @@ async fn update_data_residency(
     let principal = authenticated_admin(&headers, &state)?;
     match state.update_data_residency_config(id, req) {
         Some(config) => {
-            state.record_audit_event(&principal, "data_residency.updated", Some(format!("id={}", id)));
+            state.record_audit_event(
+                &principal,
+                "data_residency.updated",
+                Some(format!("id={}", id)),
+            );
             Ok(Json(config))
         }
         None => Err(ApiError::NotFound),
@@ -8782,7 +9769,11 @@ async fn delete_data_residency(
 ) -> Result<StatusCode, ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
     if state.delete_data_residency_config(id) {
-        state.record_audit_event(&principal, "data_residency.deleted", Some(format!("id={}", id)));
+        state.record_audit_event(
+            &principal,
+            "data_residency.deleted",
+            Some(format!("id={}", id)),
+        );
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)
@@ -8794,15 +9785,85 @@ async fn data_residency_status(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     authenticated_admin(&headers, &state)?;
     let configs = state.list_data_residency_configs();
-    let regions: Vec<_> = configs.iter().map(|c| serde_json::json!({
-        "id": c.id,
-        "region": c.region,
-        "enabled": c.enabled,
-        "file_storage_path": c.file_storage_path,
-    })).collect();
+    let regions: Vec<_> = configs
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "id": c.id,
+                "region": c.region,
+                "enabled": c.enabled,
+                "file_storage_path": c.file_storage_path,
+            })
+        })
+        .collect();
     Ok(Json(serde_json::json!({
         "regions": regions,
         "total": configs.len(),
         "active": configs.iter().filter(|c| c.enabled).count(),
     })))
+}
+
+// ─── Enterprise Integration Capability Registry ───
+
+async fn list_enterprise_integrations(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::EnterpriseIntegration>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_enterprise_integrations()))
+}
+
+async fn enterprise_capability_report(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::EnterpriseCapabilityReport>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.enterprise_capability_report()))
+}
+
+async fn enterprise_parity_readiness_report(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::EnterpriseParityReadinessReport>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.enterprise_parity_readiness_report()))
+}
+
+async fn enterprise_integration_health_report(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::EnterpriseIntegrationHealthReport>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.enterprise_integration_health_report()))
+}
+
+async fn enterprise_deployment_plan(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::EnterpriseDeploymentPlan>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.enterprise_deployment_plan()))
+}
+
+async fn update_enterprise_integration(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateEnterpriseIntegrationRequest>,
+) -> Result<Json<crate::EnterpriseIntegration>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let integration = state
+        .update_enterprise_integration(&id, req, &principal)
+        .ok_or(ApiError::NotFound)?;
+    state.record_audit_event(
+        &principal,
+        "enterprise_integration.updated",
+        Some(format!(
+            "id={} enabled={} endpoint_configured={}",
+            integration.id,
+            integration.enabled,
+            integration.endpoint_url.is_some()
+        )),
+    );
+    Ok(Json(integration))
 }

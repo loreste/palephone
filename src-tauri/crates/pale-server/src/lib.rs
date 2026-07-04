@@ -1,4 +1,4 @@
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
@@ -219,6 +219,7 @@ pub struct AppState {
     conference_attendance: RwLock<Vec<ConferenceAttendanceRecord>>,
     calls: ShardedMap<Uuid, CallSession>,
     files: ShardedMap<Uuid, FileRecord>,
+    malware_quarantine: ShardedMap<Uuid, MalwareQuarantineItem>,
     routing_rules: ShardedMap<Uuid, RoutingRule>,
     audit_events: RwLock<Vec<AdminAuditEvent>>,
     presence: ShardedMap<String, UserPresence>,
@@ -226,6 +227,7 @@ pub struct AppState {
     teams: ShardedMap<Uuid, Team>,
     scheduled_meetings: ShardedMap<Uuid, ScheduledMeeting>,
     retention_policies: ShardedMap<Uuid, RetentionPolicy>,
+    ediscovery_cases: ShardedMap<Uuid, EDiscoveryCase>,
     collaboration_policy: RwLock<CollaborationPolicy>,
     channel_webhooks: ShardedMap<Uuid, ChannelWebhook>,
     mention_rate_limits: ShardedMap<String, RateLimitBucket>,
@@ -234,6 +236,7 @@ pub struct AppState {
     message_reads: RwLock<Vec<MessageRead>>,
     voicemails: ShardedMap<Uuid, Voicemail>,
     recordings: ShardedMap<Uuid, CallRecording>,
+    transcription_jobs: ShardedMap<Uuid, TranscriptionJob>,
     ring_groups: ShardedMap<Uuid, RingGroup>,
     ivrs: ShardedMap<Uuid, Ivr>,
     user_call_settings: ShardedMap<String, UserCallSettings>,
@@ -266,6 +269,13 @@ pub struct AppState {
     qa_questions: ShardedMap<Uuid, QaQuestion>,
     // Breakout sessions keyed by session_id
     breakout_sessions: ShardedMap<Uuid, BreakoutSession>,
+    // PowerPoint Live style presentation sessions keyed by session_id
+    presentation_sessions: ShardedMap<Uuid, PresentationSession>,
+    // Per-user media effects and conference layout state
+    meeting_media_settings: ShardedMap<String, MeetingMediaSettings>,
+    conference_layouts: ShardedMap<Uuid, ConferenceLayoutState>,
+    stream_sessions: ShardedMap<Uuid, MeetingStreamSession>,
+    town_hall_configs: ShardedMap<Uuid, TownHallConfig>,
     // Transcript segments
     transcripts: RwLock<Vec<TranscriptSegment>>,
     // Call quality reports
@@ -334,6 +344,8 @@ pub struct AppState {
     sip_gateways: ShardedMap<Uuid, SipGateway>,
     // Location routing rules
     location_routing_rules: ShardedMap<Uuid, LocationRoutingRule>,
+    emergency_locations: ShardedMap<Uuid, EmergencyLocation>,
+    emergency_assignments: ShardedMap<String, EmergencyCallingAssignment>,
     // Annotations (in-memory per conference)
     conference_annotations: ShardedMap<Uuid, Vec<Annotation>>,
     // Whiteboards
@@ -361,6 +373,8 @@ pub struct AppState {
     bandwidth_policies: ShardedMap<Uuid, BandwidthPolicy>,
     // Signage displays
     signage_displays: ShardedMap<Uuid, SignageDisplay>,
+    // External enterprise capability providers
+    enterprise_integrations: ShardedMap<String, EnterpriseIntegration>,
     user_create_lock: std::sync::Mutex<()>,
     agent_assignment_lock: std::sync::Mutex<()>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
@@ -471,6 +485,7 @@ impl AppState {
             conference_attendance: RwLock::new(Vec::new()),
             calls: ShardedMap::new(),
             files: ShardedMap::new(),
+            malware_quarantine: ShardedMap::new(),
             routing_rules: ShardedMap::new(),
             audit_events: RwLock::new(Vec::new()),
             presence: ShardedMap::new(),
@@ -478,6 +493,7 @@ impl AppState {
             teams: ShardedMap::new(),
             scheduled_meetings: ShardedMap::new(),
             retention_policies: ShardedMap::new(),
+            ediscovery_cases: ShardedMap::new(),
             collaboration_policy: RwLock::new(CollaborationPolicy::default()),
             channel_webhooks: ShardedMap::new(),
             mention_rate_limits: ShardedMap::new(),
@@ -486,6 +502,7 @@ impl AppState {
             message_reads: RwLock::new(Vec::new()),
             voicemails: ShardedMap::new(),
             recordings: ShardedMap::new(),
+            transcription_jobs: ShardedMap::new(),
             ring_groups: ShardedMap::new(),
             ivrs: ShardedMap::new(),
             user_call_settings: ShardedMap::new(),
@@ -513,6 +530,11 @@ impl AppState {
             meeting_polls: ShardedMap::new(),
             qa_questions: ShardedMap::new(),
             breakout_sessions: ShardedMap::new(),
+            presentation_sessions: ShardedMap::new(),
+            meeting_media_settings: ShardedMap::new(),
+            conference_layouts: ShardedMap::new(),
+            stream_sessions: ShardedMap::new(),
+            town_hall_configs: ShardedMap::new(),
             transcripts: RwLock::new(Vec::new()),
             call_quality_reports: RwLock::new(Vec::new()),
             dlp_policies: ShardedMap::new(),
@@ -556,6 +578,8 @@ impl AppState {
             cnam_providers: RwLock::new(Vec::new()),
             sip_gateways: ShardedMap::new(),
             location_routing_rules: ShardedMap::new(),
+            emergency_locations: ShardedMap::new(),
+            emergency_assignments: ShardedMap::new(),
             conference_annotations: ShardedMap::new(),
             whiteboards: ShardedMap::new(),
             scheduling_panels: ShardedMap::new(),
@@ -570,6 +594,7 @@ impl AppState {
             app_catalog: ShardedMap::new(),
             bandwidth_policies: ShardedMap::new(),
             signage_displays: ShardedMap::new(),
+            enterprise_integrations: ShardedMap::new(),
             user_create_lock: std::sync::Mutex::new(()),
             agent_assignment_lock: std::sync::Mutex::new(()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
@@ -922,6 +947,272 @@ impl AppState {
         self.media.clone()
     }
 
+    pub fn meeting_media_settings(&self, user_uri: &str) -> MeetingMediaSettings {
+        let normalized = normalize_emergency_user_uri(user_uri).unwrap_or_else(|| user_uri.to_string());
+        let mut settings =
+            self.meeting_media_settings
+                .get(&normalized)
+                .unwrap_or_else(|| MeetingMediaSettings {
+                    user_uri: normalized.clone(),
+                    echo_cancellation: true,
+                    noise_suppression: true,
+                    auto_gain: false,
+                    background_mode: "none".to_string(),
+                    background_image_url: None,
+                    noise_suppression_configured: false,
+                    virtual_backgrounds_configured: false,
+                    updated_at: Utc::now(),
+                });
+        settings.noise_suppression_configured =
+            self.enterprise_capability_available("noise_suppression");
+        settings.virtual_backgrounds_configured =
+            self.enterprise_capability_available("virtual_backgrounds");
+        settings
+    }
+
+    pub fn update_meeting_media_settings(
+        &self,
+        user_uri: &str,
+        input: UpdateMeetingMediaSettingsRequest,
+    ) -> MeetingMediaSettings {
+        let normalized = normalize_emergency_user_uri(user_uri).unwrap_or_else(|| user_uri.to_string());
+        let mut settings = self.meeting_media_settings(&normalized);
+        if let Some(value) = input.echo_cancellation {
+            settings.echo_cancellation = value;
+        }
+        if let Some(value) = input.noise_suppression {
+            settings.noise_suppression = value;
+        }
+        if let Some(value) = input.auto_gain {
+            settings.auto_gain = value;
+        }
+        if let Some(mode) = input.background_mode {
+            settings.background_mode = normalize_media_background_mode(&mode);
+        }
+        if let Some(url) = input.background_image_url {
+            settings.background_image_url = non_empty_string(url);
+        }
+        if settings.background_mode != "image" {
+            settings.background_image_url = None;
+        }
+        settings.updated_at = Utc::now();
+        self.meeting_media_settings
+            .insert(normalized, settings.clone());
+        settings
+    }
+
+    pub fn conference_layout_state(&self, conference_id: Uuid) -> Option<ConferenceLayoutState> {
+        let conference = self.conferences.get(&conference_id)?;
+        let mut layout =
+            self.conference_layouts
+                .get(&conference_id)
+                .unwrap_or_else(|| ConferenceLayoutState {
+                    conference_id,
+                    mode: "gallery".to_string(),
+                    max_visible: 9,
+                    together_scene: None,
+                    stage_participant_ids: Vec::new(),
+                    sfu_layout_configured: false,
+                    gallery_capacity: 9,
+                    together_scene_supported: true,
+                    layout_blockers: Vec::new(),
+                    updated_by: None,
+                    updated_at: Utc::now(),
+                });
+        layout.sfu_layout_configured = self.enterprise_capability_available("together_gallery");
+        apply_layout_readiness(&mut layout, &conference.participants);
+        Some(layout)
+    }
+
+    pub fn update_conference_layout_state(
+        &self,
+        conference_id: Uuid,
+        updated_by: &str,
+        input: UpdateConferenceLayoutRequest,
+    ) -> Option<ConferenceLayoutState> {
+        let conference = self.conferences.get(&conference_id)?;
+        let mut layout = self.conference_layout_state(conference_id)?;
+        if let Some(mode) = input.mode {
+            layout.mode = normalize_conference_layout_mode(&mode);
+        }
+        if let Some(max_visible) = input.max_visible {
+            layout.max_visible = max_visible.clamp(1, 49);
+        }
+        if let Some(scene) = input.together_scene {
+            layout.together_scene = non_empty_string(scene);
+        }
+        if let Some(stage_ids) = input.stage_participant_ids {
+            layout.stage_participant_ids = stage_ids
+                .into_iter()
+                .filter(|id| {
+                    conference
+                        .participants
+                        .iter()
+                        .any(|participant| participant.user_id == *id && !participant.removed)
+                })
+                .take(12)
+                .collect();
+        }
+        if layout.mode != "together" {
+            layout.together_scene = None;
+        }
+        layout.sfu_layout_configured = self.enterprise_capability_available("together_gallery");
+        apply_layout_readiness(&mut layout, &conference.participants);
+        layout.updated_by = Some(updated_by.to_string());
+        layout.updated_at = Utc::now();
+        self.conference_layouts.insert(conference_id, layout.clone());
+        Some(layout)
+    }
+
+    pub fn list_stream_sessions(&self, conference_id: Uuid) -> Vec<MeetingStreamSession> {
+        let mut sessions: Vec<_> = self
+            .stream_sessions
+            .values()
+            .into_iter()
+            .filter(|session| session.conference_id == conference_id)
+            .map(|mut session| {
+                session.gateway_configured = self.enterprise_capability_available("ndi_rtmp_streaming");
+                session.destination = redact_stream_destination(&session.destination);
+                session
+            })
+            .collect();
+        sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        sessions
+    }
+
+    pub fn start_stream_session(
+        &self,
+        conference_id: Uuid,
+        started_by: &str,
+        input: CreateMeetingStreamRequest,
+    ) -> Result<MeetingStreamSession, String> {
+        self.conferences
+            .get(&conference_id)
+            .ok_or_else(|| "conference_not_found".to_string())?;
+        let gateway_configured = self.enterprise_capability_available("ndi_rtmp_streaming");
+        if !gateway_configured {
+            return Err("streaming_gateway_not_configured".to_string());
+        }
+        let destination = input.destination.trim();
+        if !valid_stream_destination(&input.target_kind, destination) {
+            return Err("invalid_stream_destination".to_string());
+        }
+        let now = Utc::now();
+        let session = MeetingStreamSession {
+            id: Uuid::new_v4(),
+            conference_id,
+            target_kind: input.target_kind,
+            name: non_empty_string(input.name).unwrap_or_else(|| "Meeting stream".to_string()),
+            destination: destination.to_string(),
+            status: StreamStatus::Live,
+            started_by: started_by.to_string(),
+            started_at: now,
+            stopped_at: None,
+            health: "egress_requested".to_string(),
+            gateway_configured,
+        };
+        self.stream_sessions.insert(session.id, session.clone());
+        let mut redacted = session;
+        redacted.destination = redact_stream_destination(&redacted.destination);
+        Ok(redacted)
+    }
+
+    pub fn stop_stream_session(&self, id: Uuid) -> Option<MeetingStreamSession> {
+        let mut session = self.stream_sessions.get(&id)?;
+        if session.status == StreamStatus::Live {
+            session.status = StreamStatus::Stopped;
+            session.stopped_at = Some(Utc::now());
+            session.health = "stopped".to_string();
+            self.stream_sessions.insert(id, session.clone());
+        }
+        session.gateway_configured = self.enterprise_capability_available("ndi_rtmp_streaming");
+        session.destination = redact_stream_destination(&session.destination);
+        Some(session)
+    }
+
+    pub fn stream_session(&self, id: Uuid) -> Option<MeetingStreamSession> {
+        self.stream_sessions.get(&id).map(|mut session| {
+            session.gateway_configured = self.enterprise_capability_available("ndi_rtmp_streaming");
+            session.destination = redact_stream_destination(&session.destination);
+            session
+        })
+    }
+
+    pub fn town_hall_config(&self, conference_id: Uuid) -> Option<TownHallConfig> {
+        self.conferences.get(&conference_id)?;
+        let mut config = self
+            .town_hall_configs
+            .get(&conference_id)
+            .unwrap_or_else(|| TownHallConfig {
+                conference_id,
+                enabled: false,
+                max_viewers: 10000,
+                registration_required: true,
+                presenter_only_video: true,
+                attendee_mic_disabled: true,
+                qna_moderation_required: true,
+                overflow_url: None,
+                broadcast_provider_configured: false,
+                broadcast_capacity: 1000,
+                attendee_mode: "interactive".to_string(),
+                broadcast_ready: false,
+                broadcast_blockers: Vec::new(),
+                updated_by: None,
+                updated_at: Utc::now(),
+            });
+        config.broadcast_provider_configured =
+            self.enterprise_capability_available("town_hall_broadcast");
+        apply_town_hall_readiness(&mut config);
+        Some(config)
+    }
+
+    pub fn update_town_hall_config(
+        &self,
+        conference_id: Uuid,
+        updated_by: &str,
+        input: UpdateTownHallConfigRequest,
+    ) -> Result<TownHallConfig, String> {
+        let conference = self
+            .conferences
+            .get(&conference_id)
+            .ok_or_else(|| "conference_not_found".to_string())?;
+        if conference.mode != ConferenceMode::Webinar {
+            return Err("town_hall_requires_webinar".to_string());
+        }
+        let mut config = self
+            .town_hall_config(conference_id)
+            .ok_or_else(|| "conference_not_found".to_string())?;
+        if let Some(enabled) = input.enabled {
+            config.enabled = enabled;
+        }
+        if let Some(max_viewers) = input.max_viewers {
+            config.max_viewers = max_viewers.clamp(1, 100000);
+        }
+        if let Some(required) = input.registration_required {
+            config.registration_required = required;
+        }
+        if let Some(value) = input.presenter_only_video {
+            config.presenter_only_video = value;
+        }
+        if let Some(value) = input.attendee_mic_disabled {
+            config.attendee_mic_disabled = value;
+        }
+        if let Some(value) = input.qna_moderation_required {
+            config.qna_moderation_required = value;
+        }
+        if let Some(url) = input.overflow_url {
+            config.overflow_url = non_empty_string(url);
+        }
+        config.broadcast_provider_configured =
+            self.enterprise_capability_available("town_hall_broadcast");
+        apply_town_hall_readiness(&mut config);
+        config.updated_by = Some(updated_by.to_string());
+        config.updated_at = Utc::now();
+        self.town_hall_configs
+            .insert(conference_id, config.clone());
+        Ok(config)
+    }
+
     pub fn set_runtime_event_persistence(&self, enabled: bool) {
         *self
             .persist_runtime_events
@@ -1174,6 +1465,14 @@ impl AppState {
         self.files_dir().join(file_id.to_string())
     }
 
+    pub fn quarantine_dir(&self) -> PathBuf {
+        self.data_dir.join("quarantine")
+    }
+
+    pub fn quarantine_path(&self, id: Uuid) -> PathBuf {
+        self.quarantine_dir().join(id.to_string())
+    }
+
     fn load_persisted(&self) {
         let Some(store) = &self.store else {
             return;
@@ -1196,10 +1495,12 @@ impl AppState {
         self.load_vec_collection::<ConferenceAttendanceRecord>(&self.conference_attendance);
         self.load_collection::<CallSession>(&self.calls);
         self.load_collection::<FileRecord>(&self.files);
+        self.load_collection::<MalwareQuarantineItem>(&self.malware_quarantine);
         self.load_collection::<RoutingRule>(&self.routing_rules);
         self.load_collection::<Team>(&self.teams);
         self.load_collection::<ScheduledMeeting>(&self.scheduled_meetings);
         self.load_collection::<RetentionPolicy>(&self.retention_policies);
+        self.load_collection::<EDiscoveryCase>(&self.ediscovery_cases);
         self.load_singleton::<CollaborationPolicy>(&self.collaboration_policy);
         self.load_collection::<ChannelWebhook>(&self.channel_webhooks);
         self.load_collection::<Room>(&self.rooms);
@@ -1210,6 +1511,9 @@ impl AppState {
         self.load_vec_collection::<CallQualityReport>(&self.call_quality_reports);
         self.load_collection::<DlpPolicy>(&self.dlp_policies);
         self.load_vec_collection::<DlpViolation>(&self.dlp_violations);
+        self.load_collection::<EnterpriseIntegration>(&self.enterprise_integrations);
+        self.load_collection::<EmergencyLocation>(&self.emergency_locations);
+        self.load_collection::<EmergencyCallingAssignment>(&self.emergency_assignments);
     }
 
     fn load_collection<T>(&self, map: &ShardedMap<<T as PersistedMapObject>::Key, T>)
@@ -1648,8 +1952,8 @@ impl AppState {
         let secret_bytes = Secret::Encoded(secret_b32.clone())
             .to_bytes()
             .map_err(|e| e.to_string())?;
-        let totp =
-            TOTP::new(Algorithm::SHA1, 6, 1, 30, secret_bytes, None, String::new()).map_err(|e| e.to_string())?;
+        let totp = TOTP::new(Algorithm::SHA1, 6, 1, 30, secret_bytes, None, String::new())
+            .map_err(|e| e.to_string())?;
 
         if !totp.check_current(code).map_err(|e| e.to_string())? {
             return Err("Invalid TOTP code".to_string());
@@ -1683,9 +1987,7 @@ impl AppState {
         }
 
         // Check backup codes first
-        if let Ok(mut backup_codes) =
-            serde_json::from_str::<Vec<String>>(&backup_codes_json)
-        {
+        if let Ok(mut backup_codes) = serde_json::from_str::<Vec<String>>(&backup_codes_json) {
             if let Some(pos) = backup_codes.iter().position(|c| c == code) {
                 backup_codes.remove(pos);
                 let new_codes_json = serde_json::to_string(&backup_codes).unwrap_or_default();
@@ -1706,8 +2008,8 @@ impl AppState {
         let secret_bytes = Secret::Encoded(secret_b32)
             .to_bytes()
             .map_err(|e| e.to_string())?;
-        let totp =
-            TOTP::new(Algorithm::SHA1, 6, 1, 30, secret_bytes, None, String::new()).map_err(|e| e.to_string())?;
+        let totp = TOTP::new(Algorithm::SHA1, 6, 1, 30, secret_bytes, None, String::new())
+            .map_err(|e| e.to_string())?;
 
         totp.check_current(code).map_err(|e| e.to_string())
     }
@@ -1772,11 +2074,7 @@ impl AppState {
     }
 
     /// List active sessions for a user.
-    pub fn list_sessions(
-        &self,
-        user_id: Uuid,
-        current_token: &str,
-    ) -> Vec<UserSessionInfo> {
+    pub fn list_sessions(&self, user_id: Uuid, current_token: &str) -> Vec<UserSessionInfo> {
         if let Some(pg) = &self.pg {
             let pg = pg.clone();
             let rt = tokio::runtime::Handle::try_current();
@@ -1803,14 +2101,8 @@ impl AppState {
                                     .as_str()
                                     .unwrap_or("unknown")
                                     .to_string(),
-                                created_at: s["created_at"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_string(),
-                                last_active: s["last_active"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_string(),
+                                created_at: s["created_at"].as_str().unwrap_or("").to_string(),
+                                last_active: s["last_active"].as_str().unwrap_or("").to_string(),
                                 current: false, // Set below
                             }
                         })
@@ -1832,9 +2124,8 @@ impl AppState {
                     handle.block_on(pg.get_session_token_hash_for_id(session_id))
                 }) {
                     // Remove from in-memory session map
-                    self.admin_sessions.retain(|_, s| {
-                        Self::hash_token(&s.token) != token_hash
-                    });
+                    self.admin_sessions
+                        .retain(|_, s| Self::hash_token(&s.token) != token_hash);
                 }
                 if let Ok(revoked) =
                     std::thread::scope(|_| handle.block_on(pg.revoke_user_session(session_id)))
@@ -1859,7 +2150,8 @@ impl AppState {
                     // Also remove from in-memory map
                     self.admin_sessions.retain(|_, s| {
                         let h = Self::hash_token(&s.token);
-                        h == current_hash || s.principal != self.user_sip_uri_for_id(user_id).unwrap_or_default()
+                        h == current_hash
+                            || s.principal != self.user_sip_uri_for_id(user_id).unwrap_or_default()
                     });
                     return count;
                 }
@@ -2445,6 +2737,27 @@ impl AppState {
             {
                 return Some(Err(JoinConferenceError::Locked));
             }
+            if existing.is_none() {
+                if let Some(config) = self.town_hall_configs.get(&id) {
+                    let attendee_count = conference
+                        .participants
+                        .iter()
+                        .filter(|participant| !participant.removed)
+                        .count();
+                    let requested_role = input.role.clone().unwrap_or(ParticipantRole::Member);
+                    if config.enabled
+                        && requested_role == ParticipantRole::Member
+                        && attendee_count
+                            >= if self.enterprise_capability_available("town_hall_broadcast") {
+                                config.max_viewers
+                            } else {
+                                config.max_viewers.min(1000)
+                            }
+                    {
+                        return Some(Err(JoinConferenceError::CapacityReached));
+                    }
+                }
+            }
             if !conference
                 .participants
                 .iter()
@@ -2495,6 +2808,20 @@ impl AppState {
                         )
                         && !participant.removed
                 })
+            })
+    }
+
+    pub fn conference_visible_to(&self, conference_id: Uuid, principal: &str) -> bool {
+        if self.is_admin_principal(principal) {
+            return true;
+        }
+        self.conferences
+            .get(&conference_id)
+            .is_some_and(|conference| {
+                conference
+                    .participants
+                    .iter()
+                    .any(|participant| participant.sip_uri == principal && !participant.removed)
             })
     }
 
@@ -2764,8 +3091,7 @@ impl AppState {
             created_at: Utc::now(),
             created_by: principal.to_string(),
         };
-        self.meeting_templates
-            .insert(template.id, template.clone());
+        self.meeting_templates.insert(template.id, template.clone());
         self.persist(&template);
         let template_for_pg = template.clone();
         self.pg_spawn(move |pg| {
@@ -2814,8 +3140,7 @@ impl AppState {
             }
             t
         };
-        self.meeting_templates
-            .insert(template.id, template.clone());
+        self.meeting_templates.insert(template.id, template.clone());
         self.persist(&template);
         let template_for_pg = template.clone();
         self.pg_spawn(move |pg| {
@@ -2842,13 +3167,11 @@ impl AppState {
         conference_id: Uuid,
         participant_id: Option<Uuid>,
     ) -> Option<Conference> {
-        let conference = self
-            .conferences
-            .with_write(&conference_id, |conferences| {
-                let conference = conferences.get_mut(&conference_id)?;
-                conference.spotlight_participant_id = participant_id;
-                Some(conference.clone())
-            });
+        let conference = self.conferences.with_write(&conference_id, |conferences| {
+            let conference = conferences.get_mut(&conference_id)?;
+            conference.spotlight_participant_id = participant_id;
+            Some(conference.clone())
+        });
         if let Some(conference) = &conference {
             self.persist(conference);
             self.broadcast_sse(SseEvent {
@@ -2864,12 +3187,7 @@ impl AppState {
 
     // ── Meeting reactions ─────────────────────────────────────────
 
-    pub fn broadcast_meeting_reaction(
-        &self,
-        conference_id: Uuid,
-        user_uri: &str,
-        emoji: &str,
-    ) {
+    pub fn broadcast_meeting_reaction(&self, conference_id: Uuid, user_uri: &str, emoji: &str) {
         let reaction = MeetingReaction {
             user_id: user_uri.to_string(),
             user_name: user_uri
@@ -2930,12 +3248,11 @@ impl AppState {
         self.pg_spawn(move |pg| Box::pin(async move { pg.upsert_room(&room_for_pg).await }));
 
         // Link the chat room to the conference
-        self.conferences
-            .with_write(&conference_id, |conferences| {
-                if let Some(conference) = conferences.get_mut(&conference_id) {
-                    conference.chat_room_id = Some(room_id);
-                }
-            });
+        self.conferences.with_write(&conference_id, |conferences| {
+            if let Some(conference) = conferences.get_mut(&conference_id) {
+                conference.chat_room_id = Some(room_id);
+            }
+        });
         if let Some(conference) = self.conferences.get(&conference_id) {
             self.persist(&conference);
         }
@@ -2960,18 +3277,12 @@ impl AppState {
             })
     }
 
-    pub fn set_green_room_enabled(
-        &self,
-        conference_id: Uuid,
-        enabled: bool,
-    ) -> Option<Conference> {
-        let conference = self
-            .conferences
-            .with_write(&conference_id, |conferences| {
-                let conference = conferences.get_mut(&conference_id)?;
-                conference.green_room_enabled = enabled;
-                Some(conference.clone())
-            });
+    pub fn set_green_room_enabled(&self, conference_id: Uuid, enabled: bool) -> Option<Conference> {
+        let conference = self.conferences.with_write(&conference_id, |conferences| {
+            let conference = conferences.get_mut(&conference_id)?;
+            conference.green_room_enabled = enabled;
+            Some(conference.clone())
+        });
         if let Some(conference) = &conference {
             self.persist(conference);
         }
@@ -2984,54 +3295,40 @@ impl AppState {
         user_id: Uuid,
         sip_uri: String,
     ) -> GreenRoomState {
-        self.green_rooms
-            .with_write(&conference_id, |rooms| {
-                let state = rooms
-                    .entry(conference_id)
-                    .or_insert_with(|| GreenRoomState {
-                        conference_id,
-                        enabled: true,
-                        participants: Vec::new(),
-                    });
-                if !state
-                    .participants
-                    .iter()
-                    .any(|p| p.user_id == user_id)
-                {
-                    state.participants.push(GreenRoomParticipant {
-                        user_id,
-                        sip_uri,
-                        ready: false,
-                        joined_at: Utc::now(),
-                    });
-                }
-                state.clone()
-            })
+        self.green_rooms.with_write(&conference_id, |rooms| {
+            let state = rooms
+                .entry(conference_id)
+                .or_insert_with(|| GreenRoomState {
+                    conference_id,
+                    enabled: true,
+                    participants: Vec::new(),
+                });
+            if !state.participants.iter().any(|p| p.user_id == user_id) {
+                state.participants.push(GreenRoomParticipant {
+                    user_id,
+                    sip_uri,
+                    ready: false,
+                    joined_at: Utc::now(),
+                });
+            }
+            state.clone()
+        })
     }
 
-    pub fn set_green_room_ready(
-        &self,
-        conference_id: Uuid,
-        user_id: Uuid,
-    ) -> GreenRoomState {
-        self.green_rooms
-            .with_write(&conference_id, |rooms| {
-                let state = rooms
-                    .entry(conference_id)
-                    .or_insert_with(|| GreenRoomState {
-                        conference_id,
-                        enabled: true,
-                        participants: Vec::new(),
-                    });
-                if let Some(p) = state
-                    .participants
-                    .iter_mut()
-                    .find(|p| p.user_id == user_id)
-                {
-                    p.ready = true;
-                }
-                state.clone()
-            })
+    pub fn set_green_room_ready(&self, conference_id: Uuid, user_id: Uuid) -> GreenRoomState {
+        self.green_rooms.with_write(&conference_id, |rooms| {
+            let state = rooms
+                .entry(conference_id)
+                .or_insert_with(|| GreenRoomState {
+                    conference_id,
+                    enabled: true,
+                    participants: Vec::new(),
+                });
+            if let Some(p) = state.participants.iter_mut().find(|p| p.user_id == user_id) {
+                p.ready = true;
+            }
+            state.clone()
+        })
     }
 
     // ── Out-of-office ─────────────────────────────────────────────
@@ -3039,9 +3336,7 @@ impl AppState {
     pub fn get_out_of_office(&self, user_uri: &str) -> OutOfOfficeSettings {
         // Find user by SIP URI to get OOO settings
         let users = self.users.values();
-        let user = users
-            .into_iter()
-            .find(|u| u.sip_uri == user_uri);
+        let user = users.into_iter().find(|u| u.sip_uri == user_uri);
         match user {
             Some(u) => OutOfOfficeSettings {
                 message: u.out_of_office_message,
@@ -3060,18 +3355,13 @@ impl AppState {
         input: SetOutOfOfficeRequest,
     ) -> OutOfOfficeSettings {
         let users = self.users.values();
-        if let Some(mut user) = users
-            .into_iter()
-            .find(|u| u.sip_uri == user_uri)
-        {
+        if let Some(mut user) = users.into_iter().find(|u| u.sip_uri == user_uri) {
             user.out_of_office_message = input.message.clone();
             user.out_of_office_until = input.until;
             self.users.insert(user.id, user.clone());
             self.persist(&user);
             let user_for_pg = user.clone();
-            self.pg_spawn(move |pg| {
-                Box::pin(async move { pg.insert_user(&user_for_pg).await })
-            });
+            self.pg_spawn(move |pg| Box::pin(async move { pg.insert_user(&user_for_pg).await }));
         }
         OutOfOfficeSettings {
             message: input.message,
@@ -3106,10 +3396,7 @@ impl AppState {
                 .strip_prefix("sip:")
                 .unwrap_or(&record.sip_uri);
             let join_time = record.joined_at.to_rfc3339();
-            let leave_time = record
-                .left_at
-                .map(|t| t.to_rfc3339())
-                .unwrap_or_default();
+            let leave_time = record.left_at.map(|t| t.to_rfc3339()).unwrap_or_default();
             let duration = record.duration_secs.unwrap_or(0);
             let leave_reason = record
                 .leave_reason
@@ -3440,6 +3727,118 @@ impl AppState {
             .collect()
     }
 
+    // ── PowerPoint Live / presentation sessions ────────────────────
+
+    pub fn create_presentation_session(
+        &self,
+        conference_id: Uuid,
+        presenter_uri: &str,
+        input: CreatePresentationSessionRequest,
+    ) -> Option<PresentationSession> {
+        self.conferences.get(&conference_id)?;
+        let slides: Vec<_> = input
+            .slides
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, slide)| {
+                let title = slide.title.trim();
+                if title.is_empty() {
+                    return None;
+                }
+                Some(PresentationSlide {
+                    index,
+                    title: title.to_string(),
+                    notes: non_empty_string(slide.notes.unwrap_or_default()),
+                    render_url: non_empty_string(slide.render_url.unwrap_or_default()),
+                })
+            })
+            .collect();
+        if slides.is_empty() {
+            return None;
+        }
+        let now = Utc::now();
+        let title = input.title.trim();
+        let session = PresentationSession {
+            id: Uuid::new_v4(),
+            conference_id,
+            title: if title.is_empty() {
+                "Presentation".to_string()
+            } else {
+                title.to_string()
+            },
+            source_file_id: input.source_file_id,
+            presenter_uri: normalize_emergency_user_uri(presenter_uri)
+                .unwrap_or_else(|| presenter_uri.to_string()),
+            slides,
+            current_slide: 0,
+            attendee_navigation_enabled: input.attendee_navigation_enabled,
+            renderer_configured: self.enterprise_capability_available("powerpoint_live"),
+            ended_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        self.presentation_sessions.insert(session.id, session.clone());
+        Some(session)
+    }
+
+    pub fn list_presentation_sessions(&self, conference_id: Uuid) -> Vec<PresentationSession> {
+        let mut sessions: Vec<_> = self
+            .presentation_sessions
+            .values()
+            .into_iter()
+            .filter(|session| session.conference_id == conference_id)
+            .map(|mut session| {
+                session.renderer_configured = self.enterprise_capability_available("powerpoint_live");
+                session
+            })
+            .collect();
+        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sessions
+    }
+
+    pub fn presentation_session(&self, id: Uuid) -> Option<PresentationSession> {
+        self.presentation_sessions.get(&id).map(|mut session| {
+            session.renderer_configured = self.enterprise_capability_available("powerpoint_live");
+            session
+        })
+    }
+
+    pub fn update_presentation_session(
+        &self,
+        id: Uuid,
+        input: UpdatePresentationSessionRequest,
+    ) -> Option<PresentationSession> {
+        let mut session = self.presentation_sessions.get(&id)?;
+        if session.ended_at.is_some() {
+            return Some(session);
+        }
+        if let Some(slide) = input.current_slide {
+            session.current_slide = slide.min(session.slides.len().saturating_sub(1));
+        }
+        if let Some(enabled) = input.attendee_navigation_enabled {
+            session.attendee_navigation_enabled = enabled;
+        }
+        if let Some(presenter) = input.presenter_uri {
+            if let Some(normalized) = normalize_emergency_user_uri(&presenter) {
+                session.presenter_uri = normalized;
+            }
+        }
+        session.renderer_configured = self.enterprise_capability_available("powerpoint_live");
+        session.updated_at = Utc::now();
+        self.presentation_sessions.insert(id, session.clone());
+        Some(session)
+    }
+
+    pub fn end_presentation_session(&self, id: Uuid) -> Option<PresentationSession> {
+        let mut session = self.presentation_sessions.get(&id)?;
+        let now = Utc::now();
+        session.ended_at = Some(now);
+        session.updated_at = now;
+        session.renderer_configured = self.enterprise_capability_available("powerpoint_live");
+        self.presentation_sessions.insert(id, session.clone());
+        Some(session)
+    }
+
     // ── Transcript / live captions methods ─────────────────────────
 
     pub fn post_transcript(
@@ -3492,6 +3891,45 @@ impl AppState {
             segments,
             exported_at: Utc::now(),
         }
+    }
+
+    pub fn meeting_assistant_report(&self, conference_id: Uuid) -> Option<MeetingAssistantReport> {
+        let title = self.conferences.get(&conference_id)?.title;
+        let segments: Vec<_> = self
+            .get_transcript(conference_id)
+            .into_iter()
+            .filter(|segment| segment.is_final)
+            .collect();
+        let ai_provider_configured = self
+            .enterprise_capability_report()
+            .capabilities
+            .iter()
+            .any(|capability| {
+                matches!(capability.id.as_str(), "meeting_assistant" | "copilot")
+                    && capability.status == "available"
+            });
+        let speaker_stats = meeting_speaker_stats(&segments);
+        let summary = meeting_summary(&segments);
+        Some(MeetingAssistantReport {
+            conference_id,
+            title,
+            generated_at: Utc::now(),
+            transcript_segments: segments.len(),
+            ai_provider_configured,
+            summary,
+            key_topics: meeting_key_topics(&segments),
+            action_items: meeting_action_items(&segments),
+            decisions: meeting_lines_matching(
+                &segments,
+                &["decided", "decision", "approved", "agreed", "we will"],
+            ),
+            risks: meeting_lines_matching(
+                &segments,
+                &["risk", "blocked", "blocker", "concern", "issue", "problem"],
+            ),
+            open_questions: meeting_open_questions(&segments),
+            speaker_stats,
+        })
     }
 
     // ── Call quality methods ───────────────────────────────────────
@@ -4191,11 +4629,7 @@ impl AppState {
     pub fn usage_analytics(&self) -> UsageAnalytics {
         let users = self.users.values();
         let active_users = users.iter().filter(|u| u.active).count();
-        let total_messages = self
-            .room_messages
-            .read()
-            .expect("room messages lock")
-            .len();
+        let total_messages = self.room_messages.read().expect("room messages lock").len();
         let total_calls = self.calls.len();
         let total_meetings = self.scheduled_meetings.len();
         let files = self.files.values();
@@ -4216,6 +4650,258 @@ impl AppState {
             total_files: files.len(),
             total_storage_bytes: total_storage,
             online_users,
+        }
+    }
+
+    pub fn security_posture_report(&self) -> SecurityPostureReport {
+        let users = self.users();
+        let active_users: Vec<_> = users.iter().filter(|user| user.active).collect();
+        let active_user_count = active_users.len();
+        let mfa_enabled_users = active_users
+            .iter()
+            .filter(|user| self.is_mfa_enabled(user.id))
+            .count();
+        let sso_providers = self.list_sso_providers();
+        let enabled_sso_providers = sso_providers
+            .iter()
+            .filter(|provider| provider.enabled)
+            .count();
+        let conditional_access = self.list_conditional_access_policies();
+        let enabled_conditional_access_policies = conditional_access
+            .iter()
+            .filter(|policy| policy.enabled)
+            .count();
+        let mfa_required_by_policy = conditional_access
+            .iter()
+            .any(|policy| policy.enabled && policy.actions.require_mfa);
+        let dlp_policies = self.list_dlp_policies();
+        let enabled_dlp_policies = dlp_policies.iter().filter(|policy| policy.enabled).count();
+        let retention_policies = self.retention_policies();
+        let legal_hold_policies = retention_policies
+            .iter()
+            .filter(|policy| policy.legal_hold)
+            .count();
+        let information_barriers = self.list_barriers();
+        let enabled_information_barriers = information_barriers
+            .iter()
+            .filter(|barrier| barrier.enabled)
+            .count();
+        let sensitivity_labels = self.list_labels().len();
+        let encryption_keys = self
+            .encryption_configs
+            .read()
+            .expect("encryption_configs lock")
+            .len();
+        let enabled_data_residency_regions = self
+            .list_data_residency_configs()
+            .iter()
+            .filter(|config| config.enabled)
+            .count();
+        let audit_events = self.audit_events().len();
+        let pending_compliance_reviews = self
+            .list_compliance_reviews()
+            .iter()
+            .filter(|review| review.status == "pending")
+            .count();
+
+        let mfa_score = if mfa_required_by_policy {
+            15
+        } else if active_user_count == 0 {
+            0
+        } else {
+            ((mfa_enabled_users as f64 / active_user_count as f64) * 15.0).round() as u32
+        };
+
+        let mut controls = Vec::new();
+        push_security_control(
+            &mut controls,
+            "identity.sso",
+            "Identity",
+            "Single sign-on provider",
+            enabled_sso_providers > 0,
+            if enabled_sso_providers > 0 { 10 } else { 0 },
+            10,
+            format!("{enabled_sso_providers} enabled SSO provider(s)"),
+            "Configure at least one enabled OIDC/SAML provider for centralized identity.",
+        );
+        push_security_control(
+            &mut controls,
+            "identity.mfa",
+            "Identity",
+            "MFA enforcement",
+            mfa_score == 15,
+            mfa_score,
+            15,
+            if mfa_required_by_policy {
+                "Conditional access requires MFA".to_string()
+            } else {
+                format!("{mfa_enabled_users}/{active_user_count} active users have MFA enabled")
+            },
+            "Enable MFA for all active users or enforce MFA through conditional access.",
+        );
+        push_security_control(
+            &mut controls,
+            "access.conditional",
+            "Access",
+            "Conditional access",
+            enabled_conditional_access_policies > 0,
+            if enabled_conditional_access_policies > 0 {
+                10
+            } else {
+                0
+            },
+            10,
+            format!("{enabled_conditional_access_policies} enabled conditional access policy(ies)"),
+            "Create enabled policies for MFA, risky networks, device posture, or blocked contexts.",
+        );
+        push_security_control(
+            &mut controls,
+            "protection.dlp",
+            "Information Protection",
+            "Data loss prevention",
+            enabled_dlp_policies > 0,
+            if enabled_dlp_policies > 0 { 10 } else { 0 },
+            10,
+            format!("{enabled_dlp_policies} enabled DLP policy(ies)"),
+            "Enable DLP policies that block or warn on regulated data in messages and files.",
+        );
+        push_security_control(
+            &mut controls,
+            "compliance.retention",
+            "Compliance",
+            "Retention policies",
+            !retention_policies.is_empty(),
+            if retention_policies.is_empty() { 0 } else { 10 },
+            10,
+            format!("{} retention policy(ies)", retention_policies.len()),
+            "Define retention policies for chats, channels, meetings, files, and recordings.",
+        );
+        push_security_control(
+            &mut controls,
+            "compliance.legal_hold",
+            "Compliance",
+            "Legal hold readiness",
+            legal_hold_policies > 0,
+            if legal_hold_policies > 0 { 8 } else { 0 },
+            8,
+            format!("{legal_hold_policies} legal hold policy(ies)"),
+            "Create at least one legal-hold policy for litigation preservation workflows.",
+        );
+        push_security_control(
+            &mut controls,
+            "compliance.reviews",
+            "Compliance",
+            "Communication compliance reviews",
+            pending_compliance_reviews == 0,
+            if pending_compliance_reviews == 0 { 7 } else { 3 },
+            7,
+            format!("{pending_compliance_reviews} pending compliance review(s)"),
+            "Review or resolve pending communication compliance items.",
+        );
+        push_security_control(
+            &mut controls,
+            "barriers.enabled",
+            "Information Protection",
+            "Information barriers",
+            enabled_information_barriers > 0,
+            if enabled_information_barriers > 0 { 8 } else { 0 },
+            8,
+            format!("{enabled_information_barriers} enabled barrier(s)"),
+            "Configure barriers for departments or regulated groups that must not communicate.",
+        );
+        push_security_control(
+            &mut controls,
+            "labels.sensitivity",
+            "Information Protection",
+            "Sensitivity labels",
+            sensitivity_labels > 0,
+            if sensitivity_labels > 0 { 7 } else { 0 },
+            7,
+            format!("{sensitivity_labels} sensitivity label(s)"),
+            "Create labels for privacy, guest access, encryption, and sharing restrictions.",
+        );
+        push_security_control(
+            &mut controls,
+            "encryption.byok",
+            "Encryption",
+            "Encryption key rotation",
+            encryption_keys > 0,
+            if encryption_keys > 0 { 7 } else { 0 },
+            7,
+            format!("{encryption_keys} configured encryption key(s)"),
+            "Rotate the service encryption key and use customer-provided keys where required.",
+        );
+        push_security_control(
+            &mut controls,
+            "residency.enabled",
+            "Data Governance",
+            "Data residency",
+            enabled_data_residency_regions > 0,
+            if enabled_data_residency_regions > 0 { 5 } else { 0 },
+            5,
+            format!("{enabled_data_residency_regions} enabled residency region(s)"),
+            "Enable data residency configurations for regulated tenant regions.",
+        );
+        push_security_control(
+            &mut controls,
+            "audit.activity",
+            "Audit",
+            "Audit activity",
+            audit_events > 0,
+            if audit_events > 0 { 3 } else { 0 },
+            3,
+            format!("{audit_events} audit event(s) retained"),
+            "Confirm admin actions are generating and retaining audit events.",
+        );
+
+        let score: u32 = controls.iter().map(|control| control.score).sum();
+        let max_score: u32 = controls.iter().map(|control| control.max_score).sum();
+        let posture = if score * 100 >= max_score * 85 {
+            "strong"
+        } else if score * 100 >= max_score * 60 {
+            "moderate"
+        } else {
+            "needs_attention"
+        }
+        .to_string();
+        let mut recommendations: Vec<_> = controls
+            .iter()
+            .filter(|control| control.score < control.max_score)
+            .map(|control| SecurityPostureRecommendation {
+                control_id: control.id.clone(),
+                priority: if control.score == 0 {
+                    "high".to_string()
+                } else {
+                    "medium".to_string()
+                },
+                title: control.title.clone(),
+                action: control.remediation.clone(),
+            })
+            .collect();
+        recommendations.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.title.cmp(&b.title)));
+
+        SecurityPostureReport {
+            score,
+            max_score,
+            posture,
+            generated_at: Utc::now(),
+            controls,
+            recommendations,
+            counts: SecurityPostureCounts {
+                active_users: active_user_count,
+                mfa_enabled_users,
+                enabled_sso_providers,
+                enabled_conditional_access_policies,
+                enabled_dlp_policies,
+                retention_policies: retention_policies.len(),
+                legal_hold_policies,
+                enabled_information_barriers,
+                sensitivity_labels,
+                encryption_keys,
+                enabled_data_residency_regions,
+                audit_events,
+                pending_compliance_reviews,
+            },
         }
     }
 
@@ -4312,6 +4998,66 @@ impl AppState {
             .collect()
     }
 
+    pub fn cloud_storage_status(&self) -> CloudStorageStatus {
+        let integration = self
+            .list_enterprise_integrations()
+            .into_iter()
+            .find(|integration| integration.id == "cloud_storage");
+        let provider_configured = self.enterprise_capability_available("cloud_storage");
+        let files = self.file_records();
+        let total_storage_bytes = files.iter().map(|file| file.size).sum();
+        let mut warnings = Vec::new();
+        if !provider_configured {
+            warnings.push(
+                "cloud_storage integration is not available; files are retained in local server storage"
+                    .to_string(),
+            );
+        }
+        if integration
+            .as_ref()
+            .and_then(|item| item.endpoint_url.as_ref())
+            .is_none()
+        {
+            warnings.push(
+                "configure a WebDAV or S3-compatible endpoint such as Nextcloud, ownCloud, or MinIO"
+                    .to_string(),
+            );
+        }
+        CloudStorageStatus {
+            provider_configured,
+            provider_name: integration
+                .as_ref()
+                .map(|item| item.default_provider.clone())
+                .unwrap_or_else(|| "WebDAV/S3-compatible storage".to_string()),
+            open_source_options: integration
+                .as_ref()
+                .map(|item| {
+                    item.open_source_option
+                        .split(',')
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty())
+                        .collect()
+                })
+                .unwrap_or_else(|| {
+                    vec![
+                        "Nextcloud".to_string(),
+                        "ownCloud".to_string(),
+                        "MinIO".to_string(),
+                    ]
+                }),
+            endpoint_url: integration.as_ref().and_then(|item| item.endpoint_url.clone()),
+            admin_url: integration.as_ref().and_then(|item| item.admin_url.clone()),
+            sync_mode: if provider_configured {
+                "external_provider_ready".to_string()
+            } else {
+                "local_server_storage".to_string()
+            },
+            local_file_count: files.len(),
+            total_storage_bytes,
+            warnings,
+        }
+    }
+
     pub fn discovery_file_records(&self) -> Vec<FileDiscoveryRecord> {
         self.files
             .values()
@@ -4346,11 +5092,114 @@ impl AppState {
             filename.to_string()
         };
         let dlp = self.scan_content_dlp(owner, &scan_content);
+        let malware_detected = self.advanced_threat_protection_available()
+            && malware_signature_detected(filename, content_type, body);
         FileGovernanceDecision {
-            allowed: dlp.allowed,
-            dlp_status: if dlp.allowed { "clean" } else { "blocked" }.to_string(),
-            dlp_violation_count: dlp.violations.len(),
+            allowed: dlp.allowed && !malware_detected,
+            dlp_status: if malware_detected {
+                "malware_blocked"
+            } else if dlp.allowed {
+                "clean"
+            } else {
+                "blocked"
+            }
+            .to_string(),
+            dlp_violation_count: dlp.violations.len() + usize::from(malware_detected),
             legal_hold: self.file_on_legal_hold(),
+        }
+    }
+
+    pub fn advanced_threat_protection_available(&self) -> bool {
+        self.enterprise_capability_report()
+            .capabilities
+            .into_iter()
+            .any(|capability| {
+                capability.id == "advanced_threat_protection"
+                    && capability.status == "available"
+            })
+    }
+
+    pub fn quarantine_malware_upload(
+        &self,
+        owner: &str,
+        filename: &str,
+        content_type: &str,
+        size: u64,
+        sha256: &str,
+        reason: &str,
+    ) -> MalwareQuarantineItem {
+        let item = MalwareQuarantineItem {
+            id: Uuid::new_v4(),
+            owner: owner.to_string(),
+            filename: filename.to_string(),
+            content_type: content_type.to_string(),
+            size,
+            sha256: sha256.to_string(),
+            reason: reason.to_string(),
+            status: MalwareQuarantineStatus::Quarantined,
+            detected_at: Utc::now(),
+            reviewed_by: None,
+            reviewed_at: None,
+            review_notes: None,
+        };
+        self.malware_quarantine.insert(item.id, item.clone());
+        self.persist(&item);
+        item
+    }
+
+    pub fn list_malware_quarantine(&self) -> Vec<MalwareQuarantineItem> {
+        let mut items = self.malware_quarantine.values();
+        items.sort_by(|left, right| right.detected_at.cmp(&left.detected_at));
+        items
+    }
+
+    pub fn review_malware_quarantine(
+        &self,
+        id: Uuid,
+        reviewer: &str,
+        input: ReviewMalwareQuarantineRequest,
+    ) -> Option<MalwareQuarantineItem> {
+        let mut item = self.malware_quarantine.get(&id)?;
+        item.status = input.status;
+        item.reviewed_by = Some(reviewer.to_string());
+        item.reviewed_at = Some(Utc::now());
+        item.review_notes = input.notes.and_then(non_empty_string);
+        self.malware_quarantine.insert(id, item.clone());
+        self.persist(&item);
+        Some(item)
+    }
+
+    pub fn casb_available(&self) -> bool {
+        self.enterprise_capability_available("casb")
+    }
+
+    pub fn casb_file_access_decision(
+        &self,
+        _actor: &str,
+        action: &str,
+        file: &FileRecord,
+    ) -> CasbAccessDecision {
+        if !self.casb_available() {
+            return CasbAccessDecision {
+                allowed: true,
+                enforced: false,
+                reason: "casb_not_configured".to_string(),
+            };
+        }
+        let dlp_status = file.dlp_status.to_ascii_lowercase();
+        if matches!(action, "download" | "share" | "export")
+            && matches!(dlp_status.as_str(), "blocked" | "malware_blocked")
+        {
+            return CasbAccessDecision {
+                allowed: false,
+                enforced: true,
+                reason: format!("file_{}", dlp_status),
+            };
+        }
+        CasbAccessDecision {
+            allowed: true,
+            enforced: true,
+            reason: "allowed".to_string(),
         }
     }
 
@@ -4369,7 +5218,11 @@ impl AppState {
 
     pub fn file_versions(&self, file_id: Uuid) -> Vec<FileVersion> {
         let versions = self.file_versions.read().expect("file_versions lock");
-        let mut result: Vec<_> = versions.iter().filter(|v| v.file_id == file_id).cloned().collect();
+        let mut result: Vec<_> = versions
+            .iter()
+            .filter(|v| v.file_id == file_id)
+            .cloned()
+            .collect();
         result.sort_by_key(|v| v.version_number);
         result
     }
@@ -4389,7 +5242,9 @@ impl AppState {
     }
 
     pub fn folders_for_room(&self, room_id: Uuid, parent_id: Option<Uuid>) -> Vec<Folder> {
-        self.folders.values().into_iter()
+        self.folders
+            .values()
+            .into_iter()
             .filter(|f| f.room_id == room_id && f.parent_id == parent_id)
             .collect()
     }
@@ -4442,7 +5297,11 @@ impl AppState {
         list
     }
 
-    pub fn update_approval(&self, id: Uuid, updater: impl FnOnce(&mut ApprovalRequest)) -> Option<ApprovalRequest> {
+    pub fn update_approval(
+        &self,
+        id: Uuid,
+        updater: impl FnOnce(&mut ApprovalRequest),
+    ) -> Option<ApprovalRequest> {
         self.approval_requests.with_write(&id, |map| {
             let approval = map.get_mut(&id)?;
             updater(approval);
@@ -4479,7 +5338,11 @@ impl AppState {
                 "all_external" => {
                     // External if callee doesn't match any registered account
                     let callee_user = sip_user_part(callee_uri);
-                    let is_internal = self.sip_accounts.values().iter().any(|a| a.username == callee_user);
+                    let is_internal = self
+                        .sip_accounts
+                        .values()
+                        .iter()
+                        .any(|a| a.username == callee_user);
                     if !is_internal {
                         return true;
                     }
@@ -4487,13 +5350,21 @@ impl AppState {
                 "specific_users" => {
                     let caller_user = sip_user_part(caller_uri);
                     let callee_user = sip_user_part(callee_uri);
-                    if policy.target_ids.iter().any(|t| t == caller_user || t == callee_user) {
+                    if policy
+                        .target_ids
+                        .iter()
+                        .any(|t| t == caller_user || t == callee_user)
+                    {
                         return true;
                     }
                 }
                 "specific_queues" => {
                     // Check if callee is in a targeted queue
-                    if policy.target_ids.iter().any(|t| callee_uri.contains(t.as_str())) {
+                    if policy
+                        .target_ids
+                        .iter()
+                        .any(|t| callee_uri.contains(t.as_str()))
+                    {
                         return true;
                     }
                 }
@@ -4524,7 +5395,9 @@ impl AppState {
     }
 
     pub fn personal_call_groups_for_user(&self, user_id: &str) -> Vec<PersonalCallGroup> {
-        self.personal_call_groups.values().into_iter()
+        self.personal_call_groups
+            .values()
+            .into_iter()
             .filter(|g| g.user_id == user_id)
             .collect()
     }
@@ -4560,16 +5433,34 @@ impl AppState {
         provider
     }
 
-    pub fn update_sso_provider(&self, id: Uuid, input: UpdateSsoProviderRequest) -> Option<SsoProvider> {
+    pub fn update_sso_provider(
+        &self,
+        id: Uuid,
+        input: UpdateSsoProviderRequest,
+    ) -> Option<SsoProvider> {
         let updated = self.sso_providers.with_write(&id, |providers| {
             let provider = providers.get_mut(&id)?;
-            if let Some(name) = input.name { provider.name = name; }
-            if let Some(pt) = input.provider_type { provider.provider_type = pt; }
-            if let Some(cid) = input.client_id { provider.client_id = cid; }
-            if let Some(cs) = input.client_secret { provider.client_secret_enc = cs; }
-            if let Some(iu) = input.issuer_url { provider.issuer_url = iu; }
-            if let Some(ru) = input.redirect_uri { provider.redirect_uri = ru; }
-            if let Some(en) = input.enabled { provider.enabled = en; }
+            if let Some(name) = input.name {
+                provider.name = name;
+            }
+            if let Some(pt) = input.provider_type {
+                provider.provider_type = pt;
+            }
+            if let Some(cid) = input.client_id {
+                provider.client_id = cid;
+            }
+            if let Some(cs) = input.client_secret {
+                provider.client_secret_enc = cs;
+            }
+            if let Some(iu) = input.issuer_url {
+                provider.issuer_url = iu;
+            }
+            if let Some(ru) = input.redirect_uri {
+                provider.redirect_uri = ru;
+            }
+            if let Some(en) = input.enabled {
+                provider.enabled = en;
+            }
             Some(provider.clone())
         });
         if let Some(ref p) = updated {
@@ -4583,7 +5474,9 @@ impl AppState {
         if removed {
             if let Some(pg) = &self.pg {
                 let pg = pg.clone();
-                tokio::spawn(async move { let _ = pg.delete_sso_provider(id).await; });
+                tokio::spawn(async move {
+                    let _ = pg.delete_sso_provider(id).await;
+                });
             }
         }
         removed
@@ -4597,7 +5490,9 @@ impl AppState {
         if let Some(pg) = &self.pg {
             let pg = pg.clone();
             let p = p.clone();
-            tokio::spawn(async move { let _ = pg.upsert_sso_provider(&p).await; });
+            tokio::spawn(async move {
+                let _ = pg.upsert_sso_provider(&p).await;
+            });
         }
     }
 
@@ -4623,7 +5518,10 @@ impl AppState {
     // ─── Encryption Config (BYOK) ───
 
     pub fn encryption_status(&self) -> serde_json::Value {
-        let configs = self.encryption_configs.read().expect("encryption_configs lock");
+        let configs = self
+            .encryption_configs
+            .read()
+            .expect("encryption_configs lock");
         let active = configs.first();
         serde_json::json!({
             "active": active.is_some(),
@@ -4635,7 +5533,11 @@ impl AppState {
     }
 
     pub fn rotate_encryption_key(&self, input: RotateEncryptionKeyRequest) -> EncryptionConfig {
-        let key_source = if input.customer_key_base64.is_some() { "customer" } else { "server" };
+        let key_source = if input.customer_key_base64.is_some() {
+            "customer"
+        } else {
+            "server"
+        };
         let key_id = Uuid::new_v4().to_string();
         // In production: wrap the DEK with customer key or generate server key.
         // For now, generate a key ID and record the config.
@@ -4657,14 +5559,19 @@ impl AppState {
         };
 
         {
-            let mut configs = self.encryption_configs.write().expect("encryption_configs lock");
+            let mut configs = self
+                .encryption_configs
+                .write()
+                .expect("encryption_configs lock");
             configs.insert(0, config.clone());
         }
 
         if let Some(pg) = &self.pg {
             let pg = pg.clone();
             let c = config.clone();
-            tokio::spawn(async move { let _ = pg.upsert_encryption_config(&c).await; });
+            tokio::spawn(async move {
+                let _ = pg.upsert_encryption_config(&c).await;
+            });
         }
 
         config
@@ -4687,7 +5594,11 @@ impl AppState {
             .collect()
     }
 
-    pub fn create_admin_elevation(&self, input: CreateAdminElevationRequest, granted_by: &str) -> AdminElevation {
+    pub fn create_admin_elevation(
+        &self,
+        input: CreateAdminElevationRequest,
+        granted_by: &str,
+    ) -> AdminElevation {
         let duration_minutes = input.duration_minutes.unwrap_or(60);
         let elevation = AdminElevation {
             id: Uuid::new_v4(),
@@ -4700,29 +5611,41 @@ impl AppState {
         };
 
         {
-            let mut elevations = self.admin_elevations.write().expect("admin_elevations lock");
+            let mut elevations = self
+                .admin_elevations
+                .write()
+                .expect("admin_elevations lock");
             elevations.push(elevation.clone());
         }
 
         if let Some(pg) = &self.pg {
             let pg = pg.clone();
             let e = elevation.clone();
-            tokio::spawn(async move { let _ = pg.insert_admin_elevation(&e).await; });
+            tokio::spawn(async move {
+                let _ = pg.insert_admin_elevation(&e).await;
+            });
         }
 
         elevation
     }
 
     pub fn revoke_admin_elevation(&self, id: Uuid) -> Option<AdminElevation> {
-        let mut elevations = self.admin_elevations.write().expect("admin_elevations lock");
-        let e = elevations.iter_mut().find(|e| e.id == id && e.revoked_at.is_none())?;
+        let mut elevations = self
+            .admin_elevations
+            .write()
+            .expect("admin_elevations lock");
+        let e = elevations
+            .iter_mut()
+            .find(|e| e.id == id && e.revoked_at.is_none())?;
         e.revoked_at = Some(Utc::now());
         let result = e.clone();
 
         if let Some(pg) = &self.pg {
             let pg = pg.clone();
             let e = result.clone();
-            tokio::spawn(async move { let _ = pg.insert_admin_elevation(&e).await; });
+            tokio::spawn(async move {
+                let _ = pg.insert_admin_elevation(&e).await;
+            });
         }
 
         Some(result)
@@ -4731,7 +5654,10 @@ impl AppState {
     /// Expire admin elevations that have passed their deadline.
     pub fn expire_admin_elevations(&self) {
         let now = Utc::now();
-        let mut elevations = self.admin_elevations.write().expect("admin_elevations lock");
+        let mut elevations = self
+            .admin_elevations
+            .write()
+            .expect("admin_elevations lock");
         for e in elevations.iter_mut() {
             if e.revoked_at.is_none() && e.expires_at <= now {
                 e.revoked_at = Some(now);
@@ -4753,7 +5679,10 @@ impl AppState {
     /// Encrypt a plaintext string for storage (wraps ChaCha20Poly1305).
     pub fn encrypt_field(&self, plaintext: &str) -> String {
         use base64::Engine;
-        use chacha20poly1305::{aead::{Aead, KeyInit}, ChaCha20Poly1305, Key, Nonce};
+        use chacha20poly1305::{
+            aead::{Aead, KeyInit},
+            ChaCha20Poly1305, Key, Nonce,
+        };
 
         // Derive key from storage key embedded in the store, or use a fixed fallback
         let key_material = self.http_token.as_bytes();
@@ -4780,7 +5709,10 @@ impl AppState {
     /// Decrypt an encrypted field. Returns plaintext if input is not encrypted.
     pub fn decrypt_field(&self, encoded: &str) -> String {
         use base64::Engine;
-        use chacha20poly1305::{aead::{Aead, KeyInit}, ChaCha20Poly1305, Key, Nonce};
+        use chacha20poly1305::{
+            aead::{Aead, KeyInit},
+            ChaCha20Poly1305, Key, Nonce,
+        };
 
         let Some(rest) = encoded.strip_prefix("enc:") else {
             return encoded.to_string();
@@ -4818,13 +5750,17 @@ impl AppState {
     }
 
     pub fn delegations_for_owner(&self, owner_uri: &str) -> Vec<LineDelegation> {
-        self.line_delegations.values().into_iter()
+        self.line_delegations
+            .values()
+            .into_iter()
             .filter(|d| d.owner_uri == owner_uri)
             .collect()
     }
 
     pub fn delegations_for_delegate(&self, delegate_uri: &str) -> Vec<LineDelegation> {
-        self.line_delegations.values().into_iter()
+        self.line_delegations
+            .values()
+            .into_iter()
             .filter(|d| d.delegate_uri == delegate_uri)
             .collect()
     }
@@ -4839,7 +5775,9 @@ impl AppState {
 
     /// Check if delegate_uri can answer calls for target_uri.
     pub fn can_delegate_answer(&self, target_uri: &str, delegate_uri: &str) -> bool {
-        self.line_delegations.values().into_iter()
+        self.line_delegations
+            .values()
+            .into_iter()
             .any(|d| d.owner_uri == target_uri && d.delegate_uri == delegate_uri && d.can_answer)
     }
 
@@ -4884,18 +5822,23 @@ impl AppState {
     }
 
     pub fn room_bookings_for_room(&self, room_id: Uuid) -> Vec<RoomBooking> {
-        self.room_bookings.values().into_iter()
+        self.room_bookings
+            .values()
+            .into_iter()
             .filter(|b| b.room_id == room_id)
             .collect()
     }
 
     pub fn available_rooms(&self, start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<MeetingRoom> {
         let bookings = self.room_bookings.values();
-        self.meeting_rooms.values().into_iter()
+        self.meeting_rooms
+            .values()
+            .into_iter()
             .filter(|room| {
-                room.bookable && !bookings.iter().any(|b| {
-                    b.room_id == room.id && b.start_time < end && b.end_time > start
-                })
+                room.bookable
+                    && !bookings
+                        .iter()
+                        .any(|b| b.room_id == room.id && b.start_time < end && b.end_time > start)
             })
             .collect()
     }
@@ -4920,7 +5863,9 @@ impl AppState {
 
     pub fn provisioned_device_by_mac(&self, mac: &str) -> Option<ProvisionedDevice> {
         let mac_lower = mac.to_lowercase().replace([':', '-'], "");
-        self.provisioned_devices.values().into_iter()
+        self.provisioned_devices
+            .values()
+            .into_iter()
             .find(|d| d.mac_address.to_lowercase().replace([':', '-'], "") == mac_lower)
     }
 
@@ -4935,7 +5880,9 @@ impl AppState {
     }
 
     pub fn active_hotdesk_for_device(&self, device_id: Uuid) -> Option<HotdeskSession> {
-        self.hotdesk_sessions.values().into_iter()
+        self.hotdesk_sessions
+            .values()
+            .into_iter()
             .find(|s| s.device_id == device_id && s.logged_out_at.is_none())
     }
 
@@ -4950,7 +5897,9 @@ impl AppState {
     // ─── Custom Emojis ───
 
     pub fn custom_emojis_for_team(&self, team_id: Uuid) -> Vec<CustomEmoji> {
-        self.custom_emojis.values().into_iter()
+        self.custom_emojis
+            .values()
+            .into_iter()
             .filter(|e| e.team_id == team_id)
             .collect()
     }
@@ -4966,7 +5915,10 @@ impl AppState {
     // ─── Wiki Pages ───
 
     pub fn wiki_pages_for_team(&self, team_id: Uuid) -> Vec<WikiPage> {
-        let mut pages: Vec<_> = self.wiki_pages.values().into_iter()
+        let mut pages: Vec<_> = self
+            .wiki_pages
+            .values()
+            .into_iter()
             .filter(|p| p.team_id == team_id)
             .collect();
         pages.sort_by_key(|p| p.created_at);
@@ -4988,7 +5940,10 @@ impl AppState {
     // ─── Task Boards ───
 
     pub fn task_boards_for_team(&self, team_id: Uuid) -> Vec<TaskBoard> {
-        let mut boards: Vec<_> = self.task_boards.values().into_iter()
+        let mut boards: Vec<_> = self
+            .task_boards
+            .values()
+            .into_iter()
             .filter(|b| b.team_id == team_id)
             .collect();
         boards.sort_by_key(|b| b.created_at);
@@ -5008,7 +5963,10 @@ impl AppState {
     }
 
     pub fn tasks_for_board(&self, board_id: Uuid) -> Vec<Task> {
-        let mut tasks: Vec<_> = self.tasks.values().into_iter()
+        let mut tasks: Vec<_> = self
+            .tasks
+            .values()
+            .into_iter()
             .filter(|t| t.board_id == board_id)
             .collect();
         tasks.sort_by_key(|t| t.created_at);
@@ -5031,17 +5989,26 @@ impl AppState {
 
     pub fn user_call_analytics(&self, user_sip_uri: &str) -> serde_json::Value {
         let cdrs = self.cdrs.read().expect("cdrs lock");
-        let user_cdrs: Vec<_> = cdrs.iter()
+        let user_cdrs: Vec<_> = cdrs
+            .iter()
             .filter(|c| c.caller_uri == user_sip_uri || c.callee_uri == user_sip_uri)
             .collect();
         let total_calls = user_cdrs.len();
-        let answered_calls = user_cdrs.iter().filter(|c| c.disposition == "answered").count();
+        let answered_calls = user_cdrs
+            .iter()
+            .filter(|c| c.disposition == "answered")
+            .count();
         let total_duration: i32 = user_cdrs.iter().map(|c| c.duration_secs).sum();
-        let avg_duration = if total_calls > 0 { total_duration as f64 / total_calls as f64 } else { 0.0 };
+        let avg_duration = if total_calls > 0 {
+            total_duration as f64 / total_calls as f64
+        } else {
+            0.0
+        };
 
         // MOS from call quality reports
         let reports = self.call_quality_reports.read().expect("cqr lock");
-        let user_reports: Vec<_> = reports.iter()
+        let user_reports: Vec<_> = reports
+            .iter()
             .filter(|r| r.user_sip_uri == user_sip_uri)
             .collect();
         let avg_mos = if user_reports.is_empty() {
@@ -6419,6 +7386,12 @@ impl AppState {
             invalid_destination: input.invalid_destination,
             timeout_destination: input.timeout_destination,
             options: input.options,
+            speech_enabled: input.speech_enabled.unwrap_or(false),
+            speech_language: input
+                .speech_language
+                .and_then(non_empty_string)
+                .unwrap_or_else(|| "en-US".to_string()),
+            speech_provider_configured: self.enterprise_capability_available("speech_ivr"),
             enabled: true,
             created_at: Utc::now(),
         };
@@ -6431,7 +7404,10 @@ impl AppState {
     }
 
     pub fn ivr(&self, id: Uuid) -> Option<Ivr> {
-        self.ivrs.get(&id)
+        self.ivrs.get(&id).map(|mut ivr| {
+            ivr.speech_provider_configured = self.enterprise_capability_available("speech_ivr");
+            ivr
+        })
     }
 
     pub fn ivr_by_extension(&self, uri: &str) -> Option<Ivr> {
@@ -6444,6 +7420,74 @@ impl AppState {
 
     pub fn delete_ivr(&self, id: Uuid) -> Option<Ivr> {
         self.ivrs.remove(&id)
+    }
+
+    pub fn resolve_ivr_speech(&self, id: Uuid, input: ResolveIvrSpeechRequest) -> Option<IvrSpeechResolution> {
+        let mut ivr = self.ivr(id)?;
+        let provider_configured = self.enterprise_capability_available("speech_ivr");
+        ivr.speech_provider_configured = provider_configured;
+        let utterance = input.utterance.trim().to_string();
+        if !ivr.speech_enabled {
+            return Some(IvrSpeechResolution {
+                ivr_id: id,
+                utterance,
+                language: input.language.or_else(|| Some(ivr.speech_language.clone())),
+                provider_configured,
+                matched: false,
+                reason: "speech_ivr_disabled".to_string(),
+                option: None,
+                route: ivr.invalid_destination.clone().map(|destination| ResolvedRoute {
+                    destination_type: "invalid".to_string(),
+                    destination,
+                    ring_group: None,
+                    ivr: None,
+                }),
+            });
+        }
+        if !provider_configured {
+            return Some(IvrSpeechResolution {
+                ivr_id: id,
+                utterance,
+                language: input.language.or_else(|| Some(ivr.speech_language.clone())),
+                provider_configured,
+                matched: false,
+                reason: "speech_ivr_provider_not_configured".to_string(),
+                option: None,
+                route: ivr.invalid_destination.clone().map(|destination| ResolvedRoute {
+                    destination_type: "invalid".to_string(),
+                    destination,
+                    ring_group: None,
+                    ivr: None,
+                }),
+            });
+        }
+
+        let normalized = normalize_speech_utterance(&utterance);
+        let matched = ivr.options.iter().find(|option| ivr_option_matches_speech(option, &normalized));
+        let route = matched.map(|option| ResolvedRoute {
+            destination_type: option.destination_type.clone(),
+            destination: option.destination.clone(),
+            ring_group: (option.destination_type == "ring_group")
+                .then(|| self.ring_group_by_extension(&option.destination))
+                .flatten(),
+            ivr: (option.destination_type == "ivr")
+                .then(|| self.ivr_by_extension(&option.destination))
+                .flatten(),
+        });
+        Some(IvrSpeechResolution {
+            ivr_id: id,
+            utterance,
+            language: input.language.or_else(|| Some(ivr.speech_language.clone())),
+            provider_configured,
+            matched: matched.is_some(),
+            reason: if matched.is_some() {
+                "matched_configured_phrase".to_string()
+            } else {
+                "no_configured_phrase_matched".to_string()
+            },
+            option: matched.cloned(),
+            route,
+        })
     }
 
     // ─── Call Route Resolution ───
@@ -6607,7 +7651,123 @@ impl AppState {
         });
         let r = recording.clone();
         self.pg_spawn(move |pg| Box::pin(async move { pg.insert_recording(&r).await }));
+        if recording.conference_id.is_some() {
+            let _ = self.queue_transcription_job(recording.id, &recording.recorded_by, None);
+        }
         Ok(recording)
+    }
+
+    pub fn transcription_jobs_for_recording(&self, recording_id: Uuid) -> Vec<TranscriptionJob> {
+        let mut jobs: Vec<_> = self
+            .transcription_jobs
+            .values()
+            .into_iter()
+            .filter(|job| job.recording_id == recording_id)
+            .map(|mut job| {
+                job.provider_configured = self.enterprise_capability_available("auto_transcription");
+                job
+            })
+            .collect();
+        jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        jobs
+    }
+
+    pub fn transcription_job(&self, id: Uuid) -> Option<TranscriptionJob> {
+        self.transcription_jobs.get(&id).map(|mut job| {
+            job.provider_configured = self.enterprise_capability_available("auto_transcription");
+            job
+        })
+    }
+
+    pub fn recording(&self, id: Uuid) -> Option<CallRecording> {
+        self.recordings.get(&id)
+    }
+
+    pub fn queue_transcription_job(
+        &self,
+        recording_id: Uuid,
+        requested_by: &str,
+        language: Option<String>,
+    ) -> Option<TranscriptionJob> {
+        let recording = self.recordings.get(&recording_id)?;
+        if recording.deleted_at.is_some() {
+            return None;
+        }
+        let provider_configured = self.enterprise_capability_available("auto_transcription");
+        let error = if !provider_configured {
+            Some("auto_transcription_provider_not_configured".to_string())
+        } else if recording.file_id.is_none() {
+            Some("recording_file_missing".to_string())
+        } else if recording.conference_id.is_none() {
+            Some("conference_missing".to_string())
+        } else {
+            None
+        };
+        let now = Utc::now();
+        let job = TranscriptionJob {
+            id: Uuid::new_v4(),
+            recording_id,
+            conference_id: recording.conference_id,
+            status: if error.is_some() {
+                TranscriptionJobStatus::Blocked
+            } else {
+                TranscriptionJobStatus::Queued
+            },
+            language: language.and_then(non_empty_string),
+            provider_configured,
+            requested_by: requested_by.to_string(),
+            error,
+            transcript_segment_count: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        self.transcription_jobs.insert(job.id, job.clone());
+        Some(job)
+    }
+
+    pub fn start_transcription_job(&self, id: Uuid) -> Option<TranscriptionJob> {
+        let mut job = self.transcription_jobs.get(&id)?;
+        if job.status == TranscriptionJobStatus::Queued {
+            job.status = TranscriptionJobStatus::Processing;
+            job.updated_at = Utc::now();
+            self.transcription_jobs.insert(id, job.clone());
+        }
+        Some(job)
+    }
+
+    pub fn complete_transcription_job(
+        &self,
+        id: Uuid,
+        segments: Vec<PostTranscriptRequest>,
+    ) -> Option<TranscriptionJob> {
+        let mut job = self.transcription_jobs.get(&id)?;
+        let conference_id = job.conference_id?;
+        if !matches!(
+            job.status,
+            TranscriptionJobStatus::Queued | TranscriptionJobStatus::Processing
+        ) {
+            return Some(job);
+        }
+        let mut count = 0;
+        for mut segment in segments {
+            if segment.language.is_none() {
+                segment.language = job.language.clone();
+            }
+            self.post_transcript(conference_id, segment);
+            count += 1;
+        }
+        job.status = TranscriptionJobStatus::Completed;
+        job.error = None;
+        job.transcript_segment_count = count;
+        job.updated_at = Utc::now();
+        self.transcription_jobs.insert(id, job.clone());
+        if let Some(mut recording) = self.recordings.get(&job.recording_id) {
+            recording.transcript_segment_count = self.get_transcript(conference_id).len();
+            self.recordings.insert(recording.id, recording.clone());
+            let recording_for_pg = recording.clone();
+            self.pg_spawn(move |pg| Box::pin(async move { pg.insert_recording(&recording_for_pg).await }));
+        }
+        Some(job)
     }
 
     pub fn recordings_for_user(&self, sip_uri: &str) -> Vec<CallRecording> {
@@ -7267,6 +8427,356 @@ impl AppState {
         results
     }
 
+    pub fn unified_search(
+        &self,
+        principal: &str,
+        query: &str,
+        limit: usize,
+    ) -> Vec<UnifiedSearchResult> {
+        let term = query.trim().to_ascii_lowercase();
+        if term.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let limit = limit.clamp(1, 100);
+        let mut results = Vec::new();
+
+        for message in self.sip_messages() {
+            if !self.is_admin_principal(principal) && !sip_message_visible_to(&message, principal) {
+                continue;
+            }
+            let fields = vec![
+                message.body.clone(),
+                message.from_uri.clone(),
+                message.to_uri.clone(),
+            ];
+            if !collaboration_matches(&fields, &term) {
+                continue;
+            }
+            results.push(UnifiedSearchResult {
+                id: message.id.to_string(),
+                kind: "message".to_string(),
+                title: "Direct message".to_string(),
+                snippet: message.body,
+                source: message.from_uri.clone(),
+                url: None,
+                room_id: None,
+                team_id: None,
+                conference_id: None,
+                user_uri: Some(message.from_uri),
+                file_id: None,
+                app_id: None,
+                score: score_match(&fields[0], &term) + 18,
+                updated_at: message.received_at,
+            });
+        }
+
+        for message in self
+            .room_messages
+            .read()
+            .expect("room messages lock poisoned")
+            .iter()
+            .filter(|message| room_visible_to(self, message.room_id, principal))
+        {
+            let body = self.decrypt_field(&message.body);
+            if !body.to_ascii_lowercase().contains(&term)
+                && !message.sender_uri.to_ascii_lowercase().contains(&term)
+            {
+                continue;
+            }
+            let room_title = self
+                .room(message.room_id)
+                .map(|room| room.name)
+                .unwrap_or_else(|| "Room message".to_string());
+            results.push(UnifiedSearchResult {
+                id: message.id.to_string(),
+                kind: "message".to_string(),
+                title: room_title,
+                snippet: body.chars().take(240).collect(),
+                source: message.sender_uri.clone(),
+                url: None,
+                room_id: Some(message.room_id),
+                team_id: self.room(message.room_id).and_then(|room| room.team_id),
+                conference_id: None,
+                user_uri: Some(message.sender_uri.clone()),
+                file_id: None,
+                app_id: None,
+                score: score_match(&body, &term) + 20,
+                updated_at: message.edited_at.unwrap_or(message.created_at),
+            });
+        }
+
+        for room in self.list_rooms_for_user(principal) {
+            let fields = vec![
+                room.name.clone(),
+                room.description.clone(),
+                room.channel_name.clone().unwrap_or_default(),
+                room.call_uri.clone().unwrap_or_default(),
+            ];
+            if !collaboration_matches(&fields, &term) {
+                continue;
+            }
+            results.push(UnifiedSearchResult {
+                id: room.id.to_string(),
+                kind: if room.team_id.is_some() {
+                    "channel".to_string()
+                } else if room.is_direct {
+                    "direct".to_string()
+                } else {
+                    "room".to_string()
+                },
+                title: room.name,
+                snippet: room.description,
+                source: "chat".to_string(),
+                url: None,
+                room_id: Some(room.id),
+                team_id: room.team_id,
+                conference_id: room.conference_id,
+                user_uri: None,
+                file_id: None,
+                app_id: None,
+                score: 90,
+                updated_at: room.created_at,
+            });
+        }
+
+        for team in self.list_teams_for_user(principal) {
+            let fields = vec![team.name.clone(), team.description.clone(), team.owner_uri.clone()];
+            if !collaboration_matches(&fields, &term) {
+                continue;
+            }
+            results.push(UnifiedSearchResult {
+                id: team.id.to_string(),
+                kind: "team".to_string(),
+                title: team.name,
+                snippet: team.description,
+                source: team.owner_uri,
+                url: None,
+                room_id: None,
+                team_id: Some(team.id),
+                conference_id: None,
+                user_uri: None,
+                file_id: None,
+                app_id: None,
+                score: 85,
+                updated_at: team.created_at,
+            });
+        }
+
+        for user in self.users().into_iter().filter(|user| user.active) {
+            let fields = vec![
+                user.display_name.clone(),
+                user.sip_uri.clone(),
+                user.email.clone().unwrap_or_default(),
+                user.department.clone().unwrap_or_default(),
+                user.title.clone().unwrap_or_default(),
+            ];
+            if !collaboration_matches(&fields, &term) {
+                continue;
+            }
+            results.push(UnifiedSearchResult {
+                id: user.id.to_string(),
+                kind: "user".to_string(),
+                title: user.display_name,
+                snippet: user.title.or(user.department).unwrap_or_else(|| user.sip_uri.clone()),
+                source: "directory".to_string(),
+                url: None,
+                room_id: None,
+                team_id: None,
+                conference_id: None,
+                user_uri: Some(user.sip_uri),
+                file_id: None,
+                app_id: None,
+                score: 80,
+                updated_at: user.created_at,
+            });
+        }
+
+        for meeting in self.list_meetings_for_user(principal) {
+            let fields = vec![
+                meeting.title.clone(),
+                meeting.description.clone(),
+                meeting.organizer_uri.clone(),
+            ];
+            if !collaboration_matches(&fields, &term) {
+                continue;
+            }
+            results.push(UnifiedSearchResult {
+                id: meeting.id.to_string(),
+                kind: "meeting".to_string(),
+                title: meeting.title,
+                snippet: meeting.description,
+                source: meeting.organizer_uri,
+                url: None,
+                room_id: meeting.room_id,
+                team_id: meeting
+                    .room_id
+                    .and_then(|room_id| self.room(room_id).and_then(|room| room.team_id)),
+                conference_id: meeting.conference_id,
+                user_uri: None,
+                file_id: None,
+                app_id: None,
+                score: 75,
+                updated_at: meeting.starts_at,
+            });
+        }
+
+        for file in self.file_records() {
+            if !self.is_admin_principal(principal) && file.owner != principal {
+                continue;
+            }
+            let fields = vec![
+                file.filename.clone(),
+                file.content_type.clone(),
+                file.sha256.clone(),
+                file.dlp_status.clone(),
+            ];
+            if !collaboration_matches(&fields, &term) {
+                continue;
+            }
+            results.push(UnifiedSearchResult {
+                id: file.id.to_string(),
+                kind: "file".to_string(),
+                title: file.filename,
+                snippet: format!("{} - {} bytes", file.content_type, file.size),
+                source: file.owner,
+                url: None,
+                room_id: None,
+                team_id: None,
+                conference_id: None,
+                user_uri: None,
+                file_id: Some(file.id),
+                app_id: None,
+                score: 70,
+                updated_at: file.created_at,
+            });
+        }
+
+        for recording in self.discovery_recordings() {
+            if recording.deleted_at.is_some() {
+                continue;
+            }
+            if !self.is_admin_principal(principal) && !recording_visible_to(&recording, principal) {
+                continue;
+            }
+            let transcript_hit = recording.conference_id.is_some_and(|conference_id| {
+                self.get_transcript(conference_id).iter().any(|segment| {
+                    segment.text.to_ascii_lowercase().contains(&term)
+                        || segment.speaker_uri.to_ascii_lowercase().contains(&term)
+                        || segment.speaker_name.to_ascii_lowercase().contains(&term)
+                })
+            });
+            let fields = vec![
+                recording.call_id.clone().unwrap_or_default(),
+                recording.caller_uri.clone(),
+                recording.callee_uri.clone(),
+                recording.recorded_by.clone(),
+            ];
+            if !transcript_hit && !collaboration_matches(&fields, &term) {
+                continue;
+            }
+            results.push(UnifiedSearchResult {
+                id: recording.id.to_string(),
+                kind: "recording".to_string(),
+                title: recording
+                    .call_id
+                    .clone()
+                    .unwrap_or_else(|| "Call recording".to_string()),
+                snippet: format!("{} -> {}", recording.caller_uri, recording.callee_uri),
+                source: recording.recorded_by,
+                url: None,
+                room_id: None,
+                team_id: None,
+                conference_id: recording.conference_id,
+                user_uri: None,
+                file_id: recording.file_id,
+                app_id: None,
+                score: if transcript_hit { 72 } else { 62 },
+                updated_at: recording.created_at,
+            });
+        }
+
+        for app in self.list_app_catalog().into_iter().filter(|app| app.installed) {
+            let fields = vec![
+                app.name.clone(),
+                app.description.clone(),
+                app.category.clone(),
+                app.version.clone().unwrap_or_default(),
+            ];
+            if !collaboration_matches(&fields, &term) {
+                continue;
+            }
+            results.push(UnifiedSearchResult {
+                id: app.id.to_string(),
+                kind: "app".to_string(),
+                title: app.name,
+                snippet: app.description,
+                source: app.category,
+                url: app.manifest_url.clone(),
+                room_id: None,
+                team_id: None,
+                conference_id: None,
+                user_uri: None,
+                file_id: None,
+                app_id: Some(app.id),
+                score: 45,
+                updated_at: app.installed_at.unwrap_or(app.created_at),
+            });
+        }
+
+        results.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then(right.updated_at.cmp(&left.updated_at))
+        });
+        results.truncate(limit);
+        results
+    }
+
+    pub fn copilot_query(
+        &self,
+        principal: &str,
+        input: CreateCopilotQueryRequest,
+    ) -> Result<CopilotAnswer, String> {
+        let question = input.question.trim();
+        if question.is_empty() {
+            return Err("question is required".to_string());
+        }
+        let context_query = input
+            .context_query
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(question);
+        let limit = input.limit.unwrap_or(8).clamp(1, 12);
+        let results = self.unified_search(principal, context_query, limit);
+        let provider_configured = self.enterprise_capability_available("copilot");
+        let citations: Vec<_> = results
+            .iter()
+            .take(8)
+            .enumerate()
+            .map(|(index, result)| CopilotCitation {
+                index: index + 1,
+                result: result.clone(),
+            })
+            .collect();
+        let answer = grounded_copilot_answer(question, provider_configured, &citations);
+        Ok(CopilotAnswer {
+            question: question.to_string(),
+            generated_at: Utc::now(),
+            provider_configured,
+            grounded: !citations.is_empty(),
+            answer,
+            citations,
+            suggested_prompts: copilot_suggested_prompts(&results),
+            governance: vec![
+                "uses only content returned by governed enterprise search".to_string(),
+                "citations are limited to resources visible to the caller".to_string(),
+                "external LLM/RAG readiness is reported separately from local grounding".to_string(),
+            ],
+        })
+    }
+
     pub fn start_scheduled_meeting(&self, id: Uuid, user_sip_uri: &str) -> Option<RoomCallTarget> {
         let meeting = self.scheduled_meetings.get(&id)?;
         if meeting.status == MeetingStatus::Cancelled {
@@ -7448,7 +8958,10 @@ impl AppState {
         if let Some(card) = card_payload {
             msg.card_payload = Some(card);
             // Update the message in-place
-            let mut messages = self.room_messages.write().expect("room messages lock poisoned");
+            let mut messages = self
+                .room_messages
+                .write()
+                .expect("room messages lock poisoned");
             if let Some(existing) = messages.iter_mut().find(|m| m.id == msg.id) {
                 existing.card_payload = msg.card_payload.clone();
             }
@@ -7554,9 +9067,9 @@ impl AppState {
         for msg in &delivered {
             self.persist(msg);
             let msg_for_pg = msg.clone();
-            self.pg_spawn(
-                move |pg| Box::pin(async move { pg.insert_room_message(&msg_for_pg).await }),
-            );
+            self.pg_spawn(move |pg| {
+                Box::pin(async move { pg.insert_room_message(&msg_for_pg).await })
+            });
             let mut decrypted_msg = msg.clone();
             decrypted_msg.body = self.decrypt_field(&decrypted_msg.body);
             self.broadcast_sse(SseEvent {
@@ -7573,7 +9086,12 @@ impl AppState {
 
     // ─── Tags ───
 
-    pub fn create_tag(&self, team_id: Uuid, name: &str, members: Vec<String>) -> Result<Tag, String> {
+    pub fn create_tag(
+        &self,
+        team_id: Uuid,
+        name: &str,
+        members: Vec<String>,
+    ) -> Result<Tag, String> {
         // Check team exists
         if self.teams.get(&team_id).is_none() {
             return Err("team not found".to_string());
@@ -7629,14 +9147,20 @@ impl AppState {
 
     // ─── Notification Preferences ───
 
-    pub fn get_notification_preference(&self, room_id: Uuid, user_uri: &str) -> NotificationPreference {
+    pub fn get_notification_preference(
+        &self,
+        room_id: Uuid,
+        user_uri: &str,
+    ) -> NotificationPreference {
         let key = format!("{}:{}", room_id, user_uri);
-        self.notification_preferences.get(&key).unwrap_or(NotificationPreference {
-            room_id,
-            user_uri: user_uri.to_string(),
-            notification_level: "all".to_string(),
-            updated_at: Utc::now(),
-        })
+        self.notification_preferences
+            .get(&key)
+            .unwrap_or(NotificationPreference {
+                room_id,
+                user_uri: user_uri.to_string(),
+                notification_level: "all".to_string(),
+                updated_at: Utc::now(),
+            })
     }
 
     pub fn set_notification_preference(
@@ -8248,6 +9772,10 @@ impl AppState {
             .iter()
             .filter(|message| room_id.is_none_or(|id| message.room_id == id))
             .cloned()
+            .map(|mut message| {
+                message.body = self.decrypt_field(&message.body);
+                message
+            })
             .collect();
         DiscoveryExport {
             exported_at: Utc::now(),
@@ -8293,11 +9821,15 @@ impl AppState {
                 user.as_ref()
                     .is_none_or(|user| message.sender_uri.to_ascii_lowercase().contains(user))
             })
+            .cloned()
+            .map(|mut message| {
+                message.body = self.decrypt_field(&message.body);
+                message
+            })
             .filter(|message| {
                 term.as_ref()
                     .is_none_or(|term| message.body.to_ascii_lowercase().contains(term))
             })
-            .cloned()
             .collect();
         messages.sort_by(|left, right| right.created_at.cmp(&left.created_at));
         messages.truncate(limit);
@@ -8367,6 +9899,162 @@ impl AppState {
         DiscoveryExport {
             exported_at: Utc::now(),
             room_id: query.room_id,
+            messages,
+            files,
+            recordings,
+        }
+    }
+
+    pub fn list_ediscovery_cases(&self) -> Vec<EDiscoveryCase> {
+        let mut cases = self.ediscovery_cases.values();
+        cases.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        cases
+    }
+
+    pub fn create_ediscovery_case(
+        &self,
+        principal: &str,
+        input: CreateEDiscoveryCaseRequest,
+    ) -> Result<EDiscoveryCase, String> {
+        let name = input.name.trim();
+        if name.is_empty() {
+            return Err("case name is required".to_string());
+        }
+        let now = Utc::now();
+        let case = EDiscoveryCase {
+            id: Uuid::new_v4(),
+            name: name.chars().take(120).collect(),
+            description: input.description.trim().chars().take(1000).collect(),
+            status: EDiscoveryCaseStatus::Open,
+            custodians: normalized_case_custodians(input.custodians),
+            query: normalized_case_query(input.query),
+            created_by: principal.to_string(),
+            created_at: now,
+            updated_at: now,
+            last_exported_at: None,
+            last_exported_by: None,
+            last_export_count: 0,
+        };
+        self.ediscovery_cases.insert(case.id, case.clone());
+        self.persist(&case);
+        Ok(case)
+    }
+
+    pub fn update_ediscovery_case(
+        &self,
+        id: Uuid,
+        input: UpdateEDiscoveryCaseRequest,
+    ) -> Result<EDiscoveryCase, String> {
+        let updated = self
+            .ediscovery_cases
+            .with_write(&id, |cases| {
+                let case = cases.get_mut(&id)?;
+                if let Some(name) = input.name {
+                    let name = name.trim();
+                    if name.is_empty() {
+                        return None;
+                    }
+                    case.name = name.chars().take(120).collect();
+                }
+                if let Some(description) = input.description {
+                    case.description = description.trim().chars().take(1000).collect();
+                }
+                if let Some(status) = input.status {
+                    case.status = status;
+                }
+                if let Some(custodians) = input.custodians {
+                    case.custodians = normalized_case_custodians(custodians);
+                }
+                if let Some(query) = input.query {
+                    case.query = normalized_case_query(query);
+                }
+                case.updated_at = Utc::now();
+                Some(case.clone())
+            })
+            .ok_or_else(|| "case not found or invalid".to_string())?;
+        self.persist(&updated);
+        Ok(updated)
+    }
+
+    pub fn delete_ediscovery_case(&self, id: Uuid) -> bool {
+        if self.ediscovery_cases.remove(&id).is_some() {
+            self.delete_persisted(EDiscoveryCase::collection(), id.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn export_ediscovery_case(
+        &self,
+        id: Uuid,
+        principal: &str,
+    ) -> Result<DiscoveryExport, String> {
+        let case = self
+            .ediscovery_cases
+            .get(&id)
+            .ok_or_else(|| "case not found".to_string())?;
+        let export = self.discovery_case_export(&case);
+        let count = export.messages.len() + export.files.len() + export.recordings.len();
+        let updated = self
+            .ediscovery_cases
+            .with_write(&id, |cases| {
+                let case = cases.get_mut(&id)?;
+                case.last_exported_at = Some(export.exported_at);
+                case.last_exported_by = Some(principal.to_string());
+                case.last_export_count = count;
+                case.updated_at = Utc::now();
+                Some(case.clone())
+            })
+            .ok_or_else(|| "case not found".to_string())?;
+        self.persist(&updated);
+        Ok(export)
+    }
+
+    fn discovery_case_export(&self, case: &EDiscoveryCase) -> DiscoveryExport {
+        if case.custodians.len() <= 1 || case.query.user_uri.is_some() {
+            return self.discovery_search(case.to_discovery_query());
+        }
+
+        let mut messages: HashMap<Uuid, RoomMessage> = HashMap::new();
+        let mut files: HashMap<Uuid, FileDiscoveryRecord> = HashMap::new();
+        let mut recordings: HashMap<Uuid, CallRecording> = HashMap::new();
+        for custodian in &case.custodians {
+            let mut query = case.query.clone();
+            query.user_uri = Some(custodian.clone());
+            let export = self.discovery_search(DiscoverySearchQuery {
+                q: query.q,
+                user_uri: query.user_uri,
+                room_id: query.room_id,
+                from: query.from,
+                to: query.to,
+                limit: query.limit,
+            });
+            for message in export.messages {
+                messages.insert(message.id, message);
+            }
+            for file in export.files {
+                files.insert(file.id, file);
+            }
+            for recording in export.recordings {
+                recordings.insert(recording.id, recording);
+            }
+        }
+
+        let mut messages: Vec<_> = messages.into_values().collect();
+        messages.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        let mut files: Vec<_> = files.into_values().collect();
+        files.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        let mut recordings: Vec<_> = recordings.into_values().collect();
+        recordings.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        let limit = case.query.limit.unwrap_or(250).clamp(1, 1000);
+        messages.truncate(limit);
+        files.truncate(limit);
+        recordings.truncate(limit);
+
+        DiscoveryExport {
+            exported_at: Utc::now(),
+            room_id: case.query.room_id,
             messages,
             files,
             recordings,
@@ -8939,7 +10627,11 @@ impl AppState {
 
     // ─── OAuth API Clients ───
 
-    pub fn create_api_client(&self, input: CreateApiClientRequest, principal: &str) -> CreateApiClientResponse {
+    pub fn create_api_client(
+        &self,
+        input: CreateApiClientRequest,
+        principal: &str,
+    ) -> CreateApiClientResponse {
         let raw_id = Uuid::new_v4().to_string();
         let raw_secret = Uuid::new_v4().to_string();
         let client = ApiClient {
@@ -8953,7 +10645,10 @@ impl AppState {
             created_at: Utc::now(),
         };
         self.api_clients.insert(client.id, client.clone());
-        CreateApiClientResponse { client, client_secret: raw_secret }
+        CreateApiClientResponse {
+            client,
+            client_secret: raw_secret,
+        }
     }
 
     pub fn list_api_clients(&self) -> Vec<ApiClient> {
@@ -8962,7 +10657,10 @@ impl AppState {
 
     pub fn delete_api_client(&self, id: Uuid) -> bool {
         // Remove associated tokens
-        let token_ids: Vec<Uuid> = self.api_tokens.values().into_iter()
+        let token_ids: Vec<Uuid> = self
+            .api_tokens
+            .values()
+            .into_iter()
             .filter(|t| t.client_id == id)
             .map(|t| t.id)
             .collect();
@@ -8973,7 +10671,10 @@ impl AppState {
     }
 
     pub fn api_client_by_client_id(&self, client_id: &str) -> Option<ApiClient> {
-        self.api_clients.values().into_iter().find(|c| c.client_id == client_id)
+        self.api_clients
+            .values()
+            .into_iter()
+            .find(|c| c.client_id == client_id)
     }
 
     pub fn create_oauth_token(&self, input: OAuthTokenRequest) -> Option<OAuthTokenResponse> {
@@ -8983,7 +10684,9 @@ impl AppState {
         }
         match input.grant_type.as_str() {
             "client_credentials" => {
-                let scopes = input.scope.map(|s| s.split_whitespace().map(String::from).collect::<Vec<_>>())
+                let scopes = input
+                    .scope
+                    .map(|s| s.split_whitespace().map(String::from).collect::<Vec<_>>())
                     .unwrap_or_else(|| client.scopes.clone());
                 let raw_token = Uuid::new_v4().to_string();
                 let token = ApiToken {
@@ -9032,10 +10735,18 @@ impl AppState {
     pub fn update_bot(&self, id: Uuid, input: UpdateBotRequest) -> Option<Bot> {
         self.bots.with_write(&id, |bots| {
             let bot = bots.get_mut(&id)?;
-            if let Some(name) = input.name { bot.name = name; }
-            if let Some(url) = input.webhook_url { bot.webhook_url = url; }
-            if let Some(events) = input.events { bot.events = events; }
-            if let Some(enabled) = input.enabled { bot.enabled = enabled; }
+            if let Some(name) = input.name {
+                bot.name = name;
+            }
+            if let Some(url) = input.webhook_url {
+                bot.webhook_url = url;
+            }
+            if let Some(events) = input.events {
+                bot.events = events;
+            }
+            if let Some(enabled) = input.enabled {
+                bot.enabled = enabled;
+            }
             Some(bot.clone())
         })
     }
@@ -9045,11 +10756,17 @@ impl AppState {
     }
 
     pub fn bot_by_token(&self, token: &str) -> Option<Bot> {
-        self.bots.values().into_iter().find(|b| b.api_token == token && b.enabled)
+        self.bots
+            .values()
+            .into_iter()
+            .find(|b| b.api_token == token && b.enabled)
     }
 
     pub fn fire_bot_event(&self, event_type: &str, payload: serde_json::Value) {
-        let bots: Vec<Bot> = self.bots.values().into_iter()
+        let bots: Vec<Bot> = self
+            .bots
+            .values()
+            .into_iter()
             .filter(|b| b.enabled && b.events.iter().any(|e| e == event_type || e == "*"))
             .collect();
         for bot in bots {
@@ -9058,7 +10775,8 @@ impl AppState {
             let event = event_type.to_string();
             tokio::spawn(async move {
                 let client = reqwest::Client::new();
-                let _ = client.post(&url)
+                let _ = client
+                    .post(&url)
                     .json(&serde_json::json!({ "event": event, "data": payload }))
                     .timeout(std::time::Duration::from_secs(10))
                     .send()
@@ -9069,7 +10787,11 @@ impl AppState {
 
     // ─── Calendar Integration ───
 
-    pub fn create_calendar_integration(&self, user_uri: &str, input: CreateCalendarIntegrationRequest) -> CalendarIntegration {
+    pub fn create_calendar_integration(
+        &self,
+        user_uri: &str,
+        input: CreateCalendarIntegrationRequest,
+    ) -> CalendarIntegration {
         let integration = CalendarIntegration {
             id: Uuid::new_v4(),
             user_uri: user_uri.to_string(),
@@ -9080,12 +10802,15 @@ impl AppState {
             enabled: true,
             last_sync: None,
         };
-        self.calendar_integrations.insert(integration.id, integration.clone());
+        self.calendar_integrations
+            .insert(integration.id, integration.clone());
         integration
     }
 
     pub fn list_calendar_integrations(&self, user_uri: &str) -> Vec<CalendarIntegration> {
-        self.calendar_integrations.values().into_iter()
+        self.calendar_integrations
+            .values()
+            .into_iter()
             .filter(|c| c.user_uri == user_uri)
             .collect()
     }
@@ -9097,7 +10822,8 @@ impl AppState {
     pub fn calendar_events(&self, user_uri: &str) -> Vec<CalendarEvent> {
         // Return local meetings as calendar events
         let meetings = self.scheduled_meetings.values();
-        meetings.into_iter()
+        meetings
+            .into_iter()
             .filter(|m| m.organizer_uri == user_uri || m.participants.iter().any(|p| p == user_uri))
             .map(|m| CalendarEvent {
                 id: m.id.to_string(),
@@ -9111,7 +10837,11 @@ impl AppState {
 
     // ─── Contact Sync ───
 
-    pub fn create_contact_sync(&self, user_uri: &str, input: CreateContactSyncRequest) -> ContactSyncConfig {
+    pub fn create_contact_sync(
+        &self,
+        user_uri: &str,
+        input: CreateContactSyncRequest,
+    ) -> ContactSyncConfig {
         let config = ContactSyncConfig {
             id: Uuid::new_v4(),
             user_uri: user_uri.to_string(),
@@ -9125,7 +10855,9 @@ impl AppState {
     }
 
     pub fn list_contact_sync_configs(&self, user_uri: &str) -> Vec<ContactSyncConfig> {
-        self.contact_sync_configs.values().into_iter()
+        self.contact_sync_configs
+            .values()
+            .into_iter()
             .filter(|c| c.user_uri == user_uri)
             .collect()
     }
@@ -9135,7 +10867,9 @@ impl AppState {
     }
 
     pub fn list_contacts_merged(&self, user_uri: &str) -> Vec<SyncedContact> {
-        self.synced_contacts.values().into_iter()
+        self.synced_contacts
+            .values()
+            .into_iter()
             .filter(|c| c.user_uri == user_uri)
             .collect()
     }
@@ -9165,11 +10899,21 @@ impl AppState {
     pub fn update_connector(&self, id: Uuid, input: UpdateConnectorRequest) -> Option<Connector> {
         self.connectors.with_write(&id, |connectors| {
             let c = connectors.get_mut(&id)?;
-            if let Some(name) = input.name { c.name = name; }
-            if let Some(url) = input.webhook_url { c.webhook_url = url; }
-            if let Some(events) = input.events { c.events = events; }
-            if let Some(auth) = input.auth_header { c.auth_header = Some(auth); }
-            if let Some(enabled) = input.enabled { c.enabled = enabled; }
+            if let Some(name) = input.name {
+                c.name = name;
+            }
+            if let Some(url) = input.webhook_url {
+                c.webhook_url = url;
+            }
+            if let Some(events) = input.events {
+                c.events = events;
+            }
+            if let Some(auth) = input.auth_header {
+                c.auth_header = Some(auth);
+            }
+            if let Some(enabled) = input.enabled {
+                c.enabled = enabled;
+            }
             Some(c.clone())
         })
     }
@@ -9179,7 +10923,10 @@ impl AppState {
     }
 
     pub fn fire_connector_event(&self, event_type: &str, payload: serde_json::Value) {
-        let connectors: Vec<Connector> = self.connectors.values().into_iter()
+        let connectors: Vec<Connector> = self
+            .connectors
+            .values()
+            .into_iter()
             .filter(|c| c.enabled && c.events.iter().any(|e| e == event_type || e == "*"))
             .collect();
         for connector in connectors {
@@ -9189,7 +10936,8 @@ impl AppState {
             let event = event_type.to_string();
             tokio::spawn(async move {
                 let client = reqwest::Client::new();
-                let mut req = client.post(&url)
+                let mut req = client
+                    .post(&url)
                     .json(&serde_json::json!({ "event": event, "data": payload }))
                     .timeout(std::time::Duration::from_secs(10));
                 if let Some(header) = auth {
@@ -9541,6 +11289,41 @@ pub struct CallRecording {
     pub deleted_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub deleted_by: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptionJobStatus {
+    Blocked,
+    Queued,
+    Processing,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptionJob {
+    pub id: Uuid,
+    pub recording_id: Uuid,
+    pub conference_id: Option<Uuid>,
+    pub status: TranscriptionJobStatus,
+    pub language: Option<String>,
+    pub provider_configured: bool,
+    pub requested_by: String,
+    pub error: Option<String>,
+    pub transcript_segment_count: usize,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateTranscriptionJobRequest {
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompleteTranscriptionJobRequest {
+    pub segments: Vec<PostTranscriptRequest>,
 }
 
 // ─── Group Chat Rooms ───
@@ -9897,6 +11680,106 @@ pub struct DiscoverySearchQuery {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EDiscoveryCase {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub status: EDiscoveryCaseStatus,
+    pub custodians: Vec<String>,
+    pub query: EDiscoveryCaseQuery,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_exported_at: Option<DateTime<Utc>>,
+    pub last_exported_by: Option<String>,
+    pub last_export_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EDiscoveryCaseStatus {
+    Open,
+    OnHold,
+    Closed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EDiscoveryCaseQuery {
+    pub q: Option<String>,
+    pub user_uri: Option<String>,
+    pub room_id: Option<Uuid>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateEDiscoveryCaseRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub custodians: Vec<String>,
+    #[serde(default)]
+    pub query: EDiscoveryCaseQuery,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateEDiscoveryCaseRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub status: Option<EDiscoveryCaseStatus>,
+    pub custodians: Option<Vec<String>>,
+    pub query: Option<EDiscoveryCaseQuery>,
+}
+
+impl EDiscoveryCase {
+    fn to_discovery_query(&self) -> DiscoverySearchQuery {
+        let user_uri = if self.query.user_uri.is_some() {
+            self.query.user_uri.clone()
+        } else if self.custodians.len() == 1 {
+            self.custodians.first().cloned()
+        } else {
+            None
+        };
+        let q = if self.custodians.len() > 1 && self.query.q.is_none() {
+            Some(self.custodians.join(" "))
+        } else {
+            self.query.q.clone()
+        };
+        DiscoverySearchQuery {
+            q,
+            user_uri,
+            room_id: self.query.room_id,
+            from: self.query.from,
+            to: self.query.to,
+            limit: self.query.limit,
+        }
+    }
+}
+
+fn normalized_case_custodians(custodians: Vec<String>) -> Vec<String> {
+    let mut custodians: Vec<_> = custodians
+        .into_iter()
+        .map(|custodian| custodian.trim().to_string())
+        .filter(|custodian| !custodian.is_empty())
+        .collect();
+    custodians.sort();
+    custodians.dedup();
+    custodians
+}
+
+fn normalized_case_query(mut query: EDiscoveryCaseQuery) -> EDiscoveryCaseQuery {
+    query.q = query.q.map(|value| value.trim().chars().take(240).collect()).filter(|value: &String| !value.is_empty());
+    query.user_uri = query
+        .user_uri
+        .map(|value| value.trim().chars().take(160).collect())
+        .filter(|value: &String| !value.is_empty());
+    query.limit = Some(query.limit.unwrap_or(250).clamp(1, 1000));
+    query
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetentionEnforcementResult {
     pub evaluated_at: DateTime<Utc>,
     pub dry_run: bool,
@@ -10183,6 +12066,200 @@ pub struct SearchResult {
     pub room_id: Option<Uuid>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnifiedSearchResult {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub snippet: String,
+    pub source: String,
+    pub url: Option<String>,
+    pub room_id: Option<Uuid>,
+    pub team_id: Option<Uuid>,
+    pub conference_id: Option<Uuid>,
+    pub user_uri: Option<String>,
+    pub file_id: Option<Uuid>,
+    pub app_id: Option<Uuid>,
+    pub score: i32,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateCopilotQueryRequest {
+    pub question: String,
+    #[serde(default)]
+    pub context_query: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CopilotCitation {
+    pub index: usize,
+    pub result: UnifiedSearchResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CopilotAnswer {
+    pub question: String,
+    pub generated_at: DateTime<Utc>,
+    pub provider_configured: bool,
+    pub grounded: bool,
+    pub answer: String,
+    pub citations: Vec<CopilotCitation>,
+    pub suggested_prompts: Vec<String>,
+    pub governance: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiProviderStatus {
+    pub kind: String,
+    pub configured: bool,
+    pub integration_ids: Vec<String>,
+    pub endpoint_url: Option<String>,
+    pub admin_url: Option<String>,
+    pub api_key_configured: bool,
+    pub supported_protocols: Vec<String>,
+    pub open_source_options: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateAiProviderRequest {
+    pub enabled: Option<bool>,
+    pub endpoint_url: Option<String>,
+    pub admin_url: Option<String>,
+    pub api_key: Option<String>,
+    pub clear_api_key: Option<bool>,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiProviderDispatch {
+    pub kind: String,
+    pub provider_configured: bool,
+    pub endpoint_url: Option<String>,
+    pub status: String,
+    pub payload: serde_json::Value,
+    pub warnings: Vec<String>,
+    pub governance: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LlmChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LlmChatRequest {
+    pub messages: Vec<LlmChatMessage>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SttTranscriptionRequest {
+    #[serde(default)]
+    pub recording_id: Option<Uuid>,
+    #[serde(default)]
+    pub file_id: Option<Uuid>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub diarization: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TtsSynthesisRequest {
+    pub text: String,
+    #[serde(default)]
+    pub voice: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+fn grounded_copilot_answer(
+    question: &str,
+    provider_configured: bool,
+    citations: &[CopilotCitation],
+) -> String {
+    if citations.is_empty() {
+        return if provider_configured {
+            "I could not find visible workspace content that answers this. Try a more specific project, channel, meeting, file, or person name.".to_string()
+        } else {
+            "I could not find visible workspace content that answers this. The Copilot provider is not configured, so I cannot use external reasoning or retrieval beyond governed local search.".to_string()
+        };
+    }
+
+    let mut by_kind: HashMap<String, usize> = HashMap::new();
+    for citation in citations {
+        *by_kind.entry(citation.result.kind.clone()).or_default() += 1;
+    }
+    let mut kinds: Vec<_> = by_kind.into_iter().collect();
+    kinds.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
+    let scope = kinds
+        .into_iter()
+        .map(|(kind, count)| format!("{count} {kind}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut lines = Vec::new();
+    if provider_configured {
+        lines.push(format!(
+            "Based on visible workspace content for \"{question}\", I found {scope}."
+        ));
+    } else {
+        lines.push(format!(
+            "Based on visible workspace content for \"{question}\", I found {scope}. The Copilot provider is not configured, so this is a local grounded answer."
+        ));
+    }
+    for citation in citations.iter().take(5) {
+        lines.push(format!(
+            "[{}] {}: {}",
+            citation.index,
+            citation.result.title,
+            concise_snippet(&citation.result.snippet, 180)
+        ));
+    }
+    lines.join("\n")
+}
+
+fn concise_snippet(value: &str, max_chars: usize) -> String {
+    let trimmed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if trimmed.chars().count() <= max_chars {
+        trimmed
+    } else {
+        let mut snippet: String = trimmed.chars().take(max_chars).collect();
+        snippet.push_str("...");
+        snippet
+    }
+}
+
+fn copilot_suggested_prompts(results: &[UnifiedSearchResult]) -> Vec<String> {
+    let mut prompts = Vec::new();
+    if results.iter().any(|result| result.kind == "meeting" || result.kind == "recording") {
+        prompts.push("Summarize the latest meeting context and open follow-ups.".to_string());
+    }
+    if results.iter().any(|result| result.kind == "file") {
+        prompts.push("Show the files that support this answer.".to_string());
+    }
+    if results.iter().any(|result| result.kind == "message" || result.kind == "channel") {
+        prompts.push("Find the decision trail in chat.".to_string());
+    }
+    if prompts.is_empty() {
+        prompts.push("Search for related people, meetings, and files.".to_string());
+    }
+    prompts.truncate(3);
+    prompts
+}
+
 #[derive(Debug, Clone)]
 pub struct StoreSipTransaction {
     pub method: String,
@@ -10294,6 +12371,7 @@ pub struct JoinConferenceRequest {
 pub enum JoinConferenceError {
     NotFound,
     Locked,
+    CapacityReached,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -10368,6 +12446,126 @@ pub struct MediaConfig {
     pub stun_servers: Vec<String>,
     pub stun_ignore_failure: bool,
     pub turn: Option<TurnConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeetingMediaSettings {
+    pub user_uri: String,
+    pub echo_cancellation: bool,
+    pub noise_suppression: bool,
+    pub auto_gain: bool,
+    pub background_mode: String,
+    pub background_image_url: Option<String>,
+    pub noise_suppression_configured: bool,
+    pub virtual_backgrounds_configured: bool,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateMeetingMediaSettingsRequest {
+    pub echo_cancellation: Option<bool>,
+    pub noise_suppression: Option<bool>,
+    pub auto_gain: Option<bool>,
+    pub background_mode: Option<String>,
+    pub background_image_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConferenceLayoutState {
+    pub conference_id: Uuid,
+    pub mode: String,
+    pub max_visible: usize,
+    pub together_scene: Option<String>,
+    pub stage_participant_ids: Vec<Uuid>,
+    pub sfu_layout_configured: bool,
+    #[serde(default)]
+    pub gallery_capacity: usize,
+    #[serde(default = "default_true")]
+    pub together_scene_supported: bool,
+    #[serde(default)]
+    pub layout_blockers: Vec<String>,
+    pub updated_by: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateConferenceLayoutRequest {
+    pub mode: Option<String>,
+    pub max_visible: Option<usize>,
+    pub together_scene: Option<String>,
+    pub stage_participant_ids: Option<Vec<Uuid>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamTargetKind {
+    Rtmp,
+    Ndi,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamStatus {
+    Pending,
+    Live,
+    Stopped,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeetingStreamSession {
+    pub id: Uuid,
+    pub conference_id: Uuid,
+    pub target_kind: StreamTargetKind,
+    pub name: String,
+    pub destination: String,
+    pub status: StreamStatus,
+    pub started_by: String,
+    pub started_at: DateTime<Utc>,
+    pub stopped_at: Option<DateTime<Utc>>,
+    pub health: String,
+    pub gateway_configured: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateMeetingStreamRequest {
+    pub target_kind: StreamTargetKind,
+    pub name: String,
+    pub destination: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TownHallConfig {
+    pub conference_id: Uuid,
+    pub enabled: bool,
+    pub max_viewers: usize,
+    pub registration_required: bool,
+    pub presenter_only_video: bool,
+    pub attendee_mic_disabled: bool,
+    pub qna_moderation_required: bool,
+    pub overflow_url: Option<String>,
+    pub broadcast_provider_configured: bool,
+    #[serde(default)]
+    pub broadcast_capacity: usize,
+    #[serde(default)]
+    pub attendee_mode: String,
+    #[serde(default)]
+    pub broadcast_ready: bool,
+    #[serde(default)]
+    pub broadcast_blockers: Vec<String>,
+    pub updated_by: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateTownHallConfigRequest {
+    pub enabled: Option<bool>,
+    pub max_viewers: Option<usize>,
+    pub registration_required: Option<bool>,
+    pub presenter_only_video: Option<bool>,
+    pub attendee_mic_disabled: Option<bool>,
+    pub qna_moderation_required: Option<bool>,
+    pub overflow_url: Option<String>,
 }
 
 impl Default for MediaConfig {
@@ -10558,6 +12756,55 @@ pub struct CreateBreakoutRoomInput {
     pub participants: Vec<String>,
 }
 
+// ── PowerPoint Live / presentation sessions ───────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PresentationSlide {
+    pub index: usize,
+    pub title: String,
+    pub notes: Option<String>,
+    pub render_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PresentationSession {
+    pub id: Uuid,
+    pub conference_id: Uuid,
+    pub title: String,
+    pub source_file_id: Option<Uuid>,
+    pub presenter_uri: String,
+    pub slides: Vec<PresentationSlide>,
+    pub current_slide: usize,
+    pub attendee_navigation_enabled: bool,
+    pub renderer_configured: bool,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreatePresentationSessionRequest {
+    pub title: String,
+    pub source_file_id: Option<Uuid>,
+    pub slides: Vec<CreatePresentationSlideRequest>,
+    #[serde(default)]
+    pub attendee_navigation_enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreatePresentationSlideRequest {
+    pub title: String,
+    pub notes: Option<String>,
+    pub render_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdatePresentationSessionRequest {
+    pub current_slide: Option<usize>,
+    pub attendee_navigation_enabled: Option<bool>,
+    pub presenter_uri: Option<String>,
+}
+
 // ── Live captions / transcription ──────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10594,6 +12841,37 @@ pub struct TranscriptExport {
     pub title: String,
     pub segments: Vec<TranscriptSegment>,
     pub exported_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeetingAssistantReport {
+    pub conference_id: Uuid,
+    pub title: String,
+    pub generated_at: DateTime<Utc>,
+    pub transcript_segments: usize,
+    pub ai_provider_configured: bool,
+    pub summary: String,
+    pub key_topics: Vec<String>,
+    pub action_items: Vec<MeetingActionItem>,
+    pub decisions: Vec<String>,
+    pub risks: Vec<String>,
+    pub open_questions: Vec<String>,
+    pub speaker_stats: Vec<MeetingSpeakerStat>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeetingActionItem {
+    pub owner: Option<String>,
+    pub text: String,
+    pub source_segment_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeetingSpeakerStat {
+    pub speaker_uri: String,
+    pub speaker_name: String,
+    pub segments: usize,
+    pub words: usize,
 }
 
 // ── Call quality metrics (CQD) ─────────────────────────────────────
@@ -11050,6 +13328,84 @@ pub struct UsageAnalytics {
     pub online_users: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SecurityPostureReport {
+    pub score: u32,
+    pub max_score: u32,
+    pub posture: String,
+    pub generated_at: DateTime<Utc>,
+    pub controls: Vec<SecurityPostureControl>,
+    pub recommendations: Vec<SecurityPostureRecommendation>,
+    pub counts: SecurityPostureCounts,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SecurityPostureControl {
+    pub id: String,
+    pub category: String,
+    pub title: String,
+    pub status: String,
+    pub score: u32,
+    pub max_score: u32,
+    pub summary: String,
+    pub remediation: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SecurityPostureRecommendation {
+    pub control_id: String,
+    pub priority: String,
+    pub title: String,
+    pub action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SecurityPostureCounts {
+    pub active_users: usize,
+    pub mfa_enabled_users: usize,
+    pub enabled_sso_providers: usize,
+    pub enabled_conditional_access_policies: usize,
+    pub enabled_dlp_policies: usize,
+    pub retention_policies: usize,
+    pub legal_hold_policies: usize,
+    pub enabled_information_barriers: usize,
+    pub sensitivity_labels: usize,
+    pub encryption_keys: usize,
+    pub enabled_data_residency_regions: usize,
+    pub audit_events: usize,
+    pub pending_compliance_reviews: usize,
+}
+
+fn push_security_control(
+    controls: &mut Vec<SecurityPostureControl>,
+    id: &str,
+    category: &str,
+    title: &str,
+    passed: bool,
+    score: u32,
+    max_score: u32,
+    summary: String,
+    remediation: &str,
+) {
+    controls.push(SecurityPostureControl {
+        id: id.to_string(),
+        category: category.to_string(),
+        title: title.to_string(),
+        status: if passed {
+            "pass"
+        } else if score > 0 {
+            "warning"
+        } else {
+            "fail"
+        }
+        .to_string(),
+        score,
+        max_score,
+        summary,
+        remediation: remediation.to_string(),
+    });
+}
+
 // ── Meeting templates ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11231,6 +13587,19 @@ fn default_dlp_status() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloudStorageStatus {
+    pub provider_configured: bool,
+    pub provider_name: String,
+    pub open_source_options: Vec<String>,
+    pub endpoint_url: Option<String>,
+    pub admin_url: Option<String>,
+    pub sync_mode: String,
+    pub local_file_count: usize,
+    pub total_storage_bytes: u64,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileDiscoveryRecord {
     pub id: Uuid,
     pub owner: String,
@@ -11252,6 +13621,43 @@ pub struct FileGovernanceDecision {
     pub dlp_status: String,
     pub dlp_violation_count: usize,
     pub legal_hold: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MalwareQuarantineStatus {
+    Quarantined,
+    Released,
+    Deleted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MalwareQuarantineItem {
+    pub id: Uuid,
+    pub owner: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size: u64,
+    pub sha256: String,
+    pub reason: String,
+    pub status: MalwareQuarantineStatus,
+    pub detected_at: DateTime<Utc>,
+    pub reviewed_by: Option<String>,
+    pub reviewed_at: Option<DateTime<Utc>>,
+    pub review_notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReviewMalwareQuarantineRequest {
+    pub status: MalwareQuarantineStatus,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CasbAccessDecision {
+    pub allowed: bool,
+    pub enforced: bool,
+    pub reason: String,
 }
 
 // ─── File Versioning ───
@@ -11974,7 +14380,8 @@ impl AppState {
             enabled: req.enabled.unwrap_or(true),
             created_at: Utc::now(),
         };
-        self.conditional_access_policies.insert(policy.id, policy.clone());
+        self.conditional_access_policies
+            .insert(policy.id, policy.clone());
         policy
     }
 
@@ -11984,10 +14391,18 @@ impl AppState {
         req: UpdateConditionalAccessPolicyRequest,
     ) -> Option<ConditionalAccessPolicy> {
         let mut policy = self.conditional_access_policies.get(&id)?;
-        if let Some(name) = req.name { policy.name = name; }
-        if let Some(conditions) = req.conditions { policy.conditions = conditions; }
-        if let Some(actions) = req.actions { policy.actions = actions; }
-        if let Some(enabled) = req.enabled { policy.enabled = enabled; }
+        if let Some(name) = req.name {
+            policy.name = name;
+        }
+        if let Some(conditions) = req.conditions {
+            policy.conditions = conditions;
+        }
+        if let Some(actions) = req.actions {
+            policy.actions = actions;
+        }
+        if let Some(enabled) = req.enabled {
+            policy.enabled = enabled;
+        }
         self.conditional_access_policies.insert(id, policy.clone());
         Some(policy)
     }
@@ -12004,25 +14419,46 @@ impl AppState {
         user_groups: &[String],
     ) -> ConditionalAccessActions {
         let policies = self.list_conditional_access_policies();
-        let mut result = ConditionalAccessActions { allow: true, block: false, require_mfa: false };
+        let mut result = ConditionalAccessActions {
+            allow: true,
+            block: false,
+            require_mfa: false,
+        };
 
         for policy in policies.iter().filter(|p| p.enabled) {
             let ip_match = policy.conditions.ip_ranges.is_empty()
-                || policy.conditions.ip_ranges.iter().any(|r| ip_address.starts_with(r));
+                || policy
+                    .conditions
+                    .ip_ranges
+                    .iter()
+                    .any(|r| ip_address.starts_with(r));
             let device_match = policy.conditions.device_types.is_empty()
-                || policy.conditions.device_types.contains(&device_type.to_string());
+                || policy
+                    .conditions
+                    .device_types
+                    .contains(&device_type.to_string());
             let group_match = policy.conditions.user_groups.is_empty()
-                || policy.conditions.user_groups.iter().any(|g| user_groups.contains(g));
+                || policy
+                    .conditions
+                    .user_groups
+                    .iter()
+                    .any(|g| user_groups.contains(g));
 
             if ip_match && device_match && group_match {
-                if policy.actions.block { result.block = true; result.allow = false; }
-                if policy.actions.require_mfa { result.require_mfa = true; }
-                if !policy.actions.allow && !policy.actions.block { result.allow = false; }
+                if policy.actions.block {
+                    result.block = true;
+                    result.allow = false;
+                }
+                if policy.actions.require_mfa {
+                    result.require_mfa = true;
+                }
+                if !policy.actions.allow && !policy.actions.block {
+                    result.allow = false;
+                }
             }
         }
         result
     }
-
 
     // ─── Webinar Registrations ───
 
@@ -12034,7 +14470,9 @@ impl AppState {
         let conf = self.conferences.get(&conference_id)?;
         // Check max_registrations
         if let Some(max) = conf.max_registrations {
-            let current = self.webinar_registrations.values()
+            let current = self
+                .webinar_registrations
+                .values()
                 .iter()
                 .filter(|r| r.conference_id == conference_id)
                 .count();
@@ -12066,7 +14504,8 @@ impl AppState {
     }
 
     pub fn list_webinar_registrations(&self, conference_id: Uuid) -> Vec<WebinarRegistration> {
-        self.webinar_registrations.values()
+        self.webinar_registrations
+            .values()
             .into_iter()
             .filter(|r| r.conference_id == conference_id)
             .collect()
@@ -12079,7 +14518,9 @@ impl AppState {
         req: UpdateRegistrationRequest,
     ) -> Option<WebinarRegistration> {
         let mut reg = self.webinar_registrations.get(&reg_id)?;
-        if let Some(status) = req.status { reg.status = status; }
+        if let Some(status) = req.status {
+            reg.status = status;
+        }
         self.webinar_registrations.insert(reg_id, reg.clone());
         Some(reg)
     }
@@ -12117,7 +14558,10 @@ impl AppState {
     }
 
     pub fn list_cnam_providers(&self) -> Vec<CnamProviderConfig> {
-        self.cnam_providers.read().expect("cnam_providers lock").clone()
+        self.cnam_providers
+            .read()
+            .expect("cnam_providers lock")
+            .clone()
     }
 
     // ─── SIP Gateways ───
@@ -12129,8 +14573,11 @@ impl AppState {
             host: req.host,
             port: req.port.unwrap_or(5060),
             transport: req.transport.unwrap_or_else(|| "udp".to_string()),
-            username: req.username,
-            password_enc: req.password,
+            username: req.username.and_then(non_empty_string),
+            password_enc: req
+                .password
+                .and_then(non_empty_string)
+                .map(|password| self.encrypt_field(&password)),
             prefix: req.prefix.unwrap_or_default(),
             enabled: req.enabled.unwrap_or(true),
             created_at: Utc::now(),
@@ -12145,16 +14592,92 @@ impl AppState {
         gws
     }
 
+    pub fn pstn_operator_connect_status(&self) -> PstnOperatorConnectStatus {
+        let provider_available = self.enterprise_capability_available("pstn_sbc_operator_connect");
+        let gateways = self.list_sip_gateways();
+        let enabled_gateways: Vec<_> = gateways.iter().filter(|gateway| gateway.enabled).collect();
+        let location_routes = self.list_location_routing_rules();
+        let enabled_location_route_count = location_routes.iter().filter(|rule| rule.enabled).count();
+        let e164_prefix_route_count = enabled_gateways
+            .iter()
+            .filter(|gateway| gateway.prefix.starts_with('+'))
+            .count();
+        let tls_gateway_count = enabled_gateways
+            .iter()
+            .filter(|gateway| gateway.transport.eq_ignore_ascii_case("tls"))
+            .count();
+        let authenticated_gateway_count = enabled_gateways
+            .iter()
+            .filter(|gateway| {
+                gateway
+                    .username
+                    .as_ref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    && gateway.password_enc.is_some()
+            })
+            .count();
+        let emergency_route_ready = provider_available
+            && enabled_gateways
+                .iter()
+                .any(|gateway| gateway.prefix.is_empty() || gateway.prefix == "911" || gateway.prefix == "+");
+        let routable = provider_available && !enabled_gateways.is_empty() && e164_prefix_route_count > 0;
+        let mut blockers = Vec::new();
+        if !provider_available {
+            blockers.push("pstn_provider_not_configured".to_string());
+        }
+        if enabled_gateways.is_empty() {
+            blockers.push("no_enabled_sip_gateway".to_string());
+        }
+        if e164_prefix_route_count == 0 {
+            blockers.push("no_e164_prefix_route".to_string());
+        }
+        if tls_gateway_count == 0 {
+            blockers.push("no_tls_gateway".to_string());
+        }
+        if !emergency_route_ready {
+            blockers.push("emergency_route_not_ready".to_string());
+        }
+
+        PstnOperatorConnectStatus {
+            provider_available,
+            routable,
+            gateway_count: gateways.len(),
+            enabled_gateway_count: enabled_gateways.len(),
+            tls_gateway_count,
+            authenticated_gateway_count,
+            e164_prefix_route_count,
+            enabled_location_route_count,
+            emergency_route_ready,
+            blockers,
+        }
+    }
+
     pub fn update_sip_gateway(&self, id: Uuid, req: UpdateSipGatewayRequest) -> Option<SipGateway> {
         let mut gw = self.sip_gateways.get(&id)?;
-        if let Some(name) = req.name { gw.name = name; }
-        if let Some(host) = req.host { gw.host = host; }
-        if let Some(port) = req.port { gw.port = port; }
-        if let Some(transport) = req.transport { gw.transport = transport; }
-        if let Some(username) = req.username { gw.username = Some(username); }
-        if let Some(password) = req.password { gw.password_enc = Some(password); }
-        if let Some(prefix) = req.prefix { gw.prefix = prefix; }
-        if let Some(enabled) = req.enabled { gw.enabled = enabled; }
+        if let Some(name) = req.name {
+            gw.name = name;
+        }
+        if let Some(host) = req.host {
+            gw.host = host;
+        }
+        if let Some(port) = req.port {
+            gw.port = port;
+        }
+        if let Some(transport) = req.transport {
+            gw.transport = transport;
+        }
+        if let Some(username) = req.username {
+            gw.username = non_empty_string(username);
+        }
+        if let Some(password) = req.password {
+            gw.password_enc = non_empty_string(password).map(|password| self.encrypt_field(&password));
+        }
+        if let Some(prefix) = req.prefix {
+            gw.prefix = prefix;
+        }
+        if let Some(enabled) = req.enabled {
+            gw.enabled = enabled;
+        }
         self.sip_gateways.insert(id, gw.clone());
         Some(gw)
     }
@@ -12178,7 +14701,10 @@ impl AppState {
 
     // ─── Location Routing Rules ───
 
-    pub fn create_location_routing_rule(&self, req: CreateLocationRoutingRuleRequest) -> LocationRoutingRule {
+    pub fn create_location_routing_rule(
+        &self,
+        req: CreateLocationRoutingRuleRequest,
+    ) -> LocationRoutingRule {
         let rule = LocationRoutingRule {
             id: Uuid::new_v4(),
             name: req.name,
@@ -12204,11 +14730,21 @@ impl AppState {
         req: UpdateLocationRoutingRuleRequest,
     ) -> Option<LocationRoutingRule> {
         let mut rule = self.location_routing_rules.get(&id)?;
-        if let Some(name) = req.name { rule.name = name; }
-        if let Some(pattern) = req.location_pattern { rule.location_pattern = pattern; }
-        if let Some(gw) = req.gateway_id { rule.gateway_id = gw; }
-        if let Some(p) = req.priority { rule.priority = p; }
-        if let Some(e) = req.enabled { rule.enabled = e; }
+        if let Some(name) = req.name {
+            rule.name = name;
+        }
+        if let Some(pattern) = req.location_pattern {
+            rule.location_pattern = pattern;
+        }
+        if let Some(gw) = req.gateway_id {
+            rule.gateway_id = gw;
+        }
+        if let Some(p) = req.priority {
+            rule.priority = p;
+        }
+        if let Some(e) = req.enabled {
+            rule.enabled = e;
+        }
         self.location_routing_rules.insert(id, rule.clone());
         Some(rule)
     }
@@ -12228,6 +14764,205 @@ impl AppState {
         None
     }
 
+    pub fn create_emergency_location(
+        &self,
+        req: CreateEmergencyLocationRequest,
+    ) -> EmergencyLocation {
+        let location = EmergencyLocation {
+            id: Uuid::new_v4(),
+            name: req.name,
+            address_line1: req.address_line1,
+            address_line2: req.address_line2,
+            city: req.city,
+            region: req.region,
+            postal_code: req.postal_code,
+            country: req.country.unwrap_or_else(|| "US".to_string()),
+            elin: req.elin,
+            callback_number: req.callback_number,
+            provider_location_id: req.provider_location_id,
+            validated: req.validated.unwrap_or(false),
+            created_at: Utc::now(),
+        };
+        self.emergency_locations
+            .insert(location.id, location.clone());
+        self.persist(&location);
+        location
+    }
+
+    pub fn list_emergency_locations(&self) -> Vec<EmergencyLocation> {
+        let mut locations = self.emergency_locations.values();
+        locations.sort_by(|a, b| a.name.cmp(&b.name));
+        locations
+    }
+
+    pub fn update_emergency_location(
+        &self,
+        id: Uuid,
+        req: UpdateEmergencyLocationRequest,
+    ) -> Option<EmergencyLocation> {
+        let mut location = self.emergency_locations.get(&id)?;
+        if let Some(value) = req.name {
+            location.name = value;
+        }
+        if let Some(value) = req.address_line1 {
+            location.address_line1 = value;
+        }
+        if let Some(value) = req.address_line2 {
+            location.address_line2 = non_empty_string(value);
+        }
+        if let Some(value) = req.city {
+            location.city = value;
+        }
+        if let Some(value) = req.region {
+            location.region = value;
+        }
+        if let Some(value) = req.postal_code {
+            location.postal_code = value;
+        }
+        if let Some(value) = req.country {
+            location.country = value;
+        }
+        if let Some(value) = req.elin {
+            location.elin = non_empty_string(value);
+        }
+        if let Some(value) = req.callback_number {
+            location.callback_number = non_empty_string(value);
+        }
+        if let Some(value) = req.provider_location_id {
+            location.provider_location_id = non_empty_string(value);
+        }
+        if let Some(value) = req.validated {
+            location.validated = value;
+        }
+        self.emergency_locations.insert(id, location.clone());
+        self.persist(&location);
+        Some(location)
+    }
+
+    pub fn delete_emergency_location(&self, id: Uuid) -> bool {
+        if self
+            .emergency_assignments
+            .values()
+            .into_iter()
+            .any(|assignment| assignment.location_id == id)
+        {
+            return false;
+        }
+        let deleted = self.emergency_locations.remove(&id).is_some();
+        if deleted {
+            self.delete_persisted(EmergencyLocation::collection(), id.to_string());
+        }
+        deleted
+    }
+
+    pub fn assign_emergency_location(
+        &self,
+        req: AssignEmergencyLocationRequest,
+        updated_by: &str,
+    ) -> Option<EmergencyCallingAssignment> {
+        let normalized_user = normalize_emergency_user_uri(&req.user_uri)?;
+        self.emergency_locations.get(&req.location_id)?;
+        let mut emergency_numbers = req
+            .emergency_numbers
+            .unwrap_or_else(|| vec!["911".to_string(), "112".to_string(), "933".to_string()]);
+        emergency_numbers = emergency_numbers
+            .into_iter()
+            .map(|number| normalize_dialed_number(&number))
+            .filter(|number| !number.is_empty())
+            .collect();
+        emergency_numbers.sort();
+        emergency_numbers.dedup();
+        let assignment = EmergencyCallingAssignment {
+            user_uri: normalized_user,
+            location_id: req.location_id,
+            emergency_numbers,
+            updated_by: updated_by.to_string(),
+            updated_at: Utc::now(),
+        };
+        self.emergency_assignments
+            .insert(assignment.user_uri.clone(), assignment.clone());
+        self.persist(&assignment);
+        Some(assignment)
+    }
+
+    pub fn list_emergency_assignments(&self) -> Vec<EmergencyCallingAssignment> {
+        let mut assignments = self.emergency_assignments.values();
+        assignments.sort_by(|a, b| a.user_uri.cmp(&b.user_uri));
+        assignments
+    }
+
+    pub fn remove_emergency_assignment(&self, user_uri: &str) -> bool {
+        let Some(normalized_user) = normalize_emergency_user_uri(user_uri) else {
+            return false;
+        };
+        let removed = self.emergency_assignments.remove(&normalized_user).is_some();
+        if removed {
+            self.delete_persisted(
+                EmergencyCallingAssignment::collection(),
+                normalized_user.to_string(),
+            );
+        }
+        removed
+    }
+
+    pub fn emergency_call_plan(&self, caller_uri: &str, dialed_number: &str) -> EmergencyCallPlan {
+        let normalized_caller =
+            normalize_emergency_user_uri(caller_uri).unwrap_or_else(|| caller_uri.to_string());
+        let normalized_number = normalize_dialed_number(dialed_number);
+        let assignment = self.emergency_assignments.get(&normalized_caller);
+        let emergency = assignment.as_ref().is_some_and(|assignment| {
+            assignment
+                .emergency_numbers
+                .iter()
+                .any(|number| normalize_dialed_number(number) == normalized_number)
+        }) || matches!(normalized_number.as_str(), "911" | "112" | "933");
+        let e911_provider_available = self.enterprise_capability_available("e911");
+        let pstn_provider_available = self.enterprise_capability_available("pstn_sbc_operator_connect");
+        let location = assignment
+            .as_ref()
+            .and_then(|assignment| self.emergency_locations.get(&assignment.location_id));
+        let gateway = location.as_ref().and_then(|location| {
+            self.resolve_location_route(&format!(
+                "{} {} {} {} {}",
+                location.name, location.city, location.region, location.postal_code, location.country
+            ))
+            .or_else(|| self.resolve_gateway(&normalized_number))
+        });
+        let (allowed, reason) = if !emergency {
+            (true, "not_emergency_number".to_string())
+        } else if assignment.is_none() {
+            (false, "missing_emergency_location_assignment".to_string())
+        } else if location.as_ref().is_none_or(|location| !location.validated) {
+            (false, "emergency_location_not_validated".to_string())
+        } else if !e911_provider_available {
+            (false, "e911_provider_not_configured".to_string())
+        } else if !pstn_provider_available {
+            (false, "pstn_provider_not_configured".to_string())
+        } else if gateway.is_none() {
+            (false, "no_emergency_gateway_route".to_string())
+        } else {
+            (true, "routable".to_string())
+        };
+        EmergencyCallPlan {
+            caller_uri: normalized_caller,
+            dialed_number: normalized_number,
+            emergency,
+            allowed,
+            reason,
+            location,
+            gateway,
+            e911_provider_available,
+            pstn_provider_available,
+        }
+    }
+
+    pub fn enterprise_capability_available(&self, id: &str) -> bool {
+        self.enterprise_capability_report()
+            .capabilities
+            .into_iter()
+            .any(|capability| capability.id == id && capability.status == "available")
+    }
+
     // ─── Caption Language ───
 
     pub fn set_caption_language(&self, conference_id: Uuid, _language: &str) -> bool {
@@ -12235,10 +14970,15 @@ impl AppState {
         // Language preference is stored in the transcript segments themselves
     }
 
-    pub fn get_transcript_in_language(&self, conference_id: Uuid, language: Option<&str>) -> Vec<TranscriptSegment> {
+    pub fn get_transcript_in_language(
+        &self,
+        conference_id: Uuid,
+        language: Option<&str>,
+    ) -> Vec<TranscriptSegment> {
         let segments = self.get_transcript(conference_id);
         match language {
-            Some(lang) => segments.into_iter()
+            Some(lang) => segments
+                .into_iter()
                 .filter(|s| s.language.as_deref().unwrap_or("en") == lang)
                 .collect(),
             None => segments,
@@ -12446,10 +15186,25 @@ pub struct SipGateway {
     pub port: i32,
     pub transport: String,
     pub username: Option<String>,
+    #[serde(default, skip_serializing)]
     pub password_enc: Option<String>,
     pub prefix: String,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PstnOperatorConnectStatus {
+    pub provider_available: bool,
+    pub routable: bool,
+    pub gateway_count: usize,
+    pub enabled_gateway_count: usize,
+    pub tls_gateway_count: usize,
+    pub authenticated_gateway_count: usize,
+    pub e164_prefix_route_count: usize,
+    pub enabled_location_route_count: usize,
+    pub emergency_route_ready: bool,
+    pub blockers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -12507,6 +15262,104 @@ pub struct UpdateLocationRoutingRuleRequest {
     pub enabled: Option<bool>,
 }
 
+// ─── Emergency Calling / E911 ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmergencyLocation {
+    pub id: Uuid,
+    pub name: String,
+    pub address_line1: String,
+    pub address_line2: Option<String>,
+    pub city: String,
+    pub region: String,
+    pub postal_code: String,
+    pub country: String,
+    pub elin: Option<String>,
+    pub callback_number: Option<String>,
+    pub provider_location_id: Option<String>,
+    pub validated: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+impl StoredObject for EmergencyLocation {
+    fn collection() -> &'static str {
+        "emergency_locations"
+    }
+
+    fn key(&self) -> String {
+        self.id.to_string()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateEmergencyLocationRequest {
+    pub name: String,
+    pub address_line1: String,
+    pub address_line2: Option<String>,
+    pub city: String,
+    pub region: String,
+    pub postal_code: String,
+    pub country: Option<String>,
+    pub elin: Option<String>,
+    pub callback_number: Option<String>,
+    pub provider_location_id: Option<String>,
+    pub validated: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateEmergencyLocationRequest {
+    pub name: Option<String>,
+    pub address_line1: Option<String>,
+    pub address_line2: Option<String>,
+    pub city: Option<String>,
+    pub region: Option<String>,
+    pub postal_code: Option<String>,
+    pub country: Option<String>,
+    pub elin: Option<String>,
+    pub callback_number: Option<String>,
+    pub provider_location_id: Option<String>,
+    pub validated: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmergencyCallingAssignment {
+    pub user_uri: String,
+    pub location_id: Uuid,
+    pub emergency_numbers: Vec<String>,
+    pub updated_by: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl StoredObject for EmergencyCallingAssignment {
+    fn collection() -> &'static str {
+        "emergency_calling_assignments"
+    }
+
+    fn key(&self) -> String {
+        self.user_uri.clone()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AssignEmergencyLocationRequest {
+    pub user_uri: String,
+    pub location_id: Uuid,
+    pub emergency_numbers: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmergencyCallPlan {
+    pub caller_uri: String,
+    pub dialed_number: String,
+    pub emergency: bool,
+    pub allowed: bool,
+    pub reason: String,
+    pub location: Option<EmergencyLocation>,
+    pub gateway: Option<SipGateway>,
+    pub e911_provider_available: bool,
+    pub pstn_provider_available: bool,
+}
+
 // ─── Screen Share Annotations ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -12539,7 +15392,12 @@ pub struct CreateAnnotationRequest {
 }
 
 impl AppState {
-    pub fn add_annotation(&self, conference_id: Uuid, author_uri: &str, req: CreateAnnotationRequest) -> Annotation {
+    pub fn add_annotation(
+        &self,
+        conference_id: Uuid,
+        author_uri: &str,
+        req: CreateAnnotationRequest,
+    ) -> Annotation {
         let annotation = Annotation {
             id: Uuid::new_v4(),
             conference_id,
@@ -12548,14 +15406,20 @@ impl AppState {
             author_uri: author_uri.to_string(),
             created_at: Utc::now(),
         };
-        let mut annotations = self.conference_annotations.get(&conference_id).unwrap_or_default();
+        let mut annotations = self
+            .conference_annotations
+            .get(&conference_id)
+            .unwrap_or_default();
         annotations.push(annotation.clone());
-        self.conference_annotations.insert(conference_id, annotations);
+        self.conference_annotations
+            .insert(conference_id, annotations);
         annotation
     }
 
     pub fn list_annotations(&self, conference_id: Uuid) -> Vec<Annotation> {
-        self.conference_annotations.get(&conference_id).unwrap_or_default()
+        self.conference_annotations
+            .get(&conference_id)
+            .unwrap_or_default()
     }
 
     pub fn clear_annotations(&self, conference_id: Uuid) {
@@ -12586,7 +15450,11 @@ pub struct AddWhiteboardElementRequest {
 }
 
 impl AppState {
-    pub fn get_or_create_whiteboard(&self, conference_id: Uuid, name: Option<String>) -> Whiteboard {
+    pub fn get_or_create_whiteboard(
+        &self,
+        conference_id: Uuid,
+        name: Option<String>,
+    ) -> Whiteboard {
         if let Some(wb) = self.whiteboards.get(&conference_id) {
             return wb;
         }
@@ -12606,7 +15474,11 @@ impl AppState {
         self.whiteboards.get(&conference_id)
     }
 
-    pub fn add_whiteboard_element(&self, conference_id: Uuid, element: serde_json::Value) -> Option<Whiteboard> {
+    pub fn add_whiteboard_element(
+        &self,
+        conference_id: Uuid,
+        element: serde_json::Value,
+    ) -> Option<Whiteboard> {
         let mut wb = self.whiteboards.get(&conference_id)?;
         wb.elements.push(element);
         wb.updated_at = Utc::now();
@@ -12688,12 +15560,24 @@ impl AppState {
         panel
     }
 
-    pub fn update_scheduling_panel(&self, id: Uuid, req: UpdateSchedulingPanelRequest) -> Option<SchedulingPanel> {
+    pub fn update_scheduling_panel(
+        &self,
+        id: Uuid,
+        req: UpdateSchedulingPanelRequest,
+    ) -> Option<SchedulingPanel> {
         let mut panel = self.scheduling_panels.get(&id)?;
-        if let Some(name) = req.name { panel.name = name; }
-        if let Some(room_id) = req.meeting_room_id { panel.meeting_room_id = room_id; }
-        if let Some(mode) = req.display_mode { panel.display_mode = mode; }
-        if let Some(enabled) = req.enabled { panel.enabled = enabled; }
+        if let Some(name) = req.name {
+            panel.name = name;
+        }
+        if let Some(room_id) = req.meeting_room_id {
+            panel.meeting_room_id = room_id;
+        }
+        if let Some(mode) = req.display_mode {
+            panel.display_mode = mode;
+        }
+        if let Some(enabled) = req.enabled {
+            panel.enabled = enabled;
+        }
         self.scheduling_panels.insert(id, panel.clone());
         Some(panel)
     }
@@ -12702,17 +15586,30 @@ impl AppState {
         self.scheduling_panels.remove(&id).is_some()
     }
 
-    pub fn get_panel_schedule(&self, device_identifier: &str) -> Option<(SchedulingPanel, Vec<RoomBooking>)> {
-        let panel = self.scheduling_panels.values().into_iter()
+    pub fn get_panel_schedule(
+        &self,
+        device_identifier: &str,
+    ) -> Option<(SchedulingPanel, Vec<RoomBooking>)> {
+        let panel = self
+            .scheduling_panels
+            .values()
+            .into_iter()
             .find(|p| p.device_identifier == device_identifier && p.enabled)?;
-        let today_start = Utc::now().date_naive().and_hms_opt(0, 0, 0)
+        let today_start = Utc::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
             .map(|ndt| DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc))
             .unwrap_or_else(Utc::now);
         let today_end = today_start + Duration::hours(24);
-        let bookings: Vec<RoomBooking> = self.room_bookings.values().into_iter()
-            .filter(|b| b.room_id == panel.meeting_room_id
-                && b.start_time < today_end
-                && b.end_time > today_start)
+        let bookings: Vec<RoomBooking> = self
+            .room_bookings
+            .values()
+            .into_iter()
+            .filter(|b| {
+                b.room_id == panel.meeting_room_id
+                    && b.start_time < today_end
+                    && b.end_time > today_start
+            })
             .collect();
         Some((panel, bookings))
     }
@@ -12762,7 +15659,11 @@ impl AppState {
         rules
     }
 
-    pub fn create_automation_rule(&self, created_by: &str, req: CreateAutomationRuleRequest) -> AutomationRule {
+    pub fn create_automation_rule(
+        &self,
+        created_by: &str,
+        req: CreateAutomationRuleRequest,
+    ) -> AutomationRule {
         let rule = AutomationRule {
             id: Uuid::new_v4(),
             name: req.name,
@@ -12777,13 +15678,27 @@ impl AppState {
         rule
     }
 
-    pub fn update_automation_rule(&self, id: Uuid, req: UpdateAutomationRuleRequest) -> Option<AutomationRule> {
+    pub fn update_automation_rule(
+        &self,
+        id: Uuid,
+        req: UpdateAutomationRuleRequest,
+    ) -> Option<AutomationRule> {
         let mut rule = self.automation_rules.get(&id)?;
-        if let Some(name) = req.name { rule.name = name; }
-        if let Some(trigger) = req.trigger_event { rule.trigger_event = trigger; }
-        if let Some(conditions) = req.conditions { rule.conditions = conditions; }
-        if let Some(actions) = req.actions { rule.actions = actions; }
-        if let Some(enabled) = req.enabled { rule.enabled = enabled; }
+        if let Some(name) = req.name {
+            rule.name = name;
+        }
+        if let Some(trigger) = req.trigger_event {
+            rule.trigger_event = trigger;
+        }
+        if let Some(conditions) = req.conditions {
+            rule.conditions = conditions;
+        }
+        if let Some(actions) = req.actions {
+            rule.actions = actions;
+        }
+        if let Some(enabled) = req.enabled {
+            rule.enabled = enabled;
+        }
         self.automation_rules.insert(id, rule.clone());
         Some(rule)
     }
@@ -12794,7 +15709,10 @@ impl AppState {
 
     pub fn evaluate_automation_rules(&self, event_type: &str, context: &serde_json::Value) {
         let rules = self.automation_rules.values();
-        for rule in rules.iter().filter(|r| r.enabled && r.trigger_event == event_type) {
+        for rule in rules
+            .iter()
+            .filter(|r| r.enabled && r.trigger_event == event_type)
+        {
             // Evaluate conditions - simple match for now
             let conditions_match = match rule.conditions.as_array() {
                 Some(conditions) if conditions.is_empty() => true,
@@ -12864,12 +15782,1103 @@ pub struct UpdateSignageDisplayRequest {
     pub enabled: Option<bool>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnterpriseIntegration {
+    pub id: String,
+    pub category: String,
+    pub name: String,
+    pub description: String,
+    pub integration_kind: String,
+    pub default_provider: String,
+    pub open_source_option: String,
+    pub required_dependency: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub endpoint_url: Option<String>,
+    #[serde(default)]
+    pub admin_url: Option<String>,
+    #[serde(default)]
+    pub api_key_configured: bool,
+    #[serde(default, skip_serializing)]
+    pub api_key_enc: Option<String>,
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub updated_by: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl StoredObject for EnterpriseIntegration {
+    fn collection() -> &'static str {
+        "enterprise_integrations"
+    }
+
+    fn key(&self) -> String {
+        self.id.clone()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateEnterpriseIntegrationRequest {
+    pub enabled: Option<bool>,
+    pub endpoint_url: Option<String>,
+    pub admin_url: Option<String>,
+    pub api_key: Option<String>,
+    pub clear_api_key: Option<bool>,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnterpriseCapabilityStatus {
+    pub id: String,
+    pub category: String,
+    pub name: String,
+    pub status: String,
+    pub enabled: bool,
+    pub configured: bool,
+    pub blocking_dependency: Option<String>,
+    pub default_provider: String,
+    pub open_source_option: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnterpriseCapabilityReport {
+    pub total: usize,
+    pub available: usize,
+    pub configured: usize,
+    pub blocked: usize,
+    pub capabilities: Vec<EnterpriseCapabilityStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnterpriseParityBlocker {
+    pub id: String,
+    pub category: String,
+    pub name: String,
+    pub status: String,
+    pub required_dependency: String,
+    pub recommendation: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnterpriseParityReadinessReport {
+    pub ready: bool,
+    pub score: u8,
+    pub available: usize,
+    pub total: usize,
+    pub critical_blockers: Vec<EnterpriseParityBlocker>,
+    pub warnings: Vec<String>,
+    pub consensus: Vec<String>,
+    pub next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnterpriseIntegrationHealthCheck {
+    pub id: String,
+    pub category: String,
+    pub name: String,
+    pub status: String,
+    pub checked_at: DateTime<Utc>,
+    pub checks: Vec<String>,
+    pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnterpriseIntegrationHealthReport {
+    pub healthy: usize,
+    pub warning: usize,
+    pub blocked: usize,
+    pub checked_at: DateTime<Utc>,
+    pub integrations: Vec<EnterpriseIntegrationHealthCheck>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnterpriseDeploymentPlanItem {
+    pub id: String,
+    pub category: String,
+    pub name: String,
+    pub priority: String,
+    pub status: String,
+    pub required_dependency: String,
+    pub open_source_option: String,
+    pub default_provider: String,
+    pub endpoint_required: bool,
+    pub credentials_required: bool,
+    pub action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnterpriseDeploymentPlan {
+    pub generated_at: DateTime<Utc>,
+    pub ready_to_deploy: bool,
+    pub total: usize,
+    pub completed: usize,
+    pub remaining: usize,
+    pub items: Vec<EnterpriseDeploymentPlanItem>,
+    pub summary: Vec<String>,
+}
+
+fn enterprise_integration_defaults() -> Vec<EnterpriseIntegration> {
+    let now = Utc::now();
+    [
+        ("speech_ivr", "ML/AI", "Speech IVR", "Speech-to-text and natural-language routing for IVR flows.", "ai_service", "Vosk or Whisper endpoint", "Vosk, whisper.cpp, Rasa", "ASR/NLU service reachable from the server"),
+        ("noise_suppression", "ML/AI", "Noise suppression", "Client or media-server noise suppression for calls and meetings.", "local_or_media_runtime", "WebRTC audio processing", "RNNoise, WebRTC NS", "Desktop/mobile audio runtime or SFU DSP support"),
+        ("auto_transcription", "ML/AI", "Auto-transcription", "Automatic meeting and call transcript generation.", "ai_service", "Whisper-compatible endpoint", "whisper.cpp, faster-whisper", "ASR service with recording or live audio access"),
+        ("text_to_speech", "ML/AI", "Text-to-speech", "Speech synthesis for IVR prompts, accessibility, and assistant readouts.", "ai_service", "Piper-compatible TTS endpoint", "Piper, Coqui TTS, Mimic3", "TTS synthesis service reachable from the server"),
+        ("meeting_assistant", "ML/AI", "AI meeting assistant", "Summaries, action items, and meeting Q&A over transcripts.", "ai_service", "OpenAI-compatible LLM endpoint", "Ollama, vLLM, LocalAI", "LLM service and transcript source"),
+        ("copilot", "ML/AI", "Copilot-style assistant", "Cross-workspace assistant for chat, meeting, file, and admin context.", "ai_service", "OpenAI-compatible LLM/RAG service", "Ollama, vLLM, Open WebUI pipelines", "LLM plus governed search/RAG index"),
+        ("virtual_backgrounds", "Media pipeline", "Virtual backgrounds", "Background blur/replacement for video calls.", "client_media_runtime", "WebRTC insertable streams", "MediaPipe, TensorFlow Lite", "Client video segmentation support"),
+        ("together_gallery", "Media pipeline", "Together mode and gallery", "Large gallery layout and composited meeting scenes.", "sfu_layout_service", "LiveKit/Jitsi layout service", "LiveKit, Jitsi, mediasoup", "SFU layout/compositor service"),
+        ("ndi_rtmp_streaming", "Media pipeline", "NDI/RTMP streaming", "Broadcast meeting output to NDI, RTMP, or recording pipelines.", "media_gateway", "RTMP gateway", "SRS, FFmpeg, Janus", "Streaming gateway reachable from media server"),
+        ("powerpoint_live", "Media pipeline", "PowerPoint Live", "Server-rendered slide sharing with presenter controls.", "document_render_service", "Collabora/LibreOffice renderer", "Collabora Online, LibreOffice headless", "Document conversion/rendering service"),
+        ("e911", "External services", "E911", "Emergency address, dispatchable location, and emergency call routing.", "carrier_service", "Emergency calling provider", "none", "Certified E911 provider or carrier contract"),
+        ("pstn_sbc_operator_connect", "External services", "PSTN/SBC/Operator Connect", "Carrier trunking, SBC routing, and operator connectivity.", "carrier_service", "SIP trunk or SBC provider", "OpenSIPS, Kamailio, FreeSWITCH", "Carrier/SBC trunk and numbering plan"),
+        ("cloud_storage", "External services", "Cloud storage", "SharePoint/OneDrive/GDrive-equivalent file backend.", "storage_service", "WebDAV/S3-compatible storage", "Nextcloud, ownCloud, MinIO", "External storage endpoint and credentials"),
+        ("advanced_threat_protection", "Security infra", "Advanced threat protection", "Malware scanning and attachment detonation workflow.", "security_service", "Malware scanning service", "ClamAV, YARA, Cuckoo", "Scanning daemon or sandbox endpoint"),
+        ("casb", "Security infra", "CASB", "Cloud app policy enforcement, access decisions, and activity controls.", "security_policy_service", "Policy decision service", "OPA, Wazuh, OpenSearch Security Analytics", "Policy engine and event stream"),
+        ("mobile_app", "Platform rewrites", "Mobile app", "Native mobile packaging and device capability surface.", "client_platform", "Capacitor/Tauri mobile build", "Capacitor, React Native", "Mobile build pipeline and app signing"),
+        ("web_client", "Platform rewrites", "Web client", "Browser deployment with web-safe calling and auth flows.", "client_platform", "Hosted web bundle", "Vite static hosting, Nginx", "TLS web hosting and browser media compatibility"),
+        ("popout_multi_window", "Platform rewrites", "Pop-out multi-window", "Separate windows for calls, chats, and meetings.", "desktop_runtime", "Tauri multi-window runtime", "Tauri windows", "Desktop shell support"),
+        ("town_hall_broadcast", "Scalability", "Town hall broadcast", "10,000+ viewer broadcast using SFU/CDN fanout.", "broadcast_service", "Broadcast SFU/CDN", "LiveKit egress, Janus, SRS, CDN", "SFU, egress, and CDN capacity"),
+    ]
+    .into_iter()
+    .map(|(id, category, name, description, integration_kind, default_provider, open_source_option, required_dependency)| EnterpriseIntegration {
+        id: id.to_string(),
+        category: category.to_string(),
+        name: name.to_string(),
+        description: description.to_string(),
+        integration_kind: integration_kind.to_string(),
+        default_provider: default_provider.to_string(),
+        open_source_option: open_source_option.to_string(),
+        required_dependency: required_dependency.to_string(),
+        enabled: false,
+        endpoint_url: None,
+        admin_url: None,
+        api_key_configured: false,
+        api_key_enc: None,
+        notes: String::new(),
+        updated_by: None,
+        updated_at: now,
+    })
+    .collect()
+}
+
+fn enterprise_capability_status(integration: EnterpriseIntegration) -> EnterpriseCapabilityStatus {
+    let configured = integration.endpoint_url.is_some()
+        || integration.admin_url.is_some()
+        || integration.api_key_configured
+        || integration.api_key_enc.is_some()
+        || matches!(
+            integration.integration_kind.as_str(),
+            "client_media_runtime"
+                | "client_platform"
+                | "desktop_runtime"
+                | "local_or_media_runtime"
+        ) && integration.enabled;
+    let status = if integration.enabled && configured {
+        "available"
+    } else if integration.enabled {
+        "needs_configuration"
+    } else {
+        "blocked"
+    };
+    EnterpriseCapabilityStatus {
+        id: integration.id,
+        category: integration.category,
+        name: integration.name,
+        status: status.to_string(),
+        enabled: integration.enabled,
+        configured,
+        blocking_dependency: (status != "available").then_some(integration.required_dependency),
+        default_provider: integration.default_provider,
+        open_source_option: integration.open_source_option,
+    }
+}
+
+fn enterprise_parity_recommendation(capability: &EnterpriseCapabilityStatus) -> String {
+    if !capability.enabled {
+        return format!(
+            "Enable {} after selecting an open-source or carrier-backed provider such as {}.",
+            capability.name, capability.open_source_option
+        );
+    }
+    format!(
+        "Finish {} configuration by adding {}, endpoint/admin URL, and credentials where required.",
+        capability.name, capability.blocking_dependency.as_deref().unwrap_or("provider details")
+    )
+}
+
+fn integration_uses_local_runtime(integration: &EnterpriseIntegration) -> bool {
+    matches!(
+        integration.integration_kind.as_str(),
+        "client_media_runtime" | "client_platform" | "desktop_runtime" | "local_or_media_runtime"
+    )
+}
+
+fn integration_endpoint_has_supported_scheme(value: &str) -> bool {
+    let lower = value.trim().to_ascii_lowercase();
+    [
+        "http://",
+        "https://",
+        "tcp://",
+        "udp://",
+        "grpc://",
+        "grpcs://",
+        "rtmp://",
+        "rtmps://",
+        "s3://",
+        "webdav://",
+        "webdavs://",
+    ]
+    .iter()
+    .any(|scheme| lower.starts_with(scheme))
+}
+
+fn enterprise_integration_health(integration: EnterpriseIntegration) -> EnterpriseIntegrationHealthCheck {
+    let checked_at = Utc::now();
+    let mut checks = Vec::new();
+    let mut blockers = Vec::new();
+    if integration.enabled {
+        checks.push("enabled".to_string());
+    } else {
+        blockers.push("integration_disabled".to_string());
+    }
+
+    if integration_uses_local_runtime(&integration) {
+        checks.push("local_runtime_capability".to_string());
+    } else if integration.endpoint_url.is_some()
+        || integration.admin_url.is_some()
+        || integration.api_key_configured
+        || integration.api_key_enc.is_some()
+    {
+        checks.push("provider_configuration_present".to_string());
+    } else {
+        blockers.push("provider_configuration_missing".to_string());
+    }
+
+    if let Some(endpoint_url) = integration.endpoint_url.as_deref() {
+        if integration_endpoint_has_supported_scheme(endpoint_url) {
+            checks.push("endpoint_scheme_supported".to_string());
+        } else {
+            blockers.push("endpoint_scheme_unsupported".to_string());
+        }
+    }
+    if let Some(admin_url) = integration.admin_url.as_deref() {
+        let lower = admin_url.trim().to_ascii_lowercase();
+        if lower.starts_with("http://") || lower.starts_with("https://") {
+            checks.push("admin_url_scheme_supported".to_string());
+        } else {
+            blockers.push("admin_url_scheme_unsupported".to_string());
+        }
+    }
+
+    let status = if !integration.enabled || blockers.iter().any(|blocker| blocker.ends_with("_missing") || blocker == "integration_disabled") {
+        "blocked"
+    } else if blockers.is_empty() {
+        "healthy"
+    } else {
+        "warning"
+    };
+
+    EnterpriseIntegrationHealthCheck {
+        id: integration.id,
+        category: integration.category,
+        name: integration.name,
+        status: status.to_string(),
+        checked_at,
+        checks,
+        blockers,
+    }
+}
+
+fn enterprise_deployment_priority(integration: &EnterpriseIntegration) -> String {
+    match integration.id.as_str() {
+        "e911"
+        | "pstn_sbc_operator_connect"
+        | "advanced_threat_protection"
+        | "casb"
+        | "cloud_storage" => "critical".to_string(),
+        "auto_transcription"
+        | "copilot"
+        | "meeting_assistant"
+        | "town_hall_broadcast"
+        | "together_gallery"
+        | "ndi_rtmp_streaming" => "high".to_string(),
+        _ => "standard".to_string(),
+    }
+}
+
+fn deployment_priority_rank(priority: &str) -> u8 {
+    match priority {
+        "critical" => 0,
+        "high" => 1,
+        _ => 2,
+    }
+}
+
+fn enterprise_deployment_action(
+    integration: &EnterpriseIntegration,
+    capability: &EnterpriseCapabilityStatus,
+) -> String {
+    if capability.status == "available" {
+        return "Validate end-to-end workflow and monitor provider health.".to_string();
+    }
+    if !integration.enabled {
+        return format!(
+            "Install or select {}, then enable this integration.",
+            integration.open_source_option
+        );
+    }
+    if integration_uses_local_runtime(integration) {
+        return "Complete client/runtime packaging validation and enable tenant rollout.".to_string();
+    }
+    format!(
+        "Deploy {}, configure endpoint/admin URL, and add required credentials.",
+        integration.open_source_option
+    )
+}
+
+fn ai_provider_integration_ids(kind: &str) -> Option<Vec<&'static str>> {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "llm" => Some(vec!["copilot", "meeting_assistant"]),
+        "stt" => Some(vec!["auto_transcription", "speech_ivr"]),
+        "tts" => Some(vec!["text_to_speech"]),
+        _ => None,
+    }
+}
+
+fn ai_provider_protocols(kind: &str) -> Vec<String> {
+    match kind {
+        "llm" => vec![
+            "openai_chat_completions".to_string(),
+            "ollama_generate".to_string(),
+            "vllm_openai_compatible".to_string(),
+        ],
+        "stt" => vec![
+            "whisper_transcriptions".to_string(),
+            "vosk_streaming".to_string(),
+            "faster_whisper_batch".to_string(),
+        ],
+        "tts" => vec![
+            "piper_http".to_string(),
+            "coqui_tts".to_string(),
+            "mimic3_http".to_string(),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn normalize_dialed_number(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_digit() || *ch == '+')
+        .collect()
+}
+
+fn normalize_media_background_mode(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "blur" => "blur".to_string(),
+        "image" | "custom" => "image".to_string(),
+        _ => "none".to_string(),
+    }
+}
+
+fn normalize_speech_utterance(value: &str) -> String {
+    value
+        .split_whitespace()
+        .map(|part| {
+            part.trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+                .to_ascii_lowercase()
+        })
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn ivr_option_matches_speech(option: &IvrOption, normalized_utterance: &str) -> bool {
+    if normalized_utterance.is_empty() {
+        return false;
+    }
+    let mut phrases = vec![option.label.clone(), option.digit.clone()];
+    phrases.extend(option.speech_phrases.clone());
+    phrases.into_iter().any(|phrase| {
+        let normalized_phrase = normalize_speech_utterance(&phrase);
+        !normalized_phrase.is_empty()
+            && (normalized_utterance == normalized_phrase
+                || normalized_utterance.contains(&normalized_phrase)
+                || normalized_phrase.contains(normalized_utterance))
+    })
+}
+
+fn normalize_conference_layout_mode(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "speaker" | "stage" => "speaker".to_string(),
+        "together" => "together".to_string(),
+        _ => "gallery".to_string(),
+    }
+}
+
+fn supported_together_scene(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "auditorium" | "conference" | "classroom"
+    )
+}
+
+fn apply_layout_readiness(
+    layout: &mut ConferenceLayoutState,
+    participants: &[ConferenceParticipant],
+) {
+    let active_participants = participants.iter().filter(|participant| !participant.removed).count();
+    let large_gallery_capacity = if layout.sfu_layout_configured { 49 } else { 9 };
+    layout.gallery_capacity = large_gallery_capacity;
+    layout.max_visible = layout.max_visible.clamp(1, large_gallery_capacity);
+    layout.together_scene_supported = layout
+        .together_scene
+        .as_deref()
+        .map(supported_together_scene)
+        .unwrap_or(true);
+    let mut blockers = Vec::new();
+    if layout.mode == "together" && !layout.sfu_layout_configured {
+        blockers.push("sfu_layout_service_not_configured".to_string());
+    }
+    if layout.mode == "together" && active_participants < 2 {
+        blockers.push("together_mode_requires_two_participants".to_string());
+    }
+    if !layout.together_scene_supported {
+        blockers.push("unsupported_together_scene".to_string());
+    }
+    if active_participants > large_gallery_capacity {
+        blockers.push("participant_count_exceeds_gallery_capacity".to_string());
+    }
+    layout.layout_blockers = blockers;
+}
+
+fn valid_stream_destination(kind: &StreamTargetKind, destination: &str) -> bool {
+    match kind {
+        StreamTargetKind::Rtmp => {
+            destination.starts_with("rtmp://") || destination.starts_with("rtmps://")
+        }
+        StreamTargetKind::Ndi => {
+            let trimmed = destination.trim();
+            !trimmed.is_empty() && !trimmed.contains("://")
+        }
+    }
+}
+
+fn apply_town_hall_readiness(config: &mut TownHallConfig) {
+    config.broadcast_capacity = if config.broadcast_provider_configured {
+        config.max_viewers
+    } else {
+        config.max_viewers.min(1000)
+    };
+    config.attendee_mode = if config.broadcast_provider_configured {
+        "broadcast".to_string()
+    } else {
+        "interactive".to_string()
+    };
+    let mut blockers = Vec::new();
+    if config.enabled && !config.broadcast_provider_configured && config.max_viewers > 1000 {
+        blockers.push("broadcast_provider_required_for_large_town_hall".to_string());
+    }
+    if config.enabled && config.overflow_url.is_none() && config.max_viewers > config.broadcast_capacity {
+        blockers.push("overflow_url_required_when_capacity_exceeds_local_fanout".to_string());
+    }
+    config.broadcast_ready = config.enabled
+        && config.broadcast_provider_configured
+        && config.broadcast_capacity >= config.max_viewers
+        && blockers.is_empty();
+    config.broadcast_blockers = blockers;
+}
+
+fn redact_stream_destination(destination: &str) -> String {
+    if let Some((scheme, rest)) = destination.split_once("://") {
+        if let Some(at) = rest.find('@') {
+            return format!("{scheme}://***@{}", &rest[at + 1..]);
+        }
+    }
+    destination.to_string()
+}
+
+fn meeting_summary(segments: &[TranscriptSegment]) -> String {
+    if segments.is_empty() {
+        return "No finalized transcript is available yet.".to_string();
+    }
+    segments
+        .iter()
+        .take(3)
+        .map(|segment| segment.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(600)
+        .collect()
+}
+
+fn meeting_key_topics(segments: &[TranscriptSegment]) -> Vec<String> {
+    let stop_words: HashSet<&str> = [
+        "about", "after", "again", "also", "and", "are", "because", "but", "can", "for", "from",
+        "have", "into", "our", "that", "the", "this", "to", "with", "will", "you", "your", "we",
+    ]
+    .into_iter()
+    .collect();
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for word in segments.iter().flat_map(|segment| segment.text.split_whitespace()) {
+        let normalized = word
+            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+            .to_ascii_lowercase();
+        if normalized.len() < 4 || stop_words.contains(normalized.as_str()) {
+            continue;
+        }
+        *counts.entry(normalized).or_default() += 1;
+    }
+    let mut topics: Vec<_> = counts.into_iter().collect();
+    topics.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    topics
+        .into_iter()
+        .take(8)
+        .map(|(topic, _)| topic)
+        .collect()
+}
+
+fn meeting_action_items(segments: &[TranscriptSegment]) -> Vec<MeetingActionItem> {
+    let markers = [
+        "action item",
+        "follow up",
+        "follow-up",
+        "todo",
+        "to do",
+        "need to",
+        "needs to",
+        "please",
+        "assign",
+    ];
+    segments
+        .iter()
+        .filter(|segment| text_has_any(&segment.text, &markers))
+        .take(12)
+        .map(|segment| MeetingActionItem {
+            owner: Some(segment.speaker_name.clone()).filter(|name| !name.trim().is_empty()),
+            text: segment.text.clone(),
+            source_segment_id: segment.id,
+        })
+        .collect()
+}
+
+fn meeting_lines_matching(segments: &[TranscriptSegment], markers: &[&str]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for segment in segments {
+        if text_has_any(&segment.text, markers) && !lines.contains(&segment.text) {
+            lines.push(segment.text.clone());
+        }
+        if lines.len() >= 12 {
+            break;
+        }
+    }
+    lines
+}
+
+fn meeting_open_questions(segments: &[TranscriptSegment]) -> Vec<String> {
+    let mut questions = Vec::new();
+    for segment in segments {
+        if segment.text.contains('?') && !questions.contains(&segment.text) {
+            questions.push(segment.text.clone());
+        }
+        if questions.len() >= 12 {
+            break;
+        }
+    }
+    questions
+}
+
+fn meeting_speaker_stats(segments: &[TranscriptSegment]) -> Vec<MeetingSpeakerStat> {
+    let mut stats: HashMap<String, MeetingSpeakerStat> = HashMap::new();
+    for segment in segments {
+        let stat = stats
+            .entry(segment.speaker_uri.clone())
+            .or_insert_with(|| MeetingSpeakerStat {
+                speaker_uri: segment.speaker_uri.clone(),
+                speaker_name: segment.speaker_name.clone(),
+                segments: 0,
+                words: 0,
+            });
+        stat.segments += 1;
+        stat.words += segment.text.split_whitespace().count();
+        if stat.speaker_name.is_empty() && !segment.speaker_name.is_empty() {
+            stat.speaker_name = segment.speaker_name.clone();
+        }
+    }
+    let mut stats: Vec<_> = stats.into_values().collect();
+    stats.sort_by(|left, right| {
+        right
+            .words
+            .cmp(&left.words)
+            .then_with(|| left.speaker_uri.cmp(&right.speaker_uri))
+    });
+    stats
+}
+
+fn text_has_any(text: &str, markers: &[&str]) -> bool {
+    let text = text.to_ascii_lowercase();
+    markers.iter().any(|marker| text.contains(marker))
+}
+
+fn malware_signature_detected(filename: &str, content_type: &str, body: &[u8]) -> bool {
+    const EICAR: &[u8] = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
+    if body.windows(EICAR.len()).any(|window| window == EICAR) {
+        return true;
+    }
+    let lower_name = filename.to_ascii_lowercase();
+    if lower_name.ends_with(".eicar") || lower_name.contains("eicar") {
+        return true;
+    }
+    if is_textual_content(content_type) {
+        let text = String::from_utf8_lossy(body).to_ascii_lowercase();
+        text.contains("malware-test-signature") || text.contains("virus-test-signature")
+    } else {
+        false
+    }
+}
+
 // ─── AppState methods for new features ───
 
 impl AppState {
+    pub fn list_enterprise_integrations(&self) -> Vec<EnterpriseIntegration> {
+        let mut integrations = enterprise_integration_defaults();
+        for mut configured in self.enterprise_integrations.values() {
+            configured.api_key_configured =
+                configured.api_key_configured || configured.api_key_enc.is_some();
+            if let Some(default) = integrations.iter_mut().find(|item| item.id == configured.id) {
+                *default = configured;
+            } else {
+                integrations.push(configured);
+            }
+        }
+        integrations.sort_by(|a, b| {
+            a.category
+                .cmp(&b.category)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        integrations
+    }
+
+    pub fn update_enterprise_integration(
+        &self,
+        id: &str,
+        req: UpdateEnterpriseIntegrationRequest,
+        updated_by: &str,
+    ) -> Option<EnterpriseIntegration> {
+        let mut integration = self
+            .enterprise_integrations
+            .get(&id.to_string())
+            .or_else(|| {
+                enterprise_integration_defaults()
+                    .into_iter()
+                    .find(|integration| integration.id == id)
+            })?;
+        if let Some(enabled) = req.enabled {
+            integration.enabled = enabled;
+        }
+        if let Some(endpoint_url) = req.endpoint_url {
+            integration.endpoint_url = non_empty_string(endpoint_url);
+        }
+        if let Some(admin_url) = req.admin_url {
+            integration.admin_url = non_empty_string(admin_url);
+        }
+        if req.clear_api_key.unwrap_or(false) {
+            integration.api_key_enc = None;
+            integration.api_key_configured = false;
+        } else if let Some(api_key) = req.api_key.and_then(non_empty_string) {
+            integration.api_key_enc = Some(self.encrypt_field(&api_key));
+            integration.api_key_configured = true;
+        }
+        if let Some(notes) = req.notes {
+            integration.notes = notes;
+        }
+        integration.updated_by = Some(updated_by.to_string());
+        integration.updated_at = Utc::now();
+        self.enterprise_integrations
+            .insert(integration.id.clone(), integration.clone());
+        self.persist(&integration);
+        Some(integration)
+    }
+
+    pub fn enterprise_capability_report(&self) -> EnterpriseCapabilityReport {
+        let capabilities: Vec<_> = self
+            .list_enterprise_integrations()
+            .into_iter()
+            .map(enterprise_capability_status)
+            .collect();
+        let total = capabilities.len();
+        let available = capabilities
+            .iter()
+            .filter(|capability| capability.status == "available")
+            .count();
+        let configured = capabilities
+            .iter()
+            .filter(|capability| capability.configured)
+            .count();
+        EnterpriseCapabilityReport {
+            total,
+            available,
+            configured,
+            blocked: total.saturating_sub(available),
+            capabilities,
+        }
+    }
+
+    pub fn enterprise_parity_readiness_report(&self) -> EnterpriseParityReadinessReport {
+        let capability_report = self.enterprise_capability_report();
+        let critical_blockers: Vec<_> = capability_report
+            .capabilities
+            .iter()
+            .filter(|capability| capability.status != "available")
+            .map(|capability| EnterpriseParityBlocker {
+                id: capability.id.clone(),
+                category: capability.category.clone(),
+                name: capability.name.clone(),
+                status: capability.status.clone(),
+                required_dependency: capability
+                    .blocking_dependency
+                    .clone()
+                    .unwrap_or_else(|| "provider configuration".to_string()),
+                recommendation: enterprise_parity_recommendation(capability),
+            })
+            .collect();
+        let warnings: Vec<String> = capability_report
+            .capabilities
+            .iter()
+            .filter(|capability| capability.status == "needs_configuration")
+            .map(|capability| {
+                format!(
+                    "{} is enabled but not usable until {} is configured.",
+                    capability.name,
+                    capability
+                        .blocking_dependency
+                        .as_deref()
+                        .unwrap_or("its provider")
+                )
+            })
+            .collect();
+        let total = capability_report.total.max(1);
+        let score = ((capability_report.available * 100) / total).min(100) as u8;
+        let ready = capability_report.available == capability_report.total && critical_blockers.is_empty();
+        let mut next_actions = critical_blockers
+            .iter()
+            .take(8)
+            .map(|blocker| blocker.recommendation.clone())
+            .collect::<Vec<_>>();
+        if next_actions.is_empty() {
+            next_actions.push("Run an end-to-end tenant validation across meetings, calling, files, compliance, and admin workflows.".to_string());
+        }
+        EnterpriseParityReadinessReport {
+            ready,
+            score,
+            available: capability_report.available,
+            total: capability_report.total,
+            critical_blockers,
+            warnings,
+            consensus: vec![
+                "Configured means enabled plus provider details, not just a checked toggle.".to_string(),
+                "External Microsoft 365 foundation equivalents should remain separate open-source systems and be connected through integrations.".to_string(),
+                "Teams Enterprise parity is not declared ready while any critical external capability is blocked or only partially configured.".to_string(),
+            ],
+            next_actions,
+        }
+    }
+
+    pub fn enterprise_integration_health_report(&self) -> EnterpriseIntegrationHealthReport {
+        let checked_at = Utc::now();
+        let mut integrations: Vec<_> = self
+            .list_enterprise_integrations()
+            .into_iter()
+            .map(enterprise_integration_health)
+            .collect();
+        integrations.sort_by(|left, right| {
+            left.category
+                .cmp(&right.category)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        let healthy = integrations
+            .iter()
+            .filter(|integration| integration.status == "healthy")
+            .count();
+        let warning = integrations
+            .iter()
+            .filter(|integration| integration.status == "warning")
+            .count();
+        let blocked = integrations
+            .iter()
+            .filter(|integration| integration.status == "blocked")
+            .count();
+        EnterpriseIntegrationHealthReport {
+            healthy,
+            warning,
+            blocked,
+            checked_at,
+            integrations,
+        }
+    }
+
+    pub fn enterprise_deployment_plan(&self) -> EnterpriseDeploymentPlan {
+        let generated_at = Utc::now();
+        let mut items: Vec<_> = self
+            .list_enterprise_integrations()
+            .into_iter()
+            .map(|integration| {
+                let capability = enterprise_capability_status(integration.clone());
+                let endpoint_required = !integration_uses_local_runtime(&integration);
+                EnterpriseDeploymentPlanItem {
+                    id: integration.id.clone(),
+                    category: integration.category.clone(),
+                    name: integration.name.clone(),
+                    priority: enterprise_deployment_priority(&integration),
+                    status: capability.status.clone(),
+                    required_dependency: integration.required_dependency.clone(),
+                    open_source_option: integration.open_source_option.clone(),
+                    default_provider: integration.default_provider.clone(),
+                    endpoint_required,
+                    credentials_required: endpoint_required,
+                    action: enterprise_deployment_action(&integration, &capability),
+                }
+            })
+            .collect();
+        items.sort_by(|left, right| {
+            deployment_priority_rank(&left.priority)
+                .cmp(&deployment_priority_rank(&right.priority))
+                .then_with(|| left.category.cmp(&right.category))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        let total = items.len();
+        let completed = items.iter().filter(|item| item.status == "available").count();
+        let remaining = total.saturating_sub(completed);
+        EnterpriseDeploymentPlan {
+            generated_at,
+            ready_to_deploy: remaining == 0,
+            total,
+            completed,
+            remaining,
+            items,
+            summary: vec![
+                "Install Microsoft 365 foundation equivalents as separate open-source services, then connect them here.".to_string(),
+                "Critical items cover calling, emergency services, storage, malware protection, and CASB enforcement.".to_string(),
+                "Do not mark parity complete until every required dependency is available and tenant workflows are validated.".to_string(),
+            ],
+        }
+    }
+
+    pub fn ai_provider_statuses(&self) -> Vec<AiProviderStatus> {
+        ["llm", "stt", "tts"]
+            .into_iter()
+            .filter_map(|kind| self.ai_provider_status(kind))
+            .collect()
+    }
+
+    pub fn ai_provider_status(&self, kind: &str) -> Option<AiProviderStatus> {
+        let kind = kind.trim().to_ascii_lowercase();
+        let integration_ids = ai_provider_integration_ids(&kind)?;
+        let integrations = self.list_enterprise_integrations();
+        let matched: Vec<_> = integration_ids
+            .iter()
+            .filter_map(|id| integrations.iter().find(|integration| integration.id == *id))
+            .collect();
+        let configured = matched
+            .iter()
+            .any(|integration| enterprise_capability_status((*integration).clone()).status == "available");
+        let primary = matched
+            .iter()
+            .find(|integration| {
+                enterprise_capability_status((**integration).clone()).status == "available"
+            })
+            .or_else(|| matched.first());
+        let mut warnings = Vec::new();
+        if !configured {
+            warnings.push(format!("{kind}_provider_not_configured"));
+        }
+        Some(AiProviderStatus {
+            kind: kind.clone(),
+            configured,
+            integration_ids: integration_ids.into_iter().map(str::to_string).collect(),
+            endpoint_url: primary.and_then(|integration| integration.endpoint_url.clone()),
+            admin_url: primary.and_then(|integration| integration.admin_url.clone()),
+            api_key_configured: matched
+                .iter()
+                .any(|integration| integration.api_key_configured || integration.api_key_enc.is_some()),
+            supported_protocols: ai_provider_protocols(&kind),
+            open_source_options: matched
+                .into_iter()
+                .map(|integration| integration.open_source_option.clone())
+                .collect(),
+            warnings,
+        })
+    }
+
+    pub fn update_ai_provider(
+        &self,
+        kind: &str,
+        input: UpdateAiProviderRequest,
+        updated_by: &str,
+    ) -> Option<AiProviderStatus> {
+        let kind = kind.trim().to_ascii_lowercase();
+        let ids = ai_provider_integration_ids(&kind)?;
+        for id in ids {
+            self.update_enterprise_integration(
+                id,
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: input.enabled,
+                    endpoint_url: input.endpoint_url.clone(),
+                    admin_url: input.admin_url.clone(),
+                    api_key: input.api_key.clone(),
+                    clear_api_key: input.clear_api_key,
+                    notes: input.notes.clone(),
+                },
+                updated_by,
+            )?;
+        }
+        self.ai_provider_status(&kind)
+    }
+
+    pub fn llm_chat_dispatch(
+        &self,
+        principal: &str,
+        input: LlmChatRequest,
+    ) -> Result<AiProviderDispatch, String> {
+        if input.messages.is_empty() {
+            return Err("messages are required".to_string());
+        }
+        let status = self.ai_provider_status("llm").ok_or_else(|| "unknown provider kind".to_string())?;
+        let messages: Vec<_> = input
+            .messages
+            .into_iter()
+            .map(|message| {
+                serde_json::json!({
+                    "role": message.role,
+                    "content": message.content,
+                })
+            })
+            .collect();
+        Ok(AiProviderDispatch {
+            kind: "llm".to_string(),
+            provider_configured: status.configured,
+            endpoint_url: status.endpoint_url.clone(),
+            status: if status.configured {
+                "ready_for_external_dispatch".to_string()
+            } else {
+                "blocked_provider_not_configured".to_string()
+            },
+            payload: serde_json::json!({
+                "protocols": status.supported_protocols,
+                "model": input.model.unwrap_or_else(|| "tenant-default".to_string()),
+                "temperature": input.temperature.unwrap_or(0.2),
+                "max_tokens": input.max_tokens.unwrap_or(1024),
+                "messages": messages,
+                "requested_by": principal,
+            }),
+            warnings: status.warnings,
+            governance: vec![
+                "caller must provide already-authorized context".to_string(),
+                "local server does not fabricate LLM output when provider is absent".to_string(),
+                "provider credentials remain server-side".to_string(),
+            ],
+        })
+    }
+
+    pub fn stt_transcription_dispatch(
+        &self,
+        principal: &str,
+        input: SttTranscriptionRequest,
+    ) -> Result<AiProviderDispatch, String> {
+        if input.recording_id.is_none() && input.file_id.is_none() {
+            return Err("recording_id or file_id is required".to_string());
+        }
+        if let Some(recording_id) = input.recording_id {
+            self.recording(recording_id)
+                .ok_or_else(|| "recording not found".to_string())?;
+        }
+        if let Some(file_id) = input.file_id {
+            self.files
+                .get(&file_id)
+                .ok_or_else(|| "file not found".to_string())?;
+        }
+        let status = self.ai_provider_status("stt").ok_or_else(|| "unknown provider kind".to_string())?;
+        Ok(AiProviderDispatch {
+            kind: "stt".to_string(),
+            provider_configured: status.configured,
+            endpoint_url: status.endpoint_url.clone(),
+            status: if status.configured {
+                "ready_for_external_dispatch".to_string()
+            } else {
+                "blocked_provider_not_configured".to_string()
+            },
+            payload: serde_json::json!({
+                "protocols": status.supported_protocols,
+                "recording_id": input.recording_id,
+                "file_id": input.file_id,
+                "language": input.language.unwrap_or_else(|| "en".to_string()),
+                "diarization": input.diarization.unwrap_or(true),
+                "requested_by": principal,
+            }),
+            warnings: status.warnings,
+            governance: vec![
+                "transcript text must be posted back through transcription completion APIs".to_string(),
+                "recording and file references are validated before dispatch".to_string(),
+                "local server does not fabricate transcript segments".to_string(),
+            ],
+        })
+    }
+
+    pub fn tts_synthesis_dispatch(
+        &self,
+        principal: &str,
+        input: TtsSynthesisRequest,
+    ) -> Result<AiProviderDispatch, String> {
+        let text = input.text.trim();
+        if text.is_empty() {
+            return Err("text is required".to_string());
+        }
+        let status = self.ai_provider_status("tts").ok_or_else(|| "unknown provider kind".to_string())?;
+        Ok(AiProviderDispatch {
+            kind: "tts".to_string(),
+            provider_configured: status.configured,
+            endpoint_url: status.endpoint_url.clone(),
+            status: if status.configured {
+                "ready_for_external_dispatch".to_string()
+            } else {
+                "blocked_provider_not_configured".to_string()
+            },
+            payload: serde_json::json!({
+                "protocols": status.supported_protocols,
+                "text": text,
+                "voice": input.voice.unwrap_or_else(|| "tenant-default".to_string()),
+                "language": input.language.unwrap_or_else(|| "en".to_string()),
+                "format": input.format.unwrap_or_else(|| "wav".to_string()),
+                "requested_by": principal,
+            }),
+            warnings: status.warnings,
+            governance: vec![
+                "audio bytes must come from the configured TTS provider".to_string(),
+                "local server does not synthesize placeholder audio".to_string(),
+                "provider credentials remain server-side".to_string(),
+            ],
+        })
+    }
+
     // Channel Tabs
     pub fn list_channel_tabs(&self, room_id: Uuid) -> Vec<ChannelTab> {
-        let mut tabs: Vec<ChannelTab> = self.channel_tabs.values()
+        let mut tabs: Vec<ChannelTab> = self
+            .channel_tabs
+            .values()
             .into_iter()
             .filter(|t| t.room_id == room_id)
             .collect();
@@ -12877,7 +16886,12 @@ impl AppState {
         tabs
     }
 
-    pub fn create_channel_tab(&self, room_id: Uuid, req: CreateChannelTabRequest, created_by: &str) -> ChannelTab {
+    pub fn create_channel_tab(
+        &self,
+        room_id: Uuid,
+        req: CreateChannelTabRequest,
+        created_by: &str,
+    ) -> ChannelTab {
         let tab = ChannelTab {
             id: Uuid::new_v4(),
             room_id,
@@ -12894,10 +16908,18 @@ impl AppState {
 
     pub fn update_channel_tab(&self, id: Uuid, req: UpdateChannelTabRequest) -> Option<ChannelTab> {
         let mut tab = self.channel_tabs.get(&id)?;
-        if let Some(name) = req.name { tab.name = name; }
-        if let Some(url) = req.url { tab.url = url; }
-        if let Some(icon) = req.icon { tab.icon = Some(icon); }
-        if let Some(position) = req.position { tab.position = position; }
+        if let Some(name) = req.name {
+            tab.name = name;
+        }
+        if let Some(url) = req.url {
+            tab.url = url;
+        }
+        if let Some(icon) = req.icon {
+            tab.icon = Some(icon);
+        }
+        if let Some(position) = req.position {
+            tab.position = position;
+        }
         self.channel_tabs.insert(id, tab.clone());
         Some(tab)
     }
@@ -12928,14 +16950,30 @@ impl AppState {
         ext
     }
 
-    pub fn update_message_extension(&self, id: Uuid, req: UpdateMessageExtensionRequest) -> Option<MessageExtension> {
+    pub fn update_message_extension(
+        &self,
+        id: Uuid,
+        req: UpdateMessageExtensionRequest,
+    ) -> Option<MessageExtension> {
         let mut ext = self.message_extensions.get(&id)?;
-        if let Some(name) = req.name { ext.name = name; }
-        if let Some(command) = req.command { ext.command = command; }
-        if let Some(description) = req.description { ext.description = description; }
-        if let Some(handler_url) = req.handler_url { ext.handler_url = handler_url; }
-        if let Some(icon) = req.icon { ext.icon = Some(icon); }
-        if let Some(enabled) = req.enabled { ext.enabled = enabled; }
+        if let Some(name) = req.name {
+            ext.name = name;
+        }
+        if let Some(command) = req.command {
+            ext.command = command;
+        }
+        if let Some(description) = req.description {
+            ext.description = description;
+        }
+        if let Some(handler_url) = req.handler_url {
+            ext.handler_url = handler_url;
+        }
+        if let Some(icon) = req.icon {
+            ext.icon = Some(icon);
+        }
+        if let Some(enabled) = req.enabled {
+            ext.enabled = enabled;
+        }
         self.message_extensions.insert(id, ext.clone());
         Some(ext)
     }
@@ -12945,7 +16983,10 @@ impl AppState {
     }
 
     pub fn get_message_extension_by_command(&self, command: &str) -> Option<MessageExtension> {
-        self.message_extensions.values().into_iter().find(|e| e.command == command && e.enabled)
+        self.message_extensions
+            .values()
+            .into_iter()
+            .find(|e| e.command == command && e.enabled)
     }
 
     // App Catalog
@@ -12973,14 +17014,30 @@ impl AppState {
         entry
     }
 
-    pub fn update_app_catalog_entry(&self, id: Uuid, req: UpdateAppCatalogEntryRequest) -> Option<AppCatalogEntry> {
+    pub fn update_app_catalog_entry(
+        &self,
+        id: Uuid,
+        req: UpdateAppCatalogEntryRequest,
+    ) -> Option<AppCatalogEntry> {
         let mut entry = self.app_catalog.get(&id)?;
-        if let Some(name) = req.name { entry.name = name; }
-        if let Some(description) = req.description { entry.description = description; }
-        if let Some(category) = req.category { entry.category = category; }
-        if let Some(icon_url) = req.icon_url { entry.icon_url = Some(icon_url); }
-        if let Some(manifest_url) = req.manifest_url { entry.manifest_url = Some(manifest_url); }
-        if let Some(version) = req.version { entry.version = Some(version); }
+        if let Some(name) = req.name {
+            entry.name = name;
+        }
+        if let Some(description) = req.description {
+            entry.description = description;
+        }
+        if let Some(category) = req.category {
+            entry.category = category;
+        }
+        if let Some(icon_url) = req.icon_url {
+            entry.icon_url = Some(icon_url);
+        }
+        if let Some(manifest_url) = req.manifest_url {
+            entry.manifest_url = Some(manifest_url);
+        }
+        if let Some(version) = req.version {
+            entry.version = Some(version);
+        }
         self.app_catalog.insert(id, entry.clone());
         Some(entry)
     }
@@ -13009,7 +17066,9 @@ impl AppState {
 
     // Guest Users
     pub fn list_guest_users(&self, team_id: Uuid) -> Vec<GuestUser> {
-        let mut guests: Vec<GuestUser> = self.guest_users.values()
+        let mut guests: Vec<GuestUser> = self
+            .guest_users
+            .values()
             .into_iter()
             .filter(|g| g.team_id == team_id)
             .collect();
@@ -13017,7 +17076,12 @@ impl AppState {
         guests
     }
 
-    pub fn invite_guest(&self, team_id: Uuid, req: InviteGuestRequest, invited_by: &str) -> GuestUser {
+    pub fn invite_guest(
+        &self,
+        team_id: Uuid,
+        req: InviteGuestRequest,
+        invited_by: &str,
+    ) -> GuestUser {
         let token = Uuid::new_v4().to_string();
         let token_hash = format!("{:x}", Sha256::digest(token.as_bytes()));
         let expires_at = Utc::now() + Duration::hours(req.expires_hours.unwrap_or(72));
@@ -13061,13 +17125,27 @@ impl AppState {
         policy
     }
 
-    pub fn update_bandwidth_policy(&self, id: Uuid, req: UpdateBandwidthPolicyRequest) -> Option<BandwidthPolicy> {
+    pub fn update_bandwidth_policy(
+        &self,
+        id: Uuid,
+        req: UpdateBandwidthPolicyRequest,
+    ) -> Option<BandwidthPolicy> {
         let mut policy = self.bandwidth_policies.get(&id)?;
-        if let Some(name) = req.name { policy.name = name; }
-        if let Some(max_concurrent_calls) = req.max_concurrent_calls { policy.max_concurrent_calls = max_concurrent_calls; }
-        if let Some(max_bandwidth_kbps) = req.max_bandwidth_kbps { policy.max_bandwidth_kbps = max_bandwidth_kbps; }
-        if let Some(location_pattern) = req.location_pattern { policy.location_pattern = location_pattern; }
-        if let Some(enabled) = req.enabled { policy.enabled = enabled; }
+        if let Some(name) = req.name {
+            policy.name = name;
+        }
+        if let Some(max_concurrent_calls) = req.max_concurrent_calls {
+            policy.max_concurrent_calls = max_concurrent_calls;
+        }
+        if let Some(max_bandwidth_kbps) = req.max_bandwidth_kbps {
+            policy.max_bandwidth_kbps = max_bandwidth_kbps;
+        }
+        if let Some(location_pattern) = req.location_pattern {
+            policy.location_pattern = location_pattern;
+        }
+        if let Some(enabled) = req.enabled {
+            policy.enabled = enabled;
+        }
         self.bandwidth_policies.insert(id, policy.clone());
         Some(policy)
     }
@@ -13080,9 +17158,13 @@ impl AppState {
     pub fn check_call_admission(&self, location: &str) -> bool {
         let active_call_count = self.calls.len();
         for policy in self.bandwidth_policies.values() {
-            if !policy.enabled { continue; }
+            if !policy.enabled {
+                continue;
+            }
             if policy.location_pattern == "*" || location.contains(&policy.location_pattern) {
-                if policy.max_concurrent_calls > 0 && active_call_count >= policy.max_concurrent_calls as usize {
+                if policy.max_concurrent_calls > 0
+                    && active_call_count >= policy.max_concurrent_calls as usize
+                {
                     return false;
                 }
             }
@@ -13111,13 +17193,27 @@ impl AppState {
         display
     }
 
-    pub fn update_signage_display(&self, id: Uuid, req: UpdateSignageDisplayRequest) -> Option<SignageDisplay> {
+    pub fn update_signage_display(
+        &self,
+        id: Uuid,
+        req: UpdateSignageDisplayRequest,
+    ) -> Option<SignageDisplay> {
         let mut display = self.signage_displays.get(&id)?;
-        if let Some(name) = req.name { display.name = name; }
-        if let Some(location) = req.location { display.location = location; }
-        if let Some(content_url) = req.content_url { display.content_url = content_url; }
-        if let Some(schedule) = req.schedule { display.schedule = schedule; }
-        if let Some(enabled) = req.enabled { display.enabled = enabled; }
+        if let Some(name) = req.name {
+            display.name = name;
+        }
+        if let Some(location) = req.location {
+            display.location = location;
+        }
+        if let Some(content_url) = req.content_url {
+            display.content_url = content_url;
+        }
+        if let Some(schedule) = req.schedule {
+            display.schedule = schedule;
+        }
+        if let Some(enabled) = req.enabled {
+            display.enabled = enabled;
+        }
         self.signage_displays.insert(id, display.clone());
         Some(display)
     }
@@ -13128,7 +17224,9 @@ impl AppState {
 
     pub fn get_signage_content(&self, id: Uuid) -> Option<String> {
         let display = self.signage_displays.get(&id)?;
-        if !display.enabled { return None; }
+        if !display.enabled {
+            return None;
+        }
         Some(display.content_url.clone())
     }
 }
@@ -13410,8 +17508,18 @@ pub struct Ivr {
     pub invalid_destination: Option<String>,
     pub timeout_destination: Option<String>,
     pub options: Vec<IvrOption>,
+    #[serde(default)]
+    pub speech_enabled: bool,
+    #[serde(default = "default_speech_language")]
+    pub speech_language: String,
+    #[serde(default)]
+    pub speech_provider_configured: bool,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
+}
+
+fn default_speech_language() -> String {
+    "en-US".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13420,6 +17528,8 @@ pub struct IvrOption {
     pub label: String,
     pub destination: String,
     pub destination_type: String, // user, ring_group, ivr, voicemail, external
+    #[serde(default)]
+    pub speech_phrases: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -13433,11 +17543,32 @@ pub struct CreateIvrRequest {
     pub invalid_destination: Option<String>,
     pub timeout_destination: Option<String>,
     pub options: Vec<IvrOption>,
+    pub speech_enabled: Option<bool>,
+    pub speech_language: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResolveIvrSpeechRequest {
+    pub utterance: String,
+    #[serde(default)]
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IvrSpeechResolution {
+    pub ivr_id: Uuid,
+    pub utterance: String,
+    pub language: Option<String>,
+    pub provider_configured: bool,
+    pub matched: bool,
+    pub reason: String,
+    pub option: Option<IvrOption>,
+    pub route: Option<ResolvedRoute>,
 }
 
 // ─── Call Route Resolution ───
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedRoute {
     pub destination_type: String, // user, ring_group, ivr
     pub destination: String,      // SIP URI or ID
@@ -13887,6 +18018,10 @@ fn normalize_sip_uri(aor: &str) -> Option<String> {
     ))
 }
 
+fn normalize_emergency_user_uri(value: &str) -> Option<String> {
+    normalize_sip_uri(value).or_else(|| normalize_sip_uri(&format!("sip:{}", value.trim())))
+}
+
 fn normalized_room_members(members: Vec<String>) -> Vec<String> {
     let mut members: Vec<String> = members
         .into_iter()
@@ -13905,9 +18040,43 @@ fn matches_room_call_mode(conference_mode: &ConferenceMode, room_mode: &RoomCall
 }
 
 fn collaboration_matches(values: &[String], term: &str) -> bool {
-    values
-        .iter()
-        .any(|value| value.to_lowercase().contains(term))
+    let tokens: Vec<&str> = term.split_whitespace().collect();
+    values.iter().any(|value| {
+        let value = value.to_ascii_lowercase();
+        value.contains(term)
+            || (!tokens.is_empty() && tokens.iter().all(|token| value.contains(token)))
+    })
+}
+
+fn score_match(value: &str, term: &str) -> i32 {
+    let value = value.to_ascii_lowercase();
+    if value == term {
+        100
+    } else if value.starts_with(term) {
+        80
+    } else if value.contains(term) {
+        40
+    } else {
+        0
+    }
+}
+
+fn room_visible_to(state: &AppState, room_id: Uuid, principal: &str) -> bool {
+    state.room(room_id).is_some_and(|room| {
+        room.members
+            .iter()
+            .any(|member| member.user_sip_uri == principal)
+    })
+}
+
+fn sip_message_visible_to(message: &SipMessage, principal: &str) -> bool {
+    message.from_uri == principal || message.to_uri == principal
+}
+
+fn recording_visible_to(recording: &CallRecording, principal: &str) -> bool {
+    recording.caller_uri == principal
+        || recording.callee_uri == principal
+        || recording.recorded_by == principal
 }
 
 fn nats_subject_token(value: &str) -> String {
@@ -14130,6 +18299,38 @@ impl PersistedMapObject for FileRecord {
     }
 }
 
+impl PersistedMapObject for MalwareQuarantineItem {
+    type Key = Uuid;
+
+    fn map_key(&self) -> Self::Key {
+        self.id
+    }
+}
+
+impl PersistedMapObject for EnterpriseIntegration {
+    type Key = String;
+
+    fn map_key(&self) -> Self::Key {
+        self.id.clone()
+    }
+}
+
+impl PersistedMapObject for EmergencyLocation {
+    type Key = Uuid;
+
+    fn map_key(&self) -> Self::Key {
+        self.id
+    }
+}
+
+impl PersistedMapObject for EmergencyCallingAssignment {
+    type Key = String;
+
+    fn map_key(&self) -> Self::Key {
+        self.user_uri.clone()
+    }
+}
+
 impl PersistedMapObject for RoutingRule {
     type Key = Uuid;
 
@@ -14163,6 +18364,14 @@ impl PersistedMapObject for ScheduledMeeting {
 }
 
 impl PersistedMapObject for RetentionPolicy {
+    type Key = Uuid;
+
+    fn map_key(&self) -> Self::Key {
+        self.id
+    }
+}
+
+impl PersistedMapObject for EDiscoveryCase {
     type Key = Uuid;
 
     fn map_key(&self) -> Self::Key {
@@ -14933,7 +19142,10 @@ mod tests {
             CreateTeamRequest {
                 name: "Revenue Ops".to_string(),
                 description: Some("Pipeline planning".to_string()),
-                members: vec!["sip:bob@example.com".to_string()],
+                members: vec![
+                    "sip:bob@example.com".to_string(),
+                    "sip:mallory@example.com".to_string(),
+                ],
             },
         );
         let channel = state
@@ -15016,6 +19228,1513 @@ mod tests {
         assert!(state
             .search_collaboration("sip:alice@example.com", "   ", 10)
             .is_empty());
+    }
+
+    #[test]
+    fn unified_search_finds_enterprise_content_for_authorized_user() {
+        let state = AppState::new(
+            PathBuf::from(format!("/tmp/pale-unified-search-{}", Uuid::new_v4())),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        state
+            .create_user(CreateUserRequest {
+                display_name: "Alice Revenue Search".to_string(),
+                sip_uri: "sip:alice@example.com".to_string(),
+                matrix_user_id: None,
+                password: None,
+                role: Some("user".to_string()),
+            })
+            .unwrap();
+
+        let team = state.create_team(
+            "sip:alice@example.com",
+            CreateTeamRequest {
+                name: "Revenue Search Team".to_string(),
+                description: Some("Revenue planning".to_string()),
+                members: vec!["sip:bob@example.com".to_string()],
+            },
+        );
+        let channel = state
+            .create_team_channel(
+                "sip:alice@example.com",
+                team.id,
+                CreateRoomRequest {
+                    name: "Revenue Search".to_string(),
+                    description: Some("Revenue channel".to_string()),
+                    members: vec!["sip:bob@example.com".to_string()],
+                    is_direct: Some(false),
+                    team_id: None,
+                    channel_name: Some("revenue-search".to_string()),
+                    channel_type: Some("standard".to_string()),
+                    channel_owners: Vec::new(),
+                    posting_policy: None,
+                },
+            )
+            .unwrap();
+        state
+            .send_room_message(
+                channel.id,
+                "sip:alice@example.com",
+                "Revenue search kickoff",
+                None,
+                None,
+            )
+            .unwrap();
+        let sip_message = state.store_sip_message(StoreSipMessage {
+            call_id: None,
+            from_uri: "sip:alice@example.com".to_string(),
+            to_uri: "sip:bob@example.com".to_string(),
+            content_type: "text/plain".to_string(),
+            body: "Revenue search direct follow-up".to_string(),
+        });
+        let meeting = state
+            .create_scheduled_meeting(
+                "sip:alice@example.com",
+                CreateScheduledMeetingRequest {
+                    title: "Revenue Search Review".to_string(),
+                    description: Some("Revenue search meeting".to_string()),
+                    room_id: Some(channel.id),
+                    participants: vec!["sip:bob@example.com".to_string()],
+                    starts_at: Utc::now() + Duration::hours(1),
+                    ends_at: Utc::now() + Duration::hours(2),
+                    mode: Some(RoomCallMode::Video),
+                    recurrence: None,
+                },
+            )
+            .unwrap();
+        let file = FileRecord {
+            id: Uuid::new_v4(),
+            owner: "sip:alice@example.com".to_string(),
+            filename: "revenue-search-plan.pdf".to_string(),
+            content_type: "application/pdf".to_string(),
+            size: 42,
+            sha256: "revenue-search-hash".to_string(),
+            created_at: Utc::now(),
+            dlp_status: "clean".to_string(),
+            dlp_violation_count: 0,
+            legal_hold: false,
+            deleted_at: None,
+            deleted_by: None,
+            folder_id: None,
+            locked_by: None,
+            locked_at: None,
+        };
+        state.put_file_record(file.clone());
+        state
+            .store_recording(CallRecording {
+                id: Uuid::new_v4(),
+                call_id: Some("revenue-search-call".to_string()),
+                caller_uri: "sip:alice@example.com".to_string(),
+                callee_uri: "sip:bob@example.com".to_string(),
+                duration_secs: 120,
+                file_id: Some(file.id),
+                recorded_by: "sip:alice@example.com".to_string(),
+                created_at: Utc::now(),
+                conference_id: meeting.conference_id,
+                transcript_segment_count: 0,
+                legal_hold: false,
+                deleted_at: None,
+                deleted_by: None,
+            })
+            .unwrap();
+        let app = state.create_app_catalog_entry(CreateAppCatalogEntryRequest {
+            name: "Revenue Search Bot".to_string(),
+            description: Some("Revenue workflow assistant".to_string()),
+            category: Some("productivity".to_string()),
+            icon_url: None,
+            manifest_url: None,
+            version: Some("1.0.0".to_string()),
+        });
+        state.install_app(app.id, "sip:alice@example.com").unwrap();
+
+        let results = state.unified_search("sip:alice@example.com", "revenue search", 20);
+        let kinds: Vec<_> = results.iter().map(|result| result.kind.as_str()).collect();
+        assert!(kinds.contains(&"message"));
+        assert!(kinds.contains(&"channel"));
+        assert!(kinds.contains(&"team"));
+        assert!(kinds.contains(&"user"));
+        assert!(kinds.contains(&"meeting"));
+        assert!(kinds.contains(&"file"));
+        assert!(kinds.contains(&"recording"));
+        assert!(kinds.contains(&"app"));
+        assert!(results.iter().any(|result| result.id == channel.id.to_string()));
+        assert!(results
+            .iter()
+            .any(|result| result.id == sip_message.id.to_string()));
+        assert!(results.iter().any(|result| result.id == file.id.to_string()));
+        assert!(state
+            .unified_search("sip:alice@example.com", "   ", 20)
+            .is_empty());
+    }
+
+    #[test]
+    fn unified_search_does_not_leak_private_content_to_outsiders() {
+        let state = AppState::new(
+            PathBuf::from(format!(
+                "/tmp/pale-unified-search-privacy-{}",
+                Uuid::new_v4()
+            )),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let room = state.create_room(
+            "sip:alice@example.com",
+            CreateRoomRequest {
+                name: "Secret Revenue Search".to_string(),
+                description: Some("Private room".to_string()),
+                members: vec!["sip:bob@example.com".to_string()],
+                is_direct: Some(false),
+                team_id: None,
+                channel_name: None,
+                channel_type: None,
+                channel_owners: Vec::new(),
+                posting_policy: None,
+            },
+        );
+        state
+            .send_room_message(
+                room.id,
+                "sip:alice@example.com",
+                "Secret revenue search details",
+                None,
+                None,
+            )
+            .unwrap();
+        let room_message_id = state.room_messages(room.id)[0].id;
+        let sip_message = state.store_sip_message(StoreSipMessage {
+            call_id: None,
+            from_uri: "sip:alice@example.com".to_string(),
+            to_uri: "sip:bob@example.com".to_string(),
+            content_type: "text/plain".to_string(),
+            body: "Secret revenue search direct message".to_string(),
+        });
+        let file = FileRecord {
+            id: Uuid::new_v4(),
+            owner: "sip:alice@example.com".to_string(),
+            filename: "secret-revenue-search.xlsx".to_string(),
+            content_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                .to_string(),
+            size: 64,
+            sha256: "secret-revenue-search-hash".to_string(),
+            created_at: Utc::now(),
+            dlp_status: "clean".to_string(),
+            dlp_violation_count: 0,
+            legal_hold: false,
+            deleted_at: None,
+            deleted_by: None,
+            folder_id: None,
+            locked_by: None,
+            locked_at: None,
+        };
+        state.put_file_record(file);
+        state
+            .store_recording(CallRecording {
+                id: Uuid::new_v4(),
+                call_id: Some("secret-revenue-search-call".to_string()),
+                caller_uri: "sip:alice@example.com".to_string(),
+                callee_uri: "sip:bob@example.com".to_string(),
+                duration_secs: 90,
+                file_id: None,
+                recorded_by: "sip:alice@example.com".to_string(),
+                created_at: Utc::now(),
+                conference_id: None,
+                transcript_segment_count: 0,
+                legal_hold: false,
+                deleted_at: None,
+                deleted_by: None,
+            })
+            .unwrap();
+
+        let outsider = state.unified_search("sip:mallory@example.com", "secret revenue search", 20);
+        assert!(outsider.is_empty());
+
+        let admin = state.unified_search("admin", "secret revenue search", 20);
+        assert!(admin.iter().any(|result| result.kind == "file"));
+        assert!(admin.iter().any(|result| result.kind == "recording"));
+        assert!(admin
+            .iter()
+            .any(|result| result.id == sip_message.id.to_string()));
+        assert!(!admin
+            .iter()
+            .any(|result| result.id == room_message_id.to_string()));
+        assert!(!admin.iter().any(|result| result.kind == "room"));
+    }
+
+    #[test]
+    fn copilot_answers_are_grounded_and_do_not_bypass_search_visibility() {
+        let state = AppState::new(
+            PathBuf::from(format!("/tmp/pale-copilot-{}", Uuid::new_v4())),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        state
+            .update_enterprise_integration(
+                "copilot",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some("http://localhost:11434".to_string()),
+                    admin_url: None,
+                    api_key: None,
+                    clear_api_key: None,
+                    notes: Some("local ollama".to_string()),
+                },
+                "admin",
+            )
+            .unwrap();
+        let room = state.create_room(
+            "sip:alice@example.com",
+            CreateRoomRequest {
+                name: "Board Revenue Plan".to_string(),
+                description: Some("Private board planning".to_string()),
+                members: vec!["sip:bob@example.com".to_string()],
+                is_direct: Some(false),
+                team_id: None,
+                channel_name: None,
+                channel_type: None,
+                channel_owners: Vec::new(),
+                posting_policy: None,
+            },
+        );
+        state
+            .send_room_message(
+                room.id,
+                "sip:alice@example.com",
+                "Board revenue plan says expand enterprise calling.",
+                None,
+                None,
+            )
+            .unwrap();
+
+        let alice = state
+            .copilot_query(
+                "sip:alice@example.com",
+                CreateCopilotQueryRequest {
+                    question: "What is in the board revenue plan?".to_string(),
+                    context_query: Some("board revenue plan".to_string()),
+                    limit: Some(6),
+                },
+            )
+            .unwrap();
+        assert!(alice.provider_configured);
+        assert!(alice.grounded);
+        assert!(alice.answer.contains("Board Revenue Plan"));
+        assert!(alice
+            .citations
+            .iter()
+            .any(|citation| citation.result.room_id == Some(room.id)));
+        assert!(alice
+            .governance
+            .iter()
+            .any(|entry| entry.contains("visible to the caller")));
+
+        let outsider = state
+            .copilot_query(
+                "sip:mallory@example.com",
+                CreateCopilotQueryRequest {
+                    question: "What is in the board revenue plan?".to_string(),
+                    context_query: Some("board revenue plan".to_string()),
+                    limit: Some(6),
+                },
+            )
+            .unwrap();
+        assert!(outsider.provider_configured);
+        assert!(!outsider.grounded);
+        assert!(outsider.citations.is_empty());
+        assert!(!outsider.answer.contains("expand enterprise calling"));
+    }
+
+    #[test]
+    fn ai_provider_apis_configure_llm_stt_and_tts_dispatch_contracts() {
+        let state = AppState::new(
+            PathBuf::from(format!("/tmp/pale-ai-providers-{}", Uuid::new_v4())),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+
+        let initial = state.ai_provider_statuses();
+        assert_eq!(initial.len(), 3);
+        assert!(initial.iter().all(|status| !status.configured));
+        assert!(initial.iter().any(|status| status.kind == "tts"));
+
+        let llm = state
+            .update_ai_provider(
+                "llm",
+                UpdateAiProviderRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some("http://ollama.local:11434".to_string()),
+                    admin_url: None,
+                    api_key: Some("llm-token".to_string()),
+                    clear_api_key: None,
+                    notes: Some("Ollama/vLLM compatible endpoint".to_string()),
+                },
+                "admin",
+            )
+            .unwrap();
+        assert!(llm.configured);
+        assert_eq!(llm.integration_ids, vec!["copilot", "meeting_assistant"]);
+
+        let stt = state
+            .update_ai_provider(
+                "stt",
+                UpdateAiProviderRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some("http://whisper.local/v1/audio/transcriptions".to_string()),
+                    admin_url: None,
+                    api_key: None,
+                    clear_api_key: None,
+                    notes: Some("Whisper-compatible STT".to_string()),
+                },
+                "admin",
+            )
+            .unwrap();
+        assert!(stt.configured);
+
+        let tts = state
+            .update_ai_provider(
+                "tts",
+                UpdateAiProviderRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some("http://piper.local/synthesize".to_string()),
+                    admin_url: None,
+                    api_key: None,
+                    clear_api_key: None,
+                    notes: Some("Piper TTS".to_string()),
+                },
+                "admin",
+            )
+            .unwrap();
+        assert!(tts.configured);
+        assert_eq!(tts.integration_ids, vec!["text_to_speech"]);
+
+        let llm_dispatch = state
+            .llm_chat_dispatch(
+                "sip:alice@example.com",
+                LlmChatRequest {
+                    model: Some("llama3.1".to_string()),
+                    temperature: Some(0.1),
+                    max_tokens: Some(256),
+                    messages: vec![LlmChatMessage {
+                        role: "user".to_string(),
+                        content: "Summarize the latest meeting".to_string(),
+                    }],
+                },
+            )
+            .unwrap();
+        assert_eq!(llm_dispatch.status, "ready_for_external_dispatch");
+        assert_eq!(llm_dispatch.payload["model"], "llama3.1");
+        assert!(llm_dispatch
+            .governance
+            .iter()
+            .any(|line| line.contains("does not fabricate LLM output")));
+
+        let file = FileRecord {
+            id: Uuid::new_v4(),
+            owner: "sip:alice@example.com".to_string(),
+            filename: "speech.wav".to_string(),
+            content_type: "audio/wav".to_string(),
+            size: 128,
+            sha256: "speech-sha".to_string(),
+            created_at: Utc::now(),
+            dlp_status: "clean".to_string(),
+            dlp_violation_count: 0,
+            legal_hold: false,
+            deleted_at: None,
+            deleted_by: None,
+            folder_id: None,
+            locked_by: None,
+            locked_at: None,
+        };
+        state.put_file_record(file.clone());
+        let stt_dispatch = state
+            .stt_transcription_dispatch(
+                "sip:alice@example.com",
+                SttTranscriptionRequest {
+                    recording_id: None,
+                    file_id: Some(file.id),
+                    language: Some("en-US".to_string()),
+                    diarization: Some(false),
+                },
+            )
+            .unwrap();
+        assert_eq!(stt_dispatch.status, "ready_for_external_dispatch");
+        assert_eq!(stt_dispatch.payload["file_id"], file.id.to_string());
+        assert_eq!(stt_dispatch.payload["diarization"], false);
+
+        let tts_dispatch = state
+            .tts_synthesis_dispatch(
+                "sip:alice@example.com",
+                TtsSynthesisRequest {
+                    text: "Welcome to the conference".to_string(),
+                    voice: Some("alloy".to_string()),
+                    language: Some("en-US".to_string()),
+                    format: Some("mp3".to_string()),
+                },
+            )
+            .unwrap();
+        assert_eq!(tts_dispatch.status, "ready_for_external_dispatch");
+        assert_eq!(tts_dispatch.payload["voice"], "alloy");
+        assert!(tts_dispatch
+            .governance
+            .iter()
+            .any(|line| line.contains("does not synthesize placeholder audio")));
+    }
+
+    #[test]
+    fn enterprise_capability_registry_tracks_external_parity_dependencies() {
+        let state = AppState::new(
+            PathBuf::from(format!(
+                "/tmp/pale-enterprise-integrations-{}",
+                Uuid::new_v4()
+            )),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+
+        let initial = state.enterprise_capability_report();
+        assert_eq!(initial.total, 19);
+        assert_eq!(initial.available, 0);
+        assert_eq!(initial.blocked, 19);
+        assert!(initial
+            .capabilities
+            .iter()
+            .any(|capability| capability.id == "e911"
+                && capability.blocking_dependency.is_some()));
+
+        state
+            .update_enterprise_integration(
+                "e911",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: None,
+                    admin_url: None,
+                    api_key: None,
+                    clear_api_key: None,
+                    notes: None,
+                },
+                "admin",
+            )
+            .unwrap();
+        let needs_config = state.enterprise_capability_report();
+        let e911 = needs_config
+            .capabilities
+            .iter()
+            .find(|capability| capability.id == "e911")
+            .unwrap();
+        assert_eq!(e911.status, "needs_configuration");
+        assert_eq!(needs_config.available, 0);
+
+        state
+            .update_enterprise_integration(
+                "advanced_threat_protection",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some("tcp://clamav.local:3310".to_string()),
+                    admin_url: Some("https://security.local".to_string()),
+                    api_key: Some("scanner-token".to_string()),
+                    clear_api_key: None,
+                    notes: Some("ClamAV daemon".to_string()),
+                },
+                "admin",
+            )
+            .unwrap();
+        let report = state.enterprise_capability_report();
+        let atp = report
+            .capabilities
+            .iter()
+            .find(|capability| capability.id == "advanced_threat_protection")
+            .unwrap();
+        assert_eq!(atp.status, "available");
+        assert_eq!(report.available, 1);
+        assert_eq!(report.configured, 1);
+        assert!(state
+            .list_enterprise_integrations()
+            .iter()
+            .any(|integration| integration.id == "advanced_threat_protection"
+                && integration.api_key_enc.is_some()));
+    }
+
+    #[test]
+    fn enterprise_parity_readiness_requires_every_external_capability() {
+        let state = AppState::new(
+            PathBuf::from(format!(
+                "/tmp/pale-enterprise-readiness-{}",
+                Uuid::new_v4()
+            )),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+
+        let initial = state.enterprise_parity_readiness_report();
+        assert!(!initial.ready);
+        assert_eq!(initial.score, 0);
+        assert_eq!(initial.critical_blockers.len(), 19);
+        assert!(initial
+            .consensus
+            .iter()
+            .any(|line| line.contains("not just a checked toggle")));
+
+        state
+            .update_enterprise_integration(
+                "e911",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: None,
+                    admin_url: None,
+                    api_key: None,
+                    clear_api_key: None,
+                    notes: None,
+                },
+                "admin",
+            )
+            .unwrap();
+        let partial = state.enterprise_parity_readiness_report();
+        assert!(!partial.ready);
+        assert_eq!(partial.score, 0);
+        assert!(partial
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("E911 is enabled but not usable")));
+
+        for integration in enterprise_integration_defaults() {
+            let needs_endpoint = !matches!(
+                integration.integration_kind.as_str(),
+                "client_media_runtime"
+                    | "client_platform"
+                    | "desktop_runtime"
+                    | "local_or_media_runtime"
+            );
+            state
+                .update_enterprise_integration(
+                    &integration.id,
+                    UpdateEnterpriseIntegrationRequest {
+                        enabled: Some(true),
+                        endpoint_url: needs_endpoint
+                            .then(|| format!("https://{}.internal", integration.id)),
+                        admin_url: None,
+                        api_key: None,
+                        clear_api_key: None,
+                        notes: Some("readiness test".to_string()),
+                    },
+                    "admin",
+                )
+                .unwrap();
+        }
+        let ready = state.enterprise_parity_readiness_report();
+        assert!(ready.ready);
+        assert_eq!(ready.score, 100);
+        assert!(ready.critical_blockers.is_empty());
+        assert_eq!(ready.next_actions.len(), 1);
+        assert!(ready.next_actions[0].contains("end-to-end tenant validation"));
+    }
+
+    #[test]
+    fn enterprise_integration_health_flags_invalid_or_missing_provider_configuration() {
+        let state = AppState::new(
+            PathBuf::from(format!(
+                "/tmp/pale-enterprise-health-{}",
+                Uuid::new_v4()
+            )),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+
+        let initial = state.enterprise_integration_health_report();
+        assert_eq!(initial.healthy, 0);
+        assert_eq!(initial.blocked, 19);
+
+        state
+            .update_enterprise_integration(
+                "e911",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some("ftp://e911.invalid".to_string()),
+                    admin_url: None,
+                    api_key: None,
+                    clear_api_key: None,
+                    notes: None,
+                },
+                "admin",
+            )
+            .unwrap();
+        let invalid = state.enterprise_integration_health_report();
+        let e911 = invalid
+            .integrations
+            .iter()
+            .find(|integration| integration.id == "e911")
+            .unwrap();
+        assert_eq!(e911.status, "warning");
+        assert!(e911
+            .blockers
+            .contains(&"endpoint_scheme_unsupported".to_string()));
+
+        state
+            .update_enterprise_integration(
+                "virtual_backgrounds",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: None,
+                    admin_url: None,
+                    api_key: None,
+                    clear_api_key: None,
+                    notes: None,
+                },
+                "admin",
+            )
+            .unwrap();
+        let local_runtime = state.enterprise_integration_health_report();
+        let backgrounds = local_runtime
+            .integrations
+            .iter()
+            .find(|integration| integration.id == "virtual_backgrounds")
+            .unwrap();
+        assert_eq!(backgrounds.status, "healthy");
+        assert!(backgrounds
+            .checks
+            .contains(&"local_runtime_capability".to_string()));
+    }
+
+    #[test]
+    fn enterprise_deployment_plan_prioritizes_external_foundation_work() {
+        let state = AppState::new(
+            PathBuf::from(format!(
+                "/tmp/pale-enterprise-deployment-plan-{}",
+                Uuid::new_v4()
+            )),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+
+        let initial = state.enterprise_deployment_plan();
+        assert!(!initial.ready_to_deploy);
+        assert_eq!(initial.total, 19);
+        assert_eq!(initial.completed, 0);
+        assert_eq!(initial.remaining, 19);
+        assert_eq!(initial.items[0].priority, "critical");
+        assert!(initial
+            .summary
+            .iter()
+            .any(|line| line.contains("separate open-source services")));
+        let e911 = initial
+            .items
+            .iter()
+            .find(|item| item.id == "e911")
+            .unwrap();
+        assert!(e911.endpoint_required);
+        assert!(e911.credentials_required);
+        assert!(e911.action.contains("Install or select"));
+
+        state
+            .update_enterprise_integration(
+                "advanced_threat_protection",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some("tcp://clamav.local:3310".to_string()),
+                    admin_url: None,
+                    api_key: None,
+                    clear_api_key: None,
+                    notes: Some("ClamAV".to_string()),
+                },
+                "admin",
+            )
+            .unwrap();
+        let updated = state.enterprise_deployment_plan();
+        assert_eq!(updated.completed, 1);
+        assert_eq!(updated.remaining, 18);
+        let atp = updated
+            .items
+            .iter()
+            .find(|item| item.id == "advanced_threat_protection")
+            .unwrap();
+        assert_eq!(atp.status, "available");
+        assert!(atp.action.contains("Validate end-to-end workflow"));
+    }
+
+    #[test]
+    fn cloud_storage_status_tracks_external_open_source_backend_readiness() {
+        let state = AppState::new(
+            PathBuf::from(format!("/tmp/pale-cloud-storage-{}", Uuid::new_v4())),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        state.put_file_record(FileRecord {
+            id: Uuid::new_v4(),
+            owner: "sip:alice@example.com".to_string(),
+            filename: "plan.docx".to_string(),
+            content_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                .to_string(),
+            size: 1024,
+            sha256: "cloud-storage-plan".to_string(),
+            created_at: Utc::now(),
+            dlp_status: "clean".to_string(),
+            dlp_violation_count: 0,
+            legal_hold: false,
+            deleted_at: None,
+            deleted_by: None,
+            folder_id: None,
+            locked_by: None,
+            locked_at: None,
+        });
+
+        let local_only = state.cloud_storage_status();
+        assert!(!local_only.provider_configured);
+        assert_eq!(local_only.sync_mode, "local_server_storage");
+        assert_eq!(local_only.local_file_count, 1);
+        assert_eq!(local_only.total_storage_bytes, 1024);
+        assert!(local_only
+            .open_source_options
+            .iter()
+            .any(|option| option == "Nextcloud"));
+        assert!(!local_only.warnings.is_empty());
+
+        state
+            .update_enterprise_integration(
+                "cloud_storage",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some("https://files.example.com/remote.php/dav".to_string()),
+                    admin_url: Some("https://files.example.com/settings/admin".to_string()),
+                    api_key: Some("secret".to_string()),
+                    clear_api_key: None,
+                    notes: Some("Nextcloud WebDAV".to_string()),
+                },
+                "admin",
+            )
+            .unwrap();
+        let external = state.cloud_storage_status();
+        assert!(external.provider_configured);
+        assert_eq!(external.sync_mode, "external_provider_ready");
+        assert_eq!(
+            external.endpoint_url.as_deref(),
+            Some("https://files.example.com/remote.php/dav")
+        );
+        assert!(external.warnings.is_empty());
+    }
+
+    #[test]
+    fn speech_ivr_requires_provider_and_matches_only_configured_phrases() {
+        let state = AppState::new(
+            PathBuf::from(format!("/tmp/pale-speech-ivr-{}", Uuid::new_v4())),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let ivr = state
+            .create_ivr(CreateIvrRequest {
+                name: "Main Speech IVR".to_string(),
+                extension: "sip:main@example.com".to_string(),
+                greeting_text: Some("Say sales or support.".to_string()),
+                greeting_file_id: None,
+                timeout_secs: Some(10),
+                max_retries: Some(2),
+                invalid_destination: Some("sip:operator@example.com".to_string()),
+                timeout_destination: Some("sip:operator@example.com".to_string()),
+                speech_enabled: Some(true),
+                speech_language: Some("en-US".to_string()),
+                options: vec![
+                    IvrOption {
+                        digit: "1".to_string(),
+                        label: "Sales".to_string(),
+                        destination: "sip:sales@example.com".to_string(),
+                        destination_type: "ring_group".to_string(),
+                        speech_phrases: vec!["sales".to_string(), "talk to sales".to_string()],
+                    },
+                    IvrOption {
+                        digit: "2".to_string(),
+                        label: "Support".to_string(),
+                        destination: "sip:support@example.com".to_string(),
+                        destination_type: "ring_group".to_string(),
+                        speech_phrases: vec!["support".to_string(), "technical help".to_string()],
+                    },
+                ],
+            })
+            .unwrap();
+
+        let blocked = state
+            .resolve_ivr_speech(
+                ivr.id,
+                ResolveIvrSpeechRequest {
+                    utterance: "support please".to_string(),
+                    language: None,
+                },
+            )
+            .unwrap();
+        assert!(!blocked.provider_configured);
+        assert!(!blocked.matched);
+        assert_eq!(blocked.reason, "speech_ivr_provider_not_configured");
+
+        state
+            .update_enterprise_integration(
+                "speech_ivr",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some("http://localhost:9000/asr".to_string()),
+                    admin_url: None,
+                    api_key: Some("speech-token".to_string()),
+                    clear_api_key: None,
+                    notes: Some("Vosk/Rasa speech IVR".to_string()),
+                },
+                "admin",
+            )
+            .unwrap();
+
+        let matched = state
+            .resolve_ivr_speech(
+                ivr.id,
+                ResolveIvrSpeechRequest {
+                    utterance: "I need technical help".to_string(),
+                    language: None,
+                },
+            )
+            .unwrap();
+        assert!(matched.provider_configured);
+        assert!(matched.matched);
+        assert_eq!(
+            matched.route.as_ref().map(|route| route.destination.as_str()),
+            Some("sip:support@example.com")
+        );
+
+        let unknown = state
+            .resolve_ivr_speech(
+                ivr.id,
+                ResolveIvrSpeechRequest {
+                    utterance: "billing".to_string(),
+                    language: None,
+                },
+            )
+            .unwrap();
+        assert!(!unknown.matched);
+        assert_eq!(unknown.reason, "no_configured_phrase_matched");
+        assert!(unknown.route.is_none());
+    }
+
+    #[test]
+    fn emergency_call_plan_fails_closed_until_e911_dependencies_are_ready() {
+        let state = AppState::new(
+            PathBuf::from(format!("/tmp/pale-e911-{}", Uuid::new_v4())),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+
+        let unassigned = state.emergency_call_plan("sip:alice@example.com", "911");
+        assert!(unassigned.emergency);
+        assert!(!unassigned.allowed);
+        assert_eq!(unassigned.reason, "missing_emergency_location_assignment");
+
+        state.create_sip_gateway(CreateSipGatewayRequest {
+            name: "Emergency SBC".to_string(),
+            host: "sbc.example.com".to_string(),
+            port: Some(5061),
+            transport: Some("tls".to_string()),
+            username: None,
+            password: None,
+            prefix: Some(String::new()),
+            enabled: Some(true),
+        });
+        let location = state.create_emergency_location(CreateEmergencyLocationRequest {
+            name: "HQ".to_string(),
+            address_line1: "1 Main St".to_string(),
+            address_line2: None,
+            city: "New York".to_string(),
+            region: "NY".to_string(),
+            postal_code: "10001".to_string(),
+            country: Some("US".to_string()),
+            elin: Some("+12125550100".to_string()),
+            callback_number: Some("+12125550101".to_string()),
+            provider_location_id: Some("loc-hq".to_string()),
+            validated: Some(false),
+        });
+        let assignment = state
+            .assign_emergency_location(
+                AssignEmergencyLocationRequest {
+                    user_uri: "alice@example.com".to_string(),
+                    location_id: location.id,
+                    emergency_numbers: Some(vec!["9-1-1".to_string(), "911".to_string()]),
+                },
+                "admin",
+            )
+            .unwrap();
+        assert_eq!(assignment.user_uri, "sip:alice@example.com");
+        assert_eq!(assignment.emergency_numbers, vec!["911".to_string()]);
+
+        let unvalidated = state.emergency_call_plan("sip:alice@example.com", "911");
+        assert!(!unvalidated.allowed);
+        assert_eq!(unvalidated.reason, "emergency_location_not_validated");
+
+        state
+            .update_emergency_location(
+                location.id,
+                UpdateEmergencyLocationRequest {
+                    name: None,
+                    address_line1: None,
+                    address_line2: None,
+                    city: None,
+                    region: None,
+                    postal_code: None,
+                    country: None,
+                    elin: None,
+                    callback_number: None,
+                    provider_location_id: None,
+                    validated: Some(true),
+                },
+            )
+            .unwrap();
+        let missing_e911 = state.emergency_call_plan("sip:alice@example.com", "911");
+        assert!(!missing_e911.allowed);
+        assert_eq!(missing_e911.reason, "e911_provider_not_configured");
+
+        state
+            .update_enterprise_integration(
+                "e911",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some("https://e911.example.com".to_string()),
+                    admin_url: None,
+                    api_key: None,
+                    clear_api_key: None,
+                    notes: Some("Certified E911 provider".to_string()),
+                },
+                "admin",
+            )
+            .unwrap();
+        let missing_pstn = state.emergency_call_plan("sip:alice@example.com", "911");
+        assert!(!missing_pstn.allowed);
+        assert_eq!(missing_pstn.reason, "pstn_provider_not_configured");
+
+        state
+            .update_enterprise_integration(
+                "pstn_sbc_operator_connect",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some("sip:sbc.example.com".to_string()),
+                    admin_url: None,
+                    api_key: None,
+                    clear_api_key: None,
+                    notes: Some("SBC trunk".to_string()),
+                },
+                "admin",
+            )
+            .unwrap();
+        let routable = state.emergency_call_plan("sip:alice@example.com", "911");
+        assert!(routable.allowed);
+        assert_eq!(routable.reason, "routable");
+        assert!(routable.gateway.is_some());
+        assert!(routable.e911_provider_available);
+        assert!(routable.pstn_provider_available);
+
+        let non_emergency = state.emergency_call_plan("sip:alice@example.com", "5551212");
+        assert!(!non_emergency.emergency);
+        assert!(non_emergency.allowed);
+        assert_eq!(non_emergency.reason, "not_emergency_number");
+    }
+
+    #[test]
+    fn pstn_operator_connect_status_requires_provider_routes_and_redacts_gateway_secrets() {
+        let state = AppState::new(
+            PathBuf::from(format!("/tmp/pale-pstn-{}", Uuid::new_v4())),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let initial = state.pstn_operator_connect_status();
+        assert!(!initial.provider_available);
+        assert!(!initial.routable);
+        assert!(initial
+            .blockers
+            .contains(&"pstn_provider_not_configured".to_string()));
+        assert!(initial
+            .blockers
+            .contains(&"no_enabled_sip_gateway".to_string()));
+
+        let gateway = state.create_sip_gateway(CreateSipGatewayRequest {
+            name: "Carrier SBC".to_string(),
+            host: "sbc.carrier.example".to_string(),
+            port: Some(5061),
+            transport: Some("tls".to_string()),
+            username: Some("trunk-user".to_string()),
+            password: Some("trunk-secret".to_string()),
+            prefix: Some("+".to_string()),
+            enabled: Some(true),
+        });
+        assert_ne!(gateway.password_enc.as_deref(), Some("trunk-secret"));
+        assert!(gateway.password_enc.is_some());
+        let serialized = serde_json::to_value(&gateway).unwrap();
+        assert!(serialized.get("password_enc").is_none());
+
+        let missing_provider = state.pstn_operator_connect_status();
+        assert!(!missing_provider.routable);
+        assert_eq!(missing_provider.tls_gateway_count, 1);
+        assert_eq!(missing_provider.authenticated_gateway_count, 1);
+        assert_eq!(missing_provider.e164_prefix_route_count, 1);
+
+        state
+            .update_enterprise_integration(
+                "pstn_sbc_operator_connect",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some("sip:sbc.carrier.example".to_string()),
+                    admin_url: Some("https://carrier.example/admin".to_string()),
+                    api_key: Some("operator-connect-token".to_string()),
+                    clear_api_key: None,
+                    notes: Some("Carrier trunk".to_string()),
+                },
+                "admin",
+            )
+            .unwrap();
+        let ready = state.pstn_operator_connect_status();
+        assert!(ready.provider_available);
+        assert!(ready.routable);
+        assert!(ready.emergency_route_ready);
+        assert!(ready.blockers.is_empty());
+    }
+
+    #[test]
+    fn presentation_sessions_track_powerpoint_live_controls_and_renderer_readiness() {
+        let state = AppState::new(
+            PathBuf::from(format!("/tmp/pale-powerpoint-live-{}", Uuid::new_v4())),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let conference = state.create_conference(CreateConferenceRequest {
+            title: "Roadmap".to_string(),
+            mode: ConferenceMode::Video,
+            registration_enabled: None,
+            max_registrations: None,
+            registration_fields: None,
+        });
+        state
+            .join_conference(
+                conference.id,
+                JoinConferenceRequest {
+                    user_id: Uuid::new_v4(),
+                    sip_uri: "sip:presenter@example.com".to_string(),
+                    role: Some(ParticipantRole::Host),
+                },
+                false,
+            )
+            .unwrap();
+
+        assert!(state
+            .create_presentation_session(
+                conference.id,
+                "presenter@example.com",
+                CreatePresentationSessionRequest {
+                    title: "   ".to_string(),
+                    source_file_id: None,
+                    slides: vec![],
+                    attendee_navigation_enabled: false,
+                },
+            )
+            .is_none());
+
+        let session = state
+            .create_presentation_session(
+                conference.id,
+                "presenter@example.com",
+                CreatePresentationSessionRequest {
+                    title: "   ".to_string(),
+                    source_file_id: None,
+                    slides: vec![
+                        CreatePresentationSlideRequest {
+                            title: "Strategy".to_string(),
+                            notes: Some("Open with customer asks".to_string()),
+                            render_url: None,
+                        },
+                        CreatePresentationSlideRequest {
+                            title: "Execution".to_string(),
+                            notes: None,
+                            render_url: Some("https://renderer.local/slides/2.png".to_string()),
+                        },
+                    ],
+                    attendee_navigation_enabled: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(session.title, "Presentation");
+        assert_eq!(session.presenter_uri, "sip:presenter@example.com");
+        assert_eq!(session.current_slide, 0);
+        assert!(!session.renderer_configured);
+
+        let advanced = state
+            .update_presentation_session(
+                session.id,
+                UpdatePresentationSessionRequest {
+                    current_slide: Some(99),
+                    attendee_navigation_enabled: Some(true),
+                    presenter_uri: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(advanced.current_slide, 1);
+        assert!(advanced.attendee_navigation_enabled);
+
+        state
+            .update_enterprise_integration(
+                "powerpoint_live",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some("http://collabora.local".to_string()),
+                    admin_url: None,
+                    api_key: None,
+                    clear_api_key: None,
+                    notes: Some("Collabora renderer".to_string()),
+                },
+                "admin",
+            )
+            .unwrap();
+        assert!(state
+            .presentation_session(session.id)
+            .unwrap()
+            .renderer_configured);
+
+        let ended = state.end_presentation_session(session.id).unwrap();
+        assert!(ended.ended_at.is_some());
+        let unchanged = state
+            .update_presentation_session(
+                session.id,
+                UpdatePresentationSessionRequest {
+                    current_slide: Some(0),
+                    attendee_navigation_enabled: None,
+                    presenter_uri: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(unchanged.current_slide, 1);
+    }
+
+    #[test]
+    fn meeting_media_settings_and_layout_report_runtime_readiness() {
+        let state = AppState::new(
+            PathBuf::from(format!("/tmp/pale-media-effects-{}", Uuid::new_v4())),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let conference = state.create_conference(CreateConferenceRequest {
+            title: "Design Review".to_string(),
+            mode: ConferenceMode::Video,
+            registration_enabled: None,
+            max_registrations: None,
+            registration_fields: None,
+        });
+        let host_id = Uuid::new_v4();
+        let guest_id = Uuid::new_v4();
+        state
+            .join_conference(
+                conference.id,
+                JoinConferenceRequest {
+                    user_id: host_id,
+                    sip_uri: "sip:host@example.com".to_string(),
+                    role: Some(ParticipantRole::Host),
+                },
+                false,
+            )
+            .unwrap();
+        state
+            .join_conference(
+                conference.id,
+                JoinConferenceRequest {
+                    user_id: guest_id,
+                    sip_uri: "sip:guest@example.com".to_string(),
+                    role: None,
+                },
+                false,
+            )
+            .unwrap();
+
+        let media = state.update_meeting_media_settings(
+            "host@example.com",
+            UpdateMeetingMediaSettingsRequest {
+                echo_cancellation: Some(false),
+                noise_suppression: Some(true),
+                auto_gain: Some(true),
+                background_mode: Some("custom".to_string()),
+                background_image_url: Some("https://cdn.example/bg.png".to_string()),
+            },
+        );
+        assert_eq!(media.user_uri, "sip:host@example.com");
+        assert_eq!(media.background_mode, "image");
+        assert_eq!(
+            media.background_image_url.as_deref(),
+            Some("https://cdn.example/bg.png")
+        );
+        assert!(!media.noise_suppression_configured);
+        assert!(!media.virtual_backgrounds_configured);
+
+        let layout = state
+            .update_conference_layout_state(
+                conference.id,
+                "sip:host@example.com",
+                UpdateConferenceLayoutRequest {
+                    mode: Some("together".to_string()),
+                    max_visible: Some(500),
+                    together_scene: Some("auditorium".to_string()),
+                    stage_participant_ids: Some(vec![host_id, Uuid::new_v4(), guest_id]),
+                },
+            )
+            .unwrap();
+        assert_eq!(layout.mode, "together");
+        assert_eq!(layout.max_visible, 9);
+        assert_eq!(layout.gallery_capacity, 9);
+        assert_eq!(layout.stage_participant_ids, vec![host_id, guest_id]);
+        assert!(!layout.sfu_layout_configured);
+        assert!(layout
+            .layout_blockers
+            .contains(&"sfu_layout_service_not_configured".to_string()));
+
+        for id in ["noise_suppression", "virtual_backgrounds", "together_gallery"] {
+            state
+                .update_enterprise_integration(
+                    id,
+                    UpdateEnterpriseIntegrationRequest {
+                        enabled: Some(true),
+                        endpoint_url: Some(format!("local://{id}")),
+                        admin_url: None,
+                        api_key: None,
+                        clear_api_key: None,
+                        notes: None,
+                    },
+                    "admin",
+                )
+                .unwrap();
+        }
+        let ready_media = state.meeting_media_settings("sip:host@example.com");
+        assert!(ready_media.noise_suppression_configured);
+        assert!(ready_media.virtual_backgrounds_configured);
+        assert!(state
+            .conference_layout_state(conference.id)
+            .unwrap()
+            .sfu_layout_configured);
+        let ready_layout = state.conference_layout_state(conference.id).unwrap();
+        assert_eq!(ready_layout.gallery_capacity, 49);
+        assert!(ready_layout.layout_blockers.is_empty());
+    }
+
+    #[test]
+    fn stream_sessions_require_gateway_validate_targets_and_redact_credentials() {
+        let state = AppState::new(
+            PathBuf::from(format!("/tmp/pale-streaming-{}", Uuid::new_v4())),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let conference = state.create_conference(CreateConferenceRequest {
+            title: "Town hall".to_string(),
+            mode: ConferenceMode::Webinar,
+            registration_enabled: None,
+            max_registrations: None,
+            registration_fields: None,
+        });
+
+        let missing_gateway = state
+            .start_stream_session(
+                conference.id,
+                "sip:host@example.com",
+                CreateMeetingStreamRequest {
+                    target_kind: StreamTargetKind::Rtmp,
+                    name: "YouTube".to_string(),
+                    destination: "rtmps://user:secret@live.example/app/key".to_string(),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(missing_gateway, "streaming_gateway_not_configured");
+
+        state
+            .update_enterprise_integration(
+                "ndi_rtmp_streaming",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some("rtmp://egress.local/live".to_string()),
+                    admin_url: None,
+                    api_key: None,
+                    clear_api_key: None,
+                    notes: Some("SRS gateway".to_string()),
+                },
+                "admin",
+            )
+            .unwrap();
+
+        let invalid = state
+            .start_stream_session(
+                conference.id,
+                "sip:host@example.com",
+                CreateMeetingStreamRequest {
+                    target_kind: StreamTargetKind::Rtmp,
+                    name: "Bad".to_string(),
+                    destination: "https://not-rtmp.example".to_string(),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(invalid, "invalid_stream_destination");
+
+        let session = state
+            .start_stream_session(
+                conference.id,
+                "sip:host@example.com",
+                CreateMeetingStreamRequest {
+                    target_kind: StreamTargetKind::Rtmp,
+                    name: "".to_string(),
+                    destination: "rtmps://user:secret@live.example/app/key".to_string(),
+                },
+            )
+            .unwrap();
+        assert_eq!(session.name, "Meeting stream");
+        assert_eq!(session.status, StreamStatus::Live);
+        assert_eq!(session.destination, "rtmps://***@live.example/app/key");
+        assert!(session.gateway_configured);
+
+        let ndi = state
+            .start_stream_session(
+                conference.id,
+                "sip:host@example.com",
+                CreateMeetingStreamRequest {
+                    target_kind: StreamTargetKind::Ndi,
+                    name: "NDI Program".to_string(),
+                    destination: "Pale Program Output".to_string(),
+                },
+            )
+            .unwrap();
+        assert_eq!(ndi.target_kind, StreamTargetKind::Ndi);
+
+        let stopped = state.stop_stream_session(session.id).unwrap();
+        assert_eq!(stopped.status, StreamStatus::Stopped);
+        assert!(stopped.stopped_at.is_some());
+    }
+
+    #[test]
+    fn town_hall_config_enforces_webinar_capacity_and_provider_readiness() {
+        let state = AppState::new(
+            PathBuf::from(format!("/tmp/pale-town-hall-{}", Uuid::new_v4())),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let meeting = state.create_conference(CreateConferenceRequest {
+            title: "Daily standup".to_string(),
+            mode: ConferenceMode::Video,
+            registration_enabled: None,
+            max_registrations: None,
+            registration_fields: None,
+        });
+        assert_eq!(
+            state
+                .update_town_hall_config(
+                    meeting.id,
+                    "admin",
+                    UpdateTownHallConfigRequest {
+                        enabled: Some(true),
+                        max_viewers: None,
+                        registration_required: None,
+                        presenter_only_video: None,
+                        attendee_mic_disabled: None,
+                        qna_moderation_required: None,
+                        overflow_url: None,
+                    },
+                )
+                .unwrap_err(),
+            "town_hall_requires_webinar"
+        );
+
+        let webinar = state.create_conference(CreateConferenceRequest {
+            title: "All hands".to_string(),
+            mode: ConferenceMode::Webinar,
+            registration_enabled: Some(true),
+            max_registrations: None,
+            registration_fields: None,
+        });
+        let config = state
+            .update_town_hall_config(
+                webinar.id,
+                "admin",
+                UpdateTownHallConfigRequest {
+                    enabled: Some(true),
+                    max_viewers: Some(1_000_000),
+                    registration_required: Some(true),
+                    presenter_only_video: Some(true),
+                    attendee_mic_disabled: Some(true),
+                    qna_moderation_required: Some(true),
+                    overflow_url: Some("https://cdn.example/overflow".to_string()),
+                },
+            )
+            .unwrap();
+        assert_eq!(config.max_viewers, 100000);
+        assert!(!config.broadcast_provider_configured);
+        assert_eq!(config.broadcast_capacity, 1000);
+        assert_eq!(config.attendee_mode, "interactive");
+        assert!(!config.broadcast_ready);
+        assert!(config
+            .broadcast_blockers
+            .contains(&"broadcast_provider_required_for_large_town_hall".to_string()));
+
+        state
+            .update_town_hall_config(
+                webinar.id,
+                "admin",
+                UpdateTownHallConfigRequest {
+                    enabled: Some(true),
+                    max_viewers: Some(1),
+                    registration_required: None,
+                    presenter_only_video: None,
+                    attendee_mic_disabled: None,
+                    qna_moderation_required: None,
+                    overflow_url: None,
+                },
+            )
+            .unwrap();
+        state
+            .join_conference(
+                webinar.id,
+                JoinConferenceRequest {
+                    user_id: Uuid::new_v4(),
+                    sip_uri: "sip:first@example.com".to_string(),
+                    role: None,
+                },
+                false,
+            )
+            .unwrap();
+        let rejected = state
+            .join_conference(
+                webinar.id,
+                JoinConferenceRequest {
+                    user_id: Uuid::new_v4(),
+                    sip_uri: "sip:second@example.com".to_string(),
+                    role: None,
+                },
+                false,
+            )
+            .unwrap_err();
+        assert_eq!(rejected, JoinConferenceError::CapacityReached);
+
+        state
+            .join_conference(
+                webinar.id,
+                JoinConferenceRequest {
+                    user_id: Uuid::new_v4(),
+                    sip_uri: "sip:presenter@example.com".to_string(),
+                    role: Some(ParticipantRole::Host),
+                },
+                true,
+            )
+            .unwrap();
+
+        state
+            .update_enterprise_integration(
+                "town_hall_broadcast",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some("https://broadcast.example".to_string()),
+                    admin_url: None,
+                    api_key: None,
+                    clear_api_key: None,
+                    notes: Some("CDN fanout".to_string()),
+                },
+                "admin",
+            )
+            .unwrap();
+        assert!(state
+            .town_hall_config(webinar.id)
+            .unwrap()
+            .broadcast_provider_configured);
+        let broadcast_ready = state.town_hall_config(webinar.id).unwrap();
+        assert!(broadcast_ready.broadcast_ready);
+        assert_eq!(broadcast_ready.attendee_mode, "broadcast");
+        assert_eq!(broadcast_ready.broadcast_capacity, broadcast_ready.max_viewers);
+        assert!(broadcast_ready.broadcast_blockers.is_empty());
     }
 
     #[test]
@@ -15890,7 +21609,7 @@ mod tests {
     #[test]
     fn discovery_search_filters_messages_by_keyword_user_room_and_date() {
         let state = AppState::new(
-            PathBuf::from("/tmp/pale-discovery-search-test"),
+            PathBuf::from(format!("/tmp/pale-discovery-search-test-{}", Uuid::new_v4())),
             "012345678901234567890123".to_string(),
             sha256_hex("admin-password".as_bytes()),
         );
@@ -15917,6 +21636,10 @@ mod tests {
                 None,
             )
             .unwrap();
+        let target_created_at = Utc::now();
+        state
+            .set_room_message_created_at_for_test(target.id, target_created_at)
+            .unwrap();
         state
             .send_room_message(
                 room.id,
@@ -15931,8 +21654,8 @@ mod tests {
             q: Some("acquisition".to_string()),
             user_uri: Some("owner@example.com".to_string()),
             room_id: Some(room.id),
-            from: Some(Utc::now() - Duration::hours(1)),
-            to: Some(Utc::now() + Duration::hours(1)),
+            from: Some(target_created_at - Duration::minutes(5)),
+            to: Some(target_created_at + Duration::minutes(5)),
             limit: Some(10),
         });
         assert_eq!(searched.messages.len(), 1);
@@ -15948,6 +21671,87 @@ mod tests {
             limit: Some(10),
         });
         assert!(missed.messages.is_empty());
+    }
+
+    #[test]
+    fn ediscovery_cases_save_queries_and_export_custodian_scoped_results() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-ediscovery-case-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let room = state.create_room(
+            "sip:alice@example.com",
+            CreateRoomRequest {
+                name: "Investigation".to_string(),
+                description: None,
+                members: vec!["sip:bob@example.com".to_string()],
+                is_direct: Some(false),
+                team_id: None,
+                channel_name: None,
+                channel_type: None,
+                channel_owners: Vec::new(),
+                posting_policy: None,
+            },
+        );
+        state
+            .send_room_message(
+                room.id,
+                "sip:alice@example.com",
+                "Project mercury decision",
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .send_room_message(
+                room.id,
+                "sip:bob@example.com",
+                "Project mercury follow up",
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .send_room_message(
+                room.id,
+                "sip:mallory@example.com",
+                "Project mercury outsider",
+                None,
+                None,
+            )
+            .unwrap();
+
+        let case = state
+            .create_ediscovery_case(
+                "admin",
+                CreateEDiscoveryCaseRequest {
+                    name: "Mercury inquiry".to_string(),
+                    description: "Custodian scoped search".to_string(),
+                    custodians: vec![
+                        "sip:alice@example.com".to_string(),
+                        "sip:bob@example.com".to_string(),
+                    ],
+                    query: EDiscoveryCaseQuery {
+                        q: Some("mercury".to_string()),
+                        room_id: Some(room.id),
+                        limit: Some(100),
+                        ..EDiscoveryCaseQuery::default()
+                    },
+                },
+            )
+            .unwrap();
+        let export = state.export_ediscovery_case(case.id, "admin").unwrap();
+        assert_eq!(export.messages.len(), 2);
+        assert!(export
+            .messages
+            .iter()
+            .all(|message| message.sender_uri != "sip:mallory@example.com"));
+
+        let updated = state.list_ediscovery_cases().remove(0);
+        assert_eq!(updated.id, case.id);
+        assert_eq!(updated.last_export_count, 2);
+        assert_eq!(updated.last_exported_by.as_deref(), Some("admin"));
     }
 
     #[test]
@@ -16076,6 +21880,278 @@ mod tests {
     }
 
     #[test]
+    fn advanced_threat_protection_blocks_known_malware_when_configured() {
+        let state = AppState::new(
+            PathBuf::from(format!("/tmp/pale-atp-{}", Uuid::new_v4())),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let eicar = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
+
+        let before = state.file_governance_for_upload(
+            "sip:alice@example.com",
+            "eicar.txt",
+            "text/plain",
+            eicar,
+        );
+        assert!(before.allowed);
+        assert_eq!(before.dlp_status, "clean");
+        assert!(!state.advanced_threat_protection_available());
+
+        state
+            .update_enterprise_integration(
+                "advanced_threat_protection",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some("tcp://clamav.local:3310".to_string()),
+                    admin_url: None,
+                    api_key: None,
+                    clear_api_key: None,
+                    notes: Some("ClamAV".to_string()),
+                },
+                "admin",
+            )
+            .unwrap();
+        assert!(state.advanced_threat_protection_available());
+
+        let after = state.file_governance_for_upload(
+            "sip:alice@example.com",
+            "eicar.txt",
+            "text/plain",
+            eicar,
+        );
+        assert!(!after.allowed);
+        assert_eq!(after.dlp_status, "malware_blocked");
+        assert_eq!(after.dlp_violation_count, 1);
+    }
+
+    #[test]
+    fn malware_quarantine_records_review_and_persists() {
+        let data_dir = std::env::temp_dir().join(format!("pale-atp-quarantine-{}", Uuid::new_v4()));
+        let token = "012345678901234567890123".to_string();
+        let admin_hash = sha256_hex("admin-password".as_bytes());
+        let storage_key = "atp-quarantine-storage-key".to_string();
+        let state = AppState::persistent(
+            data_dir.clone(),
+            token.clone(),
+            "admin".to_string(),
+            admin_hash.clone(),
+            storage_key.clone(),
+            DEFAULT_MAX_UPLOAD_BYTES,
+            MediaConfig::default(),
+        )
+        .unwrap();
+
+        let item = state.quarantine_malware_upload(
+            "sip:alice@example.com",
+            "eicar.txt",
+            "text/plain",
+            68,
+            "malware-sha",
+            "malware_signature_detected",
+        );
+        assert_eq!(item.status, MalwareQuarantineStatus::Quarantined);
+        assert_eq!(state.list_malware_quarantine().len(), 1);
+
+        let reviewed = state
+            .review_malware_quarantine(
+                item.id,
+                "admin",
+                ReviewMalwareQuarantineRequest {
+                    status: MalwareQuarantineStatus::Deleted,
+                    notes: Some("confirmed malware".to_string()),
+                },
+            )
+            .unwrap();
+        assert_eq!(reviewed.status, MalwareQuarantineStatus::Deleted);
+        assert_eq!(reviewed.reviewed_by.as_deref(), Some("admin"));
+        assert_eq!(reviewed.review_notes.as_deref(), Some("confirmed malware"));
+        assert!(reviewed.reviewed_at.is_some());
+        drop(state);
+
+        let reloaded = AppState::persistent(
+            data_dir,
+            token,
+            "admin".to_string(),
+            admin_hash,
+            storage_key,
+            DEFAULT_MAX_UPLOAD_BYTES,
+            MediaConfig::default(),
+        )
+        .unwrap();
+        let items = reloaded.list_malware_quarantine();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, item.id);
+        assert_eq!(items[0].status, MalwareQuarantineStatus::Deleted);
+        assert_eq!(items[0].review_notes.as_deref(), Some("confirmed malware"));
+    }
+
+    #[test]
+    fn casb_file_access_enforces_blocked_security_classifications_when_configured() {
+        let state = AppState::new(
+            PathBuf::from(format!("/tmp/pale-casb-{}", Uuid::new_v4())),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let blocked_file = FileRecord {
+            id: Uuid::new_v4(),
+            owner: "sip:alice@example.com".to_string(),
+            filename: "blocked.txt".to_string(),
+            content_type: "text/plain".to_string(),
+            size: 12,
+            sha256: "blocked".to_string(),
+            created_at: Utc::now(),
+            dlp_status: "blocked".to_string(),
+            dlp_violation_count: 1,
+            legal_hold: false,
+            deleted_at: None,
+            deleted_by: None,
+            folder_id: None,
+            locked_by: None,
+            locked_at: None,
+        };
+        let clean_file = FileRecord {
+            dlp_status: "clean".to_string(),
+            dlp_violation_count: 0,
+            filename: "clean.txt".to_string(),
+            id: Uuid::new_v4(),
+            sha256: "clean".to_string(),
+            ..blocked_file.clone()
+        };
+
+        let before = state.casb_file_access_decision("sip:alice@example.com", "download", &blocked_file);
+        assert!(before.allowed);
+        assert!(!before.enforced);
+        assert_eq!(before.reason, "casb_not_configured");
+
+        state
+            .update_enterprise_integration(
+                "casb",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some("http://opa.local/v1/data/pale/casb".to_string()),
+                    admin_url: None,
+                    api_key: None,
+                    clear_api_key: None,
+                    notes: Some("OPA policy decision service".to_string()),
+                },
+                "admin",
+            )
+            .unwrap();
+        assert!(state.casb_available());
+
+        let blocked = state.casb_file_access_decision("sip:alice@example.com", "download", &blocked_file);
+        assert!(!blocked.allowed);
+        assert!(blocked.enforced);
+        assert_eq!(blocked.reason, "file_blocked");
+
+        let clean = state.casb_file_access_decision("sip:alice@example.com", "download", &clean_file);
+        assert!(clean.allowed);
+        assert!(clean.enforced);
+        assert_eq!(clean.reason, "allowed");
+    }
+
+    #[test]
+    fn security_posture_report_scores_configured_enterprise_controls() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-security-posture-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        state
+            .create_user(CreateUserRequest {
+                display_name: "Alice".to_string(),
+                sip_uri: "sip:alice@example.com".to_string(),
+                matrix_user_id: None,
+                password: Some("alice-password".to_string()),
+                role: None,
+            })
+            .unwrap();
+        let initial = state.security_posture_report();
+        assert_eq!(initial.posture, "needs_attention");
+        assert!(initial
+            .recommendations
+            .iter()
+            .any(|rec| rec.control_id == "protection.dlp"));
+
+        state
+            .create_dlp_policy(
+                "admin",
+                CreateDlpPolicyRequest {
+                    name: "Secrets".to_string(),
+                    description: None,
+                    pattern: "SECRET-[0-9]+".to_string(),
+                    action: DlpAction::Block,
+                    enabled: true,
+                },
+            )
+            .unwrap();
+        state.upsert_retention_policy(
+            "admin",
+            UpsertRetentionPolicyRequest {
+                id: None,
+                name: "Global retention".to_string(),
+                scope: "global".to_string(),
+                room_id: None,
+                retain_days: Some(365),
+                legal_hold: Some(true),
+                export_enabled: Some(true),
+            },
+        );
+        state.create_conditional_access_policy(CreateConditionalAccessPolicyRequest {
+            name: "Require MFA".to_string(),
+            conditions: ConditionalAccessConditions {
+                ip_ranges: Vec::new(),
+                device_types: Vec::new(),
+                user_groups: Vec::new(),
+                time_windows: Vec::new(),
+            },
+            actions: ConditionalAccessActions {
+                allow: true,
+                block: false,
+                require_mfa: true,
+            },
+            enabled: Some(true),
+        });
+        state.create_barrier(CreateInformationBarrierRequest {
+            name: "Regulated wall".to_string(),
+            segment1_name: "Trading".to_string(),
+            segment1_users: vec!["sip:alice@example.com".to_string()],
+            segment2_name: "Research".to_string(),
+            segment2_users: vec!["sip:bob@example.com".to_string()],
+            block_chat: true,
+            block_call: true,
+            enabled: true,
+        });
+        state.create_label(CreateSensitivityLabelRequest {
+            name: "Confidential".to_string(),
+            description: "Restrict sensitive content".to_string(),
+            color: "#7c3aed".to_string(),
+            priority: 100,
+            encrypt_content: true,
+            restrict_sharing: true,
+            watermark: false,
+        });
+        state.rotate_encryption_key(RotateEncryptionKeyRequest {
+            customer_key_base64: None,
+        });
+
+        let improved = state.security_posture_report();
+        assert!(improved.score > initial.score);
+        assert_eq!(improved.counts.enabled_dlp_policies, 1);
+        assert_eq!(improved.counts.retention_policies, 1);
+        assert_eq!(improved.counts.legal_hold_policies, 1);
+        assert_eq!(improved.counts.enabled_conditional_access_policies, 1);
+        assert_eq!(improved.counts.enabled_information_barriers, 1);
+        assert_eq!(improved.counts.sensitivity_labels, 1);
+        assert_eq!(improved.counts.encryption_keys, 1);
+        assert!(improved
+            .controls
+            .iter()
+            .any(|control| control.id == "identity.mfa" && control.status == "pass"));
+    }
+
+    #[test]
     fn retention_enforcement_covers_files_and_discovery_exports_them() {
         let state = AppState::new(
             PathBuf::from("/tmp/pale-file-retention-test"),
@@ -16125,6 +22201,185 @@ mod tests {
         assert_eq!(export.files.len(), 1);
         assert_eq!(export.files[0].id, file.id);
         assert_eq!(export.files[0].deleted_by.as_deref(), Some("retention"));
+    }
+
+    #[test]
+    fn meeting_assistant_extracts_transcript_intelligence_without_leaking_visibility() {
+        let state = AppState::new(
+            PathBuf::from(format!("/tmp/pale-meeting-assistant-{}", Uuid::new_v4())),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let conference = state.create_conference(CreateConferenceRequest {
+            title: "Launch Review".to_string(),
+            mode: ConferenceMode::Video,
+            registration_enabled: None,
+            max_registrations: None,
+            registration_fields: None,
+        });
+        state
+            .join_conference(
+                conference.id,
+                JoinConferenceRequest {
+                    user_id: Uuid::new_v4(),
+                    sip_uri: "sip:alice@example.com".to_string(),
+                    role: Some(ParticipantRole::Host),
+                },
+                false,
+            )
+            .unwrap();
+        assert!(state.conference_visible_to(conference.id, "sip:alice@example.com"));
+        assert!(!state.conference_visible_to(conference.id, "sip:mallory@example.com"));
+
+        state.post_transcript(
+            conference.id,
+            PostTranscriptRequest {
+                speaker_uri: "sip:alice@example.com".to_string(),
+                speaker_name: "Alice".to_string(),
+                text: "We decided to launch Friday and need to update the runbook.".to_string(),
+                is_final: true,
+                language: None,
+            },
+        );
+        state.post_transcript(
+            conference.id,
+            PostTranscriptRequest {
+                speaker_uri: "sip:bob@example.com".to_string(),
+                speaker_name: "Bob".to_string(),
+                text: "Risk: billing migration is blocked. Can Clara follow up?".to_string(),
+                is_final: true,
+                language: None,
+            },
+        );
+
+        let report = state.meeting_assistant_report(conference.id).unwrap();
+        assert_eq!(report.transcript_segments, 2);
+        assert!(!report.ai_provider_configured);
+        assert!(report.summary.contains("launch Friday"));
+        assert!(report
+            .action_items
+            .iter()
+            .any(|item| item.text.contains("need to update")));
+        assert!(report
+            .decisions
+            .iter()
+            .any(|line| line.contains("decided")));
+        assert!(report.risks.iter().any(|line| line.contains("Risk")));
+        assert!(report
+            .open_questions
+            .iter()
+            .any(|line| line.contains("Can Clara")));
+        assert_eq!(report.speaker_stats.len(), 2);
+
+        state
+            .update_enterprise_integration(
+                "meeting_assistant",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some("http://llm.local/v1/chat/completions".to_string()),
+                    admin_url: None,
+                    api_key: None,
+                    clear_api_key: None,
+                    notes: None,
+                },
+                "admin",
+            )
+            .unwrap();
+        assert!(state
+            .meeting_assistant_report(conference.id)
+            .unwrap()
+            .ai_provider_configured);
+    }
+
+    #[test]
+    fn transcription_jobs_orchestrate_asr_without_faking_provider_output() {
+        let state = AppState::new(
+            PathBuf::from(format!("/tmp/pale-transcription-{}", Uuid::new_v4())),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let conference = state.create_conference(CreateConferenceRequest {
+            title: "Planning".to_string(),
+            mode: ConferenceMode::Video,
+            registration_enabled: None,
+            max_registrations: None,
+            registration_fields: None,
+        });
+        let recording = state
+            .store_recording(CallRecording {
+                id: Uuid::new_v4(),
+                call_id: Some("planning-call".to_string()),
+                caller_uri: "sip:alice@example.com".to_string(),
+                callee_uri: "sip:bob@example.com".to_string(),
+                duration_secs: 600,
+                file_id: Some(Uuid::new_v4()),
+                recorded_by: "sip:alice@example.com".to_string(),
+                created_at: Utc::now(),
+                conference_id: Some(conference.id),
+                transcript_segment_count: 0,
+                legal_hold: false,
+                deleted_at: None,
+                deleted_by: None,
+            })
+            .unwrap();
+        let blocked = state.transcription_jobs_for_recording(recording.id);
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].status, TranscriptionJobStatus::Blocked);
+        assert_eq!(
+            blocked[0].error.as_deref(),
+            Some("auto_transcription_provider_not_configured")
+        );
+
+        state
+            .update_enterprise_integration(
+                "auto_transcription",
+                UpdateEnterpriseIntegrationRequest {
+                    enabled: Some(true),
+                    endpoint_url: Some("http://whisper.local".to_string()),
+                    admin_url: None,
+                    api_key: None,
+                    clear_api_key: None,
+                    notes: Some("Whisper endpoint".to_string()),
+                },
+                "admin",
+            )
+            .unwrap();
+        let queued = state
+            .queue_transcription_job(recording.id, "admin", Some("en".to_string()))
+            .unwrap();
+        assert_eq!(queued.status, TranscriptionJobStatus::Queued);
+        assert!(queued.provider_configured);
+        let processing = state.start_transcription_job(queued.id).unwrap();
+        assert_eq!(processing.status, TranscriptionJobStatus::Processing);
+
+        let completed = state
+            .complete_transcription_job(
+                queued.id,
+                vec![
+                    PostTranscriptRequest {
+                        speaker_uri: "sip:alice@example.com".to_string(),
+                        speaker_name: "Alice".to_string(),
+                        text: "We decided to launch the rollout next week.".to_string(),
+                        is_final: true,
+                        language: None,
+                    },
+                    PostTranscriptRequest {
+                        speaker_uri: "sip:bob@example.com".to_string(),
+                        speaker_name: "Bob".to_string(),
+                        text: "Action item: Bob will prepare the checklist.".to_string(),
+                        is_final: true,
+                        language: None,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(completed.status, TranscriptionJobStatus::Completed);
+        assert_eq!(completed.transcript_segment_count, 2);
+        assert_eq!(state.get_transcript(conference.id).len(), 2);
+        assert_eq!(
+            state.recording(recording.id).unwrap().transcript_segment_count,
+            2
+        );
     }
 
     #[test]
@@ -16317,7 +22572,6 @@ mod tests {
     }
 }
 
-
 // ─── Federation ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16472,11 +22726,21 @@ impl AppState {
         peer
     }
 
-    pub fn update_federation_peer(&self, id: Uuid, req: UpdateFederationPeerRequest) -> Option<FederationPeer> {
+    pub fn update_federation_peer(
+        &self,
+        id: Uuid,
+        req: UpdateFederationPeerRequest,
+    ) -> Option<FederationPeer> {
         let mut peer = self.federation_peers.get(&id)?;
-        if let Some(url) = req.server_url { peer.server_url = url; }
-        if let Some(key) = req.shared_key { peer.shared_key_enc = key; }
-        if let Some(enabled) = req.enabled { peer.enabled = enabled; }
+        if let Some(url) = req.server_url {
+            peer.server_url = url;
+        }
+        if let Some(key) = req.shared_key {
+            peer.shared_key_enc = key;
+        }
+        if let Some(enabled) = req.enabled {
+            peer.enabled = enabled;
+        }
         self.federation_peers.insert(id, peer.clone());
         Some(peer)
     }
@@ -16486,7 +22750,10 @@ impl AppState {
     }
 
     pub fn get_federation_peer_by_domain(&self, domain: &str) -> Option<FederationPeer> {
-        self.federation_peers.values().into_iter().find(|p| p.domain == domain)
+        self.federation_peers
+            .values()
+            .into_iter()
+            .find(|p| p.domain == domain)
     }
 
     pub fn store_federated_message(&self, msg: FederatedMessage) {
@@ -16498,7 +22765,9 @@ impl AppState {
     }
 
     pub fn list_federated_messages_for_user(&self, user: &str) -> Vec<FederatedMessage> {
-        self.federated_messages.read().expect("lock")
+        self.federated_messages
+            .read()
+            .expect("lock")
             .iter()
             .filter(|m| m.to_user == user || m.from_user == user)
             .cloned()
@@ -16508,14 +22777,22 @@ impl AppState {
     // ─── Loop Component methods ───
 
     pub fn list_loop_components(&self, room_id: Uuid) -> Vec<LoopComponent> {
-        let mut components: Vec<_> = self.loop_components.values().into_iter()
+        let mut components: Vec<_> = self
+            .loop_components
+            .values()
+            .into_iter()
             .filter(|c| c.room_id == room_id)
             .collect();
         components.sort_by(|a, b| a.created_at.cmp(&b.created_at));
         components
     }
 
-    pub fn create_loop_component(&self, room_id: Uuid, created_by: &str, req: CreateLoopComponentRequest) -> LoopComponent {
+    pub fn create_loop_component(
+        &self,
+        room_id: Uuid,
+        created_by: &str,
+        req: CreateLoopComponentRequest,
+    ) -> LoopComponent {
         let now = Utc::now();
         let component = LoopComponent {
             id: Uuid::new_v4(),
@@ -16530,7 +22807,11 @@ impl AppState {
         component
     }
 
-    pub fn update_loop_component(&self, id: Uuid, req: UpdateLoopComponentRequest) -> Option<LoopComponent> {
+    pub fn update_loop_component(
+        &self,
+        id: Uuid,
+        req: UpdateLoopComponentRequest,
+    ) -> Option<LoopComponent> {
         let mut component = self.loop_components.get(&id)?;
         component.data = req.data;
         component.updated_at = Utc::now();
@@ -16596,7 +22877,12 @@ impl AppState {
         flagged
     }
 
-    pub fn update_compliance_review(&self, id: Uuid, reviewer: &str, req: UpdateComplianceReviewRequest) -> Option<ComplianceReview> {
+    pub fn update_compliance_review(
+        &self,
+        id: Uuid,
+        reviewer: &str,
+        req: UpdateComplianceReviewRequest,
+    ) -> Option<ComplianceReview> {
         let mut review = self.compliance_reviews.get(&id)?;
         review.status = req.status;
         review.reviewer = Some(reviewer.to_string());
@@ -16613,7 +22899,10 @@ impl AppState {
         configs
     }
 
-    pub fn create_data_residency_config(&self, req: CreateDataResidencyConfigRequest) -> DataResidencyConfig {
+    pub fn create_data_residency_config(
+        &self,
+        req: CreateDataResidencyConfigRequest,
+    ) -> DataResidencyConfig {
         let config = DataResidencyConfig {
             id: Uuid::new_v4(),
             region: req.region,
@@ -16622,15 +22911,26 @@ impl AppState {
             enabled: req.enabled.unwrap_or(true),
             created_at: Utc::now(),
         };
-        self.data_residency_configs.insert(config.id, config.clone());
+        self.data_residency_configs
+            .insert(config.id, config.clone());
         config
     }
 
-    pub fn update_data_residency_config(&self, id: Uuid, req: UpdateDataResidencyConfigRequest) -> Option<DataResidencyConfig> {
+    pub fn update_data_residency_config(
+        &self,
+        id: Uuid,
+        req: UpdateDataResidencyConfigRequest,
+    ) -> Option<DataResidencyConfig> {
         let mut config = self.data_residency_configs.get(&id)?;
-        if let Some(conn) = req.pg_connection_string { config.pg_connection_string_enc = conn; }
-        if let Some(path) = req.file_storage_path { config.file_storage_path = path; }
-        if let Some(enabled) = req.enabled { config.enabled = enabled; }
+        if let Some(conn) = req.pg_connection_string {
+            config.pg_connection_string_enc = conn;
+        }
+        if let Some(path) = req.file_storage_path {
+            config.file_storage_path = path;
+        }
+        if let Some(enabled) = req.enabled {
+            config.enabled = enabled;
+        }
         self.data_residency_configs.insert(id, config.clone());
         Some(config)
     }
