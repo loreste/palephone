@@ -282,6 +282,10 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
     // ── CDR start ──
     state.record_cdr_start(Some(&call_id_str), &from_aor, &requested_uri, "inbound");
 
+    // ── CNAM enrichment ──
+    // Look up caller name from CNAM cache to enrich caller ID
+    let _enriched_name = state.cnam_enrich_caller_id(crate::sip_user_part(&from_aor));
+
     // Helper: create dialog and redirect to a target URI
     let make_redirect = |target: &str| -> Option<String> {
         state.upsert_sip_dialog(UpsertSipDialog {
@@ -1622,6 +1626,17 @@ fn invite_target(state: &AppState, routed_uri: &str) -> Option<(String, SocketAd
             .ok()
             .or_else(|| sip_uri_socket_addr(&registration.contact))?;
         return Some((registration.contact, target_addr));
+    }
+
+    // ── SIP Gateway routing fallback ──
+    // If the target is not locally registered, check if a gateway prefix matches
+    let user_part = crate::sip_user_part(routed_uri);
+    if let Some(gateway) = state.resolve_gateway(user_part) {
+        let gateway_uri = format!("sip:{}@{}:{}", user_part, gateway.host, gateway.port);
+        let addr: SocketAddr = format!("{}:{}", gateway.host, gateway.port)
+            .parse()
+            .ok()?;
+        return Some((gateway_uri, addr));
     }
 
     sip_uri_socket_addr(routed_uri).map(|addr| (routed_uri.to_string(), addr))
@@ -3253,6 +3268,9 @@ Content-Length: 0\r\n\r\n";
         let conference = state.create_conference(crate::CreateConferenceRequest {
             title: "Test".to_string(),
             mode: crate::ConferenceMode::Audio,
+            registration_enabled: None,
+            max_registrations: None,
+            registration_fields: None,
         });
         state.activate_conference(conference.id);
 

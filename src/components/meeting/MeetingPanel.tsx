@@ -21,6 +21,8 @@ import {
   Unlock,
   UserMinus,
   Users,
+  ClipboardList,
+  Globe,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import {
@@ -41,7 +43,7 @@ import { toast } from "@/components/ui/Toast";
 
 function err(title: string) { toast({ type: "error", title }); }
 
-type MeetingTab = "people" | "lobby" | "hands" | "polls" | "qa" | "breakout" | "captions" | "reactions" | "chat" | "greenroom";
+type MeetingTab = "people" | "lobby" | "hands" | "polls" | "qa" | "breakout" | "captions" | "reactions" | "chat" | "greenroom" | "registration";
 
 export function MeetingPanel({ conferenceId }: { conferenceId: string }) {
   const [tab, setTab] = useState<MeetingTab>("lobby");
@@ -59,6 +61,7 @@ export function MeetingPanel({ conferenceId }: { conferenceId: string }) {
     { id: "qa", icon: MessageCircleQuestion, label: "Q&A" },
     { id: "breakout", icon: LayoutGrid, label: "Rooms" },
     { id: "captions", icon: Captions, label: "Captions" },
+    { id: "registration", icon: ClipboardList, label: "Register" },
   ];
 
   const handleTabKeyDown = (e: React.KeyboardEvent, tabId: MeetingTab) => {
@@ -99,7 +102,8 @@ export function MeetingPanel({ conferenceId }: { conferenceId: string }) {
         {tab === "polls" && <PollsPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "qa" && <QaPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "breakout" && <BreakoutPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
-        {tab === "captions" && <CaptionsPanel conferenceId={conferenceId} />}
+        {tab === "captions" && <CaptionsPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
+        {tab === "registration" && <RegistrationPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
       </div>
     </div>
   );
@@ -1110,12 +1114,37 @@ function GreenRoomPanel({ conferenceId, baseUrl, token }: { conferenceId: string
 
 // ── Captions Panel ────────────────────────────────────────────────
 
-function CaptionsPanel({ conferenceId }: { conferenceId: string }) {
+const CAPTION_LANGUAGES = [
+  { code: "en", label: "English" },
+  { code: "es", label: "Spanish" },
+  { code: "fr", label: "French" },
+  { code: "de", label: "German" },
+  { code: "pt", label: "Portuguese" },
+  { code: "zh", label: "Chinese" },
+  { code: "ja", label: "Japanese" },
+  { code: "ko", label: "Korean" },
+  { code: "ar", label: "Arabic" },
+  { code: "hi", label: "Hindi" },
+];
+
+function CaptionsPanel({ conferenceId, baseUrl, token }: { conferenceId: string; baseUrl: string | null; token: string | null }) {
   const captions = useMeetingStore((s) => s.captions);
   const enabled = useMeetingStore((s) => s.captionsEnabled);
   const setEnabled = useMeetingStore((s) => s.setCaptionsEnabled);
+  const [captionLang, setCaptionLang] = useState("en");
 
   const conferenceCaptions = captions.filter((c) => c.conference_id === conferenceId);
+
+  const handleLanguageChange = async (lang: string) => {
+    setCaptionLang(lang);
+    if (!baseUrl || !token) return;
+    try {
+      await paleServerApi(baseUrl, token, `/v1/conferences/${conferenceId}/captions/language`, {
+        method: "POST",
+        body: { language: lang },
+      });
+    } catch { /* ignore */ }
+  };
 
   return (
     <div className="space-y-3">
@@ -1132,19 +1161,147 @@ function CaptionsPanel({ conferenceId }: { conferenceId: string }) {
         </button>
       </div>
       {enabled && (
-        <div className="space-y-1 max-h-[400px] overflow-y-auto">
-          {conferenceCaptions.length === 0 ? (
-            <p className="text-xs text-secondary text-center py-4">Waiting for captions...</p>
-          ) : (
-            conferenceCaptions.map((c) => (
-              <div key={c.id} className="text-xs">
-                <span className="font-medium text-accent">
-                  {c.speaker_name || c.speaker_uri.replace(/^sip:/, "")}:
-                </span>{" "}
-                <span className={cn(!c.is_final && "italic text-secondary")}>{c.text}</span>
+        <>
+          <div className="flex items-center gap-2">
+            <Globe size={14} className="text-secondary" />
+            <select
+              value={captionLang}
+              onChange={(e) => handleLanguageChange(e.target.value)}
+              className="text-xs bg-hover border border-border-subtle rounded px-2 py-1 flex-1"
+            >
+              {CAPTION_LANGUAGES.map((l) => (
+                <option key={l.code} value={l.code}>{l.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-1 max-h-[400px] overflow-y-auto">
+            {conferenceCaptions.length === 0 ? (
+              <p className="text-xs text-secondary text-center py-4">Waiting for captions...</p>
+            ) : (
+              conferenceCaptions.map((c) => (
+                <div key={c.id} className="text-xs">
+                  <span className="font-medium text-accent">
+                    {c.speaker_name || c.speaker_uri.replace(/^sip:/, "")}:
+                  </span>{" "}
+                  <span className={cn(!c.is_final && "italic text-secondary")}>{c.text}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Registration Panel ────────────────────────────────────────────
+
+interface WebinarRegistration {
+  id: string;
+  conference_id: string;
+  name: string;
+  email: string;
+  status: string;
+  registered_at: string;
+  custom_fields: Record<string, unknown>;
+}
+
+function RegistrationPanel({ conferenceId, baseUrl, token }: { conferenceId: string; baseUrl: string | null; token: string | null }) {
+  const [registrations, setRegistrations] = useState<WebinarRegistration[]>([]);
+  const [regName, setRegName] = useState("");
+  const [regEmail, setRegEmail] = useState("");
+  const [isOrganizer, setIsOrganizer] = useState(false);
+
+  const loadRegistrations = useCallback(async () => {
+    if (!baseUrl || !token) return;
+    try {
+      const regs = await paleServerApi<WebinarRegistration[]>(baseUrl, token, `/v1/conferences/${conferenceId}/registrations`);
+      setRegistrations(regs);
+      setIsOrganizer(true);
+    } catch {
+      setIsOrganizer(false);
+    }
+  }, [baseUrl, token, conferenceId]);
+
+  useEffect(() => { loadRegistrations(); }, [loadRegistrations]);
+
+  const handleRegister = async () => {
+    if (!baseUrl || !token || !regName || !regEmail) return;
+    try {
+      await paleServerApi(baseUrl, token, `/v1/conferences/${conferenceId}/register`, {
+        method: "POST",
+        body: { name: regName, email: regEmail },
+      });
+      setRegName("");
+      setRegEmail("");
+      toast({ type: "success", title: "Registered successfully" });
+      loadRegistrations();
+    } catch { err("Registration failed"); }
+  };
+
+  const handleUpdateStatus = async (regId: string, status: string) => {
+    if (!baseUrl || !token) return;
+    try {
+      await paleServerApi(baseUrl, token, `/v1/conferences/${conferenceId}/registrations/${regId}`, {
+        method: "PUT",
+        body: { status },
+      });
+      loadRegistrations();
+    } catch { err("Failed to update status"); }
+  };
+
+  return (
+    <div className="space-y-3">
+      <h3 className="text-sm font-medium">Webinar Registration</h3>
+      <div className="space-y-2">
+        <input
+          type="text"
+          placeholder="Name"
+          value={regName}
+          onChange={(e) => setRegName(e.target.value)}
+          className="w-full text-xs px-2 py-1.5 rounded bg-hover border border-border-subtle"
+        />
+        <input
+          type="email"
+          placeholder="Email"
+          value={regEmail}
+          onChange={(e) => setRegEmail(e.target.value)}
+          className="w-full text-xs px-2 py-1.5 rounded bg-hover border border-border-subtle"
+        />
+        <button
+          onClick={handleRegister}
+          disabled={!regName || !regEmail}
+          className="w-full text-xs px-3 py-1.5 rounded bg-accent text-white hover:bg-accent/90 disabled:opacity-40"
+        >
+          Register
+        </button>
+      </div>
+
+      {isOrganizer && registrations.length > 0 && (
+        <div className="space-y-1 mt-4">
+          <h4 className="text-xs font-medium text-secondary">Registrations ({registrations.length})</h4>
+          {registrations.map((reg) => (
+            <div key={reg.id} className="flex items-center justify-between text-xs py-1 border-b border-border-subtle">
+              <div>
+                <span className="font-medium">{reg.name}</span>
+                <span className="text-secondary ml-1">({reg.email})</span>
+                <span className={cn("ml-2 px-1.5 py-0.5 rounded text-[10px]",
+                  reg.status === "approved" ? "bg-green-500/20 text-green-400" :
+                  reg.status === "rejected" ? "bg-red-500/20 text-red-400" :
+                  reg.status === "waitlisted" ? "bg-yellow-500/20 text-yellow-400" :
+                  "bg-blue-500/20 text-blue-400"
+                )}>{reg.status}</span>
               </div>
-            ))
-          )}
+              <div className="flex gap-1">
+                {reg.status !== "approved" && (
+                  <button onClick={() => handleUpdateStatus(reg.id, "approved")} className="text-green-400 hover:text-green-300"><Check size={12} /></button>
+                )}
+                {reg.status !== "rejected" && (
+                  <button onClick={() => handleUpdateStatus(reg.id, "rejected")} className="text-red-400 hover:text-red-300"><X size={12} /></button>
+                )}
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>

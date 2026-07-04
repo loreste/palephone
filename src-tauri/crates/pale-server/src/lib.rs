@@ -292,7 +292,6 @@ pub struct AppState {
     hold_music: ShardedMap<Uuid, HoldMusic>,
     // Personal call groups
     personal_call_groups: ShardedMap<Uuid, PersonalCallGroup>,
-<<<<<<< HEAD
     // SSO providers
     sso_providers: ShardedMap<Uuid, SsoProvider>,
     // Encryption config (BYOK)
@@ -322,10 +321,19 @@ pub struct AppState {
     contact_sync_configs: ShardedMap<Uuid, ContactSyncConfig>,
     synced_contacts: ShardedMap<Uuid, SyncedContact>,
     connectors: ShardedMap<Uuid, Connector>,
-=======
     // Conditional access policies
     conditional_access_policies: ShardedMap<Uuid, ConditionalAccessPolicy>,
->>>>>>> worktree-agent-ac96f54e
+    // Webinar registrations
+    webinar_registrations: ShardedMap<Uuid, WebinarRegistration>,
+    // Guest users
+    guest_users: ShardedMap<Uuid, GuestUser>,
+    // CNAM cache
+    cnam_cache: ShardedMap<String, CnamEntry>,
+    cnam_providers: RwLock<Vec<CnamProviderConfig>>,
+    // SIP gateways
+    sip_gateways: ShardedMap<Uuid, SipGateway>,
+    // Location routing rules
+    location_routing_rules: ShardedMap<Uuid, LocationRoutingRule>,
     user_create_lock: std::sync::Mutex<()>,
     agent_assignment_lock: std::sync::Mutex<()>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
@@ -494,7 +502,6 @@ impl AppState {
             recording_policies: ShardedMap::new(),
             hold_music: ShardedMap::new(),
             personal_call_groups: ShardedMap::new(),
-<<<<<<< HEAD
             sso_providers: ShardedMap::new(),
             encryption_configs: RwLock::new(Vec::new()),
             admin_elevations: RwLock::new(Vec::new()),
@@ -515,9 +522,13 @@ impl AppState {
             contact_sync_configs: ShardedMap::new(),
             synced_contacts: ShardedMap::new(),
             connectors: ShardedMap::new(),
-=======
             conditional_access_policies: ShardedMap::new(),
->>>>>>> worktree-agent-ac96f54e
+            webinar_registrations: ShardedMap::new(),
+            guest_users: ShardedMap::new(),
+            cnam_cache: ShardedMap::new(),
+            cnam_providers: RwLock::new(Vec::new()),
+            sip_gateways: ShardedMap::new(),
+            location_routing_rules: ShardedMap::new(),
             user_create_lock: std::sync::Mutex::new(()),
             agent_assignment_lock: std::sync::Mutex::new(()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
@@ -2350,6 +2361,9 @@ impl AppState {
             spotlight_participant_id: None,
             green_room_enabled: false,
             chat_room_id: None,
+            registration_enabled: input.registration_enabled.unwrap_or(false),
+            max_registrations: input.max_registrations,
+            registration_fields: input.registration_fields,
         };
         self.conferences.insert(conference.id, conference.clone());
         self.conferences.trim_to_len(MAX_CONFERENCES);
@@ -3394,6 +3408,7 @@ impl AppState {
             text: input.text,
             timestamp: Utc::now(),
             is_final: input.is_final,
+            language: input.language.or_else(|| Some("en".to_string())),
         };
         {
             let mut transcripts = self.transcripts.write().expect("transcripts lock");
@@ -6800,6 +6815,9 @@ impl AppState {
                     let conference = self.create_conference(CreateConferenceRequest {
                         title: room.name.clone(),
                         mode: mode.clone().into(),
+                        registration_enabled: None,
+                        max_registrations: None,
+                        registration_fields: None,
                     });
                     room.conference_id = Some(conference.id);
                     conference.id
@@ -6904,6 +6922,9 @@ impl AppState {
         let conference = self.create_conference(CreateConferenceRequest {
             title: input.title.clone(),
             mode: input.mode.unwrap_or(RoomCallMode::Video).into(),
+            registration_enabled: None,
+            max_registrations: None,
+            registration_fields: None,
         });
         let mut participants = input.participants;
         participants.push(organizer_uri.to_string());
@@ -10184,12 +10205,24 @@ pub struct Conference {
     pub green_room_enabled: bool,
     #[serde(default)]
     pub chat_room_id: Option<Uuid>,
+    #[serde(default)]
+    pub registration_enabled: bool,
+    #[serde(default)]
+    pub max_registrations: Option<i32>,
+    #[serde(default)]
+    pub registration_fields: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateConferenceRequest {
     pub title: String,
     pub mode: ConferenceMode,
+    #[serde(default)]
+    pub registration_enabled: Option<bool>,
+    #[serde(default)]
+    pub max_registrations: Option<i32>,
+    #[serde(default)]
+    pub registration_fields: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10478,6 +10511,12 @@ pub struct TranscriptSegment {
     pub text: String,
     pub timestamp: DateTime<Utc>,
     pub is_final: bool,
+    #[serde(default = "default_language")]
+    pub language: Option<String>,
+}
+
+fn default_language() -> Option<String> {
+    Some("en".to_string())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -10487,6 +10526,8 @@ pub struct PostTranscriptRequest {
     pub text: String,
     #[serde(default = "default_true")]
     pub is_final: bool,
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11270,7 +11311,6 @@ pub struct CreatePersonalCallGroupRequest {
     pub enabled: Option<bool>,
 }
 
-<<<<<<< HEAD
 // ─── OAuth API Clients ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11341,7 +11381,10 @@ pub struct Bot {
     pub events: Vec<String>,
     pub owner_uri: String,
     pub api_token: String,
-=======
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
 // ── Conditional Access Policies ──────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11372,13 +11415,11 @@ pub struct ConditionalAccessPolicy {
     pub name: String,
     pub conditions: ConditionalAccessConditions,
     pub actions: ConditionalAccessActions,
->>>>>>> worktree-agent-ac96f54e
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-<<<<<<< HEAD
 pub struct CreateBotRequest {
     pub name: String,
     pub webhook_url: String,
@@ -11836,7 +11877,9 @@ pub struct AdaptiveCardAction {
     pub title: String,
     pub url: Option<String>,
     pub data: Option<serde_json::Value>,
-=======
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct CreateConditionalAccessPolicyRequest {
     pub name: String,
     pub conditions: ConditionalAccessConditions,
@@ -11920,7 +11963,423 @@ impl AppState {
         }
         result
     }
->>>>>>> worktree-agent-ac96f54e
+
+    // ─── Webinar Registrations ───
+
+    pub fn register_webinar(
+        &self,
+        conference_id: Uuid,
+        req: RegisterWebinarRequest,
+    ) -> Option<WebinarRegistration> {
+        let conf = self.conferences.get(&conference_id)?;
+        // Check max_registrations
+        if let Some(max) = conf.max_registrations {
+            let current = self.webinar_registrations.values()
+                .iter()
+                .filter(|r| r.conference_id == conference_id)
+                .count();
+            if current >= max as usize {
+                let reg = WebinarRegistration {
+                    id: Uuid::new_v4(),
+                    conference_id,
+                    name: req.name,
+                    email: req.email,
+                    status: "waitlisted".to_string(),
+                    registered_at: Utc::now(),
+                    custom_fields: req.custom_fields.unwrap_or_default(),
+                };
+                self.webinar_registrations.insert(reg.id, reg.clone());
+                return Some(reg);
+            }
+        }
+        let reg = WebinarRegistration {
+            id: Uuid::new_v4(),
+            conference_id,
+            name: req.name,
+            email: req.email,
+            status: "registered".to_string(),
+            registered_at: Utc::now(),
+            custom_fields: req.custom_fields.unwrap_or_default(),
+        };
+        self.webinar_registrations.insert(reg.id, reg.clone());
+        Some(reg)
+    }
+
+    pub fn list_webinar_registrations(&self, conference_id: Uuid) -> Vec<WebinarRegistration> {
+        self.webinar_registrations.values()
+            .into_iter()
+            .filter(|r| r.conference_id == conference_id)
+            .collect()
+    }
+
+    pub fn update_webinar_registration(
+        &self,
+        _conference_id: Uuid,
+        reg_id: Uuid,
+        req: UpdateRegistrationRequest,
+    ) -> Option<WebinarRegistration> {
+        let mut reg = self.webinar_registrations.get(&reg_id)?;
+        if let Some(status) = req.status { reg.status = status; }
+        self.webinar_registrations.insert(reg_id, reg.clone());
+        Some(reg)
+    }
+
+    // ─── Guest Users ───
+
+    pub fn invite_guest(
+        &self,
+        team_id: Uuid,
+        req: InviteGuestRequest,
+        invited_by: &str,
+    ) -> GuestUser {
+        let token = format!("guest_{}", Uuid::new_v4().simple());
+        let guest = GuestUser {
+            id: Uuid::new_v4(),
+            email: req.email,
+            display_name: req.display_name,
+            invited_by: invited_by.to_string(),
+            team_id,
+            permissions: req.permissions.unwrap_or_default(),
+            token,
+            expires_at: Utc::now() + Duration::days(30),
+            created_at: Utc::now(),
+        };
+        self.guest_users.insert(guest.id, guest.clone());
+        guest
+    }
+
+    pub fn list_guests(&self, team_id: Uuid) -> Vec<GuestUser> {
+        self.guest_users.values()
+            .into_iter()
+            .filter(|g| g.team_id == team_id)
+            .collect()
+    }
+
+    pub fn delete_guest(&self, _team_id: Uuid, guest_id: Uuid) -> bool {
+        self.guest_users.remove(&guest_id).is_some()
+    }
+
+    pub fn authenticate_guest(&self, token: &str) -> Option<GuestUser> {
+        self.guest_users.values()
+            .into_iter()
+            .find(|g| g.token == token && g.expires_at > Utc::now())
+    }
+
+    // ─── CNAM Lookup ───
+
+    pub fn cnam_lookup(&self, number: &str) -> CnamLookupResult {
+        if let Some(entry) = self.cnam_cache.get(&number.to_string()) {
+            if entry.expires_at.map(|e| e > Utc::now()).unwrap_or(true) {
+                return CnamLookupResult {
+                    phone_number: number.to_string(),
+                    caller_name: Some(entry.caller_name),
+                    source: Some(entry.source),
+                    cached: true,
+                };
+            }
+        }
+        // Placeholder for external API lookup
+        CnamLookupResult {
+            phone_number: number.to_string(),
+            caller_name: None,
+            source: None,
+            cached: false,
+        }
+    }
+
+    pub fn cnam_enrich_caller_id(&self, number: &str) -> Option<String> {
+        let result = self.cnam_lookup(number);
+        result.caller_name
+    }
+
+    pub fn set_cnam_providers(&self, providers: Vec<CnamProviderConfig>) {
+        let mut lock = self.cnam_providers.write().expect("cnam_providers lock");
+        *lock = providers;
+    }
+
+    pub fn list_cnam_providers(&self) -> Vec<CnamProviderConfig> {
+        self.cnam_providers.read().expect("cnam_providers lock").clone()
+    }
+
+    // ─── SIP Gateways ───
+
+    pub fn create_sip_gateway(&self, req: CreateSipGatewayRequest) -> SipGateway {
+        let gw = SipGateway {
+            id: Uuid::new_v4(),
+            name: req.name,
+            host: req.host,
+            port: req.port.unwrap_or(5060),
+            transport: req.transport.unwrap_or_else(|| "udp".to_string()),
+            username: req.username,
+            password_enc: req.password,
+            prefix: req.prefix.unwrap_or_default(),
+            enabled: req.enabled.unwrap_or(true),
+            created_at: Utc::now(),
+        };
+        self.sip_gateways.insert(gw.id, gw.clone());
+        gw
+    }
+
+    pub fn list_sip_gateways(&self) -> Vec<SipGateway> {
+        let mut gws = self.sip_gateways.values();
+        gws.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        gws
+    }
+
+    pub fn update_sip_gateway(&self, id: Uuid, req: UpdateSipGatewayRequest) -> Option<SipGateway> {
+        let mut gw = self.sip_gateways.get(&id)?;
+        if let Some(name) = req.name { gw.name = name; }
+        if let Some(host) = req.host { gw.host = host; }
+        if let Some(port) = req.port { gw.port = port; }
+        if let Some(transport) = req.transport { gw.transport = transport; }
+        if let Some(username) = req.username { gw.username = Some(username); }
+        if let Some(password) = req.password { gw.password_enc = Some(password); }
+        if let Some(prefix) = req.prefix { gw.prefix = prefix; }
+        if let Some(enabled) = req.enabled { gw.enabled = enabled; }
+        self.sip_gateways.insert(id, gw.clone());
+        Some(gw)
+    }
+
+    pub fn delete_sip_gateway(&self, id: Uuid) -> bool {
+        self.sip_gateways.remove(&id).is_some()
+    }
+
+    /// Find a gateway matching a dialed number by prefix (longest prefix wins).
+    pub fn resolve_gateway(&self, dialed_number: &str) -> Option<SipGateway> {
+        let mut best: Option<SipGateway> = None;
+        let mut best_len = 0;
+        for gw in self.sip_gateways.values() {
+            if gw.enabled && dialed_number.starts_with(&gw.prefix) && gw.prefix.len() >= best_len {
+                best_len = gw.prefix.len();
+                best = Some(gw);
+            }
+        }
+        best
+    }
+
+    // ─── Location Routing Rules ───
+
+    pub fn create_location_routing_rule(&self, req: CreateLocationRoutingRuleRequest) -> LocationRoutingRule {
+        let rule = LocationRoutingRule {
+            id: Uuid::new_v4(),
+            name: req.name,
+            location_pattern: req.location_pattern,
+            gateway_id: req.gateway_id,
+            priority: req.priority.unwrap_or(0),
+            enabled: req.enabled.unwrap_or(true),
+            created_at: Utc::now(),
+        };
+        self.location_routing_rules.insert(rule.id, rule.clone());
+        rule
+    }
+
+    pub fn list_location_routing_rules(&self) -> Vec<LocationRoutingRule> {
+        let mut rules = self.location_routing_rules.values();
+        rules.sort_by(|a, b| a.priority.cmp(&b.priority));
+        rules
+    }
+
+    pub fn update_location_routing_rule(
+        &self,
+        id: Uuid,
+        req: UpdateLocationRoutingRuleRequest,
+    ) -> Option<LocationRoutingRule> {
+        let mut rule = self.location_routing_rules.get(&id)?;
+        if let Some(name) = req.name { rule.name = name; }
+        if let Some(pattern) = req.location_pattern { rule.location_pattern = pattern; }
+        if let Some(gw) = req.gateway_id { rule.gateway_id = gw; }
+        if let Some(p) = req.priority { rule.priority = p; }
+        if let Some(e) = req.enabled { rule.enabled = e; }
+        self.location_routing_rules.insert(id, rule.clone());
+        Some(rule)
+    }
+
+    pub fn delete_location_routing_rule(&self, id: Uuid) -> bool {
+        self.location_routing_rules.remove(&id).is_some()
+    }
+
+    /// Evaluate location routing rules to find the best gateway for a location.
+    pub fn resolve_location_route(&self, location: &str) -> Option<SipGateway> {
+        let rules = self.list_location_routing_rules();
+        for rule in rules.iter().filter(|r| r.enabled) {
+            if location.contains(&rule.location_pattern) {
+                return self.sip_gateways.get(&rule.gateway_id);
+            }
+        }
+        None
+    }
+
+    // ─── Caption Language ───
+
+    pub fn set_caption_language(&self, conference_id: Uuid, _language: &str) -> bool {
+        self.conferences.get(&conference_id).is_some()
+        // Language preference is stored in the transcript segments themselves
+    }
+
+    pub fn get_transcript_in_language(&self, conference_id: Uuid, language: Option<&str>) -> Vec<TranscriptSegment> {
+        let segments = self.get_transcript(conference_id);
+        match language {
+            Some(lang) => segments.into_iter()
+                .filter(|s| s.language.as_deref().unwrap_or("en") == lang)
+                .collect(),
+            None => segments,
+        }
+    }
+}
+
+// ─── Webinar Registrations ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebinarRegistration {
+    pub id: Uuid,
+    pub conference_id: Uuid,
+    pub name: String,
+    pub email: String,
+    pub status: String,
+    pub registered_at: DateTime<Utc>,
+    #[serde(default)]
+    pub custom_fields: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegisterWebinarRequest {
+    pub name: String,
+    pub email: String,
+    pub custom_fields: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateRegistrationRequest {
+    pub status: Option<String>,
+}
+
+// ─── Guest Users ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuestUser {
+    pub id: Uuid,
+    pub email: String,
+    pub display_name: String,
+    pub invited_by: String,
+    pub team_id: Uuid,
+    #[serde(default)]
+    pub permissions: serde_json::Value,
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InviteGuestRequest {
+    pub email: String,
+    pub display_name: String,
+    pub permissions: Option<serde_json::Value>,
+}
+
+// ─── CNAM Cache ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CnamEntry {
+    pub id: Uuid,
+    pub phone_number: String,
+    pub caller_name: String,
+    pub source: String,
+    pub cached_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CnamLookupResult {
+    pub phone_number: String,
+    pub caller_name: Option<String>,
+    pub source: Option<String>,
+    pub cached: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CnamProviderConfig {
+    pub name: String,
+    pub api_url: String,
+    pub api_key_enc: Option<String>,
+    pub enabled: bool,
+}
+
+// ─── Caption Language ───
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CaptionLanguageRequest {
+    pub language: String,
+}
+
+// ─── SIP Gateways ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SipGateway {
+    pub id: Uuid,
+    pub name: String,
+    pub host: String,
+    pub port: i32,
+    pub transport: String,
+    pub username: Option<String>,
+    pub password_enc: Option<String>,
+    pub prefix: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateSipGatewayRequest {
+    pub name: String,
+    pub host: String,
+    pub port: Option<i32>,
+    pub transport: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub prefix: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateSipGatewayRequest {
+    pub name: Option<String>,
+    pub host: Option<String>,
+    pub port: Option<i32>,
+    pub transport: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub prefix: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+// ─── Location Routing Rules ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocationRoutingRule {
+    pub id: Uuid,
+    pub name: String,
+    pub location_pattern: String,
+    pub gateway_id: Uuid,
+    pub priority: i32,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateLocationRoutingRuleRequest {
+    pub name: String,
+    pub location_pattern: String,
+    pub gateway_id: Uuid,
+    pub priority: Option<i32>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateLocationRoutingRuleRequest {
+    pub name: Option<String>,
+    pub location_pattern: Option<String>,
+    pub gateway_id: Option<Uuid>,
+    pub priority: Option<i32>,
+    pub enabled: Option<bool>,
 }
 
 fn is_textual_content(content_type: &str) -> bool {
@@ -13073,6 +13532,9 @@ mod tests {
         let conference = state.create_conference(CreateConferenceRequest {
             title: "Ops".to_string(),
             mode: ConferenceMode::Video,
+            registration_enabled: None,
+            max_registrations: None,
+            registration_fields: None,
         });
         let user_id = Uuid::new_v4();
         let join = JoinConferenceRequest {
@@ -13100,6 +13562,9 @@ mod tests {
         let conference = state.create_conference(CreateConferenceRequest {
             title: "Security Review".to_string(),
             mode: ConferenceMode::Video,
+            registration_enabled: None,
+            max_registrations: None,
+            registration_fields: None,
         });
         let existing_id = Uuid::new_v4();
         let join = JoinConferenceRequest {
@@ -13243,6 +13708,9 @@ mod tests {
         let conference = state.create_conference(CreateConferenceRequest {
             title: "Moderated".to_string(),
             mode: ConferenceMode::Video,
+            registration_enabled: None,
+            max_registrations: None,
+            registration_fields: None,
         });
         let host_id = Uuid::new_v4();
         let member_id = Uuid::new_v4();
@@ -13766,6 +14234,9 @@ mod tests {
         let conference = state.create_conference(CreateConferenceRequest {
             title: "Revenue Standup".to_string(),
             mode: ConferenceMode::Audio,
+            registration_enabled: None,
+            max_registrations: None,
+            registration_fields: None,
         });
         state
             .join_conference(
@@ -14920,6 +15391,7 @@ mod tests {
                 speaker_name: "Alice".to_string(),
                 text: "We need to preserve this decision.".to_string(),
                 is_final: true,
+                language: None,
             },
         );
         let recording = CallRecording {
