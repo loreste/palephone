@@ -1,14 +1,18 @@
 # Pale
 
-A self-hosted unified communications platform — voice, video, messaging, and full PBX in a single application. Think Teams or Zoom Phone, but you own the infrastructure.
+Pale means “to speak” in Haitian Creole.
+
+A self-hosted communications platform for voice, video, messaging, meetings, files, compliance workflows, and PBX. Pale is building toward Microsoft Teams-style enterprise coverage while keeping the infrastructure under the tenant's control.
 
 ## Why Pale?
 
-- **Complete phone system.** Not just a softphone — Pale includes its own SIP registrar, call router, PBX, and call center. No need for Asterisk, FreePBX, or any external PBX.
-- **Your data stays yours.** Every call, message, and file stays on your servers. SIP signaling, media, chat — all self-hosted. Nothing routes through third-party clouds.
-- **End-to-end encrypted chat.** Messages and files encrypted client-side via Matrix protocol. Your server only sees ciphertext.
-- **One app, not five.** Calling, video, chat, file sharing, voicemail, presence, and admin — all in one interface.
-- **Works everywhere.** macOS, Windows, Linux, Android, and iOS from a single codebase.
+- **Complete phone system.** Not just a softphone — Pale includes its own SIP registrar, call router, PBX, emergency calling model, PSTN gateway readiness, and call center. It is designed to run without Asterisk, FreePBX, or a separate PBX.
+- **Your data stays yours.** Core calls, messages, files, SIP signaling, media, and chat run on your servers. Optional external providers are explicit integrations, not hidden dependencies.
+- **Matrix-backed encrypted chat.** The Matrix client path supports Olm/Megolm encryption for conversations and encrypted file transfer.
+- **One app, not five.** Calling, video, chat, files, meetings, compliance, voicemail, presence, and admin live in one interface.
+- **Enterprise controls without lock-in.** DLP, eDiscovery, retention, security score, audit, SSO, conditional access, data residency, federation, guest access, app governance, and provider readiness are represented in the product.
+- **Bring the right engines.** Pale exposes provider contracts for LLM, STT, TTS, malware scanning, storage, broadcast, media, CASB, PSTN, and E911 instead of pretending those systems can be safely faked in app code.
+- **Desktop and Android path.** macOS, Windows, Linux, and Android builds are covered by the current project workflows.
 
 ## Features
 
@@ -32,6 +36,9 @@ A self-hosted unified communications platform — voice, video, messaging, and f
 - **CDR (Call Detail Records)** — every call logged with disposition, duration, queue info
 - **Extensions** — map short codes to users, queues, ring groups, IVR, voicemail, or park slots
 - **Inbound/outbound routing rules** — pattern-based source/destination matching with priority
+- **PSTN and Operator Connect readiness** — SIP gateway inventory, TLS/auth checks, E.164 route coverage, and provider availability reporting
+- **Emergency calling model** — emergency locations, user assignments, provider location IDs, and call plans that block unsafe routing until E911/PSTN providers are configured
+- **CNAM and caller identity** — provider configuration and lookup readiness for enterprise caller ID workflows
 
 ### Call Center
 
@@ -43,15 +50,31 @@ A self-hosted unified communications platform — voice, video, messaging, and f
 
 ### Messaging & Collaboration
 
-- End-to-end encrypted chat via Matrix protocol (Olm for 1:1, Megolm for groups)
+- Matrix-backed encrypted chat via Olm for 1:1 and Megolm for groups
 - 1:1 direct messages and group rooms
-- Teams-style team spaces with channel rooms
+- Team spaces with channel rooms
 - Scheduled meetings that create/join conference-backed calls
+- Recurring meetings, meeting templates, webinar registration, and town hall configuration
 - Typing indicators and read receipts
 - Message edit and delete
+- Message priority, saved messages, mentions, reactions, and Loop component records
 - Encrypted file sharing (AES-256-CTR per-file keys)
 - Drag-and-drop upload with any file type
-- Full-text message search
+- File versioning, folders, governance metadata, and external storage readiness tracking
+- Full-text message search plus indexed discovery records for governed content
+- Wiki pages, task boards, adaptive cards, channel tabs, message extensions, connectors, bots, app catalog, custom emojis, whiteboards, automations, signage displays, guest users, and federation records
+
+### Meetings & Events
+
+- Audio and video conference rooms
+- Scheduled meetings with policy-aware join flows
+- Meeting lifecycle controls, lobby policy, reactions, polls, attendance records, and recordings
+- Recording policies, retention hooks, and admin review paths
+- Call quality dashboard data and meeting quality signals
+- Presentation session model with renderer/provider readiness
+- Meeting media settings for gallery/together-mode style layout readiness, virtual background readiness, NDI/RTMP streaming readiness, and runtime capability reporting
+- Town hall configuration with capacity enforcement and broadcast-provider readiness for large events
+- Transcription job orchestration and AI meeting assistant report structures without fabricating AI output when no provider is configured
 
 ### Presence & Directory
 
@@ -60,15 +83,44 @@ A self-hosted unified communications platform — voice, video, messaging, and f
 - User directory with search and BLF indicators (see who's on a call)
 - Click-to-call and click-to-chat from the directory
 
-### Conferences
+### AI, Speech & Automation
 
-- Audio and video conference rooms
-- Admin and user-facing conference management
-- Join from chat view or by dialing conference URI
+- LLM provider API for chat/assistant dispatch contracts
+- STT provider API for transcription and speech IVR integration
+- TTS provider API for generated speech workflows
+- Provider status APIs for `llm`, `stt`, and `tts`, including supported protocols and readiness warnings
+- Meeting assistant report structures, action items, speaker stats, and transcription workflow state
+- Speech IVR routing that requires a configured provider and only matches configured phrases
+- Automation rules and admin-visible integration health checks
+
+Pale does not fake AI output locally. The server reports whether the tenant has configured a provider such as Ollama, vLLM, Whisper, Vosk, or another compatible service, and dispatches through that contract.
+
+### Security, Compliance & Governance
+
+- Retention policies with scheduled enforcement
+- eDiscovery search, exports, cases, custodians, saved queries, and case-scoped exports
+- DLP policies, scan previews, violations, CSV export, and file-upload blocking
+- Malware/ATP quarantine model with admin review and provider readiness tracking for scanners such as ClamAV or YARA
+- Security score dashboard with controls, recommendations, and posture summary
+- Compliance review queue and admin remediation workflow
+- Information barriers, sensitivity labels, governance records, and policy packages
+- SSO provider management, conditional access policies, MFA/certificate-auth data structures, and privileged access review
+- Encryption configuration, audit logs, data residency regions, and admin action traceability
+- CASB/provider readiness tracking for external security controls
+
+### Enterprise Integrations
+
+- Admin-managed registry for external systems needed to approach Teams Enterprise-style parity
+- Readiness report that refuses to mark the tenant ready while tracked critical dependencies are missing
+- Health report that flags missing URLs, invalid protocols, missing provider details, and partial configurations
+- Deployment plan that prioritizes open-source or self-hosted foundation services where possible
+- Integrations tracked for AI, speech, transcription, noise suppression, virtual backgrounds, media layouts, streaming, presentation rendering, E911, PSTN/SBC, storage, ATP, CASB, mobile/web/runtime hardening, multi-window, push, device permissions, and town hall scale
+
+The code models these integrations and readiness states. Real production use still requires installing and configuring the relevant providers, for example Matrix/Synapse, coturn, PostgreSQL, NATS, ClamAV/YARA, Whisper/Vosk, Ollama/vLLM, Nextcloud/S3/WebDAV, LiveKit/SRS, Collabora, OPA-style policy engines, and certified carrier/E911/PSTN providers.
 
 ### Admin Panel
 
-21 management tabs accessible to admin users:
+The admin console covers PBX, collaboration, compliance, security, devices, apps, integrations, and enterprise readiness:
 
 | Category | Tabs |
 |----------|------|
@@ -76,12 +128,16 @@ A self-hosted unified communications platform — voice, video, messaging, and f
 | **Users** | Users (CRUD + role assignment), SIP Accounts, Directory (LDAP/AD) |
 | **PBX** | Extensions, Routing, Ring Groups, Queues, IVR, Business Hours, Holidays, Paging, Media |
 | **Call Center** | Agents, Wallboard, QA Scorecards, CDR |
-| **Collaboration** | Conferences, Files, Active Calls |
+| **Collaboration** | Conferences, Files, Active Calls, Meeting Templates, Recording Policies, Guests, Message Extensions, App Store |
+| **Compliance** | Security Score, Retention, eDiscovery, DLP, Compliance Reviews, Information Barriers, Sensitivity Labels, Data Residency |
+| **Identity & Security** | SSO, Encryption, Privileged Access, Conditional Access, Custom Roles, Policy Packages, API Clients |
+| **Devices & Rooms** | Common Area Phones, Meeting Rooms, Devices, SIP Gateways, Scheduling Panels, Signage |
+| **Enterprise** | Emergency Calling, Location Routing, Federation, Automations, Enterprise Integrations, Bandwidth Policies |
 
 - **Role-based access** — admin tab only visible to admin users
 - **LDAP/Active Directory integration** — auto-provision users from AD, map groups to roles
 - **SCIM-style user provisioning** — `/v1/scim/v2/Users` endpoints for business lifecycle automation
-- **Governance controls** — retention policy records and admin eDiscovery export for server-native room messages
+- **Governance controls** — retention, eDiscovery, DLP, compliance review, and security posture reporting
 - **Audit logging** — every admin action logged with principal, action, target, timestamp
 - **Real-time refresh** — SSE events + 30-second polling for live data
 
@@ -92,7 +148,7 @@ A self-hosted unified communications platform — voice, video, messaging, and f
 - Command palette (Cmd+K) and keyboard shortcuts
 - Native OS notifications for calls and messages
 - OS keychain for credential storage (macOS Keychain, Windows Credential Manager)
-- Android and iOS via Tauri 2.x with adaptive UI
+- Android via Tauri 2.x with adaptive UI
 
 ## Encryption
 
@@ -100,11 +156,12 @@ A self-hosted unified communications platform — voice, video, messaging, and f
 |-------|------|-----|
 | SIP signaling | Call setup, registration | TLS (port 5061) |
 | Voice/video media | RTP audio and video streams | SRTP with DTLS key exchange |
-| Chat messages | 1:1 and group conversations | Olm / Megolm (Matrix E2E) |
+| Chat messages | Matrix-backed 1:1 and group conversations | Olm / Megolm |
 | File attachments | Uploaded files | AES-256-CTR with per-file key |
 | Server storage | SQLite fallback encryption | ChaCha20-Poly1305 |
 | Credentials | Passwords and tokens | OS keychain (never written to disk) |
 | Server API | HTTP endpoints | Token-based auth with 12-hour TTL |
+| Admin governance | Audit, DLP, eDiscovery, retention | Server-side policy engine + export controls |
 
 ## Architecture
 
@@ -123,8 +180,8 @@ A self-hosted unified communications platform — voice, video, messaging, and f
 │  Pale Server (self-hosted)                                   │
 │  ┌───────────┐  ┌──────────┐  ┌───────────┐  ┌───────────┐ │
 │  │ SIP       │  │ HTTP API │  │ Call      │  │ PostgreSQL│ │
-│  │ Registrar │  │ 79 routes│  │ Router    │  │ + Memory  │ │
-│  │ & Proxy   │  │ + SSE    │  │ (PBX)    │  │ Cache     │ │
+│  │ Registrar │  │ + SSE    │  │ Router    │  │ + Memory  │ │
+│  │ & Proxy   │  │ + NATS   │  │ (PBX)    │  │ Cache     │ │
 │  └───────────┘  └──────────┘  └───────────┘  └───────────┘ │
 │  ┌───────────┐  ┌──────────┐  ┌───────────┐                │
 │  │ TURN      │  │ Metrics  │  │ LDAP/AD   │                │
@@ -140,7 +197,7 @@ A self-hosted unified communications platform — voice, video, messaging, and f
 | `pjsip-sys` | Downloads PJSIP source, compiles per-platform, generates FFI bindings via bindgen |
 | `pale-core` | SIP engine with dedicated worker thread, call management, audio devices, call recording, call history (SQLite), config persistence, OS keychain |
 | `pale-matrix` | Matrix client lifecycle, E2E encrypted messaging, file upload/download, room management, sync loop |
-| `pale-server` | Full SIP registrar/proxy, HTTP API, PBX call router, PostgreSQL persistence, SSE/NATS events, rate limiting, Prometheus metrics |
+| `pale-server` | Full SIP registrar/proxy, HTTP API, PBX call router, PostgreSQL persistence, compliance engine, enterprise integration registry, AI provider dispatch contracts, SSE/NATS events, rate limiting, Prometheus metrics |
 
 ### SIP Call Routing Decision Tree
 
@@ -274,25 +331,13 @@ See [ANDROID_SETUP.md](ANDROID_SETUP.md) for detailed environment setup.
 
 ## Database
 
-Pale Server uses PostgreSQL with 9 migrations applied automatically at startup:
+Pale Server uses PostgreSQL with migrations applied automatically at startup. The schema covers users, SIP accounts, registrations, calls, rooms, messages, files, recordings, PBX routing, queues, IVR, call center data, meetings, governance, policy, security, devices, app integrations, federation, signage, compliance, and data residency.
 
-| Migration | Tables |
-|-----------|--------|
-| 001 | users, sip_accounts, sip_registrations, sip_dialogs, sip_messages, presence, calls, files, routing_rules, conferences, audit_events |
-| 002 | rooms, room_members, room_messages, read_receipts, avatars, search |
-| 003 | voicemails, call_recordings |
-| 004 | DBA constraints, indexes, retention policies |
-| 005 | User authentication (password_hash, role) |
-| 006 | Ring groups, IVR, extensions, routing enhancements |
-| 007 | Voicemail settings, follow-me, call forwarding |
-| 008 | Call queues, business hours, holidays, call park, speed dial, CDR, paging, music on hold |
-| 009 | Agent profiles, agent state log, queue metrics, QA scorecards |
-
-Data is cached in memory (ShardedMaps) for fast lookups and written through to PostgreSQL for persistence.
+Data is cached in memory for fast lookups and written through to PostgreSQL for persistence.
 
 ## API
 
-Pale Server exposes 79 HTTP endpoints. Key groups:
+Pale Server exposes a broad HTTP API plus SSE events. Key groups:
 
 | Group | Endpoints | Auth |
 |-------|-----------|------|
@@ -316,6 +361,12 @@ Pale Server exposes 79 HTTP endpoints. Key groups:
 | Conferences | `/v1/conferences` CRUD | Bearer token |
 | Files | `/v1/files` POST/GET/DELETE | Bearer token |
 | Rooms | `/v1/rooms` CRUD, `/v1/rooms/{id}/messages` | Bearer token |
+| Meetings | Scheduled meetings, templates, recordings, attendance, polls, reactions | Bearer token |
+| Compliance | Retention, eDiscovery, DLP, security score, reviews, labels, barriers | Bearer token (admin) |
+| Identity | SSO, MFA foundations, conditional access, custom roles, policy packages | Bearer token (admin) |
+| Enterprise Integrations | `/v1/admin/enterprise-integrations`, readiness, health, deployment plan | Bearer token (admin) |
+| AI Providers | `/v1/ai/providers`, `/v1/ai/llm/chat`, `/v1/ai/stt/transcribe`, `/v1/ai/tts/synthesize` | Bearer token |
+| Emergency/PSTN | Emergency locations, assignments, call plans, SIP gateways, location routing | Bearer token (admin) |
 | Events | `GET /v1/events` (SSE stream) | Bearer token |
 | Health | `GET /health`, `GET /metrics` | None |
 
@@ -358,6 +409,8 @@ pale/
 - No hardcoded credentials — all secrets via environment variables
 - CORS and Content-Type enforcement on all endpoints
 - Audit trail for all administrative actions
+- DLP, eDiscovery, retention, compliance review, and security score workflows
+- External ATP/CASB/provider readiness checks so risky integrations are visible before a tenant is marked ready
 
 ## Documentation
 
