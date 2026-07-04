@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, type ReactNode } from "react";
-import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Video, Users, Reply, Pencil, Pin, Forward, Check, CheckCheck, Search, Radio, Hash, CalendarClock, Star, AlertTriangle, Plug, Copy, Trash2, Clock, Image as ImageLucide, Languages, Bold, Italic, Code, Link, BookOpen, ListTodo, ExternalLink } from "lucide-react";
+import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Video, Users, UserPlus, Reply, Pencil, Pin, Forward, Check, CheckCheck, Search, Radio, Hash, CalendarClock, Star, AlertTriangle, Plug, Copy, Trash2, Clock, Image as ImageLucide, Languages, Bold, Italic, Code, Link, BookOpen, ListTodo, ExternalLink } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useChatStore, type ChatMessage, type RoomSummary } from "@/store/chatStore";
 import { useMatrixStore } from "@/store/matrixStore";
@@ -542,13 +542,34 @@ function ConversationList({
               <p className="text-xs font-semibold uppercase text-tertiary">Team</p>
               <p className="truncate text-sm font-medium text-primary">{focusedTeam.name}</p>
             </div>
-            <button
-              onClick={() => setFocusedTeam(null)}
-              className="shrink-0 rounded-md p-1.5 text-tertiary transition-colors hover:bg-surface hover:text-primary"
-              title="Show all conversations"
-            >
-              <X size={14} />
-            </button>
+            <div className="flex items-center gap-1 shrink-0">
+              <button
+                onClick={async () => {
+                  const email = prompt("Guest email:");
+                  if (!email) return;
+                  const displayName = prompt("Guest display name:") || email;
+                  if (!connected || !baseUrl || !token) return;
+                  try {
+                    await paleServerApi(baseUrl, token, `/v1/teams/${focusedTeam.id}/guests/invite`, {
+                      method: "POST",
+                      body: { email, display_name: displayName, permissions: ["chat.read", "chat.write"] },
+                    });
+                    toast({ type: "success", title: "Guest invited" });
+                  } catch { toast({ type: "error", title: "Failed to invite guest" }); }
+                }}
+                className="rounded-md p-1.5 text-tertiary transition-colors hover:bg-surface hover:text-primary"
+                title="Invite guest"
+              >
+                <UserPlus size={14} />
+              </button>
+              <button
+                onClick={() => setFocusedTeam(null)}
+                className="rounded-md p-1.5 text-tertiary transition-colors hover:bg-surface hover:text-primary"
+                title="Show all conversations"
+              >
+                <X size={14} />
+              </button>
+            </div>
           </div>
         )}
         <div className="relative">
@@ -972,7 +993,12 @@ function ChatRoom({
   const [gifLoading, setGifLoading] = useState(false);
   const [teamTags, setTeamTags] = useState<ServerTag[]>([]);
   const [customEmojis, setCustomEmojis] = useState<CustomEmoji[]>([]);
-  const [subTab, setSubTab] = useState<"chat" | "wiki" | "tasks">("chat");
+  const [subTab, setSubTab] = useState<"chat" | "wiki" | "tasks" | "tab">("chat");
+  const [channelTabs, setChannelTabs] = useState<{ id: string; name: string; url: string; icon?: string; position: number }[]>([]);
+  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  const [slashMenuOpen, setSlashMenuOpen] = useState(false);
+  const [slashExtensions, setSlashExtensions] = useState<{ id: string; command: string; name: string; description: string; icon?: string }[]>([]);
+  const [slashQuery, setSlashQuery] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<number | null>(null);
@@ -1017,6 +1043,25 @@ function ChatRoom({
       .then(setCustomEmojis)
       .catch(() => {});
   }, [room.team_id, isServerRoom, connected, baseUrl, token]);
+
+  // Load channel tabs
+  useEffect(() => {
+    if (!isServerRoom || !connected || !baseUrl || !token || room.is_direct) {
+      setChannelTabs([]);
+      return;
+    }
+    paleServerApi<{ id: string; name: string; url: string; icon?: string; position: number }[]>(
+      baseUrl, token, `/v1/rooms/${room.room_id}/tabs`
+    ).then(setChannelTabs).catch(() => setChannelTabs([]));
+  }, [room.room_id, isServerRoom, room.is_direct, connected, baseUrl, token]);
+
+  // Load message extensions for slash commands
+  useEffect(() => {
+    if (!connected || !baseUrl || !token) return;
+    paleServerApi<{ id: string; command: string; name: string; description: string; icon?: string }[]>(
+      baseUrl, token, "/v1/message-extensions"
+    ).then(setSlashExtensions).catch(() => setSlashExtensions([]));
+  }, [connected, baseUrl, token]);
 
   // Load server room messages on mount (stable deps only — no addMessage to avoid re-render loop)
   useEffect(() => {
@@ -1155,6 +1200,33 @@ function ChatRoom({
     } else {
       setMentionQuery(null);
       setMentionUsers([]);
+    }
+
+    // Detect / slash command
+    if (value.startsWith("/") && !value.includes(" ")) {
+      const q = value.slice(1).toLowerCase();
+      setSlashQuery(q);
+      setSlashMenuOpen(true);
+    } else {
+      setSlashMenuOpen(false);
+      setSlashQuery("");
+    }
+  };
+
+  const invokeSlashCommand = async (command: string) => {
+    setSlashMenuOpen(false);
+    setSlashQuery("");
+    const inputText = input.replace(/^\/\w*/, "").trim();
+    setInput("");
+    if (!connected || !baseUrl || !token) return;
+    try {
+      const result = await paleServerApi<{ result?: string; text?: string }>(
+        baseUrl, token, `/v1/message-extensions/${command}/invoke`, { method: "POST", body: { input: inputText } }
+      );
+      const text = result.result || result.text || JSON.stringify(result);
+      setInput(text);
+    } catch (err) {
+      toast({ type: "error", title: "Extension error", description: String(err) });
     }
   };
 
@@ -1608,6 +1680,15 @@ function ChatRoom({
           >
             <ListTodo size={12} className="inline mr-1" />Tasks
           </button>
+          {channelTabs.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => { setSubTab("tab"); setActiveTabId(tab.id); }}
+              className={cn("px-2.5 py-1 rounded-md text-xs font-medium transition-colors", subTab === "tab" && activeTabId === tab.id ? "bg-accent text-white" : "text-tertiary hover:text-primary hover:bg-elevated")}
+            >
+              <ExternalLink size={12} className="inline mr-1" />{tab.name}
+            </button>
+          ))}
         </div>
       )}
 
@@ -1618,6 +1699,20 @@ function ChatRoom({
       {subTab === "tasks" && room.team_id && baseUrl && token && (
         <TasksPanel teamId={room.team_id} baseUrl={baseUrl} token={token} />
       )}
+
+      {subTab === "tab" && activeTabId && (() => {
+        const tab = channelTabs.find((t) => t.id === activeTabId);
+        return tab ? (
+          <div className="flex-1 overflow-hidden">
+            <iframe
+              src={tab.url}
+              title={tab.name}
+              className="w-full h-full border-0"
+              sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+            />
+          </div>
+        ) : null;
+      })()}
 
       {hasActiveRoomCall && subTab === "chat" && (
         <div className="flex items-center justify-between gap-3 px-4 py-2 border-b border-border-subtle bg-success/10 text-sm">
@@ -1742,6 +1837,27 @@ function ChatRoom({
                 <span className="text-tertiary text-xs ml-auto">{u.sip_uri}</span>
               </button>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Slash command menu */}
+      {slashMenuOpen && slashExtensions.filter((e) => e.command.toLowerCase().includes(slashQuery)).length > 0 && (
+        <div className="px-3 pb-1">
+          <div className="bg-surface border border-border-subtle rounded-lg shadow-lg max-h-40 overflow-y-auto">
+            {slashExtensions
+              .filter((e) => e.command.toLowerCase().includes(slashQuery))
+              .map((ext) => (
+                <button
+                  key={ext.id}
+                  onClick={() => invokeSlashCommand(ext.command)}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-elevated transition-colors text-sm"
+                >
+                  <span className="text-accent font-mono text-xs">/{ext.command}</span>
+                  <span className="text-primary text-xs">{ext.name}</span>
+                  <span className="text-tertiary text-[10px] ml-auto truncate max-w-[200px]">{ext.description}</span>
+                </button>
+              ))}
           </div>
         </div>
       )}

@@ -23,6 +23,7 @@ import {
   Upload,
   Users,
   Monitor,
+  Plug,
   Smartphone,
   type LucideIcon,
 } from "lucide-react";
@@ -56,7 +57,7 @@ async function api<T = any>(baseUrl: string, token: string, path: string, opts?:
   return paleServerApi<T>(baseUrl, token, path, opts);
 }
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music" | "sso" | "encryption" | "pam" | "common_area_phones" | "meeting_rooms_admin" | "devices" | "custom_emojis" | "api_clients" | "bots" | "connectors" | "conditional_access";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music" | "sso" | "encryption" | "pam" | "common_area_phones" | "meeting_rooms_admin" | "devices" | "custom_emojis" | "api_clients" | "bots" | "connectors" | "conditional_access" | "message_extensions" | "app_store" | "bandwidth" | "signage";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -105,6 +106,10 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "bots", label: "Bots", icon: Router },
   { id: "connectors", label: "Connectors", icon: GitBranch },
   { id: "conditional_access", label: "Conditional Access", icon: Lock },
+  { id: "message_extensions", label: "Extensions", icon: Plug },
+  { id: "app_store", label: "App Store", icon: Download },
+  { id: "bandwidth", label: "Bandwidth", icon: BarChart3 },
+  { id: "signage", label: "Signage", icon: Monitor },
 ];
 
 export function AdminView() {
@@ -350,6 +355,10 @@ export function AdminView() {
         {activeTab === "bots" && <BotsPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "connectors" && <ConnectorsPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "conditional_access" && <ConditionalAccessPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "message_extensions" && <MessageExtensionsPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "app_store" && <AppStorePanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "bandwidth" && <BandwidthPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "signage" && <SignagePanel baseUrl={baseUrl} token={token} />}
       </div>
     </div>
   );
@@ -6427,6 +6436,388 @@ function ConditionalAccessPanel({ baseUrl, token }: { baseUrl: string; token: st
               {p.actions.allow && <span className="text-green-600">Allow</span>}
               {p.actions.block && <span className="text-red-600">Block</span>}
               {p.actions.require_mfa && <span className="text-amber-600">Require MFA</span>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Message Extensions Panel ───
+
+function MessageExtensionsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [extensions, setExtensions] = useState<any[]>([]);
+  const [name, setName] = useState("");
+  const [command, setCommand] = useState("");
+  const [description, setDescription] = useState("");
+  const [handlerUrl, setHandlerUrl] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api<any[]>(baseUrl, token, "/v1/admin/message-extensions");
+      setExtensions(data);
+    } catch {}
+  }, [baseUrl, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleCreate = async () => {
+    try {
+      await api(baseUrl, token, "/v1/admin/message-extensions", {
+        method: "POST",
+        body: { name, command, description, handler_url: handlerUrl },
+      });
+      setName(""); setCommand(""); setDescription(""); setHandlerUrl("");
+      load();
+      toast({ type: "success", title: "Extension created" });
+    } catch { toast({ type: "error", title: "Failed to create extension" }); }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/message-extensions/${id}`, { method: "DELETE" });
+      load();
+    } catch { toast({ type: "error", title: "Failed to delete extension" }); }
+  };
+
+  const handleToggle = async (id: string, currentEnabled: boolean) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/message-extensions/${id}`, { method: "PUT", body: { enabled: !currentEnabled } });
+      load();
+    } catch { toast({ type: "error", title: "Failed to update extension" }); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <h3 className="text-sm font-semibold">Message Extensions</h3>
+      <p className="text-xs text-secondary">Configure slash commands for the compose area.</p>
+      <div className="space-y-2 p-3 bg-elevated rounded-lg">
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Extension name"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="Command (e.g. weather)"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <input value={handlerUrl} onChange={(e) => setHandlerUrl(e.target.value)} placeholder="Handler URL (e.g. https://api.example.com/handle)"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <button onClick={handleCreate} disabled={!name.trim() || !command.trim() || !handlerUrl.trim()}
+          className="px-4 py-2 rounded-md text-sm font-medium bg-accent text-inverse hover:bg-accent-hover transition-colors disabled:opacity-50">
+          Create Extension
+        </button>
+      </div>
+      <div className="space-y-2">
+        {extensions.length === 0 && <p className="text-xs text-tertiary">No message extensions configured.</p>}
+        {extensions.map((ext: any) => (
+          <div key={ext.id} className={cn("p-3 rounded-lg border", ext.enabled ? "border-accent/30 bg-accent/5" : "border-border-subtle bg-surface")}>
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-sm font-medium text-primary">/{ext.command}</span>
+                <span className="ml-2 text-xs text-secondary">{ext.name}</span>
+                <span className={cn("ml-2 text-[10px] px-1.5 py-0.5 rounded", ext.enabled ? "bg-green-500/10 text-green-600" : "bg-zinc-500/10 text-zinc-500")}>
+                  {ext.enabled ? "Enabled" : "Disabled"}
+                </span>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => handleToggle(ext.id, ext.enabled)} className="text-xs text-accent hover:underline">
+                  {ext.enabled ? "Disable" : "Enable"}
+                </button>
+                <button onClick={() => handleDelete(ext.id)} className="text-xs text-destructive hover:underline">Delete</button>
+              </div>
+            </div>
+            <p className="text-[10px] text-tertiary mt-1">{ext.description}</p>
+            <p className="text-[10px] text-tertiary truncate">Handler: {ext.handler_url}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── App Store Panel ───
+
+function AppStorePanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [apps, setApps] = useState<any[]>([]);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [category, setCategory] = useState("productivity");
+  const [version, setVersion] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api<any[]>(baseUrl, token, "/v1/admin/apps");
+      setApps(data);
+    } catch {}
+  }, [baseUrl, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleCreate = async () => {
+    try {
+      await api(baseUrl, token, "/v1/admin/apps", {
+        method: "POST",
+        body: { name, description, category, version: version || undefined },
+      });
+      setName(""); setDescription(""); setVersion("");
+      load();
+      toast({ type: "success", title: "App added to catalog" });
+    } catch { toast({ type: "error", title: "Failed to create app" }); }
+  };
+
+  const handleInstall = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/apps/${id}/install`, { method: "POST" });
+      load();
+      toast({ type: "success", title: "App installed" });
+    } catch { toast({ type: "error", title: "Failed to install app" }); }
+  };
+
+  const handleUninstall = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/apps/${id}/uninstall`, { method: "POST" });
+      load();
+      toast({ type: "success", title: "App uninstalled" });
+    } catch { toast({ type: "error", title: "Failed to uninstall app" }); }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/apps/${id}`, { method: "DELETE" });
+      load();
+    } catch { toast({ type: "error", title: "Failed to delete app" }); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <h3 className="text-sm font-semibold">App Store / Extension Catalog</h3>
+      <p className="text-xs text-secondary">Browse, install, and manage apps.</p>
+      <div className="space-y-2 p-3 bg-elevated rounded-lg">
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="App name"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <select value={category} onChange={(e) => setCategory(e.target.value)}
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary focus:outline-none">
+          <option value="productivity">Productivity</option>
+          <option value="communication">Communication</option>
+          <option value="analytics">Analytics</option>
+          <option value="security">Security</option>
+          <option value="other">Other</option>
+        </select>
+        <input value={version} onChange={(e) => setVersion(e.target.value)} placeholder="Version (optional)"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <button onClick={handleCreate} disabled={!name.trim()}
+          className="px-4 py-2 rounded-md text-sm font-medium bg-accent text-inverse hover:bg-accent-hover transition-colors disabled:opacity-50">
+          Add App
+        </button>
+      </div>
+      <div className="space-y-2">
+        {apps.length === 0 && <p className="text-xs text-tertiary">No apps in catalog.</p>}
+        {apps.map((app: any) => (
+          <div key={app.id} className="p-3 rounded-lg border border-border-subtle bg-surface">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-sm font-medium text-primary">{app.name}</span>
+                {app.version && <span className="ml-2 text-[10px] text-tertiary">v{app.version}</span>}
+                <span className={cn("ml-2 text-[10px] px-1.5 py-0.5 rounded", app.installed ? "bg-green-500/10 text-green-600" : "bg-zinc-500/10 text-zinc-500")}>
+                  {app.installed ? "Installed" : "Available"}
+                </span>
+                <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent">{app.category}</span>
+              </div>
+              <div className="flex gap-2">
+                {app.installed ? (
+                  <button onClick={() => handleUninstall(app.id)} className="text-xs text-amber-600 hover:underline">Uninstall</button>
+                ) : (
+                  <button onClick={() => handleInstall(app.id)} className="text-xs text-accent hover:underline">Install</button>
+                )}
+                <button onClick={() => handleDelete(app.id)} className="text-xs text-destructive hover:underline">Delete</button>
+              </div>
+            </div>
+            <p className="text-[10px] text-tertiary mt-1">{app.description}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Bandwidth Panel ───
+
+function BandwidthPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [policies, setPolicies] = useState<any[]>([]);
+  const [name, setName] = useState("");
+  const [maxCalls, setMaxCalls] = useState("");
+  const [maxBandwidth, setMaxBandwidth] = useState("");
+  const [locationPattern, setLocationPattern] = useState("*");
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api<any[]>(baseUrl, token, "/v1/admin/bandwidth-policies");
+      setPolicies(data);
+    } catch {}
+  }, [baseUrl, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleCreate = async () => {
+    try {
+      await api(baseUrl, token, "/v1/admin/bandwidth-policies", {
+        method: "POST",
+        body: {
+          name,
+          max_concurrent_calls: maxCalls ? parseInt(maxCalls) : 0,
+          max_bandwidth_kbps: maxBandwidth ? parseInt(maxBandwidth) : 0,
+          location_pattern: locationPattern || "*",
+        },
+      });
+      setName(""); setMaxCalls(""); setMaxBandwidth(""); setLocationPattern("*");
+      load();
+      toast({ type: "success", title: "Bandwidth policy created" });
+    } catch { toast({ type: "error", title: "Failed to create policy" }); }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/bandwidth-policies/${id}`, { method: "DELETE" });
+      load();
+    } catch { toast({ type: "error", title: "Failed to delete policy" }); }
+  };
+
+  const handleToggle = async (id: string, currentEnabled: boolean) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/bandwidth-policies/${id}`, { method: "PUT", body: { enabled: !currentEnabled } });
+      load();
+    } catch { toast({ type: "error", title: "Failed to update policy" }); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <h3 className="text-sm font-semibold">Bandwidth Management / Call Admission Control</h3>
+      <p className="text-xs text-secondary">Limit concurrent calls and bandwidth by location.</p>
+      <div className="space-y-2 p-3 bg-elevated rounded-lg">
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Policy name"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <input value={maxCalls} onChange={(e) => setMaxCalls(e.target.value)} placeholder="Max concurrent calls (0 = unlimited)" type="number"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <input value={maxBandwidth} onChange={(e) => setMaxBandwidth(e.target.value)} placeholder="Max bandwidth (kbps, 0 = unlimited)" type="number"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <input value={locationPattern} onChange={(e) => setLocationPattern(e.target.value)} placeholder="Location pattern (* = all)"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <button onClick={handleCreate} disabled={!name.trim()}
+          className="px-4 py-2 rounded-md text-sm font-medium bg-accent text-inverse hover:bg-accent-hover transition-colors disabled:opacity-50">
+          Create Policy
+        </button>
+      </div>
+      <div className="space-y-2">
+        {policies.length === 0 && <p className="text-xs text-tertiary">No bandwidth policies configured.</p>}
+        {policies.map((p: any) => (
+          <div key={p.id} className={cn("p-3 rounded-lg border", p.enabled ? "border-accent/30 bg-accent/5" : "border-border-subtle bg-surface")}>
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-sm font-medium text-primary">{p.name}</span>
+                <span className={cn("ml-2 text-[10px] px-1.5 py-0.5 rounded", p.enabled ? "bg-green-500/10 text-green-600" : "bg-zinc-500/10 text-zinc-500")}>
+                  {p.enabled ? "Enabled" : "Disabled"}
+                </span>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => handleToggle(p.id, p.enabled)} className="text-xs text-accent hover:underline">
+                  {p.enabled ? "Disable" : "Enable"}
+                </button>
+                <button onClick={() => handleDelete(p.id)} className="text-xs text-destructive hover:underline">Delete</button>
+              </div>
+            </div>
+            <div className="mt-1 text-[10px] text-tertiary space-x-3">
+              <span>Max calls: {p.max_concurrent_calls || "unlimited"}</span>
+              <span>Max bandwidth: {p.max_bandwidth_kbps ? `${p.max_bandwidth_kbps} kbps` : "unlimited"}</span>
+              <span>Location: {p.location_pattern}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Signage Panel ───
+
+function SignagePanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [displays, setDisplays] = useState<any[]>([]);
+  const [name, setName] = useState("");
+  const [location, setLocation] = useState("");
+  const [contentUrl, setContentUrl] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api<any[]>(baseUrl, token, "/v1/admin/signage");
+      setDisplays(data);
+    } catch {}
+  }, [baseUrl, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleCreate = async () => {
+    try {
+      await api(baseUrl, token, "/v1/admin/signage", {
+        method: "POST",
+        body: { name, location, content_url: contentUrl },
+      });
+      setName(""); setLocation(""); setContentUrl("");
+      load();
+      toast({ type: "success", title: "Display created" });
+    } catch { toast({ type: "error", title: "Failed to create display" }); }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/signage/${id}`, { method: "DELETE" });
+      load();
+    } catch { toast({ type: "error", title: "Failed to delete display" }); }
+  };
+
+  const handleToggle = async (id: string, currentEnabled: boolean) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/signage/${id}`, { method: "PUT", body: { enabled: !currentEnabled } });
+      load();
+    } catch { toast({ type: "error", title: "Failed to update display" }); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <h3 className="text-sm font-semibold">Digital Signage</h3>
+      <p className="text-xs text-secondary">Manage digital signage displays and their content.</p>
+      <div className="space-y-2 p-3 bg-elevated rounded-lg">
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Display name"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Location"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <input value={contentUrl} onChange={(e) => setContentUrl(e.target.value)} placeholder="Content URL"
+          className="w-full px-3 py-2 text-sm bg-surface border border-border-subtle rounded-md text-primary placeholder:text-tertiary focus:outline-none" />
+        <button onClick={handleCreate} disabled={!name.trim()}
+          className="px-4 py-2 rounded-md text-sm font-medium bg-accent text-inverse hover:bg-accent-hover transition-colors disabled:opacity-50">
+          Create Display
+        </button>
+      </div>
+      <div className="space-y-2">
+        {displays.length === 0 && <p className="text-xs text-tertiary">No signage displays configured.</p>}
+        {displays.map((d: any) => (
+          <div key={d.id} className={cn("p-3 rounded-lg border", d.enabled ? "border-accent/30 bg-accent/5" : "border-border-subtle bg-surface")}>
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-sm font-medium text-primary">{d.name}</span>
+                <span className={cn("ml-2 text-[10px] px-1.5 py-0.5 rounded", d.enabled ? "bg-green-500/10 text-green-600" : "bg-zinc-500/10 text-zinc-500")}>
+                  {d.enabled ? "Enabled" : "Disabled"}
+                </span>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => handleToggle(d.id, d.enabled)} className="text-xs text-accent hover:underline">
+                  {d.enabled ? "Disable" : "Enable"}
+                </button>
+                <button onClick={() => handleDelete(d.id)} className="text-xs text-destructive hover:underline">Delete</button>
+              </div>
+            </div>
+            <div className="mt-1 text-[10px] text-tertiary space-x-3">
+              {d.location && <span>Location: {d.location}</span>}
+              {d.content_url && <span className="truncate">URL: {d.content_url}</span>}
             </div>
           </div>
         ))}

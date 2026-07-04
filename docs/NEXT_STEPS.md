@@ -138,7 +138,7 @@ implement. Use this as a roadmap for closing the gap.
 - [ ] SIP gateway / analog device (ATA) management
 - [x] Common area phone profiles — done 2026-07-03
 - [ ] Location-based PSTN routing
-- [ ] Bandwidth management / call admission control
+- [x] Bandwidth management / call admission control — done 2026-07-03
 
 ### 4.2 Meetings & Webinars
 - [ ] Webinar registration, attendee management, waitlist
@@ -164,7 +164,7 @@ implement. Use this as a roadmap for closing the gap.
 - [x] Scheduled send (future delivery) — done 2026-07-03
 - [x] Inline message translation — done 2026-07-03
 - [ ] Federated cross-organization chat
-- [ ] Guest access (invite flow, scoped permissions — flag exists but not implemented)
+- [x] Guest access (invite flow, scoped permissions) — done 2026-07-03
 - [x] Rich text editor / WYSIWYG (currently markdown only) — done 2026-07-03
 - [ ] Loop components (live collaborative inline content)
 - [ ] Immersive reader (accessibility)
@@ -211,7 +211,7 @@ implement. Use this as a roadmap for closing the gap.
 - [x] Meeting room device management and room booking — done 2026-07-03
 - [x] SIP phone provisioning portal / certified device management — done 2026-07-03
 - [ ] USB HID device integration (headset call control)
-- [ ] Digital signage
+- [x] Digital signage — done 2026-07-03
 - [ ] Room scheduling panel devices
 - [x] Hot desking (phone login/logout) — done 2026-07-03
 
@@ -219,10 +219,10 @@ implement. Use this as a roadmap for closing the gap.
 - [ ] Low-code automation (Power Platform equivalent)
 - [x] Public API with OAuth scopes for third-party apps — done 2026-07-03
 - [x] Bot framework / SDK — done 2026-07-03
-- [ ] Tabs (embedded web apps in channels)
+- [x] Tabs (embedded web apps in channels) — done 2026-07-03
 - [x] Outbound connectors and connector marketplace — done 2026-07-03
-- [ ] App store / extension catalog
-- [ ] Message extensions / compose-area action commands
+- [x] App store / extension catalog — done 2026-07-03
+- [x] Message extensions / compose-area action commands — done 2026-07-03
 - [x] Calendar sync (Exchange, Google Calendar) — done 2026-07-03
 - [x] Contact sync (bi-directional address book) — done 2026-07-03
 

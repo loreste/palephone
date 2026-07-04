@@ -35,7 +35,6 @@ use crate::{
     SetSpotlightRequest, SendMeetingReactionRequest,
     SetOutOfOfficeRequest,
     UpdateNotificationPreferenceRequest, UpdateTagRequest,
-<<<<<<< HEAD
     CreateCustomEmojiRequest, CreateWikiPageRequest, UpdateWikiPageRequest,
     CreateTaskBoardRequest, CreateTaskRequest, UpdateTaskRequest,
     TranslateRequest,
@@ -44,9 +43,7 @@ use crate::{
     CreateCalendarIntegrationRequest,
     CreateContactSyncRequest,
     CreateConnectorRequest, UpdateConnectorRequest,
-=======
     CreateConditionalAccessPolicyRequest, UpdateConditionalAccessPolicyRequest,
->>>>>>> worktree-agent-ac96f54e
 };
 
 type SharedState = Arc<AppState>;
@@ -690,6 +687,76 @@ pub fn router(state: SharedState) -> Router {
             "/v1/admin/connectors/{id}",
             put(update_connector).delete(delete_connector),
         )
+        // Channel tabs
+        .route(
+            "/v1/rooms/{id}/tabs",
+            get(list_channel_tabs).post(create_channel_tab),
+        )
+        .route(
+            "/v1/rooms/{id}/tabs/{tab_id}",
+            put(update_channel_tab).delete(delete_channel_tab),
+        )
+        // Message extensions
+        .route(
+            "/v1/admin/message-extensions",
+            get(list_message_extensions).post(create_message_extension),
+        )
+        .route(
+            "/v1/admin/message-extensions/{id}",
+            put(update_message_extension).delete(delete_message_extension),
+        )
+        .route(
+            "/v1/message-extensions",
+            get(list_enabled_message_extensions),
+        )
+        .route(
+            "/v1/message-extensions/{command}/invoke",
+            post(invoke_message_extension),
+        )
+        // App catalog
+        .route("/v1/apps", get(list_apps))
+        .route("/v1/apps/{id}/install", post(install_app))
+        .route("/v1/apps/{id}/uninstall", post(uninstall_app))
+        .route(
+            "/v1/admin/apps",
+            get(list_apps_admin).post(create_app),
+        )
+        .route(
+            "/v1/admin/apps/{id}",
+            put(update_app).delete(delete_app),
+        )
+        // Guest access
+        .route(
+            "/v1/teams/{id}/guests/invite",
+            post(invite_guest),
+        )
+        .route(
+            "/v1/teams/{id}/guests",
+            get(list_guests),
+        )
+        .route(
+            "/v1/teams/{id}/guests/{guest_id}",
+            delete(delete_guest),
+        )
+        // Bandwidth policies
+        .route(
+            "/v1/admin/bandwidth-policies",
+            get(list_bandwidth_policies).post(create_bandwidth_policy),
+        )
+        .route(
+            "/v1/admin/bandwidth-policies/{id}",
+            put(update_bandwidth_policy).delete(delete_bandwidth_policy),
+        )
+        // Signage displays
+        .route(
+            "/v1/admin/signage",
+            get(list_signage_displays).post(create_signage_display),
+        )
+        .route(
+            "/v1/admin/signage/{id}",
+            put(update_signage_display).delete(delete_signage_display),
+        )
+        .route("/v1/signage/{id}/content", get(get_signage_content))
         .route("/v1/events", get(sse_stream))
         .layer(from_fn(crate::metrics::request_metrics))
         .layer(from_fn(cors))
@@ -7265,6 +7332,8 @@ enum ApiError {
     Conflict(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("internal: {0}")]
+    Internal(String),
 }
 
 impl IntoResponse for ApiError {
@@ -7277,9 +7346,387 @@ impl IntoResponse for ApiError {
             ApiError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
-            ApiError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::Io(_) | ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(json!({ "error": self.to_string() }))).into_response()
+    }
+}
+
+// ─── Channel Tabs ───
+
+async fn list_channel_tabs(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::ChannelTab>>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    Ok(Json(state.list_channel_tabs(id)))
+}
+
+async fn create_channel_tab(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<crate::CreateChannelTabRequest>,
+) -> Result<(StatusCode, Json<crate::ChannelTab>), ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let tab = state.create_channel_tab(id, req, &principal);
+    state.record_audit_event(&principal, "channel_tab.created", Some(format!("room={} tab={}", id, tab.id)));
+    Ok((StatusCode::CREATED, Json(tab)))
+}
+
+async fn update_channel_tab(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path((_, tab_id)): Path<(Uuid, Uuid)>,
+    Json(req): Json<crate::UpdateChannelTabRequest>,
+) -> Result<Json<crate::ChannelTab>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    match state.update_channel_tab(tab_id, req) {
+        Some(tab) => {
+            state.record_audit_event(&principal, "channel_tab.updated", Some(format!("tab={}", tab_id)));
+            Ok(Json(tab))
+        }
+        None => Err(ApiError::NotFound),
+    }
+}
+
+async fn delete_channel_tab(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path((_, tab_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    if state.delete_channel_tab(tab_id) {
+        state.record_audit_event(&principal, "channel_tab.deleted", Some(format!("tab={}", tab_id)));
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
+// ─── Message Extensions ───
+
+async fn list_message_extensions(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::MessageExtension>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_message_extensions()))
+}
+
+async fn list_enabled_message_extensions(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::MessageExtension>>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    let exts: Vec<crate::MessageExtension> = state.list_message_extensions()
+        .into_iter()
+        .filter(|e| e.enabled)
+        .collect();
+    Ok(Json(exts))
+}
+
+async fn create_message_extension(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<crate::CreateMessageExtensionRequest>,
+) -> Result<(StatusCode, Json<crate::MessageExtension>), ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let ext = state.create_message_extension(req);
+    state.record_audit_event(&principal, "message_extension.created", Some(format!("id={} cmd={}", ext.id, ext.command)));
+    Ok((StatusCode::CREATED, Json(ext)))
+}
+
+async fn update_message_extension(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<crate::UpdateMessageExtensionRequest>,
+) -> Result<Json<crate::MessageExtension>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    match state.update_message_extension(id, req) {
+        Some(ext) => {
+            state.record_audit_event(&principal, "message_extension.updated", Some(format!("id={}", id)));
+            Ok(Json(ext))
+        }
+        None => Err(ApiError::NotFound),
+    }
+}
+
+async fn delete_message_extension(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if state.delete_message_extension(id) {
+        state.record_audit_event(&principal, "message_extension.deleted", Some(format!("id={}", id)));
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
+async fn invoke_message_extension(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(command): Path<String>,
+    Json(req): Json<crate::InvokeMessageExtensionRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    let ext = state.get_message_extension_by_command(&command)
+        .ok_or(ApiError::NotFound)?;
+    // Proxy to handler_url
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&ext.handler_url)
+        .json(&serde_json::json!({ "command": command, "input": req.input }))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| ApiError::Internal(format!("Extension handler error: {}", e)))?;
+    let body: serde_json::Value = resp.json().await
+        .unwrap_or(serde_json::json!({ "result": "ok" }));
+    Ok(Json(body))
+}
+
+// ─── App Catalog ───
+
+async fn list_apps(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::AppCatalogEntry>>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    Ok(Json(state.list_app_catalog()))
+}
+
+async fn list_apps_admin(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::AppCatalogEntry>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_app_catalog()))
+}
+
+async fn create_app(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<crate::CreateAppCatalogEntryRequest>,
+) -> Result<(StatusCode, Json<crate::AppCatalogEntry>), ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let app = state.create_app_catalog_entry(req);
+    state.record_audit_event(&principal, "app.created", Some(format!("id={} name={}", app.id, app.name)));
+    Ok((StatusCode::CREATED, Json(app)))
+}
+
+async fn update_app(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<crate::UpdateAppCatalogEntryRequest>,
+) -> Result<Json<crate::AppCatalogEntry>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    match state.update_app_catalog_entry(id, req) {
+        Some(app) => {
+            state.record_audit_event(&principal, "app.updated", Some(format!("id={}", id)));
+            Ok(Json(app))
+        }
+        None => Err(ApiError::NotFound),
+    }
+}
+
+async fn delete_app(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if state.delete_app_catalog_entry(id) {
+        state.record_audit_event(&principal, "app.deleted", Some(format!("id={}", id)));
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
+async fn install_app(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::AppCatalogEntry>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    match state.install_app(id, &principal) {
+        Some(app) => {
+            state.record_audit_event(&principal, "app.installed", Some(format!("id={}", id)));
+            Ok(Json(app))
+        }
+        None => Err(ApiError::NotFound),
+    }
+}
+
+async fn uninstall_app(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::AppCatalogEntry>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    match state.uninstall_app(id) {
+        Some(app) => {
+            state.record_audit_event(&principal, "app.uninstalled", Some(format!("id={}", id)));
+            Ok(Json(app))
+        }
+        None => Err(ApiError::NotFound),
+    }
+}
+
+// ─── Guest Access ───
+
+async fn invite_guest(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(team_id): Path<Uuid>,
+    Json(req): Json<crate::InviteGuestRequest>,
+) -> Result<(StatusCode, Json<crate::GuestUser>), ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let guest = state.invite_guest(team_id, req, &principal);
+    state.record_audit_event(&principal, "guest.invited", Some(format!("team={} guest={}", team_id, guest.email)));
+    Ok((StatusCode::CREATED, Json(guest)))
+}
+
+async fn list_guests(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(team_id): Path<Uuid>,
+) -> Result<Json<Vec<crate::GuestUser>>, ApiError> {
+    authenticated_principal(&headers, &state)?;
+    Ok(Json(state.list_guest_users(team_id)))
+}
+
+async fn delete_guest(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path((team_id, guest_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    if state.delete_guest(guest_id) {
+        state.record_audit_event(&principal, "guest.deleted", Some(format!("team={} guest={}", team_id, guest_id)));
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
+// ─── Bandwidth Policies ───
+
+async fn list_bandwidth_policies(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::BandwidthPolicy>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_bandwidth_policies()))
+}
+
+async fn create_bandwidth_policy(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<crate::CreateBandwidthPolicyRequest>,
+) -> Result<(StatusCode, Json<crate::BandwidthPolicy>), ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let policy = state.create_bandwidth_policy(req);
+    state.record_audit_event(&principal, "bandwidth_policy.created", Some(format!("id={}", policy.id)));
+    Ok((StatusCode::CREATED, Json(policy)))
+}
+
+async fn update_bandwidth_policy(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<crate::UpdateBandwidthPolicyRequest>,
+) -> Result<Json<crate::BandwidthPolicy>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    match state.update_bandwidth_policy(id, req) {
+        Some(policy) => {
+            state.record_audit_event(&principal, "bandwidth_policy.updated", Some(format!("id={}", id)));
+            Ok(Json(policy))
+        }
+        None => Err(ApiError::NotFound),
+    }
+}
+
+async fn delete_bandwidth_policy(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if state.delete_bandwidth_policy(id) {
+        state.record_audit_event(&principal, "bandwidth_policy.deleted", Some(format!("id={}", id)));
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
+// ─── Signage Displays ───
+
+async fn list_signage_displays(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::SignageDisplay>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_signage_displays()))
+}
+
+async fn create_signage_display(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<crate::CreateSignageDisplayRequest>,
+) -> Result<(StatusCode, Json<crate::SignageDisplay>), ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let display = state.create_signage_display(req);
+    state.record_audit_event(&principal, "signage.created", Some(format!("id={}", display.id)));
+    Ok((StatusCode::CREATED, Json(display)))
+}
+
+async fn update_signage_display(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<crate::UpdateSignageDisplayRequest>,
+) -> Result<Json<crate::SignageDisplay>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    match state.update_signage_display(id, req) {
+        Some(display) => {
+            state.record_audit_event(&principal, "signage.updated", Some(format!("id={}", id)));
+            Ok(Json(display))
+        }
+        None => Err(ApiError::NotFound),
+    }
+}
+
+async fn delete_signage_display(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if state.delete_signage_display(id) {
+        state.record_audit_event(&principal, "signage.deleted", Some(format!("id={}", id)));
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
+async fn get_signage_content(
+    State(state): State<SharedState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Public endpoint for display devices
+    match state.get_signage_content(id) {
+        Some(url) => Ok(Json(serde_json::json!({ "content_url": url }))),
+        None => Err(ApiError::NotFound),
     }
 }
 
