@@ -1653,3 +1653,23 @@ export function paleServerTranslate(
     body: JSON.stringify({ text, target_language: targetLanguage }),
   });
 }
+
+// ─── USB HID Device Integration ───
+
+export interface HidAudioDevice {
+  name: string;
+  device_type: string; // "headset" | "speaker" | "microphone"
+  connected: boolean;
+}
+
+export function detectHidDevices(): Promise<HidAudioDevice[]> {
+  return invoke("detect_hid_devices");
+}
+
+export function onHidHookSwitch(callback: (payload: { action: string }) => void): Promise<UnlistenFn> {
+  return listen<{ action: string }>("hid_hook_switch", (event) => callback(event.payload));
+}
+
+export function onHidMuteToggle(callback: (payload: { muted: boolean }) => void): Promise<UnlistenFn> {
+  return listen<{ muted: boolean }>("hid_mute_toggle", (event) => callback(event.payload));
+}

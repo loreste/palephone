@@ -208,6 +208,9 @@ describe("chatStore", () => {
 
     const flushed = store.flushQueue();
     expect(flushed).toHaveLength(2);
+    expect(useChatStore.getState().queuedMessages).toHaveLength(2);
+    store.removeFromQueue("q1");
+    store.removeFromQueue("q2");
     expect(useChatStore.getState().queuedMessages).toHaveLength(0);
   });
 });

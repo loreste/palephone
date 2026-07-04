@@ -292,7 +292,6 @@ pub struct AppState {
     hold_music: ShardedMap<Uuid, HoldMusic>,
     // Personal call groups
     personal_call_groups: ShardedMap<Uuid, PersonalCallGroup>,
-<<<<<<< HEAD
     // SSO providers
     sso_providers: ShardedMap<Uuid, SsoProvider>,
     // Encryption config (BYOK)
@@ -322,10 +321,16 @@ pub struct AppState {
     contact_sync_configs: ShardedMap<Uuid, ContactSyncConfig>,
     synced_contacts: ShardedMap<Uuid, SyncedContact>,
     connectors: ShardedMap<Uuid, Connector>,
-=======
     // Conditional access policies
     conditional_access_policies: ShardedMap<Uuid, ConditionalAccessPolicy>,
->>>>>>> worktree-agent-ac96f54e
+    // Annotations (in-memory per conference)
+    conference_annotations: ShardedMap<Uuid, Vec<Annotation>>,
+    // Whiteboards
+    whiteboards: ShardedMap<Uuid, Whiteboard>,
+    // Scheduling panels
+    scheduling_panels: ShardedMap<Uuid, SchedulingPanel>,
+    // Automation rules
+    automation_rules: ShardedMap<Uuid, AutomationRule>,
     user_create_lock: std::sync::Mutex<()>,
     agent_assignment_lock: std::sync::Mutex<()>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
@@ -494,7 +499,6 @@ impl AppState {
             recording_policies: ShardedMap::new(),
             hold_music: ShardedMap::new(),
             personal_call_groups: ShardedMap::new(),
-<<<<<<< HEAD
             sso_providers: ShardedMap::new(),
             encryption_configs: RwLock::new(Vec::new()),
             admin_elevations: RwLock::new(Vec::new()),
@@ -515,9 +519,11 @@ impl AppState {
             contact_sync_configs: ShardedMap::new(),
             synced_contacts: ShardedMap::new(),
             connectors: ShardedMap::new(),
-=======
             conditional_access_policies: ShardedMap::new(),
->>>>>>> worktree-agent-ac96f54e
+            conference_annotations: ShardedMap::new(),
+            whiteboards: ShardedMap::new(),
+            scheduling_panels: ShardedMap::new(),
+            automation_rules: ShardedMap::new(),
             user_create_lock: std::sync::Mutex::new(()),
             agent_assignment_lock: std::sync::Mutex::new(()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
@@ -11270,7 +11276,6 @@ pub struct CreatePersonalCallGroupRequest {
     pub enabled: Option<bool>,
 }
 
-<<<<<<< HEAD
 // ─── OAuth API Clients ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11341,7 +11346,10 @@ pub struct Bot {
     pub events: Vec<String>,
     pub owner_uri: String,
     pub api_token: String,
-=======
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
 // ── Conditional Access Policies ──────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11372,13 +11380,11 @@ pub struct ConditionalAccessPolicy {
     pub name: String,
     pub conditions: ConditionalAccessConditions,
     pub actions: ConditionalAccessActions,
->>>>>>> worktree-agent-ac96f54e
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-<<<<<<< HEAD
 pub struct CreateBotRequest {
     pub name: String,
     pub webhook_url: String,
@@ -11836,7 +11842,9 @@ pub struct AdaptiveCardAction {
     pub title: String,
     pub url: Option<String>,
     pub data: Option<serde_json::Value>,
-=======
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct CreateConditionalAccessPolicyRequest {
     pub name: String,
     pub conditions: ConditionalAccessConditions,
@@ -11894,7 +11902,6 @@ impl AppState {
     }
 
     /// Evaluate conditional access policies against a login request context.
-    /// Returns the action to apply (allow/block/require_mfa).
     pub fn evaluate_conditional_access(
         &self,
         ip_address: &str,
@@ -11920,7 +11927,301 @@ impl AppState {
         }
         result
     }
->>>>>>> worktree-agent-ac96f54e
+}
+
+// ─── Screen Share Annotations ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Annotation {
+    pub id: Uuid,
+    pub conference_id: Uuid,
+    #[serde(rename = "type")]
+    pub annotation_type: String, // draw, text, highlight
+    pub data: AnnotationData,
+    pub author_uri: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnotationData {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub color: String,
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateAnnotationRequest {
+    #[serde(rename = "type")]
+    pub annotation_type: String,
+    pub data: AnnotationData,
+}
+
+impl AppState {
+    pub fn add_annotation(&self, conference_id: Uuid, author_uri: &str, req: CreateAnnotationRequest) -> Annotation {
+        let annotation = Annotation {
+            id: Uuid::new_v4(),
+            conference_id,
+            annotation_type: req.annotation_type,
+            data: req.data,
+            author_uri: author_uri.to_string(),
+            created_at: Utc::now(),
+        };
+        let mut annotations = self.conference_annotations.get(&conference_id).unwrap_or_default();
+        annotations.push(annotation.clone());
+        self.conference_annotations.insert(conference_id, annotations);
+        annotation
+    }
+
+    pub fn list_annotations(&self, conference_id: Uuid) -> Vec<Annotation> {
+        self.conference_annotations.get(&conference_id).unwrap_or_default()
+    }
+
+    pub fn clear_annotations(&self, conference_id: Uuid) {
+        self.conference_annotations.remove(&conference_id);
+    }
+}
+
+// ─── Whiteboards ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Whiteboard {
+    pub id: Uuid,
+    pub conference_id: Uuid,
+    pub name: String,
+    pub elements: Vec<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateWhiteboardRequest {
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AddWhiteboardElementRequest {
+    pub element: serde_json::Value,
+}
+
+impl AppState {
+    pub fn get_or_create_whiteboard(&self, conference_id: Uuid, name: Option<String>) -> Whiteboard {
+        if let Some(wb) = self.whiteboards.get(&conference_id) {
+            return wb;
+        }
+        let wb = Whiteboard {
+            id: Uuid::new_v4(),
+            conference_id,
+            name: name.unwrap_or_else(|| "Whiteboard".to_string()),
+            elements: Vec::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        self.whiteboards.insert(conference_id, wb.clone());
+        wb
+    }
+
+    pub fn get_whiteboard(&self, conference_id: Uuid) -> Option<Whiteboard> {
+        self.whiteboards.get(&conference_id)
+    }
+
+    pub fn add_whiteboard_element(&self, conference_id: Uuid, element: serde_json::Value) -> Option<Whiteboard> {
+        let mut wb = self.whiteboards.get(&conference_id)?;
+        wb.elements.push(element);
+        wb.updated_at = Utc::now();
+        self.whiteboards.insert(conference_id, wb.clone());
+        Some(wb)
+    }
+}
+
+// ─── Scheduling Panels ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchedulingPanel {
+    pub id: Uuid,
+    pub name: String,
+    pub meeting_room_id: Uuid,
+    pub device_identifier: String,
+    pub display_mode: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateSchedulingPanelRequest {
+    pub name: String,
+    pub meeting_room_id: Uuid,
+    pub device_identifier: String,
+    pub display_mode: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateSchedulingPanelRequest {
+    pub name: Option<String>,
+    pub meeting_room_id: Option<Uuid>,
+    pub display_mode: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+impl AppState {
+    pub fn list_scheduling_panels(&self) -> Vec<SchedulingPanel> {
+        let mut panels = self.scheduling_panels.values();
+        panels.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        panels
+    }
+
+    pub fn create_scheduling_panel(&self, req: CreateSchedulingPanelRequest) -> SchedulingPanel {
+        let panel = SchedulingPanel {
+            id: Uuid::new_v4(),
+            name: req.name,
+            meeting_room_id: req.meeting_room_id,
+            device_identifier: req.device_identifier,
+            display_mode: req.display_mode.unwrap_or_else(|| "schedule".to_string()),
+            enabled: req.enabled.unwrap_or(true),
+            created_at: Utc::now(),
+        };
+        self.scheduling_panels.insert(panel.id, panel.clone());
+        panel
+    }
+
+    pub fn update_scheduling_panel(&self, id: Uuid, req: UpdateSchedulingPanelRequest) -> Option<SchedulingPanel> {
+        let mut panel = self.scheduling_panels.get(&id)?;
+        if let Some(name) = req.name { panel.name = name; }
+        if let Some(room_id) = req.meeting_room_id { panel.meeting_room_id = room_id; }
+        if let Some(mode) = req.display_mode { panel.display_mode = mode; }
+        if let Some(enabled) = req.enabled { panel.enabled = enabled; }
+        self.scheduling_panels.insert(id, panel.clone());
+        Some(panel)
+    }
+
+    pub fn delete_scheduling_panel(&self, id: Uuid) -> bool {
+        self.scheduling_panels.remove(&id).is_some()
+    }
+
+    pub fn get_panel_schedule(&self, device_identifier: &str) -> Option<(SchedulingPanel, Vec<RoomBooking>)> {
+        let panel = self.scheduling_panels.values().into_iter()
+            .find(|p| p.device_identifier == device_identifier && p.enabled)?;
+        let today_start = Utc::now().date_naive().and_hms_opt(0, 0, 0)
+            .map(|ndt| DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc))
+            .unwrap_or_else(Utc::now);
+        let today_end = today_start + Duration::hours(24);
+        let bookings: Vec<RoomBooking> = self.room_bookings.values().into_iter()
+            .filter(|b| b.room_id == panel.meeting_room_id
+                && b.start_time < today_end
+                && b.end_time > today_start)
+            .collect();
+        Some((panel, bookings))
+    }
+}
+
+// ─── Automation Rules (Workflow Builder) ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutomationRule {
+    pub id: Uuid,
+    pub name: String,
+    pub trigger_event: String, // message_received, call_completed, meeting_started, user_joined
+    pub conditions: serde_json::Value,
+    pub actions: serde_json::Value,
+    pub enabled: bool,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateAutomationRuleRequest {
+    pub name: String,
+    pub trigger_event: String,
+    #[serde(default = "default_json_array")]
+    pub conditions: serde_json::Value,
+    pub actions: serde_json::Value,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateAutomationRuleRequest {
+    pub name: Option<String>,
+    pub trigger_event: Option<String>,
+    pub conditions: Option<serde_json::Value>,
+    pub actions: Option<serde_json::Value>,
+    pub enabled: Option<bool>,
+}
+
+fn default_json_array() -> serde_json::Value {
+    serde_json::Value::Array(Vec::new())
+}
+
+impl AppState {
+    pub fn list_automation_rules(&self) -> Vec<AutomationRule> {
+        let mut rules = self.automation_rules.values();
+        rules.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        rules
+    }
+
+    pub fn create_automation_rule(&self, created_by: &str, req: CreateAutomationRuleRequest) -> AutomationRule {
+        let rule = AutomationRule {
+            id: Uuid::new_v4(),
+            name: req.name,
+            trigger_event: req.trigger_event,
+            conditions: req.conditions,
+            actions: req.actions,
+            enabled: req.enabled.unwrap_or(true),
+            created_by: created_by.to_string(),
+            created_at: Utc::now(),
+        };
+        self.automation_rules.insert(rule.id, rule.clone());
+        rule
+    }
+
+    pub fn update_automation_rule(&self, id: Uuid, req: UpdateAutomationRuleRequest) -> Option<AutomationRule> {
+        let mut rule = self.automation_rules.get(&id)?;
+        if let Some(name) = req.name { rule.name = name; }
+        if let Some(trigger) = req.trigger_event { rule.trigger_event = trigger; }
+        if let Some(conditions) = req.conditions { rule.conditions = conditions; }
+        if let Some(actions) = req.actions { rule.actions = actions; }
+        if let Some(enabled) = req.enabled { rule.enabled = enabled; }
+        self.automation_rules.insert(id, rule.clone());
+        Some(rule)
+    }
+
+    pub fn delete_automation_rule(&self, id: Uuid) -> bool {
+        self.automation_rules.remove(&id).is_some()
+    }
+
+    pub fn evaluate_automation_rules(&self, event_type: &str, context: &serde_json::Value) {
+        let rules = self.automation_rules.values();
+        for rule in rules.iter().filter(|r| r.enabled && r.trigger_event == event_type) {
+            // Evaluate conditions - simple match for now
+            let conditions_match = match rule.conditions.as_array() {
+                Some(conditions) if conditions.is_empty() => true,
+                Some(conditions) => conditions.iter().all(|cond| {
+                    let field = cond.get("field").and_then(|v| v.as_str()).unwrap_or("");
+                    let expected = cond.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                    context.get(field).and_then(|v| v.as_str()).unwrap_or("") == expected
+                }),
+                None => true,
+            };
+            if conditions_match {
+                // Execute actions via SSE broadcast
+                if let Some(actions) = rule.actions.as_array() {
+                    for action in actions {
+                        let _ = self.sse_tx.send(SseEvent {
+                            event_type: "automation_action".to_string(),
+                            payload: serde_json::json!({
+                                "rule_id": rule.id,
+                                "action": action,
+                                "context": context,
+                            }),
+                        });
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn is_textual_content(content_type: &str) -> bool {

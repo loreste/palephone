@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Hand,
   DoorOpen,
@@ -14,13 +14,20 @@ import {
   MessageCircle,
   Mic,
   MicOff,
+  Pencil,
+  PenTool,
   Shield,
   Smile,
   Sparkles,
+  Square,
   Star,
+  Type,
   Unlock,
   UserMinus,
   Users,
+  Circle,
+  Highlighter,
+  Trash2,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import {
@@ -41,7 +48,7 @@ import { toast } from "@/components/ui/Toast";
 
 function err(title: string) { toast({ type: "error", title }); }
 
-type MeetingTab = "people" | "lobby" | "hands" | "polls" | "qa" | "breakout" | "captions" | "reactions" | "chat" | "greenroom";
+type MeetingTab = "people" | "lobby" | "hands" | "polls" | "qa" | "breakout" | "captions" | "reactions" | "chat" | "greenroom" | "annotate" | "whiteboard";
 
 export function MeetingPanel({ conferenceId }: { conferenceId: string }) {
   const [tab, setTab] = useState<MeetingTab>("lobby");
@@ -59,6 +66,8 @@ export function MeetingPanel({ conferenceId }: { conferenceId: string }) {
     { id: "qa", icon: MessageCircleQuestion, label: "Q&A" },
     { id: "breakout", icon: LayoutGrid, label: "Rooms" },
     { id: "captions", icon: Captions, label: "Captions" },
+    { id: "annotate", icon: PenTool, label: "Annotate" },
+    { id: "whiteboard", icon: Pencil, label: "Board" },
   ];
 
   const handleTabKeyDown = (e: React.KeyboardEvent, tabId: MeetingTab) => {
@@ -100,6 +109,8 @@ export function MeetingPanel({ conferenceId }: { conferenceId: string }) {
         {tab === "qa" && <QaPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "breakout" && <BreakoutPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "captions" && <CaptionsPanel conferenceId={conferenceId} />}
+        {tab === "annotate" && <AnnotationPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
+        {tab === "whiteboard" && <WhiteboardPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
       </div>
     </div>
   );
@@ -1147,6 +1158,281 @@ function CaptionsPanel({ conferenceId }: { conferenceId: string }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Screen Share Annotation Panel ────────────────────────────────
+
+interface AnnotationItem {
+  id: string;
+  conference_id: string;
+  annotation_type: string;
+  data: { x: number; y: number; width: number; height: number; color: string; text?: string };
+  author_uri: string;
+  created_at: string;
+}
+
+function AnnotationPanel({ conferenceId, baseUrl, token }: { conferenceId: string; baseUrl: string | null; token: string | null }) {
+  const [annotations, setAnnotations] = useState<AnnotationItem[]>([]);
+  const [tool, setTool] = useState<"draw" | "text" | "highlight">("draw");
+  const [color, setColor] = useState("#ff0000");
+  const svgRef = useRef<SVGSVGElement>(null);
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [start, setStart] = useState<{ x: number; y: number } | null>(null);
+
+  const load = useCallback(async () => {
+    if (!baseUrl || !token) return;
+    try {
+      const data = await paleServerApi<AnnotationItem[]>(baseUrl, token, `/v1/conferences/${conferenceId}/annotations`);
+      setAnnotations(data);
+    } catch { /* ignore */ }
+  }, [baseUrl, token, conferenceId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const addAnnotation = async (x: number, y: number, width: number, height: number) => {
+    if (!baseUrl || !token) return;
+    try {
+      const ann = await paleServerApi<AnnotationItem>(baseUrl, token, `/v1/conferences/${conferenceId}/annotations`, {
+        method: "POST",
+        body: {
+          type: tool,
+          data: { x, y, width, height, color, text: tool === "text" ? "Text" : undefined },
+        },
+      });
+      setAnnotations((prev) => [...prev, ann]);
+    } catch { err("Failed to add annotation"); }
+  };
+
+  const clearAll = async () => {
+    if (!baseUrl || !token) return;
+    try {
+      await paleServerApi(baseUrl, token, `/v1/conferences/${conferenceId}/annotations`, { method: "DELETE" });
+      setAnnotations([]);
+    } catch { err("Failed to clear annotations"); }
+  };
+
+  const handleMouseDown = (e: React.MouseEvent<SVGSVGElement>) => {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setIsDrawing(true);
+    setStart({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+  };
+
+  const handleMouseUp = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (!isDrawing || !start) return;
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const endX = e.clientX - rect.left;
+    const endY = e.clientY - rect.top;
+    const x = Math.min(start.x, endX);
+    const y = Math.min(start.y, endY);
+    const width = Math.abs(endX - start.x);
+    const height = Math.abs(endY - start.y);
+    if (width > 2 || height > 2) addAnnotation(x, y, width, height);
+    setIsDrawing(false);
+    setStart(null);
+  };
+
+  const tools: { id: "draw" | "text" | "highlight"; icon: typeof PenTool; label: string }[] = [
+    { id: "draw", icon: PenTool, label: "Pen" },
+    { id: "text", icon: Type, label: "Text" },
+    { id: "highlight", icon: Highlighter, label: "Highlight" },
+  ];
+
+  const colors = ["#ff0000", "#00ff00", "#0000ff", "#ffff00", "#ff00ff", "#ffffff"];
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-1 flex-wrap">
+        {tools.map(({ id, icon: Icon, label }) => (
+          <button key={id} onClick={() => setTool(id)} title={label}
+            className={cn("p-1.5 rounded", tool === id ? "bg-accent text-white" : "text-secondary hover:text-primary")}>
+            <Icon size={14} />
+          </button>
+        ))}
+        <button onClick={clearAll} title="Clear all" className="p-1.5 rounded text-secondary hover:text-destructive ml-auto">
+          <Trash2 size={14} />
+        </button>
+      </div>
+      <div className="flex gap-1">
+        {colors.map((c) => (
+          <button key={c} onClick={() => setColor(c)}
+            className={cn("w-5 h-5 rounded-full border-2", color === c ? "border-primary" : "border-transparent")}
+            style={{ backgroundColor: c }} />
+        ))}
+      </div>
+      <div className="border border-border-subtle rounded bg-surface-secondary relative" style={{ height: 200 }}>
+        <svg ref={svgRef} className="w-full h-full cursor-crosshair"
+          onMouseDown={handleMouseDown} onMouseUp={handleMouseUp}>
+          {annotations.map((ann) => {
+            const d = ann.data;
+            if (ann.annotation_type === "highlight") {
+              return <rect key={ann.id} x={d.x} y={d.y} width={d.width} height={d.height} fill={d.color} opacity={0.3} />;
+            }
+            if (ann.annotation_type === "text") {
+              return <text key={ann.id} x={d.x} y={d.y + 14} fill={d.color} fontSize={14}>{d.text}</text>;
+            }
+            return <rect key={ann.id} x={d.x} y={d.y} width={d.width} height={d.height} stroke={d.color} strokeWidth={2} fill="none" />;
+          })}
+        </svg>
+      </div>
+      <p className="text-[10px] text-tertiary">{annotations.length} annotation(s)</p>
+    </div>
+  );
+}
+
+// ── Whiteboard Panel ─────────────────────────────────────────────
+
+interface WhiteboardData {
+  id: string;
+  conference_id: string;
+  name: string;
+  elements: any[];
+  created_at: string;
+  updated_at: string;
+}
+
+type WbTool = "freehand" | "rectangle" | "circle" | "text";
+
+function WhiteboardPanel({ conferenceId, baseUrl, token }: { conferenceId: string; baseUrl: string | null; token: string | null }) {
+  const [whiteboard, setWhiteboard] = useState<WhiteboardData | null>(null);
+  const [wbTool, setWbTool] = useState<WbTool>("freehand");
+  const [wbColor, setWbColor] = useState("#000000");
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [drawing, setDrawing] = useState(false);
+  const [drawStart, setDrawStart] = useState<{ x: number; y: number } | null>(null);
+  const [freehandPoints, setFreehandPoints] = useState<{ x: number; y: number }[]>([]);
+
+  const load = useCallback(async () => {
+    if (!baseUrl || !token) return;
+    try {
+      const wb = await paleServerApi<WhiteboardData>(baseUrl, token, `/v1/conferences/${conferenceId}/whiteboard`);
+      setWhiteboard(wb);
+    } catch {
+      // Create if not found
+      try {
+        const wb = await paleServerApi<WhiteboardData>(baseUrl, token, `/v1/conferences/${conferenceId}/whiteboard`, {
+          method: "POST", body: { name: "Meeting Whiteboard" },
+        });
+        setWhiteboard(wb);
+      } catch { /* ignore */ }
+    }
+  }, [baseUrl, token, conferenceId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  // Re-render canvas when whiteboard changes
+  useEffect(() => {
+    if (!whiteboard || !canvasRef.current) return;
+    const ctx = canvasRef.current.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+    for (const el of whiteboard.elements) {
+      ctx.strokeStyle = el.color || "#000";
+      ctx.fillStyle = el.color || "#000";
+      ctx.lineWidth = 2;
+      if (el.type === "freehand" && el.points) {
+        ctx.beginPath();
+        el.points.forEach((p: { x: number; y: number }, i: number) => {
+          if (i === 0) ctx.moveTo(p.x, p.y);
+          else ctx.lineTo(p.x, p.y);
+        });
+        ctx.stroke();
+      } else if (el.type === "rectangle") {
+        ctx.strokeRect(el.x, el.y, el.width, el.height);
+      } else if (el.type === "circle") {
+        ctx.beginPath();
+        ctx.ellipse(el.x + el.width / 2, el.y + el.height / 2, Math.abs(el.width) / 2, Math.abs(el.height) / 2, 0, 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (el.type === "text") {
+        ctx.font = "14px sans-serif";
+        ctx.fillText(el.text || "Text", el.x, el.y);
+      }
+    }
+  }, [whiteboard]);
+
+  const addElement = async (element: any) => {
+    if (!baseUrl || !token) return;
+    try {
+      const wb = await paleServerApi<WhiteboardData>(baseUrl, token, `/v1/conferences/${conferenceId}/whiteboard/elements`, {
+        method: "POST", body: { element },
+      });
+      setWhiteboard(wb);
+    } catch { err("Failed to add element"); }
+  };
+
+  const handleCanvasMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    setDrawing(true);
+    setDrawStart({ x, y });
+    if (wbTool === "freehand") setFreehandPoints([{ x, y }]);
+  };
+
+  const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!drawing || wbTool !== "freehand") return;
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setFreehandPoints((prev) => [...prev, { x: e.clientX - rect.left, y: e.clientY - rect.top }]);
+  };
+
+  const handleCanvasMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!drawing || !drawStart) return;
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const endX = e.clientX - rect.left;
+    const endY = e.clientY - rect.top;
+    setDrawing(false);
+
+    if (wbTool === "freehand" && freehandPoints.length > 1) {
+      addElement({ type: "freehand", points: freehandPoints, color: wbColor });
+      setFreehandPoints([]);
+    } else if (wbTool === "rectangle") {
+      addElement({ type: "rectangle", x: Math.min(drawStart.x, endX), y: Math.min(drawStart.y, endY), width: Math.abs(endX - drawStart.x), height: Math.abs(endY - drawStart.y), color: wbColor });
+    } else if (wbTool === "circle") {
+      addElement({ type: "circle", x: Math.min(drawStart.x, endX), y: Math.min(drawStart.y, endY), width: Math.abs(endX - drawStart.x), height: Math.abs(endY - drawStart.y), color: wbColor });
+    } else if (wbTool === "text") {
+      const text = prompt("Enter text:");
+      if (text) addElement({ type: "text", x: drawStart.x, y: drawStart.y, text, color: wbColor });
+    }
+    setDrawStart(null);
+  };
+
+  const wbTools: { id: WbTool; icon: typeof PenTool; label: string }[] = [
+    { id: "freehand", icon: PenTool, label: "Freehand" },
+    { id: "rectangle", icon: Square, label: "Rectangle" },
+    { id: "circle", icon: Circle, label: "Circle" },
+    { id: "text", icon: Type, label: "Text" },
+  ];
+
+  const wbColors = ["#000000", "#ff0000", "#00aa00", "#0000ff", "#ff8800", "#aa00ff"];
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-1 flex-wrap">
+        {wbTools.map(({ id, icon: Icon, label }) => (
+          <button key={id} onClick={() => setWbTool(id)} title={label}
+            className={cn("p-1.5 rounded", wbTool === id ? "bg-accent text-white" : "text-secondary hover:text-primary")}>
+            <Icon size={14} />
+          </button>
+        ))}
+      </div>
+      <div className="flex gap-1">
+        {wbColors.map((c) => (
+          <button key={c} onClick={() => setWbColor(c)}
+            className={cn("w-5 h-5 rounded-full border-2", wbColor === c ? "border-primary" : "border-transparent")}
+            style={{ backgroundColor: c }} />
+        ))}
+      </div>
+      <div className="border border-border-subtle rounded bg-white relative" style={{ height: 250 }}>
+        <canvas ref={canvasRef} width={280} height={250} className="cursor-crosshair"
+          onMouseDown={handleCanvasMouseDown} onMouseMove={handleCanvasMouseMove} onMouseUp={handleCanvasMouseUp} />
+      </div>
+      <p className="text-[10px] text-tertiary">{whiteboard?.elements.length ?? 0} element(s)</p>
     </div>
   );
 }
