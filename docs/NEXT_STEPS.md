@@ -134,14 +134,14 @@ implement. Use this as a roadmap for closing the gap.
 - [x] Policy-based compliance recording (auto-trigger, third-party recorder integration) — done 2026-07-03
 - [x] Configurable music on hold (per queue/tenant custom audio upload) — done 2026-07-03
 - [x] Per-user call analytics dashboard (data exists server-side, no UI) — done 2026-07-03
-- [ ] Reverse number lookup / CNAM caller ID enrichment
-- [ ] SIP gateway / analog device (ATA) management
+- [x] Reverse number lookup / CNAM caller ID enrichment — done 2026-07-03
+- [x] SIP gateway / analog device (ATA) management — done 2026-07-03
 - [x] Common area phone profiles — done 2026-07-03
-- [ ] Location-based PSTN routing
+- [x] Location-based PSTN routing — done 2026-07-03
 - [ ] Bandwidth management / call admission control
 
 ### 4.2 Meetings & Webinars
-- [ ] Webinar registration, attendee management, waitlist
+- [x] Webinar registration, attendee management, waitlist — done 2026-07-03
 - [ ] Town hall / large broadcast (10,000+ viewers)
 - [ ] Virtual backgrounds and background blur
 - [ ] Together mode / gallery views / large gallery layouts
@@ -156,7 +156,7 @@ implement. Use this as a roadmap for closing the gap.
 - [x] Green room / presenter staging — done 2026-07-03
 - [x] Meeting attendance CSV/Excel export (currently JSON only) — done 2026-07-03
 - [x] Persistent meeting chat thread (before/during/after) — done 2026-07-03
-- [ ] Caption language selection and real-time translation
+- [x] Caption language selection and real-time translation — done 2026-07-03
 - [ ] PowerPoint Live (presenter-controlled slides)
 - [ ] AI meeting assistant / Copilot (summaries, action items)
 
@@ -164,7 +164,7 @@ implement. Use this as a roadmap for closing the gap.
 - [x] Scheduled send (future delivery) — done 2026-07-03
 - [x] Inline message translation — done 2026-07-03
 - [ ] Federated cross-organization chat
-- [ ] Guest access (invite flow, scoped permissions — flag exists but not implemented)
+- [x] Guest access (invite flow, scoped permissions — flag exists but not implemented) — done 2026-07-03
 - [x] Rich text editor / WYSIWYG (currently markdown only) — done 2026-07-03
 - [ ] Loop components (live collaborative inline content)
 - [ ] Immersive reader (accessibility)

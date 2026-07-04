@@ -56,7 +56,7 @@ async function api<T = any>(baseUrl: string, token: string, path: string, opts?:
   return paleServerApi<T>(baseUrl, token, path, opts);
 }
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music" | "sso" | "encryption" | "pam" | "common_area_phones" | "meeting_rooms_admin" | "devices" | "custom_emojis" | "api_clients" | "bots" | "connectors" | "conditional_access";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music" | "sso" | "encryption" | "pam" | "common_area_phones" | "meeting_rooms_admin" | "devices" | "custom_emojis" | "api_clients" | "bots" | "connectors" | "conditional_access" | "sip_gateways" | "location_routing" | "guests";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -105,6 +105,9 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "bots", label: "Bots", icon: Router },
   { id: "connectors", label: "Connectors", icon: GitBranch },
   { id: "conditional_access", label: "Conditional Access", icon: Lock },
+  { id: "sip_gateways", label: "SIP Gateways", icon: Router },
+  { id: "location_routing", label: "Location Routing", icon: GitBranch },
+  { id: "guests", label: "Guests", icon: UserPlus },
 ];
 
 export function AdminView() {
@@ -350,6 +353,9 @@ export function AdminView() {
         {activeTab === "bots" && <BotsPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "connectors" && <ConnectorsPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "conditional_access" && <ConditionalAccessPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "sip_gateways" && <SipGatewaysPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "location_routing" && <LocationRoutingPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "guests" && <GuestsPanel baseUrl={baseUrl} token={token} />}
       </div>
     </div>
   );
@@ -6431,6 +6437,262 @@ function ConditionalAccessPanel({ baseUrl, token }: { baseUrl: string; token: st
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// ── SIP Gateways Panel ────────────────────────────────────────────
+
+interface SipGateway {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  transport: string;
+  username: string | null;
+  prefix: string;
+  enabled: boolean;
+  created_at: string;
+}
+
+function SipGatewaysPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [gateways, setGateways] = useState<SipGateway[]>([]);
+  const [name, setName] = useState("");
+  const [host, setHost] = useState("");
+  const [port, setPort] = useState("5060");
+  const [transport, setTransport] = useState("udp");
+  const [prefix, setPrefix] = useState("");
+  const [username, setUsername] = useState("");
+
+  const load = useCallback(async () => {
+    try { setGateways(await api<SipGateway[]>(baseUrl, token, "/v1/admin/sip-gateways")); } catch {}
+  }, [baseUrl, token]);
+  useEffect(() => { load(); }, [load]);
+
+  const handleCreate = async () => {
+    if (!name || !host) return;
+    try {
+      await api(baseUrl, token, "/v1/admin/sip-gateways", {
+        method: "POST",
+        body: { name, host, port: parseInt(port), transport, prefix, username: username || null },
+      });
+      setName(""); setHost(""); setPort("5060"); setPrefix(""); setUsername("");
+      load();
+    } catch { toast({ type: "error", title: "Failed to create gateway" }); }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/sip-gateways/${id}`, { method: "DELETE" });
+      load();
+    } catch { toast({ type: "error", title: "Failed to delete" }); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-lg font-semibold">SIP Gateways</h2>
+      <div className="grid grid-cols-2 gap-2">
+        <input placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+        <input placeholder="Host" value={host} onChange={(e) => setHost(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+        <input placeholder="Port" value={port} onChange={(e) => setPort(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+        <select value={transport} onChange={(e) => setTransport(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle">
+          <option value="udp">UDP</option>
+          <option value="tcp">TCP</option>
+          <option value="tls">TLS</option>
+        </select>
+        <input placeholder="Prefix (e.g. 9)" value={prefix} onChange={(e) => setPrefix(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+        <input placeholder="Username (optional)" value={username} onChange={(e) => setUsername(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+      </div>
+      <button onClick={handleCreate} disabled={!name || !host} className="flex items-center gap-1 text-sm px-3 py-1.5 bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-40">
+        <Plus size={14} /> Add Gateway
+      </button>
+      <div className="space-y-1">
+        {gateways.map((gw) => (
+          <div key={gw.id} className="flex items-center justify-between py-2 px-3 bg-hover rounded text-sm">
+            <div>
+              <span className="font-medium">{gw.name}</span>
+              <span className="text-secondary ml-2">{gw.host}:{gw.port} ({gw.transport})</span>
+              {gw.prefix && <span className="text-accent ml-2">prefix: {gw.prefix}</span>}
+              <span className={cn("ml-2 text-xs", gw.enabled ? "text-green-400" : "text-red-400")}>{gw.enabled ? "enabled" : "disabled"}</span>
+            </div>
+            <button onClick={() => handleDelete(gw.id)} className="text-red-400 hover:text-red-300"><Trash2 size={14} /></button>
+          </div>
+        ))}
+        {gateways.length === 0 && <p className="text-sm text-secondary text-center py-4">No SIP gateways configured</p>}
+      </div>
+    </div>
+  );
+}
+
+// ── Location Routing Panel ────────────────────────────────────────
+
+interface LocationRule {
+  id: string;
+  name: string;
+  location_pattern: string;
+  gateway_id: string;
+  priority: number;
+  enabled: boolean;
+  created_at: string;
+}
+
+function LocationRoutingPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [rules, setRules] = useState<LocationRule[]>([]);
+  const [gateways, setGateways] = useState<SipGateway[]>([]);
+  const [name, setName] = useState("");
+  const [pattern, setPattern] = useState("");
+  const [gatewayId, setGatewayId] = useState("");
+  const [priority, setPriority] = useState("0");
+
+  const load = useCallback(async () => {
+    try {
+      setRules(await api<LocationRule[]>(baseUrl, token, "/v1/admin/location-routing"));
+      setGateways(await api<SipGateway[]>(baseUrl, token, "/v1/admin/sip-gateways"));
+    } catch {}
+  }, [baseUrl, token]);
+  useEffect(() => { load(); }, [load]);
+
+  const handleCreate = async () => {
+    if (!name || !pattern || !gatewayId) return;
+    try {
+      await api(baseUrl, token, "/v1/admin/location-routing", {
+        method: "POST",
+        body: { name, location_pattern: pattern, gateway_id: gatewayId, priority: parseInt(priority) },
+      });
+      setName(""); setPattern(""); setGatewayId(""); setPriority("0");
+      load();
+    } catch { toast({ type: "error", title: "Failed to create rule" }); }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/location-routing/${id}`, { method: "DELETE" });
+      load();
+    } catch { toast({ type: "error", title: "Failed to delete" }); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-lg font-semibold">Location-Based PSTN Routing</h2>
+      <div className="grid grid-cols-2 gap-2">
+        <input placeholder="Rule name" value={name} onChange={(e) => setName(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+        <input placeholder="Location pattern" value={pattern} onChange={(e) => setPattern(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+        <select value={gatewayId} onChange={(e) => setGatewayId(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle">
+          <option value="">Select gateway...</option>
+          {gateways.map((gw) => <option key={gw.id} value={gw.id}>{gw.name}</option>)}
+        </select>
+        <input placeholder="Priority (0=highest)" value={priority} onChange={(e) => setPriority(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+      </div>
+      <button onClick={handleCreate} disabled={!name || !pattern || !gatewayId} className="flex items-center gap-1 text-sm px-3 py-1.5 bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-40">
+        <Plus size={14} /> Add Rule
+      </button>
+      <div className="space-y-1">
+        {rules.map((rule) => (
+          <div key={rule.id} className="flex items-center justify-between py-2 px-3 bg-hover rounded text-sm">
+            <div>
+              <span className="font-medium">{rule.name}</span>
+              <span className="text-secondary ml-2">pattern: {rule.location_pattern}</span>
+              <span className="text-accent ml-2">priority: {rule.priority}</span>
+              <span className={cn("ml-2 text-xs", rule.enabled ? "text-green-400" : "text-red-400")}>{rule.enabled ? "on" : "off"}</span>
+            </div>
+            <button onClick={() => handleDelete(rule.id)} className="text-red-400 hover:text-red-300"><Trash2 size={14} /></button>
+          </div>
+        ))}
+        {rules.length === 0 && <p className="text-sm text-secondary text-center py-4">No location routing rules</p>}
+      </div>
+    </div>
+  );
+}
+
+// ── Guests Panel ──────────────────────────────────────────────────
+
+interface GuestUserEntry {
+  id: string;
+  email: string;
+  display_name: string;
+  invited_by: string;
+  team_id: string;
+  expires_at: string;
+  created_at: string;
+}
+
+interface TeamEntry {
+  id: string;
+  name: string;
+}
+
+function GuestsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [teams, setTeams] = useState<TeamEntry[]>([]);
+  const [selectedTeam, setSelectedTeam] = useState("");
+  const [guests, setGuests] = useState<GuestUserEntry[]>([]);
+  const [email, setEmail] = useState("");
+  const [displayName, setDisplayName] = useState("");
+
+  const loadTeams = useCallback(async () => {
+    try { setTeams(await api<TeamEntry[]>(baseUrl, token, "/v1/teams")); } catch {}
+  }, [baseUrl, token]);
+
+  useEffect(() => { loadTeams(); }, [loadTeams]);
+
+  const loadGuests = useCallback(async () => {
+    if (!selectedTeam) return;
+    try { setGuests(await api<GuestUserEntry[]>(baseUrl, token, `/v1/teams/${selectedTeam}/guests`)); } catch {}
+  }, [baseUrl, token, selectedTeam]);
+
+  useEffect(() => { loadGuests(); }, [loadGuests]);
+
+  const handleInvite = async () => {
+    if (!selectedTeam || !email || !displayName) return;
+    try {
+      await api(baseUrl, token, `/v1/teams/${selectedTeam}/guests/invite`, {
+        method: "POST",
+        body: { email, display_name: displayName },
+      });
+      setEmail(""); setDisplayName("");
+      loadGuests();
+      toast({ type: "success", title: "Guest invited" });
+    } catch { toast({ type: "error", title: "Failed to invite guest" }); }
+  };
+
+  const handleRemove = async (guestId: string) => {
+    if (!selectedTeam) return;
+    try {
+      await api(baseUrl, token, `/v1/teams/${selectedTeam}/guests/${guestId}`, { method: "DELETE" });
+      loadGuests();
+    } catch { toast({ type: "error", title: "Failed to remove guest" }); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-lg font-semibold">Guest Access Management</h2>
+      <select value={selectedTeam} onChange={(e) => setSelectedTeam(e.target.value)} className="w-full px-2 py-1.5 text-sm rounded bg-hover border border-border-subtle">
+        <option value="">Select a team...</option>
+        {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+      </select>
+      {selectedTeam && (
+        <>
+          <div className="grid grid-cols-2 gap-2">
+            <input placeholder="Display name" value={displayName} onChange={(e) => setDisplayName(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+            <input placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} className="px-2 py-1 text-sm rounded bg-hover border border-border-subtle" />
+          </div>
+          <button onClick={handleInvite} disabled={!email || !displayName} className="flex items-center gap-1 text-sm px-3 py-1.5 bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-40">
+            <UserPlus size={14} /> Invite Guest
+          </button>
+          <div className="space-y-1">
+            {guests.map((g) => (
+              <div key={g.id} className="flex items-center justify-between py-2 px-3 bg-hover rounded text-sm">
+                <div>
+                  <span className="font-medium">{g.display_name}</span>
+                  <span className="text-secondary ml-2">{g.email}</span>
+                  <span className="text-xs text-secondary ml-2">invited by {g.invited_by}</span>
+                </div>
+                <button onClick={() => handleRemove(g.id)} className="text-red-400 hover:text-red-300"><Trash2 size={14} /></button>
+              </div>
+            ))}
+            {guests.length === 0 && <p className="text-sm text-secondary text-center py-4">No guests in this team</p>}
+          </div>
+        </>
+      )}
     </div>
   );
 }

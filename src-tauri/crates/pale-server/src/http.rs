@@ -687,6 +687,58 @@ pub fn router(state: SharedState) -> Router {
             "/v1/admin/connectors/{id}",
             put(update_connector).delete(delete_connector),
         )
+        // Webinar registration
+        .route(
+            "/v1/conferences/{id}/register",
+            post(register_webinar),
+        )
+        .route(
+            "/v1/conferences/{id}/registrations",
+            get(list_webinar_registrations),
+        )
+        .route(
+            "/v1/conferences/{id}/registrations/{reg_id}",
+            put(update_webinar_registration),
+        )
+        // Guest access
+        .route(
+            "/v1/teams/{id}/guests/invite",
+            post(invite_guest),
+        )
+        .route(
+            "/v1/teams/{id}/guests",
+            get(list_guests),
+        )
+        .route(
+            "/v1/teams/{id}/guests/{guest_id}",
+            delete(delete_guest),
+        )
+        // CNAM lookup
+        .route("/v1/cnam/lookup", get(cnam_lookup))
+        .route("/v1/admin/cnam/providers", get(list_cnam_providers).post(set_cnam_providers))
+        // Caption language
+        .route(
+            "/v1/conferences/{id}/captions/language",
+            post(set_caption_language),
+        )
+        // SIP gateways
+        .route(
+            "/v1/admin/sip-gateways",
+            get(list_sip_gateways).post(create_sip_gateway),
+        )
+        .route(
+            "/v1/admin/sip-gateways/{id}",
+            put(update_sip_gateway).delete(delete_sip_gateway),
+        )
+        // Location routing
+        .route(
+            "/v1/admin/location-routing",
+            get(list_location_routing_rules).post(create_location_routing_rule),
+        )
+        .route(
+            "/v1/admin/location-routing/{id}",
+            put(update_location_routing_rule).delete(delete_location_routing_rule),
+        )
         .route("/v1/events", get(sse_stream))
         .layer(from_fn(crate::metrics::request_metrics))
         .layer(from_fn(cors))
@@ -7289,6 +7341,173 @@ impl IntoResponse for ApiError {
     }
 }
 
+// ─── Webinar Registration Handlers ───
+
+async fn register_webinar(
+    State(state): State<SharedState>,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::RegisterWebinarRequest>,
+) -> impl IntoResponse {
+    match state.register_webinar(id, input) {
+        Some(reg) => (StatusCode::CREATED, Json(json!(reg))).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn list_webinar_registrations(
+    State(state): State<SharedState>,
+    Path(id): Path<Uuid>,
+) -> Json<serde_json::Value> {
+    Json(json!(state.list_webinar_registrations(id)))
+}
+
+async fn update_webinar_registration(
+    State(state): State<SharedState>,
+    Path((id, reg_id)): Path<(Uuid, Uuid)>,
+    Json(input): Json<crate::UpdateRegistrationRequest>,
+) -> impl IntoResponse {
+    match state.update_webinar_registration(id, reg_id, input) {
+        Some(reg) => Json(json!(reg)).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+// ─── Guest Access Handlers ───
+
+async fn invite_guest(
+    State(state): State<SharedState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<crate::InviteGuestRequest>,
+) -> impl IntoResponse {
+    let principal = authenticated_principal(&headers, &state).unwrap_or_default();
+    let guest = state.invite_guest(id, input, &principal);
+    (StatusCode::CREATED, Json(json!(guest)))
+}
+
+async fn list_guests(
+    State(state): State<SharedState>,
+    Path(id): Path<Uuid>,
+) -> Json<serde_json::Value> {
+    Json(json!(state.list_guests(id)))
+}
+
+async fn delete_guest(
+    State(state): State<SharedState>,
+    Path((id, guest_id)): Path<(Uuid, Uuid)>,
+) -> StatusCode {
+    if state.delete_guest(id, guest_id) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+}
+
+// ─── CNAM Lookup Handlers ───
+
+async fn cnam_lookup(
+    State(state): State<SharedState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let number = params.get("number").cloned().unwrap_or_default();
+    if number.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "number required"}))).into_response();
+    }
+    Json(json!(state.cnam_lookup(&number))).into_response()
+}
+
+async fn list_cnam_providers(
+    State(state): State<SharedState>,
+) -> Json<serde_json::Value> {
+    Json(json!(state.list_cnam_providers()))
+}
+
+async fn set_cnam_providers(
+    State(state): State<SharedState>,
+    Json(input): Json<Vec<crate::CnamProviderConfig>>,
+) -> StatusCode {
+    state.set_cnam_providers(input);
+    StatusCode::OK
+}
+
+// ─── Caption Language Handler ───
+
+async fn set_caption_language(
+    State(state): State<SharedState>,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::CaptionLanguageRequest>,
+) -> StatusCode {
+    if state.set_caption_language(id, &input.language) {
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
+
+// ─── SIP Gateway Handlers ───
+
+async fn list_sip_gateways(
+    State(state): State<SharedState>,
+) -> Json<serde_json::Value> {
+    Json(json!(state.list_sip_gateways()))
+}
+
+async fn create_sip_gateway(
+    State(state): State<SharedState>,
+    Json(input): Json<crate::CreateSipGatewayRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let gw = state.create_sip_gateway(input);
+    (StatusCode::CREATED, Json(json!(gw)))
+}
+
+async fn update_sip_gateway(
+    State(state): State<SharedState>,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::UpdateSipGatewayRequest>,
+) -> impl IntoResponse {
+    match state.update_sip_gateway(id, input) {
+        Some(gw) => Json(json!(gw)).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn delete_sip_gateway(
+    State(state): State<SharedState>,
+    Path(id): Path<Uuid>,
+) -> StatusCode {
+    if state.delete_sip_gateway(id) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+}
+
+// ─── Location Routing Handlers ───
+
+async fn list_location_routing_rules(
+    State(state): State<SharedState>,
+) -> Json<serde_json::Value> {
+    Json(json!(state.list_location_routing_rules()))
+}
+
+async fn create_location_routing_rule(
+    State(state): State<SharedState>,
+    Json(input): Json<crate::CreateLocationRoutingRuleRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let rule = state.create_location_routing_rule(input);
+    (StatusCode::CREATED, Json(json!(rule)))
+}
+
+async fn update_location_routing_rule(
+    State(state): State<SharedState>,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::UpdateLocationRoutingRuleRequest>,
+) -> impl IntoResponse {
+    match state.update_location_routing_rule(id, input) {
+        Some(rule) => Json(json!(rule)).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn delete_location_routing_rule(
+    State(state): State<SharedState>,
+    Path(id): Path<Uuid>,
+) -> StatusCode {
+    if state.delete_location_routing_rule(id) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+}
+
 #[cfg(test)]
 mod auth_tests {
     use super::*;
@@ -7433,6 +7652,9 @@ mod auth_tests {
         state.create_conference(crate::CreateConferenceRequest {
             title: "Daily Standup".to_string(),
             mode: crate::ConferenceMode::Audio,
+            registration_enabled: None,
+            max_registrations: None,
+            registration_fields: None,
         });
 
         assert!(require_bearer(&headers, &state).is_ok());
