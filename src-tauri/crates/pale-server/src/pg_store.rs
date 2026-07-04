@@ -107,6 +107,7 @@ impl PgStore {
             include_str!("../migrations/037_wiki_pages.sql"),
             include_str!("../migrations/038_task_boards.sql"),
             include_str!("../migrations/039_adaptive_cards.sql"),
+            include_str!("../migrations/036_platform_integrations.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {

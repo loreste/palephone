@@ -217,14 +217,14 @@ implement. Use this as a roadmap for closing the gap.
 
 ### 4.8 Platform & Integration
 - [ ] Low-code automation (Power Platform equivalent)
-- [ ] Public API with OAuth scopes for third-party apps
-- [ ] Bot framework / SDK
+- [x] Public API with OAuth scopes for third-party apps — done 2026-07-03
+- [x] Bot framework / SDK — done 2026-07-03
 - [ ] Tabs (embedded web apps in channels)
-- [ ] Outbound connectors and connector marketplace
+- [x] Outbound connectors and connector marketplace — done 2026-07-03
 - [ ] App store / extension catalog
 - [ ] Message extensions / compose-area action commands
-- [ ] Calendar sync (Exchange, Google Calendar)
-- [ ] Contact sync (bi-directional address book)
+- [x] Calendar sync (Exchange, Google Calendar) — done 2026-07-03
+- [x] Contact sync (bi-directional address book) — done 2026-07-03
 
 ### 4.9 User Experience
 - [ ] Mobile app (iOS/Android)
