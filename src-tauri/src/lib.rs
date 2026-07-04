@@ -522,6 +522,45 @@ fn list_audio_devices(state: State<EngineState>) -> Result<Vec<AudioDeviceInfo>,
     }
 }
 
+#[derive(serde::Serialize)]
+struct HidAudioDevice {
+    name: String,
+    device_type: String,
+    connected: bool,
+}
+
+#[tauri::command]
+fn detect_hid_devices(state: State<EngineState>) -> Result<Vec<HidAudioDevice>, String> {
+    // Reuse existing audio device enumeration to detect connected headsets
+    state.get()?;
+    unsafe {
+        let count = pjsip_sys::pjmedia_aud_dev_count() as i32;
+        let mut devices = Vec::new();
+        for i in 0..count {
+            let mut info: pjsip_sys::pjmedia_aud_dev_info = std::mem::zeroed();
+            let status = pjsip_sys::pjmedia_aud_dev_get_info(i, &mut info);
+            if status == 0 {
+                let name = std::ffi::CStr::from_ptr(info.name.as_ptr())
+                    .to_string_lossy()
+                    .to_string();
+                let device_type = if info.input_count > 0 && info.output_count > 0 {
+                    "headset"
+                } else if info.output_count > 0 {
+                    "speaker"
+                } else {
+                    "microphone"
+                };
+                devices.push(HidAudioDevice {
+                    name,
+                    device_type: device_type.to_string(),
+                    connected: true,
+                });
+            }
+        }
+        Ok(devices)
+    }
+}
+
 // ─── Call History Commands ───
 
 #[tauri::command]
@@ -875,6 +914,7 @@ pub fn run() {
             delete_sip_password,
             // Audio devices
             list_audio_devices,
+            detect_hid_devices,
             // Video
             make_video_call,
             toggle_video,

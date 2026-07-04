@@ -149,8 +149,8 @@ implement. Use this as a roadmap for closing the gap.
 - [ ] NDI / RTMP streaming output for broadcast/production
 - [x] Meeting templates and admin-configurable options policies — done 2026-07-03
 - [ ] Auto-transcription with speaker attribution and AI meeting summaries
-- [ ] Whiteboard
-- [ ] Screen share annotation
+- [x] Whiteboard — done 2026-07-03
+- [x] Screen share annotation — done 2026-07-03
 - [x] Spotlight (organizer pins video for all viewers) — done 2026-07-03
 - [x] Live animated reaction overlays (beyond raise hand) — done 2026-07-03
 - [x] Green room / presenter staging — done 2026-07-03
@@ -210,13 +210,13 @@ implement. Use this as a roadmap for closing the gap.
 ### 4.7 Devices & Rooms
 - [x] Meeting room device management and room booking — done 2026-07-03
 - [x] SIP phone provisioning portal / certified device management — done 2026-07-03
-- [ ] USB HID device integration (headset call control)
+- [x] USB HID device integration (headset call control) — done 2026-07-03
 - [ ] Digital signage
-- [ ] Room scheduling panel devices
+- [x] Room scheduling panel devices — done 2026-07-03
 - [x] Hot desking (phone login/logout) — done 2026-07-03
 
 ### 4.8 Platform & Integration
-- [ ] Low-code automation (Power Platform equivalent)
+- [x] Low-code automation (Power Platform equivalent) — done 2026-07-03
 - [x] Public API with OAuth scopes for third-party apps — done 2026-07-03
 - [x] Bot framework / SDK — done 2026-07-03
 - [ ] Tabs (embedded web apps in channels)

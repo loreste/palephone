@@ -56,7 +56,7 @@ async function api<T = any>(baseUrl: string, token: string, path: string, opts?:
   return paleServerApi<T>(baseUrl, token, path, opts);
 }
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music" | "sso" | "encryption" | "pam" | "common_area_phones" | "meeting_rooms_admin" | "devices" | "custom_emojis" | "api_clients" | "bots" | "connectors" | "conditional_access" | "sip_gateways" | "location_routing" | "guests";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "retention" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music" | "sso" | "encryption" | "pam" | "common_area_phones" | "meeting_rooms_admin" | "devices" | "custom_emojis" | "api_clients" | "bots" | "connectors" | "conditional_access" | "sip_gateways" | "location_routing" | "guests" | "scheduling_panels" | "automations";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -108,6 +108,8 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "sip_gateways", label: "SIP Gateways", icon: Router },
   { id: "location_routing", label: "Location Routing", icon: GitBranch },
   { id: "guests", label: "Guests", icon: UserPlus },
+  { id: "scheduling_panels", label: "Scheduling Panels", icon: Monitor },
+  { id: "automations", label: "Automations", icon: GitBranch },
 ];
 
 export function AdminView() {
@@ -356,6 +358,8 @@ export function AdminView() {
         {activeTab === "sip_gateways" && <SipGatewaysPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "location_routing" && <LocationRoutingPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "guests" && <GuestsPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "scheduling_panels" && <SchedulingPanelsPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "automations" && <AutomationsPanel baseUrl={baseUrl} token={token} />}
       </div>
     </div>
   );
@@ -6455,6 +6459,18 @@ interface SipGateway {
   created_at: string;
 }
 
+// ── Scheduling Panels ────────────────────────────────────────────
+
+interface SchedulingPanelItem {
+  id: string;
+  name: string;
+  meeting_room_id: string;
+  device_identifier: string;
+  display_mode: string;
+  enabled: boolean;
+  created_at: string;
+}
+
 function SipGatewaysPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
   const [gateways, setGateways] = useState<SipGateway[]>([]);
   const [name, setName] = useState("");
@@ -6693,6 +6709,210 @@ function GuestsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+function SchedulingPanelsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [panels, setPanels] = useState<SchedulingPanelItem[]>([]);
+  const [name, setName] = useState("");
+  const [roomId, setRoomId] = useState("");
+  const [deviceId, setDeviceId] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api<SchedulingPanelItem[]>(baseUrl, token, "/v1/admin/scheduling-panels");
+      setPanels(data);
+    } catch { /* ignore */ }
+  }, [baseUrl, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const create = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!name.trim() || !roomId.trim() || !deviceId.trim()) return;
+    try {
+      await api(baseUrl, token, "/v1/admin/scheduling-panels", {
+        method: "POST",
+        body: { name, meeting_room_id: roomId, device_identifier: deviceId },
+      });
+      setName(""); setRoomId(""); setDeviceId("");
+      load();
+      toast({ type: "success", title: "Panel created" });
+    } catch { toast({ type: "error", title: "Failed to create panel" }); }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/scheduling-panels/${id}`, { method: "DELETE" });
+      load();
+    } catch { toast({ type: "error", title: "Failed to delete panel" }); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <form onSubmit={create} className="flex gap-2 flex-wrap">
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Panel name"
+          className="border border-border-subtle rounded px-2 py-1 text-sm bg-surface flex-1 min-w-[120px]" />
+        <input value={roomId} onChange={(e) => setRoomId(e.target.value)} placeholder="Room UUID"
+          className="border border-border-subtle rounded px-2 py-1 text-sm bg-surface flex-1 min-w-[120px]" />
+        <input value={deviceId} onChange={(e) => setDeviceId(e.target.value)} placeholder="Device ID"
+          className="border border-border-subtle rounded px-2 py-1 text-sm bg-surface flex-1 min-w-[120px]" />
+        <button type="submit" className="px-3 py-1 rounded bg-accent text-white text-sm flex items-center gap-1">
+          <Plus size={14} /> Add
+        </button>
+      </form>
+      <div className="space-y-2">
+        {panels.map((p) => (
+          <div key={p.id} className="border border-border-subtle rounded p-2">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-sm font-medium">{p.name}</span>
+                <span className={cn("ml-2 text-[10px] px-1 rounded", p.enabled ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700")}>
+                  {p.enabled ? "Active" : "Disabled"}
+                </span>
+              </div>
+              <button onClick={() => remove(p.id)} className="text-destructive text-xs hover:underline">
+                <Trash2 size={14} />
+              </button>
+            </div>
+            <div className="text-[10px] text-tertiary mt-1">
+              Device: {p.device_identifier} | Room: {p.meeting_room_id} | Mode: {p.display_mode}
+            </div>
+          </div>
+        ))}
+        {panels.length === 0 && <p className="text-sm text-tertiary">No scheduling panels configured.</p>}
+      </div>
+    </div>
+  );
+}
+
+// ── Automations (Workflow Builder) ───────────────────────────────
+
+interface AutomationRuleItem {
+  id: string;
+  name: string;
+  trigger_event: string;
+  conditions: any;
+  actions: any;
+  enabled: boolean;
+  created_by: string;
+  created_at: string;
+}
+
+const TRIGGER_EVENTS = ["message_received", "call_completed", "meeting_started", "user_joined"];
+const ACTION_TYPES = ["send_message", "create_task", "webhook", "set_status"];
+
+function AutomationsPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [rules, setRules] = useState<AutomationRuleItem[]>([]);
+  const [name, setName] = useState("");
+  const [trigger, setTrigger] = useState(TRIGGER_EVENTS[0]);
+  const [condField, setCondField] = useState("");
+  const [condValue, setCondValue] = useState("");
+  const [actionType, setActionType] = useState(ACTION_TYPES[0]);
+  const [actionTarget, setActionTarget] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api<AutomationRuleItem[]>(baseUrl, token, "/v1/admin/automations");
+      setRules(data);
+    } catch { /* ignore */ }
+  }, [baseUrl, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const create = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) return;
+    const conditions = condField ? [{ field: condField, value: condValue }] : [];
+    const actions = [{ type: actionType, target: actionTarget }];
+    try {
+      await api(baseUrl, token, "/v1/admin/automations", {
+        method: "POST",
+        body: { name, trigger_event: trigger, conditions, actions },
+      });
+      setName(""); setCondField(""); setCondValue(""); setActionTarget("");
+      load();
+      toast({ type: "success", title: "Automation created" });
+    } catch { toast({ type: "error", title: "Failed to create automation" }); }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/automations/${id}`, { method: "DELETE" });
+      load();
+    } catch { toast({ type: "error", title: "Failed to delete automation" }); }
+  };
+
+  const toggleEnabled = async (rule: AutomationRuleItem) => {
+    try {
+      await api(baseUrl, token, `/v1/admin/automations/${rule.id}`, {
+        method: "PUT",
+        body: { enabled: !rule.enabled },
+      });
+      load();
+    } catch { toast({ type: "error", title: "Failed to update automation" }); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <form onSubmit={create} className="space-y-2 border border-border-subtle rounded p-3">
+        <div className="text-sm font-medium">New Automation Rule</div>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Rule name"
+          className="border border-border-subtle rounded px-2 py-1 text-sm bg-surface w-full" />
+        <div className="flex gap-2 flex-wrap">
+          <div className="flex-1 min-w-[150px]">
+            <label className="text-[10px] text-tertiary">Trigger</label>
+            <select value={trigger} onChange={(e) => setTrigger(e.target.value)}
+              className="border border-border-subtle rounded px-2 py-1 text-sm bg-surface w-full">
+              {TRIGGER_EVENTS.map((t) => <option key={t} value={t}>{t.replace(/_/g, " ")}</option>)}
+            </select>
+          </div>
+          <div className="flex-1 min-w-[150px]">
+            <label className="text-[10px] text-tertiary">Action</label>
+            <select value={actionType} onChange={(e) => setActionType(e.target.value)}
+              className="border border-border-subtle rounded px-2 py-1 text-sm bg-surface w-full">
+              {ACTION_TYPES.map((a) => <option key={a} value={a}>{a.replace(/_/g, " ")}</option>)}
+            </select>
+          </div>
+        </div>
+        <div className="flex gap-2 flex-wrap">
+          <input value={condField} onChange={(e) => setCondField(e.target.value)} placeholder="Condition field (opt)"
+            className="border border-border-subtle rounded px-2 py-1 text-sm bg-surface flex-1" />
+          <input value={condValue} onChange={(e) => setCondValue(e.target.value)} placeholder="Condition value"
+            className="border border-border-subtle rounded px-2 py-1 text-sm bg-surface flex-1" />
+        </div>
+        <input value={actionTarget} onChange={(e) => setActionTarget(e.target.value)} placeholder="Action target (room ID, webhook URL, etc.)"
+          className="border border-border-subtle rounded px-2 py-1 text-sm bg-surface w-full" />
+        <button type="submit" className="px-3 py-1 rounded bg-accent text-white text-sm flex items-center gap-1">
+          <Plus size={14} /> Create Rule
+        </button>
+      </form>
+      <div className="space-y-2">
+        {rules.map((r) => (
+          <div key={r.id} className="border border-border-subtle rounded p-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <button onClick={() => toggleEnabled(r)}
+                  className={cn("text-[10px] px-1.5 py-0.5 rounded", r.enabled ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700")}>
+                  {r.enabled ? "Enabled" : "Disabled"}
+                </button>
+                <span className="text-sm font-medium">{r.name}</span>
+              </div>
+              <button onClick={() => remove(r.id)} className="text-destructive hover:underline">
+                <Trash2 size={14} />
+              </button>
+            </div>
+            <div className="text-[10px] text-tertiary mt-1">
+              Trigger: {r.trigger_event.replace(/_/g, " ")} | By: {r.created_by}
+            </div>
+            <div className="text-[10px] text-secondary mt-0.5">
+              Conditions: {JSON.stringify(r.conditions)} | Actions: {JSON.stringify(r.actions)}
+            </div>
+          </div>
+        ))}
+        {rules.length === 0 && <p className="text-sm text-tertiary">No automation rules configured.</p>}
+      </div>
     </div>
   );
 }

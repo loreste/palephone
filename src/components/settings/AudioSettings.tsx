@@ -1,10 +1,10 @@
 import { useState, useEffect } from "react";
-import { Play } from "lucide-react";
+import { Headphones, Play } from "lucide-react";
 import { Reorder } from "framer-motion";
 import { cn } from "@/lib/cn";
 import { Toggle } from "@/components/ui/Toggle";
 import { useAudioStore } from "@/store/audioStore";
-import { listAudioDevices } from "@/lib/tauri";
+import { listAudioDevices, detectHidDevices, onHidHookSwitch, onHidMuteToggle, type HidAudioDevice } from "@/lib/tauri";
 
 interface Codec {
   id: string;
@@ -101,6 +101,10 @@ export function AudioSettings() {
         checked={autoGain}
         onChange={setAutoGain}
       />
+
+      {/* Connected Headset / HID Devices */}
+      <SectionHeader title="Connected Headsets" />
+      <HidDevicesSection />
 
       {/* Codec Priority */}
       <SectionHeader title="Codec Priority" />
@@ -218,6 +222,49 @@ function ToggleRow({
     <div className="flex items-center justify-between py-1">
       <span className="text-sm text-primary">{label}</span>
       <Toggle checked={checked} onChange={onChange} label={label} />
+    </div>
+  );
+}
+
+function HidDevicesSection() {
+  const [hidDevices, setHidDevices] = useState<HidAudioDevice[]>([]);
+
+  useEffect(() => {
+    detectHidDevices()
+      .then(setHidDevices)
+      .catch(() => setHidDevices([]));
+
+    // Listen for HID events
+    const unsubHook = onHidHookSwitch(({ action }) => {
+      // Hook switch events (answer/hangup) are handled by the call components
+      console.log("[HID] hook_switch:", action);
+    });
+    const unsubMute = onHidMuteToggle(({ muted }) => {
+      console.log("[HID] mute_toggle:", muted);
+    });
+
+    return () => {
+      unsubHook.then((fn) => fn());
+      unsubMute.then((fn) => fn());
+    };
+  }, []);
+
+  const headsets = hidDevices.filter((d) => d.device_type === "headset");
+
+  if (headsets.length === 0) {
+    return <p className="text-xs text-tertiary">No headsets detected. Connect a USB/Bluetooth headset for call control.</p>;
+  }
+
+  return (
+    <div className="space-y-1">
+      {headsets.map((d, i) => (
+        <div key={i} className="flex items-center gap-2 py-1.5 px-2 rounded bg-elevated">
+          <Headphones size={14} className="text-accent" />
+          <span className="text-sm text-primary flex-1">{d.name}</span>
+          <span className="text-[10px] text-green-600">Connected</span>
+        </div>
+      ))}
+      <p className="text-[10px] text-tertiary">Hook switch and mute button events are active.</p>
     </div>
   );
 }

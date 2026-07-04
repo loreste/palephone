@@ -44,6 +44,9 @@ use crate::{
     CreateContactSyncRequest,
     CreateConnectorRequest, UpdateConnectorRequest,
     CreateConditionalAccessPolicyRequest, UpdateConditionalAccessPolicyRequest,
+    CreateAnnotationRequest, CreateWhiteboardRequest, AddWhiteboardElementRequest,
+    CreateSchedulingPanelRequest, UpdateSchedulingPanelRequest,
+    CreateAutomationRuleRequest, UpdateAutomationRuleRequest,
 };
 
 type SharedState = Arc<AppState>;
@@ -738,6 +741,39 @@ pub fn router(state: SharedState) -> Router {
         .route(
             "/v1/admin/location-routing/{id}",
             put(update_location_routing_rule).delete(delete_location_routing_rule),
+        )
+        // Screen share annotations
+        .route(
+            "/v1/conferences/{id}/annotations",
+            get(list_annotations).post(create_annotation).delete(clear_annotations),
+        )
+        // Whiteboards
+        .route(
+            "/v1/conferences/{id}/whiteboard",
+            get(get_whiteboard).post(create_whiteboard),
+        )
+        .route(
+            "/v1/conferences/{id}/whiteboard/elements",
+            post(add_whiteboard_element),
+        )
+        // Scheduling panels
+        .route(
+            "/v1/admin/scheduling-panels",
+            get(list_scheduling_panels).post(create_scheduling_panel),
+        )
+        .route(
+            "/v1/admin/scheduling-panels/{id}",
+            put(update_scheduling_panel).delete(delete_scheduling_panel),
+        )
+        .route("/v1/panels/{device_id}/schedule", get(get_panel_schedule))
+        // Automation rules
+        .route(
+            "/v1/admin/automations",
+            get(list_automation_rules).post(create_automation_rule),
+        )
+        .route(
+            "/v1/admin/automations/{id}",
+            put(update_automation_rule).delete(delete_automation_rule),
         )
         .route("/v1/events", get(sse_stream))
         .layer(from_fn(crate::metrics::request_metrics))
@@ -3632,6 +3668,225 @@ async fn delete_conditional_access_policy(
         state.record_audit_event(
             &principal,
             "conditional_access.deleted",
+            Some(format!("id={}", id)),
+        );
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
+// ─── Screen Share Annotations ───
+
+async fn list_annotations(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::Annotation>>, ApiError> {
+    require_bearer(&headers, &state)?;
+    Ok(Json(state.list_annotations(id)))
+}
+
+async fn create_annotation(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<CreateAnnotationRequest>,
+) -> Result<(StatusCode, Json<crate::Annotation>), ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let annotation = state.add_annotation(id, &principal, req);
+    let _ = state.sse_tx.send(crate::SseEvent {
+        event_type: "annotation_added".to_string(),
+        payload: serde_json::to_value(&annotation).unwrap_or_default(),
+    });
+    Ok((StatusCode::CREATED, Json(annotation)))
+}
+
+async fn clear_annotations(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    require_bearer(&headers, &state)?;
+    state.clear_annotations(id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── Whiteboards ───
+
+async fn get_whiteboard(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::Whiteboard>, ApiError> {
+    require_bearer(&headers, &state)?;
+    match state.get_whiteboard(id) {
+        Some(wb) => Ok(Json(wb)),
+        None => Err(ApiError::NotFound),
+    }
+}
+
+async fn create_whiteboard(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<CreateWhiteboardRequest>,
+) -> Result<(StatusCode, Json<crate::Whiteboard>), ApiError> {
+    require_bearer(&headers, &state)?;
+    let wb = state.get_or_create_whiteboard(id, req.name);
+    Ok((StatusCode::CREATED, Json(wb)))
+}
+
+async fn add_whiteboard_element(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<AddWhiteboardElementRequest>,
+) -> Result<Json<crate::Whiteboard>, ApiError> {
+    require_bearer(&headers, &state)?;
+    match state.add_whiteboard_element(id, req.element) {
+        Some(wb) => {
+            let _ = state.sse_tx.send(crate::SseEvent {
+                event_type: "whiteboard_updated".to_string(),
+                payload: serde_json::to_value(&wb).unwrap_or_default(),
+            });
+            Ok(Json(wb))
+        }
+        None => Err(ApiError::NotFound),
+    }
+}
+
+// ─── Scheduling Panels ───
+
+async fn list_scheduling_panels(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::SchedulingPanel>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_scheduling_panels()))
+}
+
+async fn create_scheduling_panel(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<CreateSchedulingPanelRequest>,
+) -> Result<(StatusCode, Json<crate::SchedulingPanel>), ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let panel = state.create_scheduling_panel(req);
+    state.record_audit_event(
+        &principal,
+        "scheduling_panel.created",
+        Some(format!("id={} name={}", panel.id, panel.name)),
+    );
+    Ok((StatusCode::CREATED, Json(panel)))
+}
+
+async fn update_scheduling_panel(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateSchedulingPanelRequest>,
+) -> Result<Json<crate::SchedulingPanel>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    match state.update_scheduling_panel(id, req) {
+        Some(panel) => {
+            state.record_audit_event(
+                &principal,
+                "scheduling_panel.updated",
+                Some(format!("id={}", id)),
+            );
+            Ok(Json(panel))
+        }
+        None => Err(ApiError::NotFound),
+    }
+}
+
+async fn delete_scheduling_panel(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if state.delete_scheduling_panel(id) {
+        state.record_audit_event(
+            &principal,
+            "scheduling_panel.deleted",
+            Some(format!("id={}", id)),
+        );
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
+async fn get_panel_schedule(
+    State(state): State<SharedState>,
+    Path(device_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    match state.get_panel_schedule(&device_id) {
+        Some((panel, bookings)) => Ok(Json(json!({
+            "panel": panel,
+            "bookings": bookings,
+        }))),
+        None => Err(ApiError::NotFound),
+    }
+}
+
+// ─── Automation Rules ───
+
+async fn list_automation_rules(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::AutomationRule>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_automation_rules()))
+}
+
+async fn create_automation_rule(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<CreateAutomationRuleRequest>,
+) -> Result<(StatusCode, Json<crate::AutomationRule>), ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let rule = state.create_automation_rule(&principal, req);
+    state.record_audit_event(
+        &principal,
+        "automation.created",
+        Some(format!("id={} name={}", rule.id, rule.name)),
+    );
+    Ok((StatusCode::CREATED, Json(rule)))
+}
+
+async fn update_automation_rule(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateAutomationRuleRequest>,
+) -> Result<Json<crate::AutomationRule>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    match state.update_automation_rule(id, req) {
+        Some(rule) => {
+            state.record_audit_event(
+                &principal,
+                "automation.updated",
+                Some(format!("id={}", id)),
+            );
+            Ok(Json(rule))
+        }
+        None => Err(ApiError::NotFound),
+    }
+}
+
+async fn delete_automation_rule(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if state.delete_automation_rule(id) {
+        state.record_audit_event(
+            &principal,
+            "automation.deleted",
             Some(format!("id={}", id)),
         );
         Ok(StatusCode::NO_CONTENT)
