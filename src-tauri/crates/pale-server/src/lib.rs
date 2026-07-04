@@ -1882,14 +1882,20 @@ impl AppState {
     pub fn is_mfa_enabled(&self, user_id: Uuid) -> bool {
         if let Some(pg) = &self.pg {
             let pg = pg.clone();
-            let rt = tokio::runtime::Handle::try_current();
-            if let Ok(handle) = rt {
-                if let Ok(Some((_, enabled, _))) =
-                    std::thread::scope(|_| handle.block_on(pg.get_totp_secret(user_id)))
-                {
-                    return enabled;
-                }
+            let query = move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .ok()
+                    .and_then(|rt| rt.block_on(pg.get_totp_secret(user_id)).ok())
+                    .flatten()
+                    .map(|(_, enabled, _)| enabled)
+                    .unwrap_or(false)
+            };
+            if tokio::runtime::Handle::try_current().is_ok() {
+                return std::thread::spawn(query).join().unwrap_or(false);
             }
+            return query();
         }
         false
     }
