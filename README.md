@@ -14,7 +14,7 @@ We are also not pretending the hard parts are magic. Speech, AI, malware scannin
 
 ## Why Pale?
 
-- **Complete phone system.** Not just a softphone — Pale includes its own SIP registrar, call router, PBX, emergency calling model, PSTN gateway readiness, and call center. It is designed to run without Asterisk, FreePBX, or a separate PBX.
+- **Built to own the phone layer.** Pale includes SIP account records, PBX routing, emergency calling models, PSTN gateway readiness, and call center workflows. The default `pjsip` server backend is a SIP transport/telemetry path; registrar/PBX behavior requires `PALE_SIP_BACKEND=udp-parser` today or a dedicated SIP registrar/proxy in front of Pale.
 - **Your data stays yours.** Core calls, messages, files, SIP signaling, media, and chat run on your servers. Optional external providers are explicit integrations, not hidden dependencies.
 - **Matrix-backed encrypted chat.** The Matrix client path supports Olm/Megolm encryption for conversations and encrypted file transfer.
 - **One app, not five.** Calling, video, chat, files, meetings, compliance, voicemail, presence, and admin live in one interface.
@@ -121,6 +121,8 @@ Pale does not fake AI output locally. The server reports whether the tenant has 
 - Admin-managed registry for external systems needed to approach Teams Enterprise-style parity
 - Readiness report that refuses to mark the tenant ready while tracked critical dependencies are missing
 - Health report that flags missing URLs, invalid protocols, missing provider details, and partial configurations
+- Provider probe report for generic HTTP/WebDAV/gRPC and TCP reachability checks
+- Enterprise validation report that combines readiness, provider probes, security posture, and deployment guidance
 - Deployment plan that prioritizes open-source or self-hosted foundation services where possible
 - Integrations tracked for AI, speech, transcription, noise suppression, virtual backgrounds, media layouts, streaming, presentation rendering, E911, PSTN/SBC, storage, ATP, CASB, mobile/web/runtime hardening, multi-window, push, device permissions, and town hall scale
 
@@ -162,7 +164,7 @@ The admin console covers PBX, collaboration, compliance, security, devices, apps
 
 | Layer | What | How |
 |-------|------|-----|
-| SIP signaling | Call setup, registration | TLS (port 5061) |
+| SIP signaling | Call setup, registration | SIP TLS when enabled; UDP parser registrar is available through `PALE_SIP_BACKEND=udp-parser` |
 | Voice/video media | RTP audio and video streams | SRTP with DTLS key exchange |
 | Chat messages | Matrix-backed 1:1 and group conversations | Olm / Megolm |
 | File attachments | Uploaded files | AES-256-CTR with per-file key |
@@ -266,15 +268,18 @@ curl http://localhost:8090/health
 The server exposes:
 - **HTTP API** on port 8090
 - **SIP UDP** on port 5060
-- **SIP TLS** on port 5061
+- **SIP TLS** on port 5061 when `PALE_SIP_TLS=true` and cert/key paths are set
 - **TURN relay** on port 3478
 
 All settings are environment variables — see [`.env.example`](.env.example)
 for the full annotated list. Two you will almost certainly want in production:
 
 - `PALE_SIP_EXTERNAL_ADDR` — the public hostname/IP clients use to reach SIP.
-  Without it the registrar is advertised as `127.0.0.1` and only local
-  clients can register.
+  This matters when using the UDP parser registrar backend; without it, remote
+  clients may be given a loopback registrar address.
+- `PALE_SIP_BACKEND` — defaults to `pjsip`. Use `udp-parser` for the current
+  built-in REGISTER/PBX parser path, or place a dedicated SIP registrar/proxy in
+  front of Pale for production SIP deployments.
 - `PALE_SIP_TLS_CERT` / `PALE_SIP_TLS_KEY` — providing both enables SIP over
   TLS automatically (and disables plain UDP by default).
 - `NATS_URL` — optional NATS server URL, for example `nats://nats:4222`.
@@ -372,7 +377,7 @@ Pale Server exposes a broad HTTP API plus SSE events. Key groups:
 | Meetings | Scheduled meetings, templates, recordings, attendance, polls, reactions | Bearer token |
 | Compliance | Retention, eDiscovery, DLP, security score, reviews, labels, barriers | Bearer token (admin) |
 | Identity | SSO, MFA foundations, conditional access, custom roles, policy packages | Bearer token (admin) |
-| Enterprise Integrations | `/v1/admin/enterprise-integrations`, readiness, health, deployment plan | Bearer token (admin) |
+| Enterprise Integrations | `/v1/admin/enterprise-integrations`, readiness, health, provider probes, validation, deployment plan | Bearer token (admin) |
 | AI Providers | `/v1/ai/providers`, `/v1/ai/llm/chat`, `/v1/ai/stt/transcribe`, `/v1/ai/tts/synthesize` | Bearer token |
 | Emergency/PSTN | Emergency locations, assignments, call plans, SIP gateways, location routing | Bearer token (admin) |
 | Events | `GET /v1/events` (SSE stream) | Bearer token |
@@ -422,7 +427,7 @@ pale/
 
 ## Documentation
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — SIP/media stack, codec negotiation, OS-specific build details
+- [ARCHITECTURE.md](ARCHITECTURE.md) — Current system architecture, server/client responsibilities, integration boundaries
 - [ARCHITECTURE_V2.md](ARCHITECTURE_V2.md) — Video, Matrix chat, file transfer, E2E encryption design
 - [UI_UX_SPEC.md](UI_UX_SPEC.md) — Design system, component wireframes, interaction patterns
 - [ANDROID_SETUP.md](ANDROID_SETUP.md) — Android development environment setup

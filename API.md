@@ -1,8 +1,15 @@
 # Pale Server API Reference
 
-**Base URL:** `http://localhost:8080` (configurable via `PALE_HTTP_ADDR`)  
+**Base URL:** `http://localhost:8090` when using Docker Compose. The server
+process itself defaults `PALE_HTTP_ADDR` to `127.0.0.1:8080`, and Compose maps
+host port `8090` to container port `8080`.
 **Authentication:** Bearer token in `Authorization: Bearer <token>` header  
 **Content-Type:** `application/json` (unless noted)
+
+This document covers the public endpoint groups that are expected to be stable.
+The implementation has additional admin and operational endpoints; check the
+server route table in `src-tauri/crates/pale-server/src/http.rs` when building a
+client against a new area.
 
 ## Authentication
 
@@ -45,6 +52,17 @@ Status is `"degraded"` when PostgreSQL circuit breaker is open.
 
 ### GET /metrics
 Prometheus metrics in text format. No authentication required.
+
+### POST /v1/auth/login
+User login for the desktop/mobile client.
+
+**Request:**
+```json
+{ "sip_uri": "sip:alice@example.com", "password": "your-password" }
+```
+
+The response includes the authenticated user context and server provisioning
+data used by the client.
 
 ---
 
@@ -144,7 +162,7 @@ List all user presence records.
 [{ "sip_uri": "sip:alice@example.com", "status": "online", "note": "In a meeting", "updated_at": "..." }]
 ```
 
-Status values: `online`, `offline`, `busy`, `away`, `dnd`
+Status values: `online`, `offline`, `busy`, `away`, `dnd`, `on_call`
 
 ### GET /v1/presence/{sip_uri}
 Get presence for a specific user. The `sip_uri` can omit the `sip:` prefix.
@@ -264,6 +282,21 @@ Join a conference.
 ### DELETE /v1/conferences/{id}/participants/{user_id}
 Leave a conference.
 
+### Selected meeting and event endpoints
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /v1/meetings` / `POST /v1/meetings` | Scheduled meeting records |
+| `GET /v1/meetings/{id}/ics` | Calendar export |
+| `POST /v1/meetings/{id}/start` | Start a scheduled meeting |
+| `POST /v1/conferences/{id}/register` | Webinar registration |
+| `GET /v1/conferences/{id}/attendance` | Attendance records |
+| `GET /v1/conferences/{id}/attendance/export` | Attendance export |
+| `GET /v1/conferences/{id}/transcript` | Meeting transcript state |
+| `GET /v1/conferences/{id}/assistant` | Meeting assistant report |
+| `GET /v1/conferences/{id}/presentations` | Presentation session records |
+| `GET /v1/conferences/{id}/town-hall` | Town hall configuration |
+
 ---
 
 ## Calls
@@ -366,6 +399,14 @@ Get ICE/STUN/TURN configuration.
 { "ice_enabled": true, "stun_servers": ["stun:stun.l.google.com:19302"], "stun_ignore_failure": true, "turn": null }
 ```
 
+### GET /v1/media/settings
+Return tenant media capability settings such as layout, background, streaming,
+and broadcast readiness.
+
+### PUT /v1/media/settings
+Update tenant media settings. Production media features still require the
+corresponding provider services to be deployed.
+
 ---
 
 ## Voicemail
@@ -400,6 +441,111 @@ List admin audit events (last 500, reverse chronological).
 ```json
 [{ "id": "uuid", "principal": "admin", "action": "user.created", "target": "uuid", "created_at": "..." }]
 ```
+
+### GET /v1/admin/audit/export.csv
+Export audit events as CSV.
+
+---
+
+## AI and Speech Providers
+
+Pale exposes provider contracts for AI and speech. These endpoints do not
+invent results when no provider is configured.
+
+### GET /v1/ai/providers
+List configured provider readiness for LLM, STT, and TTS.
+
+### PUT /v1/ai/providers/{kind}
+Configure a provider. `kind` is one of `llm`, `stt`, or `tts`.
+
+**Request:**
+```json
+{
+  "name": "ollama",
+  "endpoint": "http://ollama:11434",
+  "protocol": "http",
+  "enabled": true
+}
+```
+
+### POST /v1/ai/llm/chat
+Dispatch an LLM chat request to the configured provider.
+
+### POST /v1/ai/stt/transcribe
+Dispatch a speech-to-text request to the configured provider.
+
+### POST /v1/ai/tts/synthesize
+Dispatch a text-to-speech request to the configured provider.
+
+---
+
+## Compliance and Governance
+
+| Endpoint group | Purpose |
+|----------------|---------|
+| `/v1/admin/governance/retention` | Retention policy CRUD and enforcement |
+| `/v1/admin/ediscovery/*` | eDiscovery search, cases, and exports |
+| `/v1/admin/dlp/*` | DLP policies, scans, violations, and exports |
+| `/v1/admin/atp/quarantine` | ATP quarantine records and review |
+| `/v1/admin/compliance/*` | Communication compliance scans and reviews |
+| `/v1/admin/security-score` | Security posture report |
+| `/v1/admin/barriers` | Information barrier policy records |
+| `/v1/admin/labels` | Sensitivity label records |
+| `/v1/admin/data-residency` | Data residency records and status |
+
+ATP and CASB entries are readiness and workflow surfaces unless the tenant has
+connected real malware scanning or CASB infrastructure.
+
+---
+
+## Enterprise Integrations
+
+These endpoints track external systems required for enterprise deployments.
+
+### GET /v1/admin/enterprise-integrations
+List integration records.
+
+### GET /v1/admin/enterprise-integrations/status
+Summarize integration status by category and readiness.
+
+### GET /v1/admin/enterprise-integrations/readiness
+Return the tenant readiness report. Critical missing providers keep the report
+from marking the tenant ready.
+
+### GET /v1/admin/enterprise-integrations/health
+Return configuration health checks such as missing endpoints, invalid
+protocols, missing provider details, and disabled critical services.
+
+### GET /v1/admin/enterprise-integrations/provider-probes
+Run provider probe checks. Current probes cover generic HTTP(S)/WebDAV/gRPC
+reachability and TCP endpoint reachability. Some systems, such as S3, RTMP,
+carrier trunks, E911, CASB, and malware scanners, still need provider-specific
+adapters for deep validation.
+
+### GET /v1/admin/enterprise-integrations/validation
+Return an enterprise validation report that combines readiness, security score,
+provider probes, and deployment guidance.
+
+### GET /v1/admin/enterprise-integrations/deployment-plan
+Return an ordered deployment plan for missing or incomplete integrations.
+
+### PUT /v1/admin/enterprise-integrations/{id}
+Update an integration record.
+
+---
+
+## Identity, Access, and Provisioning
+
+| Endpoint group | Purpose |
+|----------------|---------|
+| `/v1/mfa/*` | MFA status, setup, verify, validate, and disable |
+| `/v1/sessions/*` | User session list and revocation |
+| `/v1/admin/sso-providers` | SSO provider records |
+| `/v1/admin/conditional-access` | Conditional access policies |
+| `/v1/scim/v2/Users` | SCIM-style user provisioning |
+| `/v1/admin/roles` | Custom role records and permissions |
+| `/v1/admin/policy-packages` | Policy package records and assignments |
+| `/v1/admin/api-clients` | OAuth/API client records |
 
 ---
 
@@ -465,7 +611,7 @@ All errors return JSON:
 | `PALE_RATE_LIMIT_RPS` | No | `100` | Requests per second per user |
 | `PALE_MAX_UPLOAD_BYTES` | No | `104857600` | Max file upload size |
 | `PALE_LOG_JSON` | No | `false` | Enable JSON structured logging |
-| `PALE_SIP_BACKEND` | No | `pjsip` | SIP backend (pjsip or udp-parser) |
+| `PALE_SIP_BACKEND` | No | `pjsip` | SIP backend. `pjsip` is the default transport/runtime path; `udp-parser` enables the current built-in REGISTER/PBX parser path |
 | `PALE_SIP_SRTP` | No | `true` | Require SRTP encryption |
 | `PALE_ICE` | No | `true` | Enable ICE |
 | `PALE_STUN_SERVERS` | No | — | Comma-separated STUN servers |
