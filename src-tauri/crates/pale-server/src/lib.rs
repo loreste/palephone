@@ -292,7 +292,6 @@ pub struct AppState {
     hold_music: ShardedMap<Uuid, HoldMusic>,
     // Personal call groups
     personal_call_groups: ShardedMap<Uuid, PersonalCallGroup>,
-<<<<<<< HEAD
     // SSO providers
     sso_providers: ShardedMap<Uuid, SsoProvider>,
     // Encryption config (BYOK)
@@ -322,10 +321,8 @@ pub struct AppState {
     contact_sync_configs: ShardedMap<Uuid, ContactSyncConfig>,
     synced_contacts: ShardedMap<Uuid, SyncedContact>,
     connectors: ShardedMap<Uuid, Connector>,
-=======
     // Conditional access policies
     conditional_access_policies: ShardedMap<Uuid, ConditionalAccessPolicy>,
->>>>>>> worktree-agent-ac96f54e
     user_create_lock: std::sync::Mutex<()>,
     agent_assignment_lock: std::sync::Mutex<()>,
     sse_tx: tokio::sync::broadcast::Sender<SseEvent>,
@@ -494,7 +491,6 @@ impl AppState {
             recording_policies: ShardedMap::new(),
             hold_music: ShardedMap::new(),
             personal_call_groups: ShardedMap::new(),
-<<<<<<< HEAD
             sso_providers: ShardedMap::new(),
             encryption_configs: RwLock::new(Vec::new()),
             admin_elevations: RwLock::new(Vec::new()),
@@ -515,9 +511,7 @@ impl AppState {
             contact_sync_configs: ShardedMap::new(),
             synced_contacts: ShardedMap::new(),
             connectors: ShardedMap::new(),
-=======
             conditional_access_policies: ShardedMap::new(),
->>>>>>> worktree-agent-ac96f54e
             user_create_lock: std::sync::Mutex::new(()),
             agent_assignment_lock: std::sync::Mutex::new(()),
             sse_tx: tokio::sync::broadcast::channel(256).0,
@@ -1436,6 +1430,12 @@ impl AppState {
             if !verify_password(password, expected_hash) {
                 return Err(AuthError::Unauthorized);
             }
+        }
+
+        // Evaluate conditional access policies before creating session
+        let ca_result = self.evaluate_conditional_access("", "", &[]);
+        if ca_result.block {
+            return Err(AuthError::Unauthorized);
         }
 
         // Create session carrying the user's role (consulted by admin-only endpoints)
@@ -7325,11 +7325,12 @@ impl AppState {
         if priority == "urgent" && !self.collaboration_policy().urgent_messages_enabled {
             return Err("urgent messages are disabled by policy".to_string());
         }
+        let encrypted_body = self.encrypt_field(body);
         let msg = RoomMessage {
             id: Uuid::new_v4(),
             room_id,
             sender_uri: sender_uri.to_string(),
-            body: body.to_string(),
+            body: encrypted_body,
             content_type: "text/plain".to_string(),
             created_at: Utc::now(),
             reply_to,
@@ -7356,11 +7357,13 @@ impl AppState {
         self.persist(&msg);
         let msg_for_pg = msg.clone();
         self.pg_spawn(move |pg| Box::pin(async move { pg.insert_room_message(&msg_for_pg).await }));
+        let mut decrypted_msg = msg.clone();
+        decrypted_msg.body = self.decrypt_field(&decrypted_msg.body);
         self.broadcast_sse(SseEvent {
             event_type: "room_message".to_string(),
-            payload: serde_json::to_value(&msg).unwrap_or_default(),
+            payload: serde_json::to_value(&decrypted_msg).unwrap_or_default(),
         });
-        Ok(msg)
+        Ok(decrypted_msg)
     }
 
     /// Send a room message with optional adaptive card payload.
@@ -7425,11 +7428,12 @@ impl AppState {
             self.authorize_message_mentions(room, sender_uri, &mentions)?;
         }
         let priority = normalize_message_priority(priority.as_deref());
+        let encrypted_body = self.encrypt_field(body);
         let msg = RoomMessage {
             id: Uuid::new_v4(),
             room_id,
             sender_uri: sender_uri.to_string(),
-            body: body.to_string(),
+            body: encrypted_body,
             content_type: "text/plain".to_string(),
             created_at: Utc::now(),
             reply_to,
@@ -7485,13 +7489,15 @@ impl AppState {
             self.pg_spawn(
                 move |pg| Box::pin(async move { pg.insert_room_message(&msg_for_pg).await }),
             );
+            let mut decrypted_msg = msg.clone();
+            decrypted_msg.body = self.decrypt_field(&decrypted_msg.body);
             self.broadcast_sse(SseEvent {
                 event_type: "room_message".to_string(),
-                payload: serde_json::to_value(msg).unwrap_or_default(),
+                payload: serde_json::to_value(&decrypted_msg).unwrap_or_default(),
             });
             self.broadcast_sse(SseEvent {
                 event_type: "scheduled_message_delivered".to_string(),
-                payload: serde_json::to_value(msg).unwrap_or_default(),
+                payload: serde_json::to_value(&decrypted_msg).unwrap_or_default(),
             });
         }
         delivered
@@ -8709,6 +8715,10 @@ impl AppState {
             .iter()
             .filter(|m| m.room_id == room_id && m.delivered)
             .cloned()
+            .map(|mut m| {
+                m.body = self.decrypt_field(&m.body);
+                m
+            })
             .collect()
     }
 
@@ -8939,6 +8949,7 @@ impl AppState {
             events: input.events,
             owner_uri: owner_uri.to_string(),
             api_token: Uuid::new_v4().to_string(),
+            allowed_rooms: Vec::new(),
             enabled: true,
             created_at: Utc::now(),
         };
@@ -11270,7 +11281,6 @@ pub struct CreatePersonalCallGroupRequest {
     pub enabled: Option<bool>,
 }
 
-<<<<<<< HEAD
 // ─── OAuth API Clients ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11341,7 +11351,12 @@ pub struct Bot {
     pub events: Vec<String>,
     pub owner_uri: String,
     pub api_token: String,
-=======
+    #[serde(default)]
+    pub allowed_rooms: Vec<Uuid>,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
 // ── Conditional Access Policies ──────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11372,13 +11387,11 @@ pub struct ConditionalAccessPolicy {
     pub name: String,
     pub conditions: ConditionalAccessConditions,
     pub actions: ConditionalAccessActions,
->>>>>>> worktree-agent-ac96f54e
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-<<<<<<< HEAD
 pub struct CreateBotRequest {
     pub name: String,
     pub webhook_url: String,
@@ -11836,7 +11849,9 @@ pub struct AdaptiveCardAction {
     pub title: String,
     pub url: Option<String>,
     pub data: Option<serde_json::Value>,
-=======
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct CreateConditionalAccessPolicyRequest {
     pub name: String,
     pub conditions: ConditionalAccessConditions,
@@ -11920,7 +11935,6 @@ impl AppState {
         }
         result
     }
->>>>>>> worktree-agent-ac96f54e
 }
 
 fn is_textual_content(content_type: &str) -> bool {

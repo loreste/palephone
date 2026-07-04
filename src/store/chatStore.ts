@@ -104,6 +104,7 @@ interface ChatStoreState {
   setOffline: (offline: boolean) => void;
   enqueueMessage: (msg: QueuedMessage) => void;
   flushQueue: () => QueuedMessage[];
+  removeFromQueue: (id: string) => void;
   clearServerData: () => void;
 }
 
@@ -203,10 +204,13 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
   },
 
   flushQueue: () => {
-    const queued = get().queuedMessages;
-    persistQueuedMessages([]);
-    set({ queuedMessages: [] });
-    return queued;
+    return [...get().queuedMessages];
+  },
+
+  removeFromQueue: (id: string) => {
+    const updated = get().queuedMessages.filter((m) => m.id !== id);
+    persistQueuedMessages(updated);
+    set({ queuedMessages: updated });
   },
 
   // Drop all pale-server rooms/messages (e.g. on server disconnect),

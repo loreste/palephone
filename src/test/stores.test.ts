@@ -208,6 +208,16 @@ describe("chatStore", () => {
 
     const flushed = store.flushQueue();
     expect(flushed).toHaveLength(2);
+    // flushQueue no longer clears the queue; messages are removed individually on successful delivery
+    expect(useChatStore.getState().queuedMessages).toHaveLength(2);
+
+    // Remove one message (simulating successful delivery)
+    store.removeFromQueue("q1");
+    expect(useChatStore.getState().queuedMessages).toHaveLength(1);
+    expect(useChatStore.getState().queuedMessages[0].id).toBe("q2");
+
+    // Remove the other
+    store.removeFromQueue("q2");
     expect(useChatStore.getState().queuedMessages).toHaveLength(0);
   });
 });

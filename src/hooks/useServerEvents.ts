@@ -75,7 +75,15 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
                 Authorization: `Bearer ${token}`,
               },
               body: JSON.stringify({ body: msg.body }),
-            }).catch(() => {});
+            })
+              .then((res) => {
+                if (res.ok) {
+                  useChatStore.getState().removeFromQueue(msg.id);
+                }
+              })
+              .catch(() => {
+                // Message stays in queue for next reconnect attempt
+              });
           }
         }
       };

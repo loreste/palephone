@@ -282,6 +282,13 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
     // ── CDR start ──
     state.record_cdr_start(Some(&call_id_str), &from_aor, &requested_uri, "inbound");
 
+    // ── Information barrier check ──
+    let barrier_result = state.check_barrier(&from_aor, &requested_uri, true);
+    if barrier_result.blocked {
+        state.record_cdr_end(&call_id_str, "blocked");
+        return Some(request.response(403, "Forbidden", &[]));
+    }
+
     // Helper: create dialog and redirect to a target URI
     let make_redirect = |target: &str| -> Option<String> {
         state.upsert_sip_dialog(UpsertSipDialog {

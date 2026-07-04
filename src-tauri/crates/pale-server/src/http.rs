@@ -35,7 +35,6 @@ use crate::{
     SetSpotlightRequest, SendMeetingReactionRequest,
     SetOutOfOfficeRequest,
     UpdateNotificationPreferenceRequest, UpdateTagRequest,
-<<<<<<< HEAD
     CreateCustomEmojiRequest, CreateWikiPageRequest, UpdateWikiPageRequest,
     CreateTaskBoardRequest, CreateTaskRequest, UpdateTaskRequest,
     TranslateRequest,
@@ -44,9 +43,7 @@ use crate::{
     CreateCalendarIntegrationRequest,
     CreateContactSyncRequest,
     CreateConnectorRequest, UpdateConnectorRequest,
-=======
     CreateConditionalAccessPolicyRequest, UpdateConditionalAccessPolicyRequest,
->>>>>>> worktree-agent-ac96f54e
 };
 
 type SharedState = Arc<AppState>;
@@ -6861,6 +6858,9 @@ async fn bot_send_message(
         return Err(ApiError::Unauthorized);
     }
     let bot = state.bot_by_token(token).ok_or(ApiError::Unauthorized)?;
+    if !bot.allowed_rooms.is_empty() && !bot.allowed_rooms.contains(&input.room_id) {
+        return Err(ApiError::Forbidden);
+    }
     let sender = format!("bot:{}", bot.name);
     let msg = state
         .send_room_message(input.room_id, &sender, &input.body, None, None)
@@ -7168,6 +7168,12 @@ fn authenticated_principal_role(
 fn authenticated_admin(headers: &HeaderMap, state: &AppState) -> Result<String, ApiError> {
     let (principal, role) = authenticated_principal_role(headers, state)?;
     if role != crate::ROLE_ADMIN {
+        // Check for PAM elevation: allow non-admin users with an active elevation
+        if let Some(user) = state.user_by_sip_uri(&principal) {
+            if state.has_active_elevation(user.id) {
+                return Ok(principal);
+            }
+        }
         return Err(ApiError::Forbidden);
     }
     Ok(principal)
