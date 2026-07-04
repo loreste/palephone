@@ -61,19 +61,30 @@ export function MeetingPanel({ conferenceId }: { conferenceId: string }) {
     { id: "captions", icon: Captions, label: "Captions" },
   ];
 
+  const handleTabKeyDown = (e: React.KeyboardEvent, tabId: MeetingTab) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      setTab(tabId);
+    }
+  };
+
   return (
     <div className="flex flex-col h-full border-l border-border-subtle w-[320px]">
-      <div className="flex border-b border-border-subtle">
+      <div className="flex border-b border-border-subtle" role="tablist" aria-label="Meeting panel tabs">
         {tabs.map(({ id, icon: Icon, label }) => (
           <button
             key={id}
+            role="tab"
+            aria-selected={tab === id}
+            aria-label={label}
             onClick={() => setTab(id)}
+            onKeyDown={(e) => handleTabKeyDown(e, id)}
             className={cn(
               "flex-1 flex flex-col items-center gap-0.5 py-2 text-[10px]",
               tab === id ? "text-accent border-b-2 border-accent" : "text-secondary hover:text-primary"
             )}
           >
-            <Icon size={16} />
+            <Icon size={16} aria-hidden="true" />
             {label}
           </button>
         ))}

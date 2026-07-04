@@ -35,6 +35,7 @@ use crate::{
     SetSpotlightRequest, SendMeetingReactionRequest,
     SetOutOfOfficeRequest,
     UpdateNotificationPreferenceRequest, UpdateTagRequest,
+<<<<<<< HEAD
     CreateCustomEmojiRequest, CreateWikiPageRequest, UpdateWikiPageRequest,
     CreateTaskBoardRequest, CreateTaskRequest, UpdateTaskRequest,
     TranslateRequest,
@@ -43,6 +44,9 @@ use crate::{
     CreateCalendarIntegrationRequest,
     CreateContactSyncRequest,
     CreateConnectorRequest, UpdateConnectorRequest,
+=======
+    CreateConditionalAccessPolicyRequest, UpdateConditionalAccessPolicyRequest,
+>>>>>>> worktree-agent-ac96f54e
 };
 
 type SharedState = Arc<AppState>;
@@ -176,6 +180,14 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/v1/admin/ediscovery/export", get(discovery_export))
         .route("/v1/admin/ediscovery/search", get(discovery_search))
+        .route(
+            "/v1/admin/conditional-access",
+            get(list_conditional_access_policies).post(create_conditional_access_policy),
+        )
+        .route(
+            "/v1/admin/conditional-access/{id}",
+            put(update_conditional_access_policy).delete(delete_conditional_access_policy),
+        )
         .route(
             "/v1/scim/v2/Users",
             get(scim_list_users).post(scim_create_user),
@@ -3514,6 +3526,69 @@ fn parse_discovery_time(value: Option<&str>) -> Result<Option<DateTime<Utc>>, Ap
     DateTime::parse_from_rfc3339(value)
         .map(|date| Some(date.with_timezone(&Utc)))
         .map_err(|_| ApiError::Conflict(format!("invalid RFC3339 timestamp: {value}")))
+}
+
+// ─── Conditional Access Policies ───
+
+async fn list_conditional_access_policies(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::ConditionalAccessPolicy>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.list_conditional_access_policies()))
+}
+
+async fn create_conditional_access_policy(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<CreateConditionalAccessPolicyRequest>,
+) -> Result<(StatusCode, Json<crate::ConditionalAccessPolicy>), ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let policy = state.create_conditional_access_policy(req);
+    state.record_audit_event(
+        &principal,
+        "conditional_access.created",
+        Some(format!("id={} name={}", policy.id, policy.name)),
+    );
+    Ok((StatusCode::CREATED, Json(policy)))
+}
+
+async fn update_conditional_access_policy(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateConditionalAccessPolicyRequest>,
+) -> Result<Json<crate::ConditionalAccessPolicy>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    match state.update_conditional_access_policy(id, req) {
+        Some(policy) => {
+            state.record_audit_event(
+                &principal,
+                "conditional_access.updated",
+                Some(format!("id={}", id)),
+            );
+            Ok(Json(policy))
+        }
+        None => Err(ApiError::NotFound),
+    }
+}
+
+async fn delete_conditional_access_policy(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if state.delete_conditional_access_policy(id) {
+        state.record_audit_event(
+            &principal,
+            "conditional_access.deleted",
+            Some(format!("id={}", id)),
+        );
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
 }
 
 // ─── SCIM Provisioning ───

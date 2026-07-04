@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useCallback } from "react";
 import { Phone, PhoneOff } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/cn";
@@ -6,6 +6,7 @@ import { CallerAvatar } from "./CallerAvatar";
 import { useCallStore } from "@/store/callStore";
 import { useCallActions } from "@/hooks/useCallActions";
 import { playRingtone } from "@/lib/notificationSound";
+import { t } from "@/lib/i18n";
 
 export function IncomingCallOverlay() {
   const incomingCall = useCallStore((s) => s.incomingCall);
@@ -29,6 +30,45 @@ export function IncomingCallOverlay() {
 
   const handleAccept = () => answerIncomingCall();
   const handleReject = () => rejectIncomingCall();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const acceptRef = useRef<HTMLButtonElement>(null);
+  const previousFocusRef = useRef<Element | null>(null);
+
+  // Focus trap: autofocus accept button and trap Tab
+  useEffect(() => {
+    if (incomingCall) {
+      previousFocusRef.current = document.activeElement;
+      setTimeout(() => acceptRef.current?.focus(), 100);
+    } else if (previousFocusRef.current instanceof HTMLElement) {
+      previousFocusRef.current.focus();
+      previousFocusRef.current = null;
+    }
+  }, [incomingCall]);
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === "Escape") {
+        handleReject();
+        return;
+      }
+      if (e.key === "Tab" && dialogRef.current) {
+        const focusable = dialogRef.current.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        );
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    },
+    [handleReject]
+  );
 
   return (
     <AnimatePresence>
@@ -44,6 +84,11 @@ export function IncomingCallOverlay() {
 
           {/* Panel */}
           <motion.div
+            ref={dialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("call.incoming")}
+            onKeyDown={handleKeyDown}
             initial={{ opacity: 0, y: "100%" }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: "100%" }}
@@ -95,6 +140,7 @@ export function IncomingCallOverlay() {
               </motion.button>
 
               <motion.button
+                ref={acceptRef}
                 whileTap={{ scale: 0.9 }}
                 onClick={handleAccept}
                 className={cn(
@@ -104,7 +150,7 @@ export function IncomingCallOverlay() {
                   "hover:brightness-110 transition-all"
                 )}
                 style={{ boxShadow: "0 0 20px rgba(34, 197, 94, 0.35)" }}
-                aria-label="Accept call"
+                aria-label={t("call.accept")}
               >
                 <Phone size={20} fill="currentColor" />
                 <span>Accept</span>

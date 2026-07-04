@@ -100,6 +100,7 @@ function ToastItem({
       <button
         onClick={() => onDismiss(t.id)}
         className="shrink-0 text-tertiary hover:text-secondary"
+        aria-label="Dismiss"
       >
         <X size={12} />
       </button>

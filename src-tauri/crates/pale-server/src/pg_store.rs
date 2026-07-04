@@ -102,12 +102,13 @@ impl PgStore {
             include_str!("../migrations/036_sso_providers.sql"),
             include_str!("../migrations/037_encryption_config.sql"),
             include_str!("../migrations/038_admin_elevations.sql"),
-            include_str!("../migrations/036_devices_rooms_delegation.sql"),
-            include_str!("../migrations/036_custom_emojis.sql"),
-            include_str!("../migrations/037_wiki_pages.sql"),
-            include_str!("../migrations/038_task_boards.sql"),
-            include_str!("../migrations/039_adaptive_cards.sql"),
-            include_str!("../migrations/036_platform_integrations.sql"),
+            include_str!("../migrations/039_devices_rooms_delegation.sql"),
+            include_str!("../migrations/040_custom_emojis.sql"),
+            include_str!("../migrations/041_wiki_pages.sql"),
+            include_str!("../migrations/042_task_boards.sql"),
+            include_str!("../migrations/043_adaptive_cards.sql"),
+            include_str!("../migrations/044_platform_integrations.sql"),
+            include_str!("../migrations/045_conditional_access.sql"),
         ];
 
         for (i, sql) in migrations.iter().enumerate() {

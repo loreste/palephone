@@ -71,6 +71,9 @@ export function SearchOverlay({ open, onClose }: SearchOverlayProps) {
             className="fixed inset-0 z-50 bg-base/50 backdrop-blur-sm"
           />
           <motion.div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Search messages"
             initial={{ opacity: 0, scale: 0.95, y: -10 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.95, y: -10 }}
@@ -93,7 +96,7 @@ export function SearchOverlay({ open, onClose }: SearchOverlayProps) {
                 className="flex-1 bg-transparent text-sm text-primary placeholder:text-tertiary focus:outline-none"
               />
               {query && (
-                <button onClick={() => handleSearch("")} className="text-tertiary hover:text-secondary">
+                <button onClick={() => handleSearch("")} className="text-tertiary hover:text-secondary" aria-label="Clear search">
                   <X size={14} />
                 </button>
               )}

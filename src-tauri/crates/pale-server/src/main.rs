@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use clap::Parser;
 use pale_server::{
-    http, metrics,
+    cli, http, metrics,
     pjsip_runtime::{PjsipRuntime, PjsipRuntimeConfig, TlsConfig},
     sip, AppState, MediaConfig, ServerConfig, TurnConfig, TurnTransport,
 };
@@ -69,6 +70,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     } else {
         log::info!("No PALE_DATABASE_URL set — using SQLite-only persistence");
+    }
+
+    // CLI mode: if --cli flag is passed, run CLI commands and exit
+    if std::env::args().any(|arg| arg == "--cli") {
+        let cli_args: Vec<String> = std::env::args()
+            .skip_while(|arg| arg != "--cli")
+            .skip(1)
+            .collect();
+        let mut full_args = vec!["pale-server".to_string()];
+        full_args.extend(cli_args);
+        match cli::Cli::try_parse_from(&full_args) {
+            Ok(parsed) => {
+                cli::run_cli(parsed, &app_state);
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
     }
 
     // Rate limiting

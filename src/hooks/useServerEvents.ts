@@ -38,6 +38,7 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
   const removeMessage = useChatStore((s) => s.removeMessage);
   const upsertRoom = useChatStore((s) => s.upsertRoom);
   const setTypingUsers = useChatStore((s) => s.setTypingUsers);
+  const setOffline = useChatStore((s) => s.setOffline);
   const addActivity = useActivityStore((s) => s.addItem);
   const updateToken = useServerStore((s) => s.updateToken);
   const tokenExpiresAt = useServerStore((s) => s.tokenExpiresAt);
@@ -60,6 +61,24 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
       const url = `${baseUrl.replace(/\/+$/, "")}/v1/events`;
       const es = new EventSource(`${url}?token=${encodeURIComponent(token)}`);
       sourceRef.current = es;
+
+      es.onopen = () => {
+        setOffline(false);
+        // Flush any queued messages on reconnect
+        const queued = useChatStore.getState().flushQueue();
+        if (queued.length > 0 && baseUrl && token) {
+          for (const msg of queued) {
+            fetch(`${baseUrl.replace(/\/+$/, "")}/v1/rooms/${msg.room_id}/messages`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`,
+              },
+              body: JSON.stringify({ body: msg.body }),
+            }).catch(() => {});
+          }
+        }
+      };
 
       es.addEventListener("presence", (e) => {
         try {
@@ -453,6 +472,7 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
       es.onerror = () => {
         es.close();
         sourceRef.current = null;
+        setOffline(true);
         reconnectRef.current = window.setTimeout(connect, RECONNECT_DELAY_MS);
       };
     };
@@ -483,6 +503,7 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
     removeMessage,
     upsertRoom,
     setTypingUsers,
+    setOffline,
     addActivity,
   ]);
 
