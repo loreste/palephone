@@ -154,6 +154,48 @@ export interface AdminSnapshot {
   presence: AdminPresence[];
 }
 
+export interface SecurityPostureControl {
+  id: string;
+  category: string;
+  title: string;
+  status: "pass" | "warning" | "fail";
+  score: number;
+  max_score: number;
+  summary: string;
+  remediation: string;
+}
+
+export interface SecurityPostureRecommendation {
+  control_id: string;
+  priority: "high" | "medium" | "low";
+  title: string;
+  action: string;
+}
+
+export interface SecurityPostureReport {
+  score: number;
+  max_score: number;
+  posture: "strong" | "moderate" | "needs_attention";
+  generated_at: string;
+  controls: SecurityPostureControl[];
+  recommendations: SecurityPostureRecommendation[];
+  counts: {
+    active_users: number;
+    mfa_enabled_users: number;
+    enabled_sso_providers: number;
+    enabled_conditional_access_policies: number;
+    enabled_dlp_policies: number;
+    retention_policies: number;
+    legal_hold_policies: number;
+    enabled_information_barriers: number;
+    sensitivity_labels: number;
+    encryption_keys: number;
+    enabled_data_residency_regions: number;
+    audit_events: number;
+    pending_compliance_reviews: number;
+  };
+}
+
 export interface CreateUserInput {
   display_name: string;
   sip_uri: string;
@@ -393,6 +435,10 @@ export function deleteFile(baseUrl: string, token: string, id: string) {
 
 export function loadPresence(baseUrl: string, token: string) {
   return adminGet<AdminPresence[]>(baseUrl, token, "/v1/presence");
+}
+
+export function loadSecurityPosture(baseUrl: string, token: string) {
+  return adminGet<SecurityPostureReport>(baseUrl, token, "/v1/admin/security-score");
 }
 
 // ─── MFA / TOTP ───
