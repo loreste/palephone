@@ -38,5 +38,7 @@ regex = "1"
 totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
 hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+jsonwebtoken = "9"
+url = "2"
 urlencoding = "2"
 clap = { version = "4", features = ["derive"] }
