@@ -294,6 +294,58 @@
         margin: 0;
       }
 
+      .screenshots {
+        display: grid;
+        gap: 22px;
+      }
+
+      .screenshot-card {
+        border: 1px solid var(--line);
+        background: rgba(14, 16, 20, 0.86);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+
+      .screenshot-card.featured {
+        display: grid;
+        grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
+        align-items: stretch;
+      }
+
+      .screenshot-card img {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        background: #0c0d10;
+      }
+
+      .screenshot-card.featured img {
+        min-height: 360px;
+      }
+
+      .screenshot-copy {
+        padding: 24px;
+        display: grid;
+        align-content: center;
+      }
+
+      .screenshot-copy h3 {
+        margin: 0 0 10px;
+        font-size: 1.2rem;
+      }
+
+      .screenshot-copy p {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .screenshot-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+      }
+
       .downloads {
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -433,9 +485,15 @@
 
         .hero-grid,
         .grid,
+        .screenshot-card.featured,
+        .screenshot-grid,
         .downloads,
         .docs-layout {
           grid-template-columns: 1fr;
+        }
+
+        .screenshot-card.featured img {
+          min-height: auto;
         }
 
         .toc {
@@ -457,6 +515,7 @@
         </a>
         <nav class="nav-links" aria-label="Main navigation">
           <a href="#capabilities">Capabilities</a>
+          <a href="#screenshots">Screenshots</a>
           <a href="#enterprise">Enterprise</a>
           <a href="#downloads">Downloads</a>
           <a href="#docs">Docs</a>
@@ -563,6 +622,69 @@
                 federation records, and automation records.
               </p>
             </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="screenshots">
+        <div class="shell">
+          <div class="section-head">
+            <h2>See the application, not a mockup.</h2>
+            <p>
+              These screenshots are from the current Pale desktop client
+              connected to drcpbx.com. They show the calling surface, admin
+              sign-in state, and the grouped admin console.
+            </p>
+          </div>
+
+          <div class="screenshots">
+            <article class="screenshot-card featured">
+              <img
+                src="/assets/pale-admin-console.png"
+                alt="Pale admin console showing grouped navigation, user presence, registrations, routing, and subscriptions"
+                loading="lazy"
+              />
+              <div class="screenshot-copy">
+                <h3>Admin console</h3>
+                <p>
+                  Super admins can manage PBX resources, user presence, SIP
+                  records, routing, calls, conferences, and platform controls
+                  from the desktop client.
+                </p>
+              </div>
+            </article>
+
+            <div class="screenshot-grid">
+              <article class="screenshot-card">
+                <img
+                  src="/assets/pale-dialer.png"
+                  alt="Pale desktop dialer with SIP URI entry, numeric keypad, and bottom navigation"
+                  loading="lazy"
+                />
+                <div class="screenshot-copy">
+                  <h3>Calling workspace</h3>
+                  <p>
+                    The main client keeps calls, chat, people, files, recent
+                    activity, calendar, admin, and settings in one workspace.
+                  </p>
+                </div>
+              </article>
+
+              <article class="screenshot-card">
+                <img
+                  src="/assets/pale-admin-signin.png"
+                  alt="Pale admin sign-in form with server URL, username, password, and SSO option"
+                  loading="lazy"
+                />
+                <div class="screenshot-copy">
+                  <h3>Admin access</h3>
+                  <p>
+                    Admin features are role-based and connect to the backend
+                    server URL configured for the signed-in deployment.
+                  </p>
+                </div>
+              </article>
+            </div>
           </div>
         </div>
       </section>
