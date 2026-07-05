@@ -271,8 +271,12 @@ pub const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
         include_str!("../migrations/063_data_residency.sql"),
     ),
     (
-        "064_push_subscriptions.sql",
-        include_str!("../migrations/064_push_subscriptions.sql"),
+        "064_message_threads.sql",
+        include_str!("../migrations/064_message_threads.sql"),
+    ),
+    (
+        "065_push_subscriptions.sql",
+        include_str!("../migrations/065_push_subscriptions.sql"),
     ),
 ];
 

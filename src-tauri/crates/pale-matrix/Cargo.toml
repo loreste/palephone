@@ -1,6 +1,6 @@
 [package]
 name = "pale-matrix"
-version = "0.1.0"
+version = "0.1.1"
 license = "GPL-2.0-only"
 edition = "2021"
 description = "Matrix protocol integration for Pale — chat, file transfer, E2E encryption"

@@ -1,6 +1,6 @@
 [package]
 name = "pale-server"
-version = "0.1.0"
+version = "0.1.1"
 license = "GPL-2.0-only"
 edition = "2021"
 description = "Backend infrastructure server for Pale SIP, files, and conferences"
@@ -31,7 +31,7 @@ chacha20poly1305 = "0.10"
 rusqlite = { version = "0.37", features = ["bundled", "chrono", "uuid"] }
 tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
 deadpool-postgres = "0.14"
-ldap3 = "0.11"
+ldap3 = { version = "0.11", default-features = false, features = ["tls-rustls"] }
 chrono-tz = "0.10"
 rand = "0.8"
 regex = "1"

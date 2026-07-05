@@ -1,4 +1,4 @@
--- Migration 064: Web push notification subscriptions
+-- Migration 065: Web push notification subscriptions
 CREATE TABLE IF NOT EXISTS push_subscriptions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_uri TEXT NOT NULL,
