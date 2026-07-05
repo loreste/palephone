@@ -880,7 +880,85 @@ function NotificationSettingsPanel() {
           Save
         </button>
       </div>
+
+      <PushNotificationSettings />
     </div>
+  );
+}
+
+function PushNotificationSettings() {
+  const { baseUrl, token, connected } = useServerStore();
+  const [pushEnabled, setPushEnabled] = useState(false);
+  const [pushSupported, setPushSupported] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    // Check if push is supported in this environment
+    const isTauri = Boolean((window as any).__TAURI_INTERNALS__);
+    const supported = !isTauri && "serviceWorker" in navigator && "PushManager" in window;
+    setPushSupported(supported);
+
+    if (supported) {
+      navigator.serviceWorker.ready.then((reg) => {
+        reg.pushManager.getSubscription().then((sub) => {
+          setPushEnabled(sub !== null);
+        });
+      }).catch(() => {});
+    }
+  }, []);
+
+  const handleTogglePush = async () => {
+    if (!baseUrl || !token) return;
+    setLoading(true);
+    try {
+      const { subscribeToPush, unsubscribeFromPush } = await import("@/lib/pushSubscription");
+      if (pushEnabled) {
+        await unsubscribeFromPush(baseUrl, token);
+        setPushEnabled(false);
+        toast({ type: "success", title: "Push notifications disabled" });
+      } else {
+        const ok = await subscribeToPush(baseUrl, token);
+        setPushEnabled(ok);
+        if (ok) {
+          toast({ type: "success", title: "Push notifications enabled" });
+        } else {
+          toast({ type: "error", title: "Could not enable push notifications" });
+        }
+      }
+    } catch (err) {
+      toast({ type: "error", title: "Push notification error", description: String(err) });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!pushSupported) return null;
+
+  return (
+    <>
+      <SectionHeader title="Push Notifications" />
+      <div className="flex items-center justify-between py-1">
+        <div>
+          <span className="text-sm text-primary">Browser push notifications</span>
+          <p className="text-xs text-tertiary mt-0.5">
+            Receive notifications even when the app is in the background
+          </p>
+        </div>
+        <button
+          onClick={handleTogglePush}
+          disabled={loading || !connected}
+          className={cn(
+            "px-3 py-1.5 rounded-md text-xs font-medium transition-colors",
+            pushEnabled
+              ? "bg-red-500/10 text-red-500 hover:bg-red-500/20"
+              : "bg-accent text-inverse hover:bg-accent-hover",
+            (loading || !connected) && "opacity-50 cursor-not-allowed"
+          )}
+        >
+          {loading ? "..." : pushEnabled ? "Disable" : "Enable"}
+        </button>
+      </div>
+    </>
   );
 }
 

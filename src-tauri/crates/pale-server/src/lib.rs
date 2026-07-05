@@ -21,6 +21,8 @@ pub mod pg_store;
 pub mod pjsip_runtime;
 pub mod sip;
 mod storage;
+pub mod storage_backend;
+pub mod web_push;
 
 pub use pg_store::PgStore;
 use storage::{Store, StoredObject};
@@ -397,6 +399,14 @@ pub struct AppState {
     pg_failure_count: Arc<std::sync::atomic::AtomicU64>,
     /// LiveKit SFU configuration (when set, conferences use LiveKit for media).
     livekit: Option<livekit::LiveKitConfig>,
+    /// Pluggable file storage backend (local disk or S3).
+    storage_client: Option<storage_backend::StorageClient>,
+    /// VAPID configuration for Web Push notifications.
+    vapid_config: Option<web_push::VapidConfig>,
+    /// Web Push subscriptions keyed by subscription ID.
+    push_subscriptions: ShardedMap<Uuid, web_push::PushSubscription>,
+    /// HTTP client for sending push notifications.
+    push_http_client: reqwest::Client,
 }
 
 impl fmt::Debug for ServerConfig {
@@ -619,6 +629,10 @@ impl AppState {
             pg: None,
             pg_failure_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             livekit: None,
+            storage_client: None,
+            vapid_config: None,
+            push_subscriptions: ShardedMap::new(),
+            push_http_client: reqwest::Client::new(),
         }
     }
 
@@ -650,6 +664,140 @@ impl AppState {
     /// Returns the LiveKit configuration, if present.
     pub fn livekit_config(&self) -> Option<&livekit::LiveKitConfig> {
         self.livekit.as_ref()
+    }
+
+    // ─── Storage Backend ───
+
+    /// Set the storage backend (local or S3).
+    pub fn set_storage_client(&mut self, client: storage_backend::StorageClient) {
+        self.storage_client = Some(client);
+    }
+
+    /// Get the storage client, falling back to a local client if none is set.
+    pub fn storage_client(&self) -> storage_backend::StorageClient {
+        self.storage_client
+            .clone()
+            .unwrap_or_else(|| storage_backend::StorageClient::local(self.files_dir()))
+    }
+
+    // ─── Web Push ───
+
+    /// Set the VAPID configuration for Web Push.
+    pub fn set_vapid_config(&mut self, config: web_push::VapidConfig) {
+        self.vapid_config = Some(config);
+    }
+
+    /// Get the VAPID public key (for client subscription).
+    pub fn vapid_public_key(&self) -> Option<String> {
+        self.vapid_config.as_ref().map(|c| c.public_key.clone())
+    }
+
+    /// Register a push subscription for the given user.
+    pub fn add_push_subscription(
+        &self,
+        user_uri: &str,
+        request: &web_push::PushSubscribeRequest,
+    ) -> web_push::PushSubscription {
+        // Remove any existing subscription with the same endpoint
+        let existing: Vec<Uuid> = self
+            .push_subscriptions
+            .values()
+            .iter()
+            .filter(|s| s.endpoint == request.endpoint)
+            .map(|s| s.id)
+            .collect();
+        for id in existing {
+            self.push_subscriptions.remove(&id);
+        }
+
+        let sub = web_push::PushSubscription {
+            id: Uuid::new_v4(),
+            user_uri: user_uri.to_string(),
+            endpoint: request.endpoint.clone(),
+            p256dh: request.p256dh.clone(),
+            auth: request.auth.clone(),
+            created_at: Utc::now(),
+        };
+        self.push_subscriptions.insert(sub.id, sub.clone());
+        self.pg_spawn({
+            let sub = sub.clone();
+            move |pg| Box::pin(async move { pg.insert_push_subscription(&sub).await })
+        });
+        sub
+    }
+
+    /// Remove a push subscription by endpoint.
+    pub fn remove_push_subscription(&self, user_uri: &str, endpoint: &str) -> bool {
+        let to_remove: Vec<Uuid> = self
+            .push_subscriptions
+            .values()
+            .iter()
+            .filter(|s| s.user_uri == user_uri && s.endpoint == endpoint)
+            .map(|s| s.id)
+            .collect();
+        let removed = !to_remove.is_empty();
+        for id in to_remove {
+            self.push_subscriptions.remove(&id);
+            self.pg_spawn(move |pg| Box::pin(async move { pg.delete_push_subscription(id).await }));
+        }
+        removed
+    }
+
+    /// Remove a push subscription by ID (used when receiving a 410 Gone).
+    pub fn remove_push_subscription_by_id(&self, id: Uuid) {
+        self.push_subscriptions.remove(&id);
+        self.pg_spawn(move |pg| Box::pin(async move { pg.delete_push_subscription(id).await }));
+    }
+
+    /// Get all push subscriptions for a user.
+    pub fn push_subscriptions_for_user(&self, user_uri: &str) -> Vec<web_push::PushSubscription> {
+        self.push_subscriptions
+            .values()
+            .into_iter()
+            .filter(|s| s.user_uri == user_uri)
+            .collect()
+    }
+
+    /// Send a push notification to all of a user's subscriptions.
+    pub fn notify_user_push(
+        &self,
+        user_uri: &str,
+        title: &str,
+        body: &str,
+        tag: Option<String>,
+    ) {
+        let Some(config) = self.vapid_config.clone() else {
+            return;
+        };
+        let subscriptions = self.push_subscriptions_for_user(user_uri);
+        if subscriptions.is_empty() {
+            return;
+        }
+        let http_client = self.push_http_client.clone();
+        let payload = web_push::PushPayload {
+            title: title.to_string(),
+            body: body.to_string(),
+            tag,
+            url: None,
+        };
+        for sub in subscriptions {
+            let client = http_client.clone();
+            let cfg = config.clone();
+            let p = payload.clone();
+            let sub_id = sub.id;
+            // We can't borrow self in spawn, so collect IDs to remove
+            tokio::spawn(async move {
+                match web_push::send_push_notification(&client, &cfg, &sub, &p).await {
+                    Ok(()) => {}
+                    Err(web_push::PushError::Gone) => {
+                        log::info!("push subscription {} is gone, will be cleaned up", sub_id);
+                    }
+                    Err(e) => {
+                        log::warn!("push notification failed for {}: {}", sub.endpoint, e);
+                    }
+                }
+            });
+        }
     }
 
     pub fn set_rate_limit_rps(&mut self, rps: u32) {
@@ -953,6 +1101,18 @@ impl AppState {
                 }
             }
             Err(e) => log::warn!("Failed to load hotdesk sessions from Postgres: {}", e),
+        }
+        match pg.load_push_subscriptions().await {
+            Ok(subs) => {
+                let count = subs.len();
+                for sub in subs {
+                    self.push_subscriptions.insert(sub.id, sub);
+                }
+                if count > 0 {
+                    log::info!("Loaded {} push subscriptions from PostgreSQL", count);
+                }
+            }
+            Err(e) => log::warn!("Failed to load push subscriptions from Postgres: {}", e),
         }
         log::info!("Loaded data from PostgreSQL into memory cache");
     }
@@ -5008,6 +5168,15 @@ impl AppState {
         self.calls.insert(call.id, call.clone());
         self.calls.trim_to_len(MAX_CALLS);
         self.persist(&call);
+        // Push notifications to callees for incoming calls
+        for callee in &call.callees {
+            self.notify_user_push(
+                callee,
+                &format!("Incoming call from {}", sip_user_part(&call.caller)),
+                "Tap to answer",
+                Some(format!("call-{}", call.id)),
+            );
+        }
         Ok(call)
     }
 
@@ -9358,6 +9527,34 @@ impl AppState {
             event_type: "room_message".to_string(),
             payload: serde_json::to_value(&decrypted_msg).unwrap_or_default(),
         });
+        // Push notifications to mentioned users and DM recipients
+        if let Some(room) = room.as_ref() {
+            let plain_body = self.decrypt_field(&msg.body);
+            // Notify mentioned users
+            for mentioned_uri in &msg.mentioned_user_uris {
+                if mentioned_uri != sender_uri {
+                    self.notify_user_push(
+                        mentioned_uri,
+                        &format!("Mentioned by {}", sip_user_part(sender_uri)),
+                        &plain_body,
+                        Some(format!("room-{}", room_id)),
+                    );
+                }
+            }
+            // For DMs (2-member rooms), notify the other party
+            if room.members.len() == 2 && msg.mentioned_user_uris.is_empty() {
+                for member in &room.members {
+                    if member.user_sip_uri != sender_uri {
+                        self.notify_user_push(
+                            &member.user_sip_uri,
+                            &format!("Message from {}", sip_user_part(sender_uri)),
+                            &plain_body,
+                            Some(format!("dm-{}", room_id)),
+                        );
+                    }
+                }
+            }
+        }
         Ok(decrypted_msg)
     }
 

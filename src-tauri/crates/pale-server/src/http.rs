@@ -946,6 +946,12 @@ pub fn router(state: SharedState) -> Router {
             put(update_signage_display).delete(delete_signage_display),
         )
         .route("/v1/signage/{id}/content", get(get_signage_content))
+        // Storage status
+        .route("/v1/admin/storage/status", get(admin_storage_status))
+        // Web Push
+        .route("/v1/push/subscribe", post(push_subscribe))
+        .route("/v1/push/unsubscribe", delete(push_unsubscribe))
+        .route("/v1/push/vapid-key", get(push_vapid_key))
         .route("/v1/events", get(sse_stream))
         .layer(from_fn(crate::metrics::request_metrics))
         .layer(from_fn(cors))
@@ -3460,7 +3466,7 @@ async fn upload_file(
         header_string(&headers, "x-pale-folder-id").and_then(|s| Uuid::parse_str(&s).ok());
     let room_id = header_string(&headers, "x-pale-room-id").and_then(|s| Uuid::parse_str(&s).ok());
 
-    tokio::fs::create_dir_all(state.files_dir()).await?;
+    let backend = state.storage_client();
 
     // Check if a file with the same name exists in the same room/folder — if so, create a version
     let existing = room_id.and_then(|_rid| {
@@ -3484,10 +3490,11 @@ async fn upload_file(
         // Save current file as a version if this is the first time versioning
         if versions.is_empty() {
             let v1_id = Uuid::new_v4();
-            let v1_path = state.file_version_path(v1_id);
+            let v1_storage_key = format!("version_{}", v1_id);
             // Copy current file content to version storage
-            if let Ok(current_bytes) = tokio::fs::read(state.file_path(existing_file.id)).await {
-                let _ = tokio::fs::write(&v1_path, &current_bytes).await;
+            let main_key = existing_file.id.to_string();
+            if let Ok(current_bytes) = backend.download(&main_key).await {
+                let _ = backend.upload(&v1_storage_key, &current_bytes).await;
             }
             state.add_file_version(crate::FileVersion {
                 id: v1_id,
@@ -3497,14 +3504,16 @@ async fn upload_file(
                 size: existing_file.size as i64,
                 sha256: existing_file.sha256.clone(),
                 created_at: existing_file.created_at,
-                storage_path: v1_path.to_string_lossy().to_string(),
+                storage_path: v1_storage_key,
             });
         }
 
         // Save the new upload as the latest version
         let ver_id = Uuid::new_v4();
-        let ver_path = state.file_version_path(ver_id);
-        tokio::fs::write(&ver_path, &body).await?;
+        let ver_storage_key = format!("version_{}", ver_id);
+        backend.upload(&ver_storage_key, &body).await.map_err(|e| {
+            ApiError::Internal(format!("storage upload failed: {e}"))
+        })?;
         state.add_file_version(crate::FileVersion {
             id: ver_id,
             file_id: existing_file.id,
@@ -3513,12 +3522,14 @@ async fn upload_file(
             size: body.len() as i64,
             sha256: sha256.clone(),
             created_at: Utc::now(),
-            storage_path: ver_path.to_string_lossy().to_string(),
+            storage_path: ver_storage_key,
         });
 
         // Update the main file record with new content
-        let path = state.file_path(existing_file.id);
-        tokio::fs::write(&path, &body).await?;
+        let main_key = existing_file.id.to_string();
+        backend.upload(&main_key, &body).await.map_err(|e| {
+            ApiError::Internal(format!("storage upload failed: {e}"))
+        })?;
 
         let mut updated = existing_file;
         updated.size = body.len() as u64;
@@ -3536,8 +3547,10 @@ async fn upload_file(
     }
 
     let id = Uuid::new_v4();
-    let path = state.file_path(id);
-    tokio::fs::write(&path, &body).await?;
+    let storage_key = id.to_string();
+    backend.upload(&storage_key, &body).await.map_err(|e| {
+        ApiError::Internal(format!("storage upload failed: {e}"))
+    })?;
 
     let record = FileRecord {
         id,
@@ -3603,7 +3616,11 @@ async fn download_file(
         );
         return Err(ApiError::Forbidden);
     }
-    let bytes = tokio::fs::read(state.file_path(id)).await?;
+    let backend = state.storage_client();
+    let storage_key = id.to_string();
+    let bytes = backend.download(&storage_key).await.map_err(|e| {
+        ApiError::Internal(format!("storage download failed: {e}"))
+    })?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -3643,10 +3660,10 @@ async fn delete_file(
             .ok_or(ApiError::NotFound)?
     } else {
         let record = state.delete_file_record(id).ok_or(ApiError::NotFound)?;
-        match tokio::fs::remove_file(state.file_path(id)).await {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
+        let backend = state.storage_client();
+        let storage_key = id.to_string();
+        if let Err(e) = backend.delete(&storage_key).await {
+            log::warn!("failed to delete file {} from storage: {}", id, e);
         }
         record
     };
@@ -8564,6 +8581,58 @@ impl<'de> serde::Deserialize<'de> for SensitiveString {
     {
         String::deserialize(deserializer).map(Self)
     }
+}
+
+// ─── Storage Status ───
+
+async fn admin_storage_status(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let requester = authenticated_principal(&headers, &state)?;
+    state.record_audit_event(&requester, "admin.storage_status_viewed", None);
+    let backend = state.storage_client();
+    let info = backend.backend_info();
+    let connectivity = match backend.check_connectivity().await {
+        Ok(()) => "ok".to_string(),
+        Err(e) => format!("error: {e}"),
+    };
+    Ok(Json(json!({
+        "backend": info,
+        "connectivity": connectivity,
+        "file_count": state.file_records().len(),
+    })))
+}
+
+// ─── Web Push ───
+
+async fn push_subscribe(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::web_push::PushSubscribeRequest>,
+) -> Result<Json<crate::web_push::PushSubscription>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let sub = state.add_push_subscription(&principal, &input);
+    Ok(Json(sub))
+}
+
+async fn push_unsubscribe(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::web_push::PushUnsubscribeRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let removed = state.remove_push_subscription(&principal, &input.endpoint);
+    Ok(Json(json!({ "removed": removed })))
+}
+
+async fn push_vapid_key(
+    State(state): State<SharedState>,
+) -> Json<serde_json::Value> {
+    Json(json!({
+        "vapid_public_key": state.vapid_public_key().unwrap_or_default(),
+        "enabled": state.vapid_public_key().is_some(),
+    }))
 }
 
 #[derive(Debug, thiserror::Error)]

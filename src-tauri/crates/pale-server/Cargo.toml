@@ -42,3 +42,7 @@ jsonwebtoken = "9"
 url = "2"
 urlencoding = "2"
 clap = { version = "4", features = ["derive"] }
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1"
+p256 = { version = "0.13", features = ["ecdsa", "jwk"] }
+jwt-simple = "0.12"

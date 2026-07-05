@@ -84,6 +84,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         log::info!("LiveKit not configured — conferences use signaling-only mode");
     }
 
+    // Configure S3 storage backend if PALE_S3_BUCKET is set
+    if let Some(s3_config) = pale_server::storage_backend::S3Config::from_env() {
+        log::info!(
+            "S3 storage configured: bucket={} region={} endpoint={}",
+            s3_config.bucket,
+            s3_config.region,
+            s3_config.endpoint.as_deref().unwrap_or("default"),
+        );
+        let client = pale_server::storage_backend::StorageClient::s3(&s3_config).await;
+        app_state.set_storage_client(client);
+    } else {
+        log::info!("S3 not configured — using local file storage");
+        let client =
+            pale_server::storage_backend::StorageClient::local(config.data_dir.join("files"));
+        app_state.set_storage_client(client);
+    }
+
+    // Configure VAPID for Web Push notifications
+    if let Some(vapid_config) = pale_server::web_push::VapidConfig::from_env() {
+        log::info!(
+            "Web Push VAPID configured (subject={})",
+            vapid_config.subject,
+        );
+        app_state.set_vapid_config(vapid_config);
+    } else {
+        log::info!("Web Push not configured — set PALE_VAPID_PUBLIC_KEY and PALE_VAPID_PRIVATE_KEY to enable");
+    }
+
     // CLI mode: if --cli flag is passed, run CLI commands and exit
     if std::env::args().any(|arg| arg == "--cli") {
         let cli_args: Vec<String> = std::env::args()

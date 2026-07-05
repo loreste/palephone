@@ -270,6 +270,10 @@ pub const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
         "063_data_residency.sql",
         include_str!("../migrations/063_data_residency.sql"),
     ),
+    (
+        "064_push_subscriptions.sql",
+        include_str!("../migrations/064_push_subscriptions.sql"),
+    ),
 ];
 
 /// PostgreSQL-backed persistent store using deadpool connection pool.
@@ -2380,6 +2384,64 @@ impl PgStore {
             .execute("DELETE FROM tasks WHERE id = $1", &[&id])
             .await?;
         Ok(())
+    }
+
+    // ─── Push Subscriptions ───
+
+    pub async fn insert_push_subscription(
+        &self,
+        sub: &crate::web_push::PushSubscription,
+    ) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "INSERT INTO push_subscriptions (id, user_uri, endpoint, p256dh, auth, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (endpoint) DO UPDATE SET
+                    user_uri=$2, p256dh=$4, auth=$5, created_at=$6",
+                &[
+                    &sub.id,
+                    &sub.user_uri,
+                    &sub.endpoint,
+                    &sub.p256dh,
+                    &sub.auth,
+                    &sub.created_at,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_push_subscription(&self, id: Uuid) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client
+            .execute("DELETE FROM push_subscriptions WHERE id = $1", &[&id])
+            .await?;
+        Ok(())
+    }
+
+    pub async fn load_push_subscriptions(
+        &self,
+    ) -> Result<Vec<crate::web_push::PushSubscription>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT id, user_uri, endpoint, p256dh, auth, created_at FROM push_subscriptions",
+                &[],
+            )
+            .await?;
+        let mut subs = Vec::new();
+        for row in rows {
+            subs.push(crate::web_push::PushSubscription {
+                id: row.get(0),
+                user_uri: row.get(1),
+                endpoint: row.get(2),
+                p256dh: row.get(3),
+                auth: row.get(4),
+                created_at: row.get(5),
+            });
+        }
+        Ok(subs)
     }
 }
 

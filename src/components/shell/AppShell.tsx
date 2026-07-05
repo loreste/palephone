@@ -131,6 +131,13 @@ export function AppShell() {
                 }).catch(() => {});
               }
 
+              // Auto-subscribe to push notifications (non-blocking)
+              import("@/lib/pushSubscription")
+                .then(({ subscribeToPush }) =>
+                  subscribeToPush(config.server!.url!, response.token)
+                )
+                .catch(() => {});
+
               setWizardChecked(true);
               return;
             }

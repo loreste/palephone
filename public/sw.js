@@ -16,6 +16,44 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+// ─── Push Notifications ───
+
+self.addEventListener("push", (event) => {
+  let data = { title: "Pale", body: "New notification" };
+  try {
+    if (event.data) {
+      data = event.data.json();
+    }
+  } catch (_e) {
+    if (event.data) {
+      data.body = event.data.text();
+    }
+  }
+  const options = {
+    body: data.body || "",
+    icon: "/icon.svg",
+    badge: "/icon.svg",
+    tag: data.tag || "pale-notification",
+    data: { url: data.url || "/" },
+  };
+  event.waitUntil(self.registration.showNotification(data.title || "Pale", options));
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const url = event.notification.data?.url || "/";
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      for (const client of clients) {
+        if (client.url.includes(self.location.origin) && "focus" in client) {
+          return client.focus();
+        }
+      }
+      return self.clients.openWindow(url);
+    }),
+  );
+});
+
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   const url = new URL(request.url);
