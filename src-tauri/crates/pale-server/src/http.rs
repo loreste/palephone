@@ -34,14 +34,15 @@ use crate::{
     CreateTaskRequest, CreateTeamRequest, CreateUserRequest, CreateVipCallerRequest,
     CreateWhiteboardRequest, CreateWikiPageRequest, EmergencyCallingAssignment,
     FederationReceiveRequest, FederationSendRequest, FileRecord, JoinConferenceRequest,
-    OAuthTokenRequest, ProvisionUserRequest, RequestCallbackInput, RoomCallMode, ScheduleRoomMessageRequest,
-    SendMeetingReactionRequest, SendRoomMessageRequest, SetAgentStateRequest,
-    SetOutOfOfficeRequest, SetPresenceRequest, SetSpotlightRequest, StartMonitorRequest,
-    SyncCallHistoryRequest, TranslateRequest, UpdateAutomationRuleRequest, UpdateBotRequest,
-    UpdateCallStatusRequest, UpdateCollaborationPolicyRequest, UpdateComplianceReviewRequest,
-    UpdateConditionalAccessPolicyRequest, UpdateConferenceParticipantRequest,
-    UpdateConnectorRequest, UpdateDataResidencyConfigRequest, UpdateFederationPeerRequest,
-    UpdateEmergencyLocationRequest, UpdateEnterpriseIntegrationRequest, UpdateLoopComponentRequest, UpdateMeetingTemplateRequest,
+    OAuthTokenRequest, ProvisionUserRequest, RequestCallbackInput, RoomCallMode,
+    ScheduleRoomMessageRequest, SendMeetingReactionRequest, SendRoomMessageRequest,
+    SetAgentStateRequest, SetOutOfOfficeRequest, SetPresenceRequest, SetSpotlightRequest,
+    StartMonitorRequest, SyncCallHistoryRequest, TranslateRequest, UpdateAutomationRuleRequest,
+    UpdateBotRequest, UpdateCallStatusRequest, UpdateCollaborationPolicyRequest,
+    UpdateComplianceReviewRequest, UpdateConditionalAccessPolicyRequest,
+    UpdateConferenceParticipantRequest, UpdateConnectorRequest, UpdateDataResidencyConfigRequest,
+    UpdateEmergencyLocationRequest, UpdateEnterpriseIntegrationRequest,
+    UpdateFederationPeerRequest, UpdateLoopComponentRequest, UpdateMeetingTemplateRequest,
     UpdateNotificationPreferenceRequest, UpdateScheduledMeetingRequest,
     UpdateSchedulingPanelRequest, UpdateSipAccountStatusRequest, UpdateTagRequest,
     UpdateTaskRequest, UpdateWikiPageRequest, UpsertRetentionPolicyRequest,
@@ -482,10 +483,7 @@ pub fn router(state: SharedState) -> Router {
             get(export_dlp_violations_csv),
         )
         .route("/v1/admin/dlp/scan", post(scan_content_dlp))
-        .route(
-            "/v1/admin/atp/quarantine",
-            get(list_malware_quarantine),
-        )
+        .route("/v1/admin/atp/quarantine", get(list_malware_quarantine))
         .route(
             "/v1/admin/atp/quarantine/{id}",
             put(review_malware_quarantine),
@@ -1165,7 +1163,12 @@ async fn user_login(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("desktop");
     state
-        .authenticate_user(&input.sip_uri, input.password.expose(), &client_ip, device_type)
+        .authenticate_user(
+            &input.sip_uri,
+            input.password.expose(),
+            &client_ip,
+            device_type,
+        )
         .map(Json)
         .map_err(|err| match err {
             AuthError::Unauthorized => ApiError::Unauthorized,
@@ -1533,11 +1536,8 @@ async fn join_conference(
         // Ensure the room name is assigned on the conference
         if let Some(room_name) = state.ensure_livekit_room_name(id) {
             // Create the LiveKit room (idempotent – OK if already exists)
-            if let Err(e) = crate::livekit::create_room(
-                state.livekit_config().unwrap(),
-                &room_name,
-            )
-            .await
+            if let Err(e) =
+                crate::livekit::create_room(state.livekit_config().unwrap(), &room_name).await
             {
                 log::warn!("Failed to create LiveKit room {room_name}: {e}");
                 // Fall back to signaling-only mode
@@ -1759,7 +1759,9 @@ async fn start_livekit_recording(
         .livekit_config()
         .ok_or_else(|| ApiError::Conflict("LiveKit not configured".to_string()))?;
     if conference.livekit_egress_id.is_some() {
-        return Err(ApiError::Conflict("recording already in progress".to_string()));
+        return Err(ApiError::Conflict(
+            "recording already in progress".to_string(),
+        ));
     }
     let output_path = format!("recordings/pale-conf-{id}.mp4");
     let egress_id = crate::livekit::start_room_composite_egress(config, room_name, &output_path)
@@ -1855,7 +1857,11 @@ async fn update_conference_layout(
     let layout = state
         .update_conference_layout_state(id, &principal, input)
         .ok_or(ApiError::NotFound)?;
-    state.record_audit_event(&principal, "conference.layout_updated", Some(id.to_string()));
+    state.record_audit_event(
+        &principal,
+        "conference.layout_updated",
+        Some(id.to_string()),
+    );
     state.broadcast_sse(crate::SseEvent {
         event_type: "conference_layout_updated".to_string(),
         payload: serde_json::to_value(&layout).unwrap(),
@@ -1901,8 +1907,11 @@ async fn stop_stream_session(
 ) -> Result<Json<crate::MeetingStreamSession>, ApiError> {
     let (principal, role) = authenticated_principal_role(&headers, &state)?;
     let existing = state.stream_session(id).ok_or(ApiError::NotFound)?;
-    if !state.can_moderate_conference(existing.conference_id, &principal, role == crate::ROLE_ADMIN)
-    {
+    if !state.can_moderate_conference(
+        existing.conference_id,
+        &principal,
+        role == crate::ROLE_ADMIN,
+    ) {
         return Err(ApiError::Forbidden);
     }
     let session = state.stop_stream_session(id).ok_or(ApiError::NotFound)?;
@@ -2456,7 +2465,9 @@ async fn create_presentation(
     }
     let session = state
         .create_presentation_session(id, &principal, input)
-        .ok_or_else(|| ApiError::BadRequest("presentation requires at least one slide".to_string()))?;
+        .ok_or_else(|| {
+            ApiError::BadRequest("presentation requires at least one slide".to_string())
+        })?;
     state.record_audit_event(
         &principal,
         "presentation.created",
@@ -2476,10 +2487,12 @@ async fn update_presentation(
     Json(input): Json<crate::UpdatePresentationSessionRequest>,
 ) -> Result<Json<crate::PresentationSession>, ApiError> {
     let (principal, role) = authenticated_principal_role(&headers, &state)?;
-    let existing = state
-        .presentation_session(id)
-        .ok_or(ApiError::NotFound)?;
-    if !state.can_moderate_conference(existing.conference_id, &principal, role == crate::ROLE_ADMIN) {
+    let existing = state.presentation_session(id).ok_or(ApiError::NotFound)?;
+    if !state.can_moderate_conference(
+        existing.conference_id,
+        &principal,
+        role == crate::ROLE_ADMIN,
+    ) {
         return Err(ApiError::Forbidden);
     }
     let session = state
@@ -2499,13 +2512,17 @@ async fn end_presentation(
     Path(id): Path<Uuid>,
 ) -> Result<Json<crate::PresentationSession>, ApiError> {
     let (principal, role) = authenticated_principal_role(&headers, &state)?;
-    let existing = state
-        .presentation_session(id)
-        .ok_or(ApiError::NotFound)?;
-    if !state.can_moderate_conference(existing.conference_id, &principal, role == crate::ROLE_ADMIN) {
+    let existing = state.presentation_session(id).ok_or(ApiError::NotFound)?;
+    if !state.can_moderate_conference(
+        existing.conference_id,
+        &principal,
+        role == crate::ROLE_ADMIN,
+    ) {
         return Err(ApiError::Forbidden);
     }
-    let session = state.end_presentation_session(id).ok_or(ApiError::NotFound)?;
+    let session = state
+        .end_presentation_session(id)
+        .ok_or(ApiError::NotFound)?;
     state.record_audit_event(&principal, "presentation.ended", Some(id.to_string()));
     state.broadcast_sse(crate::SseEvent {
         event_type: "presentation_updated".to_string(),
@@ -3451,7 +3468,9 @@ async fn upload_file(
     let mut hasher = Sha256::new();
     hasher.update(&body);
     let sha256 = to_hex(&hasher.finalize());
-    let governance = state.file_governance_for_upload(&owner, &filename, &content_type, &body).await;
+    let governance = state
+        .file_governance_for_upload(&owner, &filename, &content_type, &body)
+        .await;
     if !governance.allowed {
         let action = if governance.dlp_status == "malware_blocked" {
             "file.upload_blocked_malware"
@@ -3530,9 +3549,10 @@ async fn upload_file(
         // Save the new upload as the latest version
         let ver_id = Uuid::new_v4();
         let ver_storage_key = format!("version_{}", ver_id);
-        backend.upload(&ver_storage_key, &body).await.map_err(|e| {
-            ApiError::Internal(format!("storage upload failed: {e}"))
-        })?;
+        backend
+            .upload(&ver_storage_key, &body)
+            .await
+            .map_err(|e| ApiError::Internal(format!("storage upload failed: {e}")))?;
         state.add_file_version(crate::FileVersion {
             id: ver_id,
             file_id: existing_file.id,
@@ -3546,9 +3566,10 @@ async fn upload_file(
 
         // Update the main file record with new content
         let main_key = existing_file.id.to_string();
-        backend.upload(&main_key, &body).await.map_err(|e| {
-            ApiError::Internal(format!("storage upload failed: {e}"))
-        })?;
+        backend
+            .upload(&main_key, &body)
+            .await
+            .map_err(|e| ApiError::Internal(format!("storage upload failed: {e}")))?;
 
         let mut updated = existing_file;
         updated.size = body.len() as u64;
@@ -3567,9 +3588,10 @@ async fn upload_file(
 
     let id = Uuid::new_v4();
     let storage_key = id.to_string();
-    backend.upload(&storage_key, &body).await.map_err(|e| {
-        ApiError::Internal(format!("storage upload failed: {e}"))
-    })?;
+    backend
+        .upload(&storage_key, &body)
+        .await
+        .map_err(|e| ApiError::Internal(format!("storage upload failed: {e}")))?;
 
     let record = FileRecord {
         id,
@@ -3637,9 +3659,10 @@ async fn download_file(
     }
     let backend = state.storage_client();
     let storage_key = id.to_string();
-    let bytes = backend.download(&storage_key).await.map_err(|e| {
-        ApiError::Internal(format!("storage download failed: {e}"))
-    })?;
+    let bytes = backend
+        .download(&storage_key)
+        .await
+        .map_err(|e| ApiError::Internal(format!("storage download failed: {e}")))?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -4275,7 +4298,11 @@ async fn create_ediscovery_case(
     let case = state
         .create_ediscovery_case(&principal, input)
         .map_err(ApiError::BadRequest)?;
-    state.record_audit_event(&principal, "ediscovery.case_created", Some(case.id.to_string()));
+    state.record_audit_event(
+        &principal,
+        "ediscovery.case_created",
+        Some(case.id.to_string()),
+    );
     Ok(Json(case))
 }
 
@@ -4286,15 +4313,13 @@ async fn update_ediscovery_case(
     Json(input): Json<crate::UpdateEDiscoveryCaseRequest>,
 ) -> Result<Json<crate::EDiscoveryCase>, ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
-    let case = state
-        .update_ediscovery_case(id, input)
-        .map_err(|err| {
-            if err.contains("not found") {
-                ApiError::NotFound
-            } else {
-                ApiError::BadRequest(err)
-            }
-        })?;
+    let case = state.update_ediscovery_case(id, input).map_err(|err| {
+        if err.contains("not found") {
+            ApiError::NotFound
+        } else {
+            ApiError::BadRequest(err)
+        }
+    })?;
     state.record_audit_event(&principal, "ediscovery.case_updated", Some(id.to_string()));
     Ok(Json(case))
 }
@@ -5177,7 +5202,9 @@ async fn search_messages(
     let mut results: Vec<crate::SearchResult> = state
         .sip_messages()
         .into_iter()
-        .filter(|m| state.is_admin_principal(&principal) || m.from_uri == principal || m.to_uri == principal)
+        .filter(|m| {
+            state.is_admin_principal(&principal) || m.from_uri == principal || m.to_uri == principal
+        })
         .filter(|m| m.body.to_lowercase().contains(&term))
         .take(limit)
         .map(|m| crate::SearchResult {
@@ -5199,14 +5226,16 @@ async fn search_messages(
         .filter(|m| room_member(&state, m.room_id, &principal))
         .filter_map(|m| {
             let body = state.decrypt_field(&m.body);
-            body.to_lowercase().contains(&term).then(|| crate::SearchResult {
-                id: m.id,
-                source: "room".to_string(),
-                from_uri: m.sender_uri.clone(),
-                body,
-                timestamp: m.created_at,
-                room_id: Some(m.room_id),
-            })
+            body.to_lowercase()
+                .contains(&term)
+                .then(|| crate::SearchResult {
+                    id: m.id,
+                    source: "room".to_string(),
+                    from_uri: m.sender_uri.clone(),
+                    body,
+                    timestamp: m.created_at,
+                    room_id: Some(m.room_id),
+                })
         })
         .take(limit)
         .collect();
@@ -5274,7 +5303,10 @@ async fn update_ai_provider(
     state.record_audit_event(
         &principal,
         "ai_provider.updated",
-        Some(format!("kind={} configured={}", status.kind, status.configured)),
+        Some(format!(
+            "kind={} configured={}",
+            status.kind, status.configured
+        )),
     );
     Ok(Json(status))
 }
@@ -6392,7 +6424,9 @@ async fn resolve_ivr_speech(
     Json(input): Json<crate::ResolveIvrSpeechRequest>,
 ) -> Result<Json<crate::IvrSpeechResolution>, ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
-    let resolution = state.resolve_ivr_speech(id, input).ok_or(ApiError::NotFound)?;
+    let resolution = state
+        .resolve_ivr_speech(id, input)
+        .ok_or(ApiError::NotFound)?;
     state.record_audit_event(
         &principal,
         "ivr.speech_resolved",
@@ -6552,7 +6586,9 @@ async fn start_transcription_job(
     Path(id): Path<Uuid>,
 ) -> Result<Json<crate::TranscriptionJob>, ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
-    let job = state.start_transcription_job(id).ok_or(ApiError::NotFound)?;
+    let job = state
+        .start_transcription_job(id)
+        .ok_or(ApiError::NotFound)?;
     state.record_audit_event(&principal, "transcription.started", Some(id.to_string()));
     Ok(Json(job))
 }
@@ -8073,7 +8109,10 @@ async fn translate_text(
         ));
     }
 
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
         .post(&api_url)
         .json(&serde_json::json!({
@@ -8717,9 +8756,7 @@ async fn push_unsubscribe(
     Ok(Json(json!({ "removed": removed })))
 }
 
-async fn push_vapid_key(
-    State(state): State<SharedState>,
-) -> Json<serde_json::Value> {
+async fn push_vapid_key(State(state): State<SharedState>) -> Json<serde_json::Value> {
     Json(json!({
         "vapid_public_key": state.vapid_public_key().unwrap_or_default(),
         "enabled": state.vapid_public_key().is_some(),
@@ -8763,7 +8800,10 @@ impl IntoResponse for ApiError {
         if matches!(&self, ApiError::TooManyRequests) {
             return (
                 status,
-                [(header::HeaderName::from_static("retry-after"), HeaderValue::from_static("60"))],
+                [(
+                    header::HeaderName::from_static("retry-after"),
+                    HeaderValue::from_static("60"),
+                )],
                 Json(json!({ "error": self.to_string() })),
             )
                 .into_response();
@@ -8957,7 +8997,10 @@ async fn invoke_message_extension(
         .get_message_extension_by_command(&command)
         .ok_or(ApiError::NotFound)?;
     // Proxy to handler_url
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
         .post(&ext.handler_url)
         .json(&serde_json::json!({ "command": command, "input": req.input }))
@@ -9323,11 +9366,12 @@ async fn assign_emergency_location(
     Json(input): Json<crate::AssignEmergencyLocationRequest>,
 ) -> Result<Json<EmergencyCallingAssignment>, ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
-    let assignment = state
-        .assign_emergency_location(input, &principal)
-        .ok_or(ApiError::BadRequest(
-            "invalid user URI or emergency location".to_string(),
-        ))?;
+    let assignment =
+        state
+            .assign_emergency_location(input, &principal)
+            .ok_or(ApiError::BadRequest(
+                "invalid user URI or emergency location".to_string(),
+            ))?;
     state.record_audit_event(
         &principal,
         "emergency_assignment.updated",
@@ -9549,7 +9593,12 @@ mod auth_tests {
             })
             .expect("create user");
         let login = state
-            .authenticate_user("sip:bob@example.com", "user-password", "127.0.0.1", "desktop")
+            .authenticate_user(
+                "sip:bob@example.com",
+                "user-password",
+                "127.0.0.1",
+                "desktop",
+            )
             .expect("user login");
 
         let headers = bearer_headers(&login.token);
@@ -9593,7 +9642,12 @@ mod auth_tests {
             .expect("create bob");
 
         let login = state
-            .authenticate_user("sip:alice@example.com", "alice-password", "127.0.0.1", "desktop")
+            .authenticate_user(
+                "sip:alice@example.com",
+                "alice-password",
+                "127.0.0.1",
+                "desktop",
+            )
             .expect("alice login");
         let headers = bearer_headers(&login.token);
 
@@ -9620,7 +9674,12 @@ mod auth_tests {
             })
             .expect("create alice");
         let login = state
-            .authenticate_user("sip:alice@example.com", "alice-password", "127.0.0.1", "desktop")
+            .authenticate_user(
+                "sip:alice@example.com",
+                "alice-password",
+                "127.0.0.1",
+                "desktop",
+            )
             .expect("alice login");
         let headers = bearer_headers(&login.token);
 
@@ -9865,11 +9924,21 @@ mod auth_tests {
         // LDAP cannot verify (unreachable) — the wrong local password MUST
         // still be rejected (fail closed, no auth bypass)...
         assert!(state
-            .authenticate_user("sip:carol@example.com", "wrong-password", "127.0.0.1", "desktop")
+            .authenticate_user(
+                "sip:carol@example.com",
+                "wrong-password",
+                "127.0.0.1",
+                "desktop"
+            )
             .is_err());
         // ...and the correct local password still works.
         assert!(state
-            .authenticate_user("sip:carol@example.com", "carol-password", "127.0.0.1", "desktop")
+            .authenticate_user(
+                "sip:carol@example.com",
+                "carol-password",
+                "127.0.0.1",
+                "desktop"
+            )
             .is_ok());
     }
 }

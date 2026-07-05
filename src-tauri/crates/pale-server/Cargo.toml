@@ -5,6 +5,10 @@ license = "GPL-2.0-only"
 edition = "2021"
 description = "Backend infrastructure server for Pale SIP, files, and conferences"
 
+[features]
+default = []
+native-pjsip = ["dep:pjsip-sys"]
+
 [dependencies]
 axum = "0.8"
 tokio = { version = ">=1.44.2, <2", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
@@ -23,7 +27,7 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 chrono = { version = ">=0.4.20, <0.5", features = ["serde"] }
 md-5 = "0.10"
-pjsip-sys = { path = "../pjsip-sys" }
+pjsip-sys = { path = "../pjsip-sys", optional = true }
 rsip = "0.4"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 base64 = "0.22"

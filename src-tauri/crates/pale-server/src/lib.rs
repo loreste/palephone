@@ -18,6 +18,7 @@ pub mod ldap_auth;
 pub mod livekit;
 pub mod metrics;
 pub mod pg_store;
+#[cfg(feature = "native-pjsip")]
 pub mod pjsip_runtime;
 pub mod sip;
 mod storage;
@@ -765,13 +766,7 @@ impl AppState {
     }
 
     /// Send a push notification to all of a user's subscriptions.
-    pub fn notify_user_push(
-        &self,
-        user_uri: &str,
-        title: &str,
-        body: &str,
-        tag: Option<String>,
-    ) {
+    pub fn notify_user_push(&self, user_uri: &str, title: &str, body: &str, tag: Option<String>) {
         let Some(config) = self.vapid_config.clone() else {
             return;
         };
@@ -1136,21 +1131,22 @@ impl AppState {
     }
 
     pub fn meeting_media_settings(&self, user_uri: &str) -> MeetingMediaSettings {
-        let normalized = normalize_emergency_user_uri(user_uri).unwrap_or_else(|| user_uri.to_string());
-        let mut settings =
-            self.meeting_media_settings
-                .get(&normalized)
-                .unwrap_or_else(|| MeetingMediaSettings {
-                    user_uri: normalized.clone(),
-                    echo_cancellation: true,
-                    noise_suppression: true,
-                    auto_gain: false,
-                    background_mode: "none".to_string(),
-                    background_image_url: None,
-                    noise_suppression_configured: false,
-                    virtual_backgrounds_configured: false,
-                    updated_at: Utc::now(),
-                });
+        let normalized =
+            normalize_emergency_user_uri(user_uri).unwrap_or_else(|| user_uri.to_string());
+        let mut settings = self
+            .meeting_media_settings
+            .get(&normalized)
+            .unwrap_or_else(|| MeetingMediaSettings {
+                user_uri: normalized.clone(),
+                echo_cancellation: true,
+                noise_suppression: true,
+                auto_gain: false,
+                background_mode: "none".to_string(),
+                background_image_url: None,
+                noise_suppression_configured: false,
+                virtual_backgrounds_configured: false,
+                updated_at: Utc::now(),
+            });
         settings.noise_suppression_configured =
             self.enterprise_capability_available("noise_suppression");
         settings.virtual_backgrounds_configured =
@@ -1163,7 +1159,8 @@ impl AppState {
         user_uri: &str,
         input: UpdateMeetingMediaSettingsRequest,
     ) -> MeetingMediaSettings {
-        let normalized = normalize_emergency_user_uri(user_uri).unwrap_or_else(|| user_uri.to_string());
+        let normalized =
+            normalize_emergency_user_uri(user_uri).unwrap_or_else(|| user_uri.to_string());
         let mut settings = self.meeting_media_settings(&normalized);
         if let Some(value) = input.echo_cancellation {
             settings.echo_cancellation = value;
@@ -1191,22 +1188,22 @@ impl AppState {
 
     pub fn conference_layout_state(&self, conference_id: Uuid) -> Option<ConferenceLayoutState> {
         let conference = self.conferences.get(&conference_id)?;
-        let mut layout =
-            self.conference_layouts
-                .get(&conference_id)
-                .unwrap_or_else(|| ConferenceLayoutState {
-                    conference_id,
-                    mode: "gallery".to_string(),
-                    max_visible: 9,
-                    together_scene: None,
-                    stage_participant_ids: Vec::new(),
-                    sfu_layout_configured: false,
-                    gallery_capacity: 9,
-                    together_scene_supported: true,
-                    layout_blockers: Vec::new(),
-                    updated_by: None,
-                    updated_at: Utc::now(),
-                });
+        let mut layout = self
+            .conference_layouts
+            .get(&conference_id)
+            .unwrap_or_else(|| ConferenceLayoutState {
+                conference_id,
+                mode: "gallery".to_string(),
+                max_visible: 9,
+                together_scene: None,
+                stage_participant_ids: Vec::new(),
+                sfu_layout_configured: false,
+                gallery_capacity: 9,
+                together_scene_supported: true,
+                layout_blockers: Vec::new(),
+                updated_by: None,
+                updated_at: Utc::now(),
+            });
         layout.sfu_layout_configured = self.enterprise_capability_available("together_gallery");
         apply_layout_readiness(&mut layout, &conference.participants);
         Some(layout)
@@ -1248,7 +1245,8 @@ impl AppState {
         apply_layout_readiness(&mut layout, &conference.participants);
         layout.updated_by = Some(updated_by.to_string());
         layout.updated_at = Utc::now();
-        self.conference_layouts.insert(conference_id, layout.clone());
+        self.conference_layouts
+            .insert(conference_id, layout.clone());
         Some(layout)
     }
 
@@ -1259,7 +1257,8 @@ impl AppState {
             .into_iter()
             .filter(|session| session.conference_id == conference_id)
             .map(|mut session| {
-                session.gateway_configured = self.enterprise_capability_available("ndi_rtmp_streaming");
+                session.gateway_configured =
+                    self.enterprise_capability_available("ndi_rtmp_streaming");
                 session.destination = redact_stream_destination(&session.destination);
                 session
             })
@@ -1396,8 +1395,7 @@ impl AppState {
         apply_town_hall_readiness(&mut config);
         config.updated_by = Some(updated_by.to_string());
         config.updated_at = Utc::now();
-        self.town_hall_configs
-            .insert(conference_id, config.clone());
+        self.town_hall_configs.insert(conference_id, config.clone());
         Ok(config)
     }
 
@@ -4031,7 +4029,8 @@ impl AppState {
             created_at: now,
             updated_at: now,
         };
-        self.presentation_sessions.insert(session.id, session.clone());
+        self.presentation_sessions
+            .insert(session.id, session.clone());
         Some(session)
     }
 
@@ -4042,7 +4041,8 @@ impl AppState {
             .into_iter()
             .filter(|session| session.conference_id == conference_id)
             .map(|mut session| {
-                session.renderer_configured = self.enterprise_capability_available("powerpoint_live");
+                session.renderer_configured =
+                    self.enterprise_capability_available("powerpoint_live");
                 session
             })
             .collect();
@@ -4154,14 +4154,14 @@ impl AppState {
             .into_iter()
             .filter(|segment| segment.is_final)
             .collect();
-        let ai_provider_configured = self
-            .enterprise_capability_report()
-            .capabilities
-            .iter()
-            .any(|capability| {
-                matches!(capability.id.as_str(), "meeting_assistant" | "copilot")
-                    && capability.status == "available"
-            });
+        let ai_provider_configured =
+            self.enterprise_capability_report()
+                .capabilities
+                .iter()
+                .any(|capability| {
+                    matches!(capability.id.as_str(), "meeting_assistant" | "copilot")
+                        && capability.status == "available"
+                });
         let speaker_stats = meeting_speaker_stats(&segments);
         let summary = meeting_summary(&segments);
         Some(MeetingAssistantReport {
@@ -5047,7 +5047,11 @@ impl AppState {
             "Compliance",
             "Communication compliance reviews",
             pending_compliance_reviews == 0,
-            if pending_compliance_reviews == 0 { 7 } else { 3 },
+            if pending_compliance_reviews == 0 {
+                7
+            } else {
+                3
+            },
             7,
             format!("{pending_compliance_reviews} pending compliance review(s)"),
             "Review or resolve pending communication compliance items.",
@@ -5058,7 +5062,11 @@ impl AppState {
             "Information Protection",
             "Information barriers",
             enabled_information_barriers > 0,
-            if enabled_information_barriers > 0 { 8 } else { 0 },
+            if enabled_information_barriers > 0 {
+                8
+            } else {
+                0
+            },
             8,
             format!("{enabled_information_barriers} enabled barrier(s)"),
             "Configure barriers for departments or regulated groups that must not communicate.",
@@ -5091,7 +5099,11 @@ impl AppState {
             "Data Governance",
             "Data residency",
             enabled_data_residency_regions > 0,
-            if enabled_data_residency_regions > 0 { 5 } else { 0 },
+            if enabled_data_residency_regions > 0 {
+                5
+            } else {
+                0
+            },
             5,
             format!("{enabled_data_residency_regions} enabled residency region(s)"),
             "Enable data residency configurations for regulated tenant regions.",
@@ -5308,7 +5320,9 @@ impl AppState {
                         "MinIO".to_string(),
                     ]
                 }),
-            endpoint_url: integration.as_ref().and_then(|item| item.endpoint_url.clone()),
+            endpoint_url: integration
+                .as_ref()
+                .and_then(|item| item.endpoint_url.clone()),
             admin_url: integration.as_ref().and_then(|item| item.admin_url.clone()),
             sync_mode: if provider_configured {
                 "external_provider_ready".to_string()
@@ -5380,8 +5394,7 @@ impl AppState {
             .capabilities
             .into_iter()
             .any(|capability| {
-                capability.id == "advanced_threat_protection"
-                    && capability.status == "available"
+                capability.id == "advanced_threat_protection" && capability.status == "available"
             })
     }
 
@@ -5792,9 +5805,7 @@ impl AppState {
             .oidc_discovery_cache
             .get(&provider.issuer_url)
             .map(|d| d.authorization_endpoint.clone())
-            .unwrap_or_else(|| {
-                format!("{}/authorize", provider.issuer_url.trim_end_matches('/'))
-            });
+            .unwrap_or_else(|| format!("{}/authorize", provider.issuer_url.trim_end_matches('/')));
 
         let url = format!(
             "{}?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email%20profile&state={}&nonce={}",
@@ -5819,10 +5830,7 @@ impl AppState {
     }
 
     /// Fetch and cache OIDC discovery document from the provider's well-known endpoint.
-    pub async fn discover_oidc_config(
-        &self,
-        issuer_url: &str,
-    ) -> Result<OidcDiscovery, String> {
+    pub async fn discover_oidc_config(&self, issuer_url: &str) -> Result<OidcDiscovery, String> {
         // Return cached if fresh (< 1 hour)
         if let Some(cached) = self.oidc_discovery_cache.get(&issuer_url.to_string()) {
             let age = Utc::now() - cached.fetched_at;
@@ -5835,17 +5843,17 @@ impl AppState {
             "{}/.well-known/openid-configuration",
             issuer_url.trim_end_matches('/')
         );
-        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         let resp = client
             .get(&well_known_url)
             .send()
             .await
             .map_err(|e| format!("OIDC discovery fetch failed: {e}"))?;
         if !resp.status().is_success() {
-            return Err(format!(
-                "OIDC discovery returned status {}",
-                resp.status()
-            ));
+            return Err(format!("OIDC discovery returned status {}", resp.status()));
         }
         let body: serde_json::Value = resp
             .json()
@@ -5853,10 +5861,7 @@ impl AppState {
             .map_err(|e| format!("OIDC discovery parse failed: {e}"))?;
 
         let discovery = OidcDiscovery {
-            issuer: body["issuer"]
-                .as_str()
-                .unwrap_or(issuer_url)
-                .to_string(),
+            issuer: body["issuer"].as_str().unwrap_or(issuer_url).to_string(),
             authorization_endpoint: body["authorization_endpoint"]
                 .as_str()
                 .ok_or("missing authorization_endpoint")?
@@ -5869,9 +5874,7 @@ impl AppState {
                 .as_str()
                 .ok_or("missing jwks_uri")?
                 .to_string(),
-            userinfo_endpoint: body["userinfo_endpoint"]
-                .as_str()
-                .map(|s| s.to_string()),
+            userinfo_endpoint: body["userinfo_endpoint"].as_str().map(|s| s.to_string()),
             fetched_at: Utc::now(),
         };
 
@@ -5887,7 +5890,10 @@ impl AppState {
         jwks_uri: &str,
         kid: &str,
     ) -> Result<(jsonwebtoken::DecodingKey, jsonwebtoken::Algorithm), String> {
-        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         let resp = client
             .get(jwks_uri)
             .send()
@@ -5901,9 +5907,7 @@ impl AppState {
             .await
             .map_err(|e| format!("JWKS parse failed: {e}"))?;
 
-        let keys = jwks["keys"]
-            .as_array()
-            .ok_or("JWKS missing keys array")?;
+        let keys = jwks["keys"].as_array().ok_or("JWKS missing keys array")?;
 
         let jwk = keys
             .iter()
@@ -5924,22 +5928,14 @@ impl AppState {
         let kty = jwk["kty"].as_str().unwrap_or("");
         let decoding_key = match kty {
             "RSA" => {
-                let n = jwk["n"]
-                    .as_str()
-                    .ok_or("RSA JWK missing 'n'")?;
-                let e = jwk["e"]
-                    .as_str()
-                    .ok_or("RSA JWK missing 'e'")?;
+                let n = jwk["n"].as_str().ok_or("RSA JWK missing 'n'")?;
+                let e = jwk["e"].as_str().ok_or("RSA JWK missing 'e'")?;
                 jsonwebtoken::DecodingKey::from_rsa_components(n, e)
                     .map_err(|e| format!("Failed to build RSA key: {e}"))?
             }
             "EC" => {
-                let x = jwk["x"]
-                    .as_str()
-                    .ok_or("EC JWK missing 'x'")?;
-                let y = jwk["y"]
-                    .as_str()
-                    .ok_or("EC JWK missing 'y'")?;
+                let x = jwk["x"].as_str().ok_or("EC JWK missing 'x'")?;
+                let y = jwk["y"].as_str().ok_or("EC JWK missing 'y'")?;
                 jsonwebtoken::DecodingKey::from_ec_components(x, y)
                     .map_err(|e| format!("Failed to build EC key: {e}"))?
             }
@@ -5971,12 +5967,13 @@ impl AppState {
         }
 
         // 2. Discover OIDC endpoints
-        let discovery = self
-            .discover_oidc_config(&provider.issuer_url)
-            .await?;
+        let discovery = self.discover_oidc_config(&provider.issuer_url).await?;
 
         // 3. Exchange the authorization code for tokens
-        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         let token_resp = client
             .post(&discovery.token_endpoint)
             .form(&[
@@ -5992,13 +5989,8 @@ impl AppState {
 
         if !token_resp.status().is_success() {
             let status = token_resp.status();
-            let body = token_resp
-                .text()
-                .await
-                .unwrap_or_default();
-            return Err(format!(
-                "Token endpoint returned {status}: {body}"
-            ));
+            let body = token_resp.text().await.unwrap_or_default();
+            return Err(format!("Token endpoint returned {status}: {body}"));
         }
 
         let token_body: serde_json::Value = token_resp
@@ -6013,26 +6005,19 @@ impl AppState {
         // 4. Decode the JWT header to get the kid
         let jwt_header = jsonwebtoken::decode_header(id_token_str)
             .map_err(|e| format!("Failed to decode JWT header: {e}"))?;
-        let kid = jwt_header
-            .kid
-            .ok_or("ID token JWT header missing kid")?;
+        let kid = jwt_header.kid.ok_or("ID token JWT header missing kid")?;
 
         // 5. Fetch the signing key from JWKS and validate signature
-        let (decoding_key, algorithm) = self
-            .fetch_jwks_key(&discovery.jwks_uri, &kid)
-            .await?;
+        let (decoding_key, algorithm) = self.fetch_jwks_key(&discovery.jwks_uri, &kid).await?;
 
         let mut validation = jsonwebtoken::Validation::new(algorithm);
         validation.set_audience(&[&provider.client_id]);
         validation.set_issuer(&[&discovery.issuer]);
         validation.validate_exp = true;
 
-        let token_data = jsonwebtoken::decode::<OidcIdTokenClaims>(
-            id_token_str,
-            &decoding_key,
-            &validation,
-        )
-        .map_err(|e| format!("ID token validation failed: {e}"))?;
+        let token_data =
+            jsonwebtoken::decode::<OidcIdTokenClaims>(id_token_str, &decoding_key, &validation)
+                .map_err(|e| format!("ID token validation failed: {e}"))?;
         let claims = token_data.claims;
 
         // 6. Verify nonce
@@ -6046,9 +6031,7 @@ impl AppState {
             .as_deref()
             .or(claims.preferred_username.as_deref())
             .ok_or("ID token missing email and preferred_username")?;
-        let display_name = claims
-            .name
-            .unwrap_or_else(|| email.to_string());
+        let display_name = claims.name.unwrap_or_else(|| email.to_string());
 
         // 8. Look up or auto-provision local user
         let sip_uri = format!("sip:{}@sso", email.split('@').next().unwrap_or(email));
@@ -6092,11 +6075,7 @@ impl AppState {
 
         self.update_presence(&user.sip_uri, PresenceStatus::Online, None);
 
-        self.record_audit_event(
-            &user.sip_uri,
-            "user.sso_login",
-            Some(provider.name.clone()),
-        );
+        self.record_audit_event(&user.sip_uri, "user.sso_login", Some(provider.name.clone()));
 
         Ok(UserLoginResponse {
             token: session.token,
@@ -8014,7 +7993,11 @@ impl AppState {
         self.ivrs.remove(&id)
     }
 
-    pub fn resolve_ivr_speech(&self, id: Uuid, input: ResolveIvrSpeechRequest) -> Option<IvrSpeechResolution> {
+    pub fn resolve_ivr_speech(
+        &self,
+        id: Uuid,
+        input: ResolveIvrSpeechRequest,
+    ) -> Option<IvrSpeechResolution> {
         let mut ivr = self.ivr(id)?;
         let provider_configured = self.enterprise_capability_available("speech_ivr");
         ivr.speech_provider_configured = provider_configured;
@@ -8028,12 +8011,15 @@ impl AppState {
                 matched: false,
                 reason: "speech_ivr_disabled".to_string(),
                 option: None,
-                route: ivr.invalid_destination.clone().map(|destination| ResolvedRoute {
-                    destination_type: "invalid".to_string(),
-                    destination,
-                    ring_group: None,
-                    ivr: None,
-                }),
+                route: ivr
+                    .invalid_destination
+                    .clone()
+                    .map(|destination| ResolvedRoute {
+                        destination_type: "invalid".to_string(),
+                        destination,
+                        ring_group: None,
+                        ivr: None,
+                    }),
             });
         }
         if !provider_configured {
@@ -8045,17 +8031,23 @@ impl AppState {
                 matched: false,
                 reason: "speech_ivr_provider_not_configured".to_string(),
                 option: None,
-                route: ivr.invalid_destination.clone().map(|destination| ResolvedRoute {
-                    destination_type: "invalid".to_string(),
-                    destination,
-                    ring_group: None,
-                    ivr: None,
-                }),
+                route: ivr
+                    .invalid_destination
+                    .clone()
+                    .map(|destination| ResolvedRoute {
+                        destination_type: "invalid".to_string(),
+                        destination,
+                        ring_group: None,
+                        ivr: None,
+                    }),
             });
         }
 
         let normalized = normalize_speech_utterance(&utterance);
-        let matched = ivr.options.iter().find(|option| ivr_option_matches_speech(option, &normalized));
+        let matched = ivr
+            .options
+            .iter()
+            .find(|option| ivr_option_matches_speech(option, &normalized));
         let route = matched.map(|option| ResolvedRoute {
             destination_type: option.destination_type.clone(),
             destination: option.destination.clone(),
@@ -8256,7 +8248,8 @@ impl AppState {
             .into_iter()
             .filter(|job| job.recording_id == recording_id)
             .map(|mut job| {
-                job.provider_configured = self.enterprise_capability_available("auto_transcription");
+                job.provider_configured =
+                    self.enterprise_capability_available("auto_transcription");
                 job
             })
             .collect();
@@ -8357,7 +8350,9 @@ impl AppState {
             recording.transcript_segment_count = self.get_transcript(conference_id).len();
             self.recordings.insert(recording.id, recording.clone());
             let recording_for_pg = recording.clone();
-            self.pg_spawn(move |pg| Box::pin(async move { pg.insert_recording(&recording_for_pg).await }));
+            self.pg_spawn(move |pg| {
+                Box::pin(async move { pg.insert_recording(&recording_for_pg).await })
+            });
         }
         Some(job)
     }
@@ -9132,7 +9127,11 @@ impl AppState {
         }
 
         for team in self.list_teams_for_user(principal) {
-            let fields = vec![team.name.clone(), team.description.clone(), team.owner_uri.clone()];
+            let fields = vec![
+                team.name.clone(),
+                team.description.clone(),
+                team.owner_uri.clone(),
+            ];
             if !collaboration_matches(&fields, &term) {
                 continue;
             }
@@ -9169,7 +9168,10 @@ impl AppState {
                 id: user.id.to_string(),
                 kind: "user".to_string(),
                 title: user.display_name,
-                snippet: user.title.or(user.department).unwrap_or_else(|| user.sip_uri.clone()),
+                snippet: user
+                    .title
+                    .or(user.department)
+                    .unwrap_or_else(|| user.sip_uri.clone()),
                 source: "directory".to_string(),
                 url: None,
                 room_id: None,
@@ -9287,7 +9289,11 @@ impl AppState {
             });
         }
 
-        for app in self.list_app_catalog().into_iter().filter(|app| app.installed) {
+        for app in self
+            .list_app_catalog()
+            .into_iter()
+            .filter(|app| app.installed)
+        {
             let fields = vec![
                 app.name.clone(),
                 app.description.clone(),
@@ -9364,7 +9370,8 @@ impl AppState {
             governance: vec![
                 "uses only content returned by governed enterprise search".to_string(),
                 "citations are limited to resources visible to the caller".to_string(),
-                "external LLM/RAG readiness is reported separately from local grounding".to_string(),
+                "external LLM/RAG readiness is reported separately from local grounding"
+                    .to_string(),
             ],
         })
     }
@@ -11225,7 +11232,8 @@ impl AppState {
         };
 
         // Send the reply message via normal send path
-        let mut msg = self.send_room_message(room_id, sender_uri, body, Some(root_message_id), priority)?;
+        let mut msg =
+            self.send_room_message(room_id, sender_uri, body, Some(root_message_id), priority)?;
 
         // Stamp thread_id on the reply
         msg.thread_id = Some(thread_id);
@@ -11251,9 +11259,8 @@ impl AppState {
             thread
         });
 
-        let thread = updated_thread.unwrap_or_else(|| {
-            self.message_threads.get(&thread_id).unwrap()
-        });
+        let thread =
+            updated_thread.unwrap_or_else(|| self.message_threads.get(&thread_id).unwrap());
 
         self.broadcast_sse(SseEvent {
             event_type: "thread_reply".to_string(),
@@ -11288,17 +11295,14 @@ impl AppState {
 
     /// Update rate limit configuration at runtime.
     pub fn set_rate_limit_config(&self, config: RateLimitConfig) {
-        *self.rate_limit_config
+        *self
+            .rate_limit_config
             .write()
             .expect("rate limit config lock") = config;
     }
 
     /// Check per-endpoint-group rate limit. Returns true if allowed.
-    pub fn check_endpoint_rate_limit(
-        &self,
-        principal: &str,
-        group: EndpointGroup,
-    ) -> bool {
+    pub fn check_endpoint_rate_limit(&self, principal: &str, group: EndpointGroup) -> bool {
         let config = self.rate_limit_config();
         let max_per_minute = match group {
             EndpointGroup::Default => config.default_rpm,
@@ -11320,8 +11324,7 @@ impl AppState {
                     last_refill: now,
                 });
 
-            let elapsed =
-                (now - bucket.last_refill).num_milliseconds().max(0) as f64 / 1000.0;
+            let elapsed = (now - bucket.last_refill).num_milliseconds().max(0) as f64 / 1000.0;
             bucket.tokens = (bucket.tokens + elapsed * refill_rate).min(max_tokens);
             bucket.last_refill = now;
 
@@ -11595,7 +11598,10 @@ impl AppState {
             let payload = payload.clone();
             let event = event_type.to_string();
             tokio::spawn(async move {
-                let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new());
                 let _ = client
                     .post(&url)
                     .json(&serde_json::json!({ "event": event, "data": payload }))
@@ -11658,7 +11664,10 @@ impl AppState {
     pub async fn calendar_events_synced(&self, user_uri: &str) -> Vec<CalendarEvent> {
         let mut events = self.calendar_events_local(user_uri);
         let integrations = self.list_calendar_integrations(user_uri);
-        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         for integration in integrations {
             if !integration.enabled {
                 continue;
@@ -11670,7 +11679,9 @@ impl AppState {
                         .map(|(evts, refreshed)| {
                             // Persist refreshed access token if we got one
                             if let Some(new_token) = refreshed {
-                                if let Some(mut updated) = self.calendar_integrations.get(&integration.id) {
+                                if let Some(mut updated) =
+                                    self.calendar_integrations.get(&integration.id)
+                                {
                                     updated.access_token_enc = new_token;
                                     self.calendar_integrations.insert(integration.id, updated);
                                 }
@@ -11678,9 +11689,7 @@ impl AppState {
                             evts
                         })
                 }
-                "caldav" => {
-                    sync_caldav_calendar(&client, &integration).await
-                }
+                "caldav" => sync_caldav_calendar(&client, &integration).await,
                 _ => {
                     log::warn!("Unknown calendar provider: {}", integration.provider);
                     continue;
@@ -11701,7 +11710,12 @@ impl AppState {
                     }
                 }
                 Err(e) => {
-                    log::error!("Calendar sync failed for {} ({}): {}", integration.provider, integration.id, e);
+                    log::error!(
+                        "Calendar sync failed for {} ({}): {}",
+                        integration.provider,
+                        integration.id,
+                        e
+                    );
                 }
             }
         }
@@ -11809,7 +11823,10 @@ impl AppState {
             let payload = payload.clone();
             let event = event_type.to_string();
             tokio::spawn(async move {
-                let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new());
                 let mut req = client
                     .post(&url)
                     .json(&serde_json::json!({ "event": event, "data": payload }))
@@ -12644,7 +12661,10 @@ fn normalized_case_custodians(custodians: Vec<String>) -> Vec<String> {
 }
 
 fn normalized_case_query(mut query: EDiscoveryCaseQuery) -> EDiscoveryCaseQuery {
-    query.q = query.q.map(|value| value.trim().chars().take(240).collect()).filter(|value: &String| !value.is_empty());
+    query.q = query
+        .q
+        .map(|value| value.trim().chars().take(240).collect())
+        .filter(|value: &String| !value.is_empty());
     query.user_uri = query
         .user_uri
         .map(|value| value.trim().chars().take(160).collect())
@@ -13174,13 +13194,19 @@ fn concise_snippet(value: &str, max_chars: usize) -> String {
 
 fn copilot_suggested_prompts(results: &[UnifiedSearchResult]) -> Vec<String> {
     let mut prompts = Vec::new();
-    if results.iter().any(|result| result.kind == "meeting" || result.kind == "recording") {
+    if results
+        .iter()
+        .any(|result| result.kind == "meeting" || result.kind == "recording")
+    {
         prompts.push("Summarize the latest meeting context and open follow-ups.".to_string());
     }
     if results.iter().any(|result| result.kind == "file") {
         prompts.push("Show the files that support this answer.".to_string());
     }
-    if results.iter().any(|result| result.kind == "message" || result.kind == "channel") {
+    if results
+        .iter()
+        .any(|result| result.kind == "message" || result.kind == "channel")
+    {
         prompts.push("Find the decision trail in chat.".to_string());
     }
     if prompts.is_empty() {
@@ -15623,7 +15649,8 @@ impl AppState {
         let gateways = self.list_sip_gateways();
         let enabled_gateways: Vec<_> = gateways.iter().filter(|gateway| gateway.enabled).collect();
         let location_routes = self.list_location_routing_rules();
-        let enabled_location_route_count = location_routes.iter().filter(|rule| rule.enabled).count();
+        let enabled_location_route_count =
+            location_routes.iter().filter(|rule| rule.enabled).count();
         let e164_prefix_route_count = enabled_gateways
             .iter()
             .filter(|gateway| gateway.prefix.starts_with('+'))
@@ -15643,10 +15670,11 @@ impl AppState {
             })
             .count();
         let emergency_route_ready = provider_available
-            && enabled_gateways
-                .iter()
-                .any(|gateway| gateway.prefix.is_empty() || gateway.prefix == "911" || gateway.prefix == "+");
-        let routable = provider_available && !enabled_gateways.is_empty() && e164_prefix_route_count > 0;
+            && enabled_gateways.iter().any(|gateway| {
+                gateway.prefix.is_empty() || gateway.prefix == "911" || gateway.prefix == "+"
+            });
+        let routable =
+            provider_available && !enabled_gateways.is_empty() && e164_prefix_route_count > 0;
         let mut blockers = Vec::new();
         if !provider_available {
             blockers.push("pstn_provider_not_configured".to_string());
@@ -15696,7 +15724,8 @@ impl AppState {
             gw.username = non_empty_string(username);
         }
         if let Some(password) = req.password {
-            gw.password_enc = non_empty_string(password).map(|password| self.encrypt_field(&password));
+            gw.password_enc =
+                non_empty_string(password).map(|password| self.encrypt_field(&password));
         }
         if let Some(prefix) = req.prefix {
             gw.prefix = prefix;
@@ -15921,7 +15950,10 @@ impl AppState {
         let Some(normalized_user) = normalize_emergency_user_uri(user_uri) else {
             return false;
         };
-        let removed = self.emergency_assignments.remove(&normalized_user).is_some();
+        let removed = self
+            .emergency_assignments
+            .remove(&normalized_user)
+            .is_some();
         if removed {
             self.delete_persisted(
                 EmergencyCallingAssignment::collection(),
@@ -15943,14 +15975,19 @@ impl AppState {
                 .any(|number| normalize_dialed_number(number) == normalized_number)
         }) || matches!(normalized_number.as_str(), "911" | "112" | "933");
         let e911_provider_available = self.enterprise_capability_available("e911");
-        let pstn_provider_available = self.enterprise_capability_available("pstn_sbc_operator_connect");
+        let pstn_provider_available =
+            self.enterprise_capability_available("pstn_sbc_operator_connect");
         let location = assignment
             .as_ref()
             .and_then(|assignment| self.emergency_locations.get(&assignment.location_id));
         let gateway = location.as_ref().and_then(|location| {
             self.resolve_location_route(&format!(
                 "{} {} {} {} {}",
-                location.name, location.city, location.region, location.postal_code, location.country
+                location.name,
+                location.city,
+                location.region,
+                location.postal_code,
+                location.country
             ))
             .or_else(|| self.resolve_gateway(&normalized_number))
         });
@@ -16994,45 +17031,227 @@ pub struct EnterpriseDeploymentPlan {
 fn enterprise_integration_defaults() -> Vec<EnterpriseIntegration> {
     let now = Utc::now();
     [
-        ("speech_ivr", "ML/AI", "Speech IVR", "Speech-to-text and natural-language routing for IVR flows.", "ai_service", "Vosk or Whisper endpoint", "Vosk, whisper.cpp, Rasa", "ASR/NLU service reachable from the server"),
-        ("noise_suppression", "ML/AI", "Noise suppression", "Client or media-server noise suppression for calls and meetings.", "local_or_media_runtime", "WebRTC audio processing", "RNNoise, WebRTC NS", "Desktop/mobile audio runtime or SFU DSP support"),
-        ("auto_transcription", "ML/AI", "Auto-transcription", "Automatic meeting and call transcript generation.", "ai_service", "Whisper-compatible endpoint", "whisper.cpp, faster-whisper", "ASR service with recording or live audio access"),
-        ("text_to_speech", "ML/AI", "Text-to-speech", "Speech synthesis for IVR prompts, accessibility, and assistant readouts.", "ai_service", "Piper-compatible TTS endpoint", "Piper, Coqui TTS, Mimic3", "TTS synthesis service reachable from the server"),
-        ("meeting_assistant", "ML/AI", "AI meeting assistant", "Summaries, action items, and meeting Q&A over transcripts.", "ai_service", "OpenAI-compatible LLM endpoint", "Ollama, vLLM, LocalAI", "LLM service and transcript source"),
-        ("copilot", "ML/AI", "Copilot-style assistant", "Cross-workspace assistant for chat, meeting, file, and admin context.", "ai_service", "OpenAI-compatible LLM/RAG service", "Ollama, vLLM, Open WebUI pipelines", "LLM plus governed search/RAG index"),
-        ("virtual_backgrounds", "Media pipeline", "Virtual backgrounds", "Background blur/replacement for video calls.", "client_media_runtime", "WebRTC insertable streams", "MediaPipe, TensorFlow Lite", "Client video segmentation support"),
-        ("together_gallery", "Media pipeline", "Together mode and gallery", "Large gallery layout and composited meeting scenes.", "sfu_layout_service", "LiveKit/Jitsi layout service", "LiveKit, Jitsi, mediasoup", "SFU layout/compositor service"),
-        ("ndi_rtmp_streaming", "Media pipeline", "NDI/RTMP streaming", "Broadcast meeting output to NDI, RTMP, or recording pipelines.", "media_gateway", "RTMP gateway", "SRS, FFmpeg, Janus", "Streaming gateway reachable from media server"),
-        ("powerpoint_live", "Media pipeline", "PowerPoint Live", "Server-rendered slide sharing with presenter controls.", "document_render_service", "Collabora/LibreOffice renderer", "Collabora Online, LibreOffice headless", "Document conversion/rendering service"),
-        ("e911", "External services", "E911", "Emergency address, dispatchable location, and emergency call routing.", "carrier_service", "Emergency calling provider", "none", "Certified E911 provider or carrier contract"),
-        ("pstn_sbc_operator_connect", "External services", "PSTN/SBC/Operator Connect", "Carrier trunking, SBC routing, and operator connectivity.", "carrier_service", "SIP trunk or SBC provider", "OpenSIPS, Kamailio, FreeSWITCH", "Carrier/SBC trunk and numbering plan"),
-        ("cloud_storage", "External services", "Cloud storage", "SharePoint/OneDrive/GDrive-equivalent file backend.", "storage_service", "WebDAV/S3-compatible storage", "Nextcloud, ownCloud, MinIO", "External storage endpoint and credentials"),
-        ("advanced_threat_protection", "Security infra", "Advanced threat protection", "Malware scanning and attachment detonation workflow.", "security_service", "Malware scanning service", "ClamAV, YARA, Cuckoo", "Scanning daemon or sandbox endpoint"),
-        ("casb", "Security infra", "CASB", "Cloud app policy enforcement, access decisions, and activity controls.", "security_policy_service", "Policy decision service", "OPA, Wazuh, OpenSearch Security Analytics", "Policy engine and event stream"),
-        ("mobile_app", "Platform rewrites", "Mobile app", "Native mobile packaging and device capability surface.", "client_platform", "Capacitor/Tauri mobile build", "Capacitor, React Native", "Mobile build pipeline and app signing"),
-        ("web_client", "Platform rewrites", "Web client", "Browser deployment with web-safe calling and auth flows.", "client_platform", "Hosted web bundle", "Vite static hosting, Nginx", "TLS web hosting and browser media compatibility"),
-        ("popout_multi_window", "Platform rewrites", "Pop-out multi-window", "Separate windows for calls, chats, and meetings.", "desktop_runtime", "Tauri multi-window runtime", "Tauri windows", "Desktop shell support"),
-        ("town_hall_broadcast", "Scalability", "Town hall broadcast", "10,000+ viewer broadcast using SFU/CDN fanout.", "broadcast_service", "Broadcast SFU/CDN", "LiveKit egress, Janus, SRS, CDN", "SFU, egress, and CDN capacity"),
+        (
+            "speech_ivr",
+            "ML/AI",
+            "Speech IVR",
+            "Speech-to-text and natural-language routing for IVR flows.",
+            "ai_service",
+            "Vosk or Whisper endpoint",
+            "Vosk, whisper.cpp, Rasa",
+            "ASR/NLU service reachable from the server",
+        ),
+        (
+            "noise_suppression",
+            "ML/AI",
+            "Noise suppression",
+            "Client or media-server noise suppression for calls and meetings.",
+            "local_or_media_runtime",
+            "WebRTC audio processing",
+            "RNNoise, WebRTC NS",
+            "Desktop/mobile audio runtime or SFU DSP support",
+        ),
+        (
+            "auto_transcription",
+            "ML/AI",
+            "Auto-transcription",
+            "Automatic meeting and call transcript generation.",
+            "ai_service",
+            "Whisper-compatible endpoint",
+            "whisper.cpp, faster-whisper",
+            "ASR service with recording or live audio access",
+        ),
+        (
+            "text_to_speech",
+            "ML/AI",
+            "Text-to-speech",
+            "Speech synthesis for IVR prompts, accessibility, and assistant readouts.",
+            "ai_service",
+            "Piper-compatible TTS endpoint",
+            "Piper, Coqui TTS, Mimic3",
+            "TTS synthesis service reachable from the server",
+        ),
+        (
+            "meeting_assistant",
+            "ML/AI",
+            "AI meeting assistant",
+            "Summaries, action items, and meeting Q&A over transcripts.",
+            "ai_service",
+            "OpenAI-compatible LLM endpoint",
+            "Ollama, vLLM, LocalAI",
+            "LLM service and transcript source",
+        ),
+        (
+            "copilot",
+            "ML/AI",
+            "Copilot-style assistant",
+            "Cross-workspace assistant for chat, meeting, file, and admin context.",
+            "ai_service",
+            "OpenAI-compatible LLM/RAG service",
+            "Ollama, vLLM, Open WebUI pipelines",
+            "LLM plus governed search/RAG index",
+        ),
+        (
+            "virtual_backgrounds",
+            "Media pipeline",
+            "Virtual backgrounds",
+            "Background blur/replacement for video calls.",
+            "client_media_runtime",
+            "WebRTC insertable streams",
+            "MediaPipe, TensorFlow Lite",
+            "Client video segmentation support",
+        ),
+        (
+            "together_gallery",
+            "Media pipeline",
+            "Together mode and gallery",
+            "Large gallery layout and composited meeting scenes.",
+            "sfu_layout_service",
+            "LiveKit/Jitsi layout service",
+            "LiveKit, Jitsi, mediasoup",
+            "SFU layout/compositor service",
+        ),
+        (
+            "ndi_rtmp_streaming",
+            "Media pipeline",
+            "NDI/RTMP streaming",
+            "Broadcast meeting output to NDI, RTMP, or recording pipelines.",
+            "media_gateway",
+            "RTMP gateway",
+            "SRS, FFmpeg, Janus",
+            "Streaming gateway reachable from media server",
+        ),
+        (
+            "powerpoint_live",
+            "Media pipeline",
+            "PowerPoint Live",
+            "Server-rendered slide sharing with presenter controls.",
+            "document_render_service",
+            "Collabora/LibreOffice renderer",
+            "Collabora Online, LibreOffice headless",
+            "Document conversion/rendering service",
+        ),
+        (
+            "e911",
+            "External services",
+            "E911",
+            "Emergency address, dispatchable location, and emergency call routing.",
+            "carrier_service",
+            "Emergency calling provider",
+            "none",
+            "Certified E911 provider or carrier contract",
+        ),
+        (
+            "pstn_sbc_operator_connect",
+            "External services",
+            "PSTN/SBC/Operator Connect",
+            "Carrier trunking, SBC routing, and operator connectivity.",
+            "carrier_service",
+            "SIP trunk or SBC provider",
+            "OpenSIPS, Kamailio, FreeSWITCH",
+            "Carrier/SBC trunk and numbering plan",
+        ),
+        (
+            "cloud_storage",
+            "External services",
+            "Cloud storage",
+            "SharePoint/OneDrive/GDrive-equivalent file backend.",
+            "storage_service",
+            "WebDAV/S3-compatible storage",
+            "Nextcloud, ownCloud, MinIO",
+            "External storage endpoint and credentials",
+        ),
+        (
+            "advanced_threat_protection",
+            "Security infra",
+            "Advanced threat protection",
+            "Malware scanning and attachment detonation workflow.",
+            "security_service",
+            "Malware scanning service",
+            "ClamAV, YARA, Cuckoo",
+            "Scanning daemon or sandbox endpoint",
+        ),
+        (
+            "casb",
+            "Security infra",
+            "CASB",
+            "Cloud app policy enforcement, access decisions, and activity controls.",
+            "security_policy_service",
+            "Policy decision service",
+            "OPA, Wazuh, OpenSearch Security Analytics",
+            "Policy engine and event stream",
+        ),
+        (
+            "mobile_app",
+            "Platform rewrites",
+            "Mobile app",
+            "Native mobile packaging and device capability surface.",
+            "client_platform",
+            "Capacitor/Tauri mobile build",
+            "Capacitor, React Native",
+            "Mobile build pipeline and app signing",
+        ),
+        (
+            "web_client",
+            "Platform rewrites",
+            "Web client",
+            "Browser deployment with web-safe calling and auth flows.",
+            "client_platform",
+            "Hosted web bundle",
+            "Vite static hosting, Nginx",
+            "TLS web hosting and browser media compatibility",
+        ),
+        (
+            "popout_multi_window",
+            "Platform rewrites",
+            "Pop-out multi-window",
+            "Separate windows for calls, chats, and meetings.",
+            "desktop_runtime",
+            "Tauri multi-window runtime",
+            "Tauri windows",
+            "Desktop shell support",
+        ),
+        (
+            "town_hall_broadcast",
+            "Scalability",
+            "Town hall broadcast",
+            "10,000+ viewer broadcast using SFU/CDN fanout.",
+            "broadcast_service",
+            "Broadcast SFU/CDN",
+            "LiveKit egress, Janus, SRS, CDN",
+            "SFU, egress, and CDN capacity",
+        ),
     ]
     .into_iter()
-    .map(|(id, category, name, description, integration_kind, default_provider, open_source_option, required_dependency)| EnterpriseIntegration {
-        id: id.to_string(),
-        category: category.to_string(),
-        name: name.to_string(),
-        description: description.to_string(),
-        integration_kind: integration_kind.to_string(),
-        default_provider: default_provider.to_string(),
-        open_source_option: open_source_option.to_string(),
-        required_dependency: required_dependency.to_string(),
-        enabled: false,
-        endpoint_url: None,
-        admin_url: None,
-        api_key_configured: false,
-        api_key_enc: None,
-        notes: String::new(),
-        updated_by: None,
-        updated_at: now,
-    })
+    .map(
+        |(
+            id,
+            category,
+            name,
+            description,
+            integration_kind,
+            default_provider,
+            open_source_option,
+            required_dependency,
+        )| EnterpriseIntegration {
+            id: id.to_string(),
+            category: category.to_string(),
+            name: name.to_string(),
+            description: description.to_string(),
+            integration_kind: integration_kind.to_string(),
+            default_provider: default_provider.to_string(),
+            open_source_option: open_source_option.to_string(),
+            required_dependency: required_dependency.to_string(),
+            enabled: false,
+            endpoint_url: None,
+            admin_url: None,
+            api_key_configured: false,
+            api_key_enc: None,
+            notes: String::new(),
+            updated_by: None,
+            updated_at: now,
+        },
+    )
     .collect()
 }
 
@@ -17077,7 +17296,11 @@ fn enterprise_parity_recommendation(capability: &EnterpriseCapabilityStatus) -> 
     }
     format!(
         "Finish {} configuration by adding {}, endpoint/admin URL, and credentials where required.",
-        capability.name, capability.blocking_dependency.as_deref().unwrap_or("provider details")
+        capability.name,
+        capability
+            .blocking_dependency
+            .as_deref()
+            .unwrap_or("provider details")
     )
 }
 
@@ -17107,7 +17330,9 @@ fn integration_endpoint_has_supported_scheme(value: &str) -> bool {
     .any(|scheme| lower.starts_with(scheme))
 }
 
-fn enterprise_integration_health(integration: EnterpriseIntegration) -> EnterpriseIntegrationHealthCheck {
+fn enterprise_integration_health(
+    integration: EnterpriseIntegration,
+) -> EnterpriseIntegrationHealthCheck {
     let checked_at = Utc::now();
     let mut checks = Vec::new();
     let mut blockers = Vec::new();
@@ -17145,7 +17370,11 @@ fn enterprise_integration_health(integration: EnterpriseIntegration) -> Enterpri
         }
     }
 
-    let status = if !integration.enabled || blockers.iter().any(|blocker| blocker.ends_with("_missing") || blocker == "integration_disabled") {
+    let status = if !integration.enabled
+        || blockers
+            .iter()
+            .any(|blocker| blocker.ends_with("_missing") || blocker == "integration_disabled")
+    {
         "blocked"
     } else if blockers.is_empty() {
         "healthy"
@@ -17225,7 +17454,12 @@ async fn probe_http_target(target: &str) -> (String, Option<u128>, Vec<String>, 
                 || status == reqwest::StatusCode::UNAUTHORIZED
                 || status == reqwest::StatusCode::FORBIDDEN
             {
-                ("reachable".to_string(), Some(latency_ms), evidence, blockers)
+                (
+                    "reachable".to_string(),
+                    Some(latency_ms),
+                    evidence,
+                    blockers,
+                )
             } else if status.is_server_error() {
                 blockers.push(format!("provider_server_error:{}", status.as_u16()));
                 ("blocked".to_string(), Some(latency_ms), evidence, blockers)
@@ -17259,7 +17493,12 @@ async fn probe_tcp_target(target: &str) -> (String, Option<u128>, Vec<String>, V
             let latency_ms = started.elapsed().as_millis();
             evidence.push(format!("tcp_connect:{address}"));
             evidence.push(format!("latency_ms:{latency_ms}"));
-            ("reachable".to_string(), Some(latency_ms), evidence, blockers)
+            (
+                "reachable".to_string(),
+                Some(latency_ms),
+                evidence,
+                blockers,
+            )
         }
         Ok(Err(err)) => {
             blockers.push(format!("tcp_connect_failed:{err}"));
@@ -17272,7 +17511,9 @@ async fn probe_tcp_target(target: &str) -> (String, Option<u128>, Vec<String>, V
     }
 }
 
-async fn probe_enterprise_integration(integration: EnterpriseIntegration) -> EnterpriseProviderProbe {
+async fn probe_enterprise_integration(
+    integration: EnterpriseIntegration,
+) -> EnterpriseProviderProbe {
     let checked_at = Utc::now();
     let adapter = enterprise_probe_adapter(&integration).to_string();
     let target = endpoint_target(&integration);
@@ -17410,7 +17651,8 @@ fn enterprise_deployment_action(
         );
     }
     if integration_uses_local_runtime(integration) {
-        return "Complete client/runtime packaging validation and enable tenant rollout.".to_string();
+        return "Complete client/runtime packaging validation and enable tenant rollout."
+            .to_string();
     }
     format!(
         "Deploy {}, configure endpoint/admin URL, and add required credentials.",
@@ -17518,7 +17760,10 @@ fn apply_layout_readiness(
     layout: &mut ConferenceLayoutState,
     participants: &[ConferenceParticipant],
 ) {
-    let active_participants = participants.iter().filter(|participant| !participant.removed).count();
+    let active_participants = participants
+        .iter()
+        .filter(|participant| !participant.removed)
+        .count();
     let large_gallery_capacity = if layout.sfu_layout_configured { 49 } else { 9 };
     layout.gallery_capacity = large_gallery_capacity;
     layout.max_visible = layout.max_visible.clamp(1, large_gallery_capacity);
@@ -17570,7 +17815,10 @@ fn apply_town_hall_readiness(config: &mut TownHallConfig) {
     if config.enabled && !config.broadcast_provider_configured && config.max_viewers > 1000 {
         blockers.push("broadcast_provider_required_for_large_town_hall".to_string());
     }
-    if config.enabled && config.overflow_url.is_none() && config.max_viewers > config.broadcast_capacity {
+    if config.enabled
+        && config.overflow_url.is_none()
+        && config.max_viewers > config.broadcast_capacity
+    {
         blockers.push("overflow_url_required_when_capacity_exceeds_local_fanout".to_string());
     }
     config.broadcast_ready = config.enabled
@@ -17613,7 +17861,10 @@ fn meeting_key_topics(segments: &[TranscriptSegment]) -> Vec<String> {
     .into_iter()
     .collect();
     let mut counts: HashMap<String, usize> = HashMap::new();
-    for word in segments.iter().flat_map(|segment| segment.text.split_whitespace()) {
+    for word in segments
+        .iter()
+        .flat_map(|segment| segment.text.split_whitespace())
+    {
         let normalized = word
             .trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
             .to_ascii_lowercase();
@@ -17624,11 +17875,7 @@ fn meeting_key_topics(segments: &[TranscriptSegment]) -> Vec<String> {
     }
     let mut topics: Vec<_> = counts.into_iter().collect();
     topics.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    topics
-        .into_iter()
-        .take(8)
-        .map(|(topic, _)| topic)
-        .collect()
+    topics.into_iter().take(8).map(|(topic, _)| topic).collect()
 }
 
 fn meeting_action_items(segments: &[TranscriptSegment]) -> Vec<MeetingActionItem> {
@@ -17774,10 +18021,7 @@ async fn sync_google_calendar(
         }
     }
 
-    let calendar_id = integration
-        .calendar_id
-        .as_deref()
-        .unwrap_or("primary");
+    let calendar_id = integration.calendar_id.as_deref().unwrap_or("primary");
     let now = Utc::now();
     let time_min = (now - Duration::days(7)).to_rfc3339();
     let time_max = (now + Duration::days(30)).to_rfc3339();
@@ -17814,10 +18058,7 @@ async fn sync_google_calendar(
             Some(id) => format!("google:{id}"),
             None => continue,
         };
-        let title = item["summary"]
-            .as_str()
-            .unwrap_or("(No title)")
-            .to_string();
+        let title = item["summary"].as_str().unwrap_or("(No title)").to_string();
         // Google returns dateTime for timed events, date for all-day events
         let start_str = item["start"]["dateTime"]
             .as_str()
@@ -17888,10 +18129,16 @@ async fn sync_caldav_calendar(
     );
 
     let resp = client
-        .request(reqwest::Method::from_bytes(b"REPORT").unwrap(), calendar_url)
+        .request(
+            reqwest::Method::from_bytes(b"REPORT").unwrap(),
+            calendar_url,
+        )
         .header("Content-Type", "application/xml; charset=utf-8")
         .header("Depth", "1")
-        .basic_auth(&integration.access_token_enc, integration.refresh_token_enc.as_deref())
+        .basic_auth(
+            &integration.access_token_enc,
+            integration.refresh_token_enc.as_deref(),
+        )
         .body(report_body)
         .send()
         .await
@@ -17903,7 +18150,10 @@ async fn sync_caldav_calendar(
         return Err(format!("CalDAV REPORT error ({status}): {body}"));
     }
 
-    let body = resp.text().await.map_err(|e| format!("CalDAV response read error: {e}"))?;
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("CalDAV response read error: {e}"))?;
     Ok(parse_ics_vevents(&body, "caldav"))
 }
 
@@ -17974,13 +18224,11 @@ async fn clamav_scan(host: &str, body: &[u8]) -> Result<bool, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt as TokioAsyncWriteExt};
     use tokio::net::TcpStream;
 
-    let mut stream = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        TcpStream::connect(host),
-    )
-    .await
-    .map_err(|_| format!("ClamAV connect to {host} timed out"))?
-    .map_err(|e| format!("ClamAV connect to {host} failed: {e}"))?;
+    let mut stream =
+        tokio::time::timeout(std::time::Duration::from_secs(10), TcpStream::connect(host))
+            .await
+            .map_err(|_| format!("ClamAV connect to {host} timed out"))?
+            .map_err(|e| format!("ClamAV connect to {host} failed: {e}"))?;
 
     // Send zINSTREAM\0
     stream
@@ -18075,7 +18323,10 @@ async fn llm_call_provider(
     max_tokens: usize,
     messages: &[serde_json::Value],
 ) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let provider = std::env::var("PALE_LLM_PROVIDER").unwrap_or_default();
     let api_key = std::env::var("PALE_LLM_API_KEY").ok();
 
@@ -18131,7 +18382,10 @@ async fn stt_call_provider(
     language: &str,
     filename: &str,
 ) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let provider = std::env::var("PALE_STT_PROVIDER").unwrap_or_default();
     let api_key = std::env::var("PALE_STT_API_KEY").ok();
 
@@ -18185,7 +18439,10 @@ async fn tts_call_provider(
     voice: &str,
     format: &str,
 ) -> Result<Vec<u8>, String> {
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let provider = std::env::var("PALE_TTS_PROVIDER").unwrap_or_default();
     let api_key = std::env::var("PALE_TTS_API_KEY").ok();
 
@@ -18238,7 +18495,10 @@ impl AppState {
         for mut configured in self.enterprise_integrations.values() {
             configured.api_key_configured =
                 configured.api_key_configured || configured.api_key_enc.is_some();
-            if let Some(default) = integrations.iter_mut().find(|item| item.id == configured.id) {
+            if let Some(default) = integrations
+                .iter_mut()
+                .find(|item| item.id == configured.id)
+            {
                 *default = configured;
             } else {
                 integrations.push(configured);
@@ -18352,7 +18612,8 @@ impl AppState {
             .collect();
         let total = capability_report.total.max(1);
         let score = ((capability_report.available * 100) / total).min(100) as u8;
-        let ready = capability_report.available == capability_report.total && critical_blockers.is_empty();
+        let ready =
+            capability_report.available == capability_report.total && critical_blockers.is_empty();
         let mut next_actions = critical_blockers
             .iter()
             .take(8)
@@ -18518,16 +18779,56 @@ impl AppState {
         );
 
         for (id, area, summary) in [
-            ("advanced_threat_protection", "Security", "Malware/ATP scanning provider must be configured and reachable."),
-            ("casb", "Security", "CASB or policy-engine provider must be configured and reachable."),
-            ("cloud_storage", "Files", "External storage backend must be configured and reachable."),
-            ("e911", "Calling", "Certified E911 provider must be configured and reachable."),
-            ("pstn_sbc_operator_connect", "Calling", "PSTN/SBC provider must be configured and reachable."),
-            ("auto_transcription", "AI", "STT provider must be configured and reachable."),
-            ("text_to_speech", "AI", "TTS provider must be configured and reachable."),
-            ("meeting_assistant", "AI", "LLM meeting assistant provider must be configured and reachable."),
-            ("copilot", "AI", "LLM workspace assistant provider must be configured and reachable."),
-            ("town_hall_broadcast", "Scale", "Broadcast/SFU provider must be configured and reachable for large town halls."),
+            (
+                "advanced_threat_protection",
+                "Security",
+                "Malware/ATP scanning provider must be configured and reachable.",
+            ),
+            (
+                "casb",
+                "Security",
+                "CASB or policy-engine provider must be configured and reachable.",
+            ),
+            (
+                "cloud_storage",
+                "Files",
+                "External storage backend must be configured and reachable.",
+            ),
+            (
+                "e911",
+                "Calling",
+                "Certified E911 provider must be configured and reachable.",
+            ),
+            (
+                "pstn_sbc_operator_connect",
+                "Calling",
+                "PSTN/SBC provider must be configured and reachable.",
+            ),
+            (
+                "auto_transcription",
+                "AI",
+                "STT provider must be configured and reachable.",
+            ),
+            (
+                "text_to_speech",
+                "AI",
+                "TTS provider must be configured and reachable.",
+            ),
+            (
+                "meeting_assistant",
+                "AI",
+                "LLM meeting assistant provider must be configured and reachable.",
+            ),
+            (
+                "copilot",
+                "AI",
+                "LLM workspace assistant provider must be configured and reachable.",
+            ),
+            (
+                "town_hall_broadcast",
+                "Scale",
+                "Broadcast/SFU provider must be configured and reachable for large town halls.",
+            ),
         ] {
             let capability = capability_by_id.get(id).copied();
             let probe = probe_by_id.get(id).copied();
@@ -18547,7 +18848,8 @@ impl AppState {
                 if probe.status != "reachable" {
                     blockers.extend(probe.blockers.clone());
                     if probe.status == "warning" {
-                        blockers.push("provider_requires_deeper_adapter_or_certification".to_string());
+                        blockers
+                            .push("provider_requires_deeper_adapter_or_certification".to_string());
                     }
                 }
             } else {
@@ -18565,13 +18867,41 @@ impl AppState {
         }
 
         for (id, area, summary) in [
-            ("mobile_app", "Client Runtime", "Android/mobile packaging and device capability path must be validated."),
-            ("web_client", "Client Runtime", "Browser deployment and browser media compatibility must be validated."),
-            ("popout_multi_window", "Client Runtime", "Desktop multi-window lifecycle must be validated."),
-            ("virtual_backgrounds", "Media", "Virtual background runtime must be certified on target clients."),
-            ("together_gallery", "Media", "Gallery/together layout runtime must be certified."),
-            ("ndi_rtmp_streaming", "Media", "Streaming gateway must be configured and reachable."),
-            ("powerpoint_live", "Media", "Presentation renderer must be configured and reachable."),
+            (
+                "mobile_app",
+                "Client Runtime",
+                "Android/mobile packaging and device capability path must be validated.",
+            ),
+            (
+                "web_client",
+                "Client Runtime",
+                "Browser deployment and browser media compatibility must be validated.",
+            ),
+            (
+                "popout_multi_window",
+                "Client Runtime",
+                "Desktop multi-window lifecycle must be validated.",
+            ),
+            (
+                "virtual_backgrounds",
+                "Media",
+                "Virtual background runtime must be certified on target clients.",
+            ),
+            (
+                "together_gallery",
+                "Media",
+                "Gallery/together layout runtime must be certified.",
+            ),
+            (
+                "ndi_rtmp_streaming",
+                "Media",
+                "Streaming gateway must be configured and reachable.",
+            ),
+            (
+                "powerpoint_live",
+                "Media",
+                "Presentation renderer must be configured and reachable.",
+            ),
         ] {
             let capability = capability_by_id.get(id).copied();
             let status = capability
@@ -18593,7 +18923,10 @@ impl AppState {
         }
 
         let passed = checks.iter().filter(|check| check.status == "pass").count();
-        let warning = checks.iter().filter(|check| check.status == "warning").count();
+        let warning = checks
+            .iter()
+            .filter(|check| check.status == "warning")
+            .count();
         let failed = checks.iter().filter(|check| check.status == "fail").count();
         let total = checks.len().max(1);
         let score = ((passed * 100) / total).min(100) as u8;
@@ -18651,7 +18984,10 @@ impl AppState {
                 .then_with(|| left.name.cmp(&right.name))
         });
         let total = items.len();
-        let completed = items.iter().filter(|item| item.status == "available").count();
+        let completed = items
+            .iter()
+            .filter(|item| item.status == "available")
+            .count();
         let remaining = total.saturating_sub(completed);
         EnterpriseDeploymentPlan {
             generated_at,
@@ -18681,11 +19017,15 @@ impl AppState {
         let integrations = self.list_enterprise_integrations();
         let matched: Vec<_> = integration_ids
             .iter()
-            .filter_map(|id| integrations.iter().find(|integration| integration.id == *id))
+            .filter_map(|id| {
+                integrations
+                    .iter()
+                    .find(|integration| integration.id == *id)
+            })
             .collect();
-        let configured = matched
-            .iter()
-            .any(|integration| enterprise_capability_status((*integration).clone()).status == "available");
+        let configured = matched.iter().any(|integration| {
+            enterprise_capability_status((*integration).clone()).status == "available"
+        });
         let primary = matched
             .iter()
             .find(|integration| {
@@ -18702,9 +19042,9 @@ impl AppState {
             integration_ids: integration_ids.into_iter().map(str::to_string).collect(),
             endpoint_url: primary.and_then(|integration| integration.endpoint_url.clone()),
             admin_url: primary.and_then(|integration| integration.admin_url.clone()),
-            api_key_configured: matched
-                .iter()
-                .any(|integration| integration.api_key_configured || integration.api_key_enc.is_some()),
+            api_key_configured: matched.iter().any(|integration| {
+                integration.api_key_configured || integration.api_key_enc.is_some()
+            }),
             supported_protocols: ai_provider_protocols(&kind),
             open_source_options: matched
                 .into_iter()
@@ -18747,7 +19087,9 @@ impl AppState {
         if input.messages.is_empty() {
             return Err("messages are required".to_string());
         }
-        let status = self.ai_provider_status("llm").ok_or_else(|| "unknown provider kind".to_string())?;
+        let status = self
+            .ai_provider_status("llm")
+            .ok_or_else(|| "unknown provider kind".to_string())?;
         let messages: Vec<_> = input
             .messages
             .into_iter()
@@ -18836,7 +19178,9 @@ impl AppState {
                 .ok_or_else(|| "file not found".to_string())?;
         }
 
-        let status = self.ai_provider_status("stt").ok_or_else(|| "unknown provider kind".to_string())?;
+        let status = self
+            .ai_provider_status("stt")
+            .ok_or_else(|| "unknown provider kind".to_string())?;
         let language = input.language.clone().unwrap_or_else(|| "en".to_string());
 
         let stt_api_url = std::env::var("PALE_STT_API_URL").ok();
@@ -18845,16 +19189,20 @@ impl AppState {
             // Read audio data only when we actually have a provider to call
             let (audio_data, audio_filename) = if let Some(recording_id) = input.recording_id {
                 let rec = self.recording(recording_id).unwrap();
-                let fid = rec.file_id.ok_or_else(|| "recording has no associated file".to_string())?;
+                let fid = rec
+                    .file_id
+                    .ok_or_else(|| "recording has no associated file".to_string())?;
                 let path = self.file_path(fid);
-                let data = tokio::fs::read(&path).await
+                let data = tokio::fs::read(&path)
+                    .await
                     .map_err(|e| format!("failed to read recording file: {e}"))?;
                 (data, format!("recording_{recording_id}.wav"))
             } else {
                 let file_id = input.file_id.unwrap();
                 let file_record = self.files.get(&file_id).unwrap();
                 let path = self.file_path(file_id);
-                let data = tokio::fs::read(&path).await
+                let data = tokio::fs::read(&path)
+                    .await
                     .map_err(|e| format!("failed to read file: {e}"))?;
                 (data, file_record.filename.clone())
             };
@@ -18904,7 +19252,8 @@ impl AppState {
             payload,
             warnings: status.warnings,
             governance: vec![
-                "transcript text must be posted back through transcription completion APIs".to_string(),
+                "transcript text must be posted back through transcription completion APIs"
+                    .to_string(),
                 "recording and file references are validated before dispatch".to_string(),
                 "local server does not fabricate transcript segments".to_string(),
             ],
@@ -18920,7 +19269,9 @@ impl AppState {
         if text.is_empty() {
             return Err("text is required".to_string());
         }
-        let status = self.ai_provider_status("tts").ok_or_else(|| "unknown provider kind".to_string())?;
+        let status = self
+            .ai_provider_status("tts")
+            .ok_or_else(|| "unknown provider kind".to_string())?;
         let voice = input.voice.unwrap_or_else(|| "tenant-default".to_string());
         let format = input.format.unwrap_or_else(|| "wav".to_string());
 
@@ -21469,11 +21820,15 @@ mod tests {
         assert!(kinds.contains(&"file"));
         assert!(kinds.contains(&"recording"));
         assert!(kinds.contains(&"app"));
-        assert!(results.iter().any(|result| result.id == channel.id.to_string()));
+        assert!(results
+            .iter()
+            .any(|result| result.id == channel.id.to_string()));
         assert!(results
             .iter()
             .any(|result| result.id == sip_message.id.to_string()));
-        assert!(results.iter().any(|result| result.id == file.id.to_string()));
+        assert!(results
+            .iter()
+            .any(|result| result.id == file.id.to_string()));
         assert!(state
             .unified_search("sip:alice@example.com", "   ", 20)
             .is_empty());
@@ -21812,8 +22167,7 @@ mod tests {
         assert!(initial
             .capabilities
             .iter()
-            .any(|capability| capability.id == "e911"
-                && capability.blocking_dependency.is_some()));
+            .any(|capability| capability.id == "e911" && capability.blocking_dependency.is_some()));
 
         state
             .update_enterprise_integration(
@@ -21871,10 +22225,7 @@ mod tests {
     #[test]
     fn enterprise_parity_readiness_requires_every_external_capability() {
         let state = AppState::new(
-            PathBuf::from(format!(
-                "/tmp/pale-enterprise-readiness-{}",
-                Uuid::new_v4()
-            )),
+            PathBuf::from(format!("/tmp/pale-enterprise-readiness-{}", Uuid::new_v4())),
             "012345678901234567890123".to_string(),
             sha256_hex("admin-password".as_bytes()),
         );
@@ -21945,10 +22296,7 @@ mod tests {
     #[test]
     fn enterprise_integration_health_flags_invalid_or_missing_provider_configuration() {
         let state = AppState::new(
-            PathBuf::from(format!(
-                "/tmp/pale-enterprise-health-{}",
-                Uuid::new_v4()
-            )),
+            PathBuf::from(format!("/tmp/pale-enterprise-health-{}", Uuid::new_v4())),
             "012345678901234567890123".to_string(),
             sha256_hex("admin-password".as_bytes()),
         );
@@ -22018,9 +22366,7 @@ mod tests {
             "012345678901234567890123".to_string(),
             sha256_hex("admin-password".as_bytes()),
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let accept_task = tokio::spawn(async move {
             let _ = listener.accept().await;
@@ -22143,11 +22489,7 @@ mod tests {
             .summary
             .iter()
             .any(|line| line.contains("separate open-source services")));
-        let e911 = initial
-            .items
-            .iter()
-            .find(|item| item.id == "e911")
-            .unwrap();
+        let e911 = initial.items.iter().find(|item| item.id == "e911").unwrap();
         assert!(e911.endpoint_required);
         assert!(e911.credentials_required);
         assert!(e911.action.contains("Install or select"));
@@ -22317,7 +22659,10 @@ mod tests {
         assert!(matched.provider_configured);
         assert!(matched.matched);
         assert_eq!(
-            matched.route.as_ref().map(|route| route.destination.as_str()),
+            matched
+                .route
+                .as_ref()
+                .map(|route| route.destination.as_str()),
             Some("sip:support@example.com")
         );
 
@@ -22608,10 +22953,12 @@ mod tests {
                 "admin",
             )
             .unwrap();
-        assert!(state
-            .presentation_session(session.id)
-            .unwrap()
-            .renderer_configured);
+        assert!(
+            state
+                .presentation_session(session.id)
+                .unwrap()
+                .renderer_configured
+        );
 
         let ended = state.end_presentation_session(session.id).unwrap();
         assert!(ended.ended_at.is_some());
@@ -22707,7 +23054,11 @@ mod tests {
             .layout_blockers
             .contains(&"sfu_layout_service_not_configured".to_string()));
 
-        for id in ["noise_suppression", "virtual_backgrounds", "together_gallery"] {
+        for id in [
+            "noise_suppression",
+            "virtual_backgrounds",
+            "together_gallery",
+        ] {
             state
                 .update_enterprise_integration(
                     id,
@@ -22726,10 +23077,12 @@ mod tests {
         let ready_media = state.meeting_media_settings("sip:host@example.com");
         assert!(ready_media.noise_suppression_configured);
         assert!(ready_media.virtual_backgrounds_configured);
-        assert!(state
-            .conference_layout_state(conference.id)
-            .unwrap()
-            .sfu_layout_configured);
+        assert!(
+            state
+                .conference_layout_state(conference.id)
+                .unwrap()
+                .sfu_layout_configured
+        );
         let ready_layout = state.conference_layout_state(conference.id).unwrap();
         assert_eq!(ready_layout.gallery_capacity, 49);
         assert!(ready_layout.layout_blockers.is_empty());
@@ -22954,14 +23307,19 @@ mod tests {
                 "admin",
             )
             .unwrap();
-        assert!(state
-            .town_hall_config(webinar.id)
-            .unwrap()
-            .broadcast_provider_configured);
+        assert!(
+            state
+                .town_hall_config(webinar.id)
+                .unwrap()
+                .broadcast_provider_configured
+        );
         let broadcast_ready = state.town_hall_config(webinar.id).unwrap();
         assert!(broadcast_ready.broadcast_ready);
         assert_eq!(broadcast_ready.attendee_mode, "broadcast");
-        assert_eq!(broadcast_ready.broadcast_capacity, broadcast_ready.max_viewers);
+        assert_eq!(
+            broadcast_ready.broadcast_capacity,
+            broadcast_ready.max_viewers
+        );
         assert!(broadcast_ready.broadcast_blockers.is_empty());
     }
 
@@ -23837,7 +24195,10 @@ mod tests {
     #[test]
     fn discovery_search_filters_messages_by_keyword_user_room_and_date() {
         let state = AppState::new(
-            PathBuf::from(format!("/tmp/pale-discovery-search-test-{}", Uuid::new_v4())),
+            PathBuf::from(format!(
+                "/tmp/pale-discovery-search-test-{}",
+                Uuid::new_v4()
+            )),
             "012345678901234567890123".to_string(),
             sha256_hex("admin-password".as_bytes()),
         );
@@ -24033,12 +24394,14 @@ mod tests {
             .content_snippet
             .ends_with("..."));
 
-        let decision = state.file_governance_for_upload(
-            "sip:alice@example.com",
-            "notes.txt",
-            "text/plain",
-            b"customer SECRET-123",
-        ).await;
+        let decision = state
+            .file_governance_for_upload(
+                "sip:alice@example.com",
+                "notes.txt",
+                "text/plain",
+                b"customer SECRET-123",
+            )
+            .await;
 
         assert!(!decision.allowed);
         assert_eq!(decision.dlp_status, "blocked");
@@ -24081,12 +24444,14 @@ mod tests {
             .is_err());
         assert_eq!(disabled.name, "Sensitive tokens");
         assert!(!disabled.enabled);
-        let allowed = state.file_governance_for_upload(
-            "sip:alice@example.com",
-            "notes-2.txt",
-            "text/plain",
-            b"customer SECRET-456",
-        ).await;
+        let allowed = state
+            .file_governance_for_upload(
+                "sip:alice@example.com",
+                "notes-2.txt",
+                "text/plain",
+                b"customer SECRET-456",
+            )
+            .await;
         assert!(allowed.allowed);
         drop(state);
 
@@ -24116,12 +24481,9 @@ mod tests {
         );
         let eicar = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
 
-        let before = state.file_governance_for_upload(
-            "sip:alice@example.com",
-            "eicar.txt",
-            "text/plain",
-            eicar,
-        ).await;
+        let before = state
+            .file_governance_for_upload("sip:alice@example.com", "eicar.txt", "text/plain", eicar)
+            .await;
         assert!(before.allowed);
         assert_eq!(before.dlp_status, "clean");
         assert!(!state.advanced_threat_protection_available());
@@ -24142,12 +24504,9 @@ mod tests {
             .unwrap();
         assert!(state.advanced_threat_protection_available());
 
-        let after = state.file_governance_for_upload(
-            "sip:alice@example.com",
-            "eicar.txt",
-            "text/plain",
-            eicar,
-        ).await;
+        let after = state
+            .file_governance_for_upload("sip:alice@example.com", "eicar.txt", "text/plain", eicar)
+            .await;
         assert!(!after.allowed);
         assert_eq!(after.dlp_status, "malware_blocked");
         assert_eq!(after.dlp_violation_count, 1);
@@ -24247,7 +24606,8 @@ mod tests {
             ..blocked_file.clone()
         };
 
-        let before = state.casb_file_access_decision("sip:alice@example.com", "download", &blocked_file);
+        let before =
+            state.casb_file_access_decision("sip:alice@example.com", "download", &blocked_file);
         assert!(before.allowed);
         assert!(!before.enforced);
         assert_eq!(before.reason, "casb_not_configured");
@@ -24268,12 +24628,14 @@ mod tests {
             .unwrap();
         assert!(state.casb_available());
 
-        let blocked = state.casb_file_access_decision("sip:alice@example.com", "download", &blocked_file);
+        let blocked =
+            state.casb_file_access_decision("sip:alice@example.com", "download", &blocked_file);
         assert!(!blocked.allowed);
         assert!(blocked.enforced);
         assert_eq!(blocked.reason, "file_blocked");
 
-        let clean = state.casb_file_access_decision("sip:alice@example.com", "download", &clean_file);
+        let clean =
+            state.casb_file_access_decision("sip:alice@example.com", "download", &clean_file);
         assert!(clean.allowed);
         assert!(clean.enforced);
         assert_eq!(clean.reason, "allowed");
@@ -24488,10 +24850,7 @@ mod tests {
             .action_items
             .iter()
             .any(|item| item.text.contains("need to update")));
-        assert!(report
-            .decisions
-            .iter()
-            .any(|line| line.contains("decided")));
+        assert!(report.decisions.iter().any(|line| line.contains("decided")));
         assert!(report.risks.iter().any(|line| line.contains("Risk")));
         assert!(report
             .open_questions
@@ -24513,10 +24872,12 @@ mod tests {
                 "admin",
             )
             .unwrap();
-        assert!(state
-            .meeting_assistant_report(conference.id)
-            .unwrap()
-            .ai_provider_configured);
+        assert!(
+            state
+                .meeting_assistant_report(conference.id)
+                .unwrap()
+                .ai_provider_configured
+        );
     }
 
     #[test]
@@ -24605,7 +24966,10 @@ mod tests {
         assert_eq!(completed.transcript_segment_count, 2);
         assert_eq!(state.get_transcript(conference.id).len(), 2);
         assert_eq!(
-            state.recording(recording.id).unwrap().transcript_segment_count,
+            state
+                .recording(recording.id)
+                .unwrap()
+                .transcript_segment_count,
             2
         );
     }

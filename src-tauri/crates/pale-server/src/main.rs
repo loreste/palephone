@@ -4,12 +4,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
+#[cfg(feature = "native-pjsip")]
+use pale_server::pjsip_runtime::{PjsipRuntime, PjsipRuntimeConfig, TlsConfig};
 use pale_server::{
-    cli, http, metrics,
-    pjsip_runtime::{PjsipRuntime, PjsipRuntimeConfig, TlsConfig},
-    sip, AppState, MediaConfig, ServerConfig, TurnConfig, TurnTransport,
+    cli, http, metrics, sip, AppState, MediaConfig, ServerConfig, TurnConfig, TurnTransport,
 };
 use tracing_subscriber::EnvFilter;
+
+#[cfg(feature = "native-pjsip")]
+type NativePjsipRuntime = PjsipRuntime;
+#[cfg(not(feature = "native-pjsip"))]
+type NativePjsipRuntime = ();
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -162,6 +167,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // responses must not point clients at it.
     match sip_backend {
         SipBackend::UdpParser => app_state.set_sip_registrar(sip_external.clone()),
+        #[cfg(feature = "native-pjsip")]
         SipBackend::Pjsip => log::info!(
             "SIP backend 'pjsip' does not implement REGISTER; login responses will not advertise a SIP registrar"
         ),
@@ -169,7 +175,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let state = Arc::new(app_state);
     tokio::fs::create_dir_all(state.files_dir()).await?;
-    let _pjsip_runtime = match sip_backend {
+    let _pjsip_runtime: Option<NativePjsipRuntime> = match sip_backend {
+        #[cfg(feature = "native-pjsip")]
         SipBackend::Pjsip => {
             let tls = tls_config_from_env(config.sip_addr.port())?;
             let encrypted_by_default = tls.is_some();
@@ -470,6 +477,7 @@ fn checked_secret(name: &str, errors: &mut Vec<String>) -> Option<String> {
     }
 }
 
+#[cfg(feature = "native-pjsip")]
 fn tls_config_from_env(
     sip_port: u16,
 ) -> Result<Option<TlsConfig>, Box<dyn std::error::Error + Send + Sync>> {
@@ -510,6 +518,7 @@ fn tls_config_from_env(
     }))
 }
 
+#[cfg(feature = "native-pjsip")]
 fn required_env(name: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     std::env::var(name)
         .ok()
@@ -523,6 +532,7 @@ fn optional_env(name: &str) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
+#[cfg(feature = "native-pjsip")]
 fn onoff(value: bool) -> &'static str {
     if value {
         "on"
@@ -543,18 +553,28 @@ fn env_bool(name: &str, default: bool) -> bool {
 }
 
 enum SipBackend {
+    #[cfg(feature = "native-pjsip")]
     Pjsip,
     UdpParser,
 }
 
 fn sip_backend_from_env() -> SipBackend {
     match std::env::var("PALE_SIP_BACKEND")
-        .unwrap_or_else(|_| "pjsip".to_string())
+        .unwrap_or_else(|_| "udp-parser".to_string())
         .to_lowercase()
         .as_str()
     {
         "udp-parser" | "parser" | "custom" => SipBackend::UdpParser,
+        #[cfg(feature = "native-pjsip")]
         _ => SipBackend::Pjsip,
+        #[cfg(not(feature = "native-pjsip"))]
+        other => {
+            log::warn!(
+                "PALE_SIP_BACKEND={} requested, but this pale-server build does not include native PJSIP; using udp-parser",
+                other
+            );
+            SipBackend::UdpParser
+        }
     }
 }
 

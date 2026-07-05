@@ -38,9 +38,7 @@ impl LiveKitConfig {
 }
 
 fn non_empty_env(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .filter(|v| !v.trim().is_empty())
+    std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
 // ── Access-token generation (LiveKit JWT) ────────────────────────────
@@ -208,7 +206,10 @@ pub async fn create_room(config: &LiveKitConfig, room_name: &str) -> Result<(), 
         "max_participants": 250,
     });
 
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
         .post(&url)
         .header("Authorization", format!("Bearer {token}"))
@@ -221,9 +222,7 @@ pub async fn create_room(config: &LiveKitConfig, room_name: &str) -> Result<(), 
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!(
-            "LiveKit CreateRoom returned {status}: {text}"
-        ));
+        return Err(format!("LiveKit CreateRoom returned {status}: {text}"));
     }
     Ok(())
 }
@@ -241,7 +240,10 @@ pub async fn delete_room(config: &LiveKitConfig, room_name: &str) -> Result<(), 
 
     let body = serde_json::json!({ "room": room_name });
 
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
         .post(&url)
         .header("Authorization", format!("Bearer {token}"))
@@ -277,10 +279,7 @@ pub async fn start_room_composite_egress(
     room_name: &str,
     output_file_path: &str,
 ) -> Result<String, String> {
-    let url = livekit_http_url(
-        config,
-        "/twirp/livekit.Egress/StartRoomCompositeEgress",
-    );
+    let url = livekit_http_url(config, "/twirp/livekit.Egress/StartRoomCompositeEgress");
     let token = generate_token(
         config,
         "pale-server",
@@ -298,7 +297,10 @@ pub async fn start_room_composite_egress(
         "audio_only": false,
     });
 
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
         .post(&url)
         .header("Authorization", format!("Bearer {token}"))
@@ -311,9 +313,7 @@ pub async fn start_room_composite_egress(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!(
-            "LiveKit Egress returned {status}: {text}"
-        ));
+        return Err(format!("LiveKit Egress returned {status}: {text}"));
     }
 
     let info: EgressInfo = resp
@@ -336,7 +336,10 @@ pub async fn stop_egress(config: &LiveKitConfig, egress_id: &str) -> Result<(), 
 
     let body = serde_json::json!({ "egress_id": egress_id });
 
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
         .post(&url)
         .header("Authorization", format!("Bearer {token}"))

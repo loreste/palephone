@@ -7,7 +7,7 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use p256::ecdsa::{SigningKey, Signature, signature::Signer};
+use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -99,17 +99,18 @@ fn build_vapid_header(config: &VapidConfig, audience: &str) -> Result<String, Pu
     let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
 
     let jwt = format!("{}.{}", signing_input, sig_b64);
-    Ok(format!(
-        "vapid t={},k={}",
-        jwt, config.public_key
-    ))
+    Ok(format!("vapid t={},k={}", jwt, config.public_key))
 }
 
 /// Extract the origin (scheme + host) from a push endpoint URL.
 fn audience_from_endpoint(endpoint: &str) -> Result<String, PushError> {
     let url = url::Url::parse(endpoint)
         .map_err(|e| PushError::Config(format!("invalid endpoint URL: {e}")))?;
-    Ok(format!("{}://{}", url.scheme(), url.host_str().unwrap_or("localhost")))
+    Ok(format!(
+        "{}://{}",
+        url.scheme(),
+        url.host_str().unwrap_or("localhost")
+    ))
 }
 
 /// Send a push notification to a single subscription.

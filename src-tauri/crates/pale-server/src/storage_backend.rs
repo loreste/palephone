@@ -37,14 +37,22 @@ impl S3Config {
     /// Reads S3 configuration from environment variables.  Returns `None` when
     /// `PALE_S3_BUCKET` is not set, meaning the local backend should be used.
     pub fn from_env() -> Option<Self> {
-        let bucket = std::env::var("PALE_S3_BUCKET").ok().filter(|v| !v.is_empty())?;
+        let bucket = std::env::var("PALE_S3_BUCKET")
+            .ok()
+            .filter(|v| !v.is_empty())?;
         let region = std::env::var("PALE_S3_REGION")
             .ok()
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| "us-east-1".to_string());
-        let endpoint = std::env::var("PALE_S3_ENDPOINT").ok().filter(|v| !v.is_empty());
-        let access_key = std::env::var("PALE_S3_ACCESS_KEY").ok().filter(|v| !v.is_empty());
-        let secret_key = std::env::var("PALE_S3_SECRET_KEY").ok().filter(|v| !v.is_empty());
+        let endpoint = std::env::var("PALE_S3_ENDPOINT")
+            .ok()
+            .filter(|v| !v.is_empty());
+        let access_key = std::env::var("PALE_S3_ACCESS_KEY")
+            .ok()
+            .filter(|v| !v.is_empty());
+        let secret_key = std::env::var("PALE_S3_SECRET_KEY")
+            .ok()
+            .filter(|v| !v.is_empty());
         Some(Self {
             bucket,
             region,
@@ -63,19 +71,26 @@ pub struct StorageClient {
 
 #[derive(Clone)]
 enum StorageInner {
-    Local { files_dir: PathBuf },
-    S3 { client: aws_sdk_s3::Client, bucket: String },
+    Local {
+        files_dir: PathBuf,
+    },
+    S3 {
+        client: aws_sdk_s3::Client,
+        bucket: String,
+    },
 }
 
 impl std::fmt::Debug for StorageClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.inner {
-            StorageInner::Local { files_dir } => {
-                f.debug_struct("StorageClient::Local").field("files_dir", files_dir).finish()
-            }
-            StorageInner::S3 { bucket, .. } => {
-                f.debug_struct("StorageClient::S3").field("bucket", bucket).finish()
-            }
+            StorageInner::Local { files_dir } => f
+                .debug_struct("StorageClient::Local")
+                .field("files_dir", files_dir)
+                .finish(),
+            StorageInner::S3 { bucket, .. } => f
+                .debug_struct("StorageClient::S3")
+                .field("bucket", bucket)
+                .finish(),
         }
     }
 }
@@ -94,21 +109,19 @@ impl StorageClient {
             .region(aws_config::Region::new(config.region.clone()));
 
         if let (Some(access_key), Some(secret_key)) = (&config.access_key, &config.secret_key) {
-            aws_builder = aws_builder.credentials_provider(
-                aws_sdk_s3::config::Credentials::new(
-                    access_key.clone(),
-                    secret_key.clone(),
-                    None,
-                    None,
-                    "pale-env",
-                ),
-            );
+            aws_builder = aws_builder.credentials_provider(aws_sdk_s3::config::Credentials::new(
+                access_key.clone(),
+                secret_key.clone(),
+                None,
+                None,
+                "pale-env",
+            ));
         }
 
         let aws_config = aws_builder.load().await;
 
-        let mut s3_config_builder = aws_sdk_s3::config::Builder::from(&aws_config)
-            .force_path_style(true);
+        let mut s3_config_builder =
+            aws_sdk_s3::config::Builder::from(&aws_config).force_path_style(true);
 
         if let Some(endpoint) = &config.endpoint {
             s3_config_builder = s3_config_builder.endpoint_url(endpoint);
@@ -225,8 +238,8 @@ impl StorageClient {
             },
             StorageInner::S3 { bucket, .. } => {
                 let endpoint = std::env::var("PALE_S3_ENDPOINT").ok();
-                let region = std::env::var("PALE_S3_REGION")
-                    .unwrap_or_else(|_| "us-east-1".to_string());
+                let region =
+                    std::env::var("PALE_S3_REGION").unwrap_or_else(|_| "us-east-1".to_string());
                 StorageBackend::S3 {
                     bucket: bucket.clone(),
                     region,
