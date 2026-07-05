@@ -662,7 +662,8 @@
           <div class="docs-layout">
             <aside class="toc" aria-label="Documentation links">
               <strong>On this page</strong>
-              <a href="#server-linux">Install Pale Server on Linux</a>
+              <a href="#server-linux">Linux with Docker Compose</a>
+              <a href="#server-linux-bare-metal">Bare-metal Linux</a>
               <a href="#server-windows">Install Pale Server on Windows</a>
               <a href="#how-tos">How-tos</a>
               <a href="#tls">TLS guidance</a>
@@ -672,11 +673,12 @@
 
             <div class="doc-stack">
               <article class="doc-card" id="server-linux">
-                <h3>Install Pale Server on Linux</h3>
+                <h3>Install Pale Server on Linux with Docker Compose</h3>
                 <p>
-                  The supported Linux path in this repository is Docker Compose.
+                  Docker Compose is the quickest Linux path in this repository.
                   It runs Pale Server with PostgreSQL, coturn, and NATS, then
-                  exposes the HTTP API on port 8090 and SIP on 5060/5061.
+                  exposes the HTTP API on port 8090 and SIP on 5060/5061. Use
+                  this when you want the bundled stack managed together.
                 </p>
                 <ol>
                   <li>Install Docker and Docker Compose on a Linux host.</li>
@@ -699,6 +701,83 @@ curl http://localhost:8090/health</pre>
                   For public deployments, put TLS in front of the HTTP API or
                   set <code>PALE_HTTP_TLS_CERT</code> and <code>PALE_HTTP_TLS_KEY</code>.
                   Open only the ports your deployment actually uses.
+                </div>
+              </article>
+
+              <article class="doc-card" id="server-linux-bare-metal">
+                <h3>Install Pale Server on bare-metal Linux</h3>
+                <p>
+                  You can run Pale Server directly on Linux without Docker. In
+                  that model, Pale Server is just a native binary managed by
+                  systemd, while PostgreSQL, coturn, TLS certificates, backups,
+                  and optional services such as NATS are installed and operated
+                  separately.
+                </p>
+                <h4>Install OS packages</h4>
+                <pre class="code-block">sudo apt update
+sudo apt install -y build-essential pkg-config python3 nasm \
+  libssl-dev libasound2-dev libopus-dev uuid-dev libclang-dev clang \
+  postgresql postgresql-contrib coturn curl git</pre>
+                <p>
+                  Install Rust with the stable toolchain before building the
+                  server. On production hosts, pin the Rust version in your
+                  build process instead of building from an untracked shell
+                  history.
+                </p>
+                <h4>Create the database</h4>
+                <pre class="code-block">sudo -u postgres createuser --pwprompt pale
+sudo -u postgres createdb -O pale pale</pre>
+                <h4>Build and install the server</h4>
+                <pre class="code-block">git clone https://github.com/loreste/palephone.git
+cd palephone/src-tauri/crates/pale-server
+cargo build --release --bin pale-server
+sudo install -m 0755 ../../target/release/pale-server /usr/local/bin/pale-server
+id -u pale >/dev/null 2>&amp;1 || sudo useradd --system --home /var/lib/pale --create-home --shell /usr/sbin/nologin pale
+sudo install -d -o root -g pale -m 0750 /etc/pale
+sudo install -d -o pale -g pale -m 0750 /var/lib/pale</pre>
+                <h4>Create <code>/etc/pale/pale-server.env</code></h4>
+                <pre class="code-block">PALE_HTTP_ADDR=127.0.0.1:8080
+PALE_SIP_ADDR=0.0.0.0:5060
+PALE_DATA_DIR=/var/lib/pale
+PALE_DATABASE_URL="host=localhost user=pale password=replace-with-db-password dbname=pale"
+PALE_SERVER_TOKEN=replace-with-strong-token-24-plus-chars
+PALE_ADMIN_PASSWORD=replace-with-strong-admin-password
+PALE_STORAGE_KEY=replace-with-strong-storage-key
+PALE_ADMIN_USERNAME=admin
+PALE_SIP_BACKEND=pjsip
+RUST_LOG=info</pre>
+                <pre class="code-block">sudo chown root:pale /etc/pale/pale-server.env
+sudo chmod 0640 /etc/pale/pale-server.env</pre>
+                <h4>Create a systemd service</h4>
+                <pre class="code-block">sudo tee /etc/systemd/system/pale-server.service >/dev/null &lt;&lt;'EOF'
+[Unit]
+Description=Pale Server
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+User=pale
+Group=pale
+EnvironmentFile=/etc/pale/pale-server.env
+ExecStart=/usr/local/bin/pale-server
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/pale
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now pale-server
+curl http://127.0.0.1:8080/health</pre>
+                <div class="callout">
+                  In bare-metal installs, you own the dependency lifecycle.
+                  Keep PostgreSQL, coturn, certificates, firewall rules, and
+                  backups patched and tested like any other production service.
                 </div>
               </article>
 
@@ -742,6 +821,18 @@ $env:PALE_DATABASE_URL = "host=localhost user=pale password=... dbname=pale"
                   You can also create users through the server CLI.
                 </p>
                 <pre class="code-block">docker compose exec pale-server pale-server user create \
+  --username sip:admin@example.com \
+  --display-name "Admin" \
+  --password "replace-with-a-strong-password" \
+  --role admin</pre>
+                <p>
+                  On a bare-metal Linux server, load the same environment file
+                  first so the CLI connects to the same data store:
+                </p>
+                <pre class="code-block">set -a
+. /etc/pale/pale-server.env
+set +a
+pale-server user create \
   --username sip:admin@example.com \
   --display-name "Admin" \
   --password "replace-with-a-strong-password" \
