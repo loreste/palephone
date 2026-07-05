@@ -1,12 +1,12 @@
 import { useState, useRef, useEffect, useCallback, type ReactNode } from "react";
-import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Video, Users, UserPlus, Reply, Pencil, Pin, Forward, Check, CheckCheck, Search, Radio, Hash, CalendarClock, Star, AlertTriangle, Plug, Copy, Trash2, Clock, Image as ImageLucide, Languages, Bold, Italic, Code, Link, BookOpen, ListTodo, ExternalLink } from "lucide-react";
+import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Video, Users, UserPlus, Reply, Pencil, Pin, Forward, Check, CheckCheck, Search, Radio, Hash, CalendarClock, Star, AlertTriangle, Plug, Copy, Trash2, Clock, Image as ImageLucide, Languages, Bold, Italic, Code, Link, BookOpen, ListTodo, ExternalLink, MessagesSquare } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useChatStore, type ChatMessage, type RoomSummary } from "@/store/chatStore";
 import { useMatrixStore } from "@/store/matrixStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
-import { matrixSendMessage, matrixSetTyping, matrixCreateDm, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerSaveMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerEndRoomCall, paleServerGetConferences, paleServerGetMeetings, paleServerCreateMeeting, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerGetRoomMessages, paleServerGetRoomMessageState, paleServerSendRoomMessage, paleServerScheduleRoomMessage, paleServerGetChannelWebhooks, paleServerCreateChannelWebhook, paleServerUpdateChannelWebhook, paleServerDeleteChannelWebhook, paleServerEditMessage, paleServerDeleteMessage, paleServerGetNotificationPreference, paleServerSetNotificationPreference, paleServerSearchGifs, paleServerGetTags, paleServerTranslate, paleServerGetCustomEmojis, paleServerGetWikiPages, paleServerCreateWikiPage, paleServerUpdateWikiPage, paleServerDeleteWikiPage, paleServerGetTaskBoards, paleServerCreateTaskBoard, paleServerGetTasks, paleServerCreateTask, paleServerUpdateTask, type ServerRoom, type ServerUser, type ServerRoomMessage, type ServerRoomMessageState, type ServerMeeting, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult, type ServerChannelWebhook, type GifResult, type ServerTag, type CustomEmoji, type WikiPage, type TaskBoard, type TaskItem } from "@/lib/tauri";
+import { matrixSendMessage, matrixSetTyping, matrixCreateDm, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerSaveMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerEndRoomCall, paleServerGetConferences, paleServerGetMeetings, paleServerCreateMeeting, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerGetRoomMessages, paleServerGetRoomMessageState, paleServerSendRoomMessage, paleServerScheduleRoomMessage, paleServerGetChannelWebhooks, paleServerCreateChannelWebhook, paleServerUpdateChannelWebhook, paleServerDeleteChannelWebhook, paleServerEditMessage, paleServerDeleteMessage, paleServerGetNotificationPreference, paleServerSetNotificationPreference, paleServerSearchGifs, paleServerGetTags, paleServerTranslate, paleServerGetCustomEmojis, paleServerGetWikiPages, paleServerCreateWikiPage, paleServerUpdateWikiPage, paleServerDeleteWikiPage, paleServerGetTaskBoards, paleServerCreateTaskBoard, paleServerGetTasks, paleServerCreateTask, paleServerUpdateTask, paleServerGetRoomThreads, paleServerGetThreadMessages, paleServerReplyToThread, type ServerRoom, type ServerUser, type ServerRoomMessage, type ServerRoomMessageState, type ServerMeeting, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult, type ServerChannelWebhook, type GifResult, type ServerTag, type CustomEmoji, type WikiPage, type TaskBoard, type TaskItem, type ServerMessageThread } from "@/lib/tauri";
 import { joinScheduledMeeting } from "@/lib/meetingJoin";
 import { toast } from "@/components/ui/Toast";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
@@ -108,6 +108,7 @@ function mapServerRoomMessages(
       delivery_status: msg.delivery_status ?? "sent",
       scheduled_at: msg.scheduled_at,
       card_payload: msg.card_payload ?? null,
+      thread_id: msg.thread_id ?? null,
     } satisfies ChatMessage;
   });
 }
@@ -1034,6 +1035,14 @@ function ChatRoom({
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashExtensions, setSlashExtensions] = useState<{ id: string; command: string; name: string; description: string; icon?: string }[]>([]);
   const [slashQuery, setSlashQuery] = useState("");
+  // Threading state
+  const [threadPanelOpen, setThreadPanelOpen] = useState(false);
+  const [activeThreadRootId, setActiveThreadRootId] = useState<string | null>(null);
+  const [threadMessages, setThreadMessages] = useState<ChatMessage[]>([]);
+  const [threadInput, setThreadInput] = useState("");
+  const [threadLoading, setThreadLoading] = useState(false);
+  const [roomThreads, setRoomThreads] = useState<ServerMessageThread[]>([]);
+  const [showThreadList, setShowThreadList] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<number | null>(null);
@@ -1463,6 +1472,90 @@ function ChatRoom({
     inputRef.current?.focus();
   };
 
+  const openThread = async (msg: ChatMessage) => {
+    if (!connected || !baseUrl || !token) return;
+    setActiveThreadRootId(msg.event_id);
+    setThreadPanelOpen(true);
+    setThreadLoading(true);
+    setShowThreadList(false);
+    try {
+      // Find the thread for this message, or load thread messages via root message
+      const threads = await paleServerGetRoomThreads(baseUrl, token, room.room_id);
+      const thread = threads.find((t) => t.root_message_id === msg.event_id);
+      if (thread) {
+        const msgs = await paleServerGetThreadMessages(baseUrl, token, thread.id);
+        setThreadMessages(
+          msgs.map((m) => ({
+            event_id: m.id,
+            room_id: m.room_id,
+            sender: m.sender_uri,
+            sender_name: null,
+            body: m.body,
+            msg_type: "text" as const,
+            timestamp: Math.floor(new Date(m.created_at).getTime() / 1000),
+            is_encrypted: false,
+            is_own: currentSipUri != null && m.sender_uri === currentSipUri,
+            priority: m.priority ?? "normal",
+            delivery_status: m.delivery_status ?? "sent",
+          }))
+        );
+      } else {
+        // No thread yet -- just show the root message
+        setThreadMessages([msg]);
+      }
+    } catch {
+      setThreadMessages([msg]);
+    } finally {
+      setThreadLoading(false);
+    }
+  };
+
+  const handleThreadReply = async () => {
+    if (!threadInput.trim() || !activeThreadRootId || !connected || !baseUrl || !token) return;
+    const body = threadInput.trim();
+    setThreadInput("");
+    try {
+      const result = await paleServerReplyToThread(baseUrl, token, activeThreadRootId, body, "normal");
+      const replyMsg: ChatMessage = {
+        event_id: result.message.id,
+        room_id: result.message.room_id,
+        sender: result.message.sender_uri,
+        sender_name: null,
+        body: result.message.body,
+        msg_type: "text",
+        timestamp: Math.floor(new Date(result.message.created_at).getTime() / 1000),
+        is_encrypted: false,
+        is_own: true,
+        priority: result.message.priority ?? "normal",
+        delivery_status: result.message.delivery_status ?? "sent",
+        thread_id: result.thread.id,
+      };
+      setThreadMessages((prev) => [...prev, replyMsg]);
+      // Update the thread reply count in the room threads list
+      setRoomThreads((prev) =>
+        prev.map((t) =>
+          t.id === result.thread.id ? result.thread : t
+        ).concat(prev.find((t) => t.id === result.thread.id) ? [] : [result.thread])
+      );
+    } catch (err) {
+      toast({ type: "error", title: "Reply failed", description: String(err) });
+    }
+  };
+
+  const loadRoomThreads = async () => {
+    if (!connected || !baseUrl || !token) return;
+    try {
+      const threads = await paleServerGetRoomThreads(baseUrl, token, room.room_id);
+      setRoomThreads(threads);
+    } catch { /* ignore */ }
+  };
+
+  // Load threads for reply count display
+  useEffect(() => {
+    if (!isServerRoom || !connected || !baseUrl || !token) return;
+    loadRoomThreads();
+  }, [room.room_id, isServerRoom, connected, baseUrl, token]);
+
   const handleForward = async (msg: ChatMessage) => {
     const target = window.prompt("Enter room ID or user SIP URI to forward to:");
     if (!target || !connected || !baseUrl || !token) return;
@@ -1652,6 +1745,16 @@ function ChatRoom({
             <option value="muted">Muted</option>
           </select>
         )}
+        {isServerRoom && (
+          <button
+            onClick={() => { loadRoomThreads(); setShowThreadList(true); setThreadPanelOpen(false); }}
+            className="p-2 rounded-md text-tertiary hover:text-accent hover:bg-elevated transition-colors"
+            title="View all threads"
+            aria-label="View all threads"
+          >
+            <MessagesSquare size={17} />
+          </button>
+        )}
         {canManageConnectors && (
           <button
             onClick={() => setShowConnectors(true)}
@@ -1801,20 +1904,25 @@ function ChatRoom({
             <p className="text-sm text-tertiary">No messages yet</p>
           </div>
         )}
-        {messages.map((msg) => (
-          <MessageBubble
-            key={msg.event_id}
-            message={msg}
-            onReply={handleReply}
-            onEdit={handleEdit}
-            onForward={handleForward}
-            onPin={handlePin}
-            onSave={handleSave}
-            onTranslate={handleTranslate}
-            onImmersiveReader={(m) => setImmersiveReaderMessage(m)}
-            customEmojis={customEmojis}
-          />
-        ))}
+        {messages.map((msg) => {
+          const thread = roomThreads.find((t) => t.root_message_id === msg.event_id);
+          return (
+            <MessageBubble
+              key={msg.event_id}
+              message={msg}
+              onReply={handleReply}
+              onEdit={handleEdit}
+              onForward={handleForward}
+              onPin={handlePin}
+              onSave={handleSave}
+              onTranslate={handleTranslate}
+              onImmersiveReader={(m) => setImmersiveReaderMessage(m)}
+              onOpenThread={openThread}
+              threadReplyCount={thread?.reply_count}
+              customEmojis={customEmojis}
+            />
+          );
+        })}
         <div ref={messagesEndRef} />
 
         {/* Loop Components */}
@@ -2174,6 +2282,130 @@ function ChatRoom({
           message={immersiveReaderMessage}
           onClose={() => setImmersiveReaderMessage(null)}
         />
+      )}
+
+      {/* Thread Panel (side panel overlay) */}
+      {threadPanelOpen && (
+        <div className="absolute right-0 top-0 bottom-0 w-80 bg-surface border-l border-border-subtle z-20 flex flex-col shadow-lg">
+          <div className="flex items-center gap-2 px-3 py-2 border-b border-border-subtle shrink-0">
+            <button
+              onClick={() => { setThreadPanelOpen(false); setActiveThreadRootId(null); }}
+              className="p-1 text-tertiary hover:text-primary rounded-md hover:bg-elevated"
+            >
+              <X size={16} />
+            </button>
+            <MessagesSquare size={16} className="text-accent" />
+            <span className="text-sm font-semibold text-primary">Thread</span>
+          </div>
+          <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2">
+            {threadLoading && (
+              <div className="flex justify-center py-8">
+                <Loader2 size={18} className="animate-spin text-tertiary" />
+              </div>
+            )}
+            {!threadLoading && threadMessages.map((msg) => (
+              <div
+                key={msg.event_id}
+                className={cn(
+                  "rounded-lg px-3 py-2 text-sm max-w-full",
+                  msg.is_own
+                    ? "bg-accent text-white ml-4"
+                    : "bg-elevated text-primary mr-4"
+                )}
+              >
+                {!msg.is_own && (
+                  <p className="text-[10px] font-semibold text-accent mb-0.5">
+                    {msg.sender_name ?? msg.sender.split(":")[0]?.replace("@", "")}
+                  </p>
+                )}
+                <p className="whitespace-pre-wrap break-words">{msg.body}</p>
+                <p className={cn("text-[9px] mt-1", msg.is_own ? "text-white/60" : "text-tertiary")}>
+                  {new Date(msg.timestamp * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+                </p>
+              </div>
+            ))}
+          </div>
+          <div className="flex items-center gap-2 px-3 py-2 border-t border-border-subtle shrink-0">
+            <input
+              type="text"
+              value={threadInput}
+              onChange={(e) => setThreadInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleThreadReply(); } }}
+              placeholder="Reply in thread..."
+              className="flex-1 bg-surface border border-border-subtle rounded-lg px-3 py-2 text-sm text-primary placeholder:text-tertiary focus:outline-none focus:border-border-focus"
+            />
+            <button
+              onClick={handleThreadReply}
+              disabled={!threadInput.trim()}
+              className={cn(
+                "p-2 rounded-lg transition-colors",
+                threadInput.trim()
+                  ? "bg-accent text-white hover:bg-accent-hover"
+                  : "text-tertiary cursor-not-allowed"
+              )}
+            >
+              <Send size={16} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Thread List Modal */}
+      {showThreadList && (
+        <div className="absolute right-0 top-0 bottom-0 w-80 bg-surface border-l border-border-subtle z-20 flex flex-col shadow-lg">
+          <div className="flex items-center gap-2 px-3 py-2 border-b border-border-subtle shrink-0">
+            <button
+              onClick={() => setShowThreadList(false)}
+              className="p-1 text-tertiary hover:text-primary rounded-md hover:bg-elevated"
+            >
+              <X size={16} />
+            </button>
+            <MessagesSquare size={16} className="text-accent" />
+            <span className="text-sm font-semibold text-primary">All Threads</span>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {roomThreads.length === 0 && (
+              <p className="text-sm text-tertiary text-center py-8">No threads yet</p>
+            )}
+            {roomThreads.map((thread) => {
+              const rootMsg = messages.find((m) => m.event_id === thread.root_message_id);
+              return (
+                <button
+                  key={thread.id}
+                  onClick={() => {
+                    if (rootMsg) openThread(rootMsg);
+                    setShowThreadList(false);
+                  }}
+                  className="w-full text-left px-3 py-2.5 border-b border-border-subtle hover:bg-elevated transition-colors"
+                >
+                  <p className="text-xs text-primary truncate">
+                    {rootMsg?.body ?? "Message"}
+                  </p>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className="text-[10px] text-accent font-medium">
+                      {thread.reply_count} {thread.reply_count === 1 ? "reply" : "replies"}
+                    </span>
+                    <span className="text-[10px] text-tertiary">
+                      Last activity {new Date(thread.last_reply_at).toLocaleDateString()}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1 mt-0.5">
+                    {thread.participants.slice(0, 3).map((p, i) => (
+                      <span key={i} className="text-[9px] text-secondary truncate max-w-[80px]">
+                        {p.replace(/^sip:/, "").split("@")[0]}
+                      </span>
+                    ))}
+                    {thread.participants.length > 3 && (
+                      <span className="text-[9px] text-tertiary">
+                        +{thread.participants.length - 3}
+                      </span>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
       )}
     </div>
   );
@@ -3194,6 +3426,8 @@ function MessageBubble({
   onSave,
   onTranslate,
   onImmersiveReader,
+  onOpenThread,
+  threadReplyCount,
   customEmojis,
 }: {
   message: ChatMessage;
@@ -3204,6 +3438,8 @@ function MessageBubble({
   onSave?: (msg: ChatMessage) => void;
   onTranslate?: (msg: ChatMessage, targetLang: string) => void;
   onImmersiveReader?: (msg: ChatMessage) => void;
+  onOpenThread?: (msg: ChatMessage) => void;
+  threadReplyCount?: number;
   customEmojis?: CustomEmoji[];
 }) {
   const time = new Date(message.timestamp * 1000).toLocaleTimeString([], {
@@ -3270,6 +3506,14 @@ function MessageBubble({
             title="Reply"
           >
             <Reply size={12} />
+          </button>
+          {/* Thread */}
+          <button
+            onClick={() => onOpenThread?.(message)}
+            className="p-0.5 rounded text-tertiary hover:text-accent"
+            title="Reply in thread"
+          >
+            <MessagesSquare size={12} />
           </button>
           {/* Edit (own only) */}
           {message.is_own && (
@@ -3514,6 +3758,20 @@ function MessageBubble({
             </p>
           )}
         </div>
+
+        {/* Thread reply count link */}
+        {threadReplyCount != null && threadReplyCount > 0 && (
+          <button
+            onClick={() => onOpenThread?.(message)}
+            className={cn(
+              "flex items-center gap-1 mt-1 text-[11px] font-medium hover:underline",
+              message.is_own ? "text-blue-200" : "text-accent"
+            )}
+          >
+            <MessagesSquare size={12} />
+            {threadReplyCount} {threadReplyCount === 1 ? "reply" : "replies"}
+          </button>
+        )}
 
         {/* Reactions display */}
         {message.reactions && Object.keys(message.reactions).length > 0 && (

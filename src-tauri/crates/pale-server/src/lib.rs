@@ -390,6 +390,9 @@ pub struct AppState {
     nats_url: Option<String>,
     rate_limits: ShardedMap<String, RateLimitBucket>,
     rate_limit_rps: u32,
+    rate_limit_config: std::sync::RwLock<RateLimitConfig>,
+    endpoint_rate_limits: ShardedMap<String, RateLimitBucket>,
+    message_threads: ShardedMap<Uuid, MessageThread>,
     /// Address advertised to clients as their SIP registrar. `None` when the
     /// active SIP backend cannot register clients (e.g. the pjsip backend),
     /// in which case login/provisioning responses must not advertise one.
@@ -624,6 +627,9 @@ impl AppState {
                 .filter(|value| !value.trim().is_empty()),
             rate_limits: ShardedMap::new(),
             rate_limit_rps: 100,
+            rate_limit_config: std::sync::RwLock::new(RateLimitConfig::default()),
+            endpoint_rate_limits: ShardedMap::new(),
+            message_threads: ShardedMap::new(),
             sip_registrar: None,
             ldap_config: std::sync::RwLock::new(ldap_auth::LdapConfig::default()),
             pg: None,
@@ -9508,6 +9514,7 @@ impl AppState {
             delivered: true,
             delivery_status: "sent".to_string(),
             card_payload: None,
+            thread_id: None,
         };
         let mut messages = self
             .room_messages
@@ -9642,6 +9649,7 @@ impl AppState {
             delivered: false,
             delivery_status: "pending".to_string(),
             card_payload: None,
+            thread_id: None,
         };
         let mut messages = self
             .room_messages
@@ -11127,6 +11135,205 @@ impl AppState {
         Some(msg.clone())
     }
 
+    // ─── Message Threads ───
+
+    /// List threads in a room, sorted by last activity.
+    pub fn room_threads(&self, room_id: Uuid) -> Vec<MessageThread> {
+        let mut threads: Vec<MessageThread> = self
+            .message_threads
+            .values()
+            .into_iter()
+            .filter(|t| t.room_id == room_id)
+            .collect();
+        threads.sort_by(|a, b| b.last_reply_at.cmp(&a.last_reply_at));
+        threads
+    }
+
+    /// Get a single thread by ID.
+    pub fn get_thread(&self, thread_id: Uuid) -> Option<MessageThread> {
+        self.message_threads.get(&thread_id)
+    }
+
+    /// Get all messages in a thread.
+    pub fn thread_messages(&self, thread_id: Uuid) -> Vec<RoomMessage> {
+        let thread = match self.message_threads.get(&thread_id) {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+        let messages = self
+            .room_messages
+            .read()
+            .expect("room messages lock poisoned");
+        // Include the root message and all replies
+        let mut result: Vec<RoomMessage> = messages
+            .iter()
+            .filter(|m| m.id == thread.root_message_id || m.thread_id == Some(thread_id))
+            .cloned()
+            .collect();
+        result.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        for msg in &mut result {
+            msg.body = self.decrypt_field(&msg.body);
+        }
+        result
+    }
+
+    /// Reply to a thread. If the target message has no thread, one is created.
+    pub fn reply_to_thread(
+        &self,
+        root_message_id: Uuid,
+        sender_uri: &str,
+        body: &str,
+        priority: Option<String>,
+    ) -> Result<(RoomMessage, MessageThread), String> {
+        // Find the root message
+        let root = self
+            .room_message(root_message_id)
+            .ok_or_else(|| "root message not found".to_string())?;
+
+        let room_id = root.room_id;
+
+        // Look up or create thread
+        let thread_id = {
+            // Check if there's already a thread for this root message
+            let existing: Option<MessageThread> = self
+                .message_threads
+                .values()
+                .into_iter()
+                .find(|t| t.root_message_id == root_message_id);
+
+            if let Some(t) = existing {
+                t.id
+            } else {
+                // Create a new thread
+                let tid = Uuid::new_v4();
+                let thread = MessageThread {
+                    id: tid,
+                    room_id,
+                    root_message_id,
+                    reply_count: 0,
+                    last_reply_at: root.created_at,
+                    participants: vec![root.sender_uri.clone()],
+                    created_at: Utc::now(),
+                };
+                self.message_threads.insert(tid, thread.clone());
+                self.broadcast_sse(SseEvent {
+                    event_type: "thread_created".to_string(),
+                    payload: serde_json::to_value(&thread).unwrap_or_default(),
+                });
+                tid
+            }
+        };
+
+        // Send the reply message via normal send path
+        let mut msg = self.send_room_message(room_id, sender_uri, body, Some(root_message_id), priority)?;
+
+        // Stamp thread_id on the reply
+        msg.thread_id = Some(thread_id);
+        {
+            let mut messages = self
+                .room_messages
+                .write()
+                .expect("room messages lock poisoned");
+            if let Some(existing) = messages.iter_mut().find(|m| m.id == msg.id) {
+                existing.thread_id = Some(thread_id);
+            }
+        }
+
+        // Update thread metadata
+        let now = Utc::now();
+        let updated_thread = self.message_threads.get(&thread_id).map(|mut thread| {
+            thread.reply_count += 1;
+            thread.last_reply_at = now;
+            if !thread.participants.contains(&sender_uri.to_string()) {
+                thread.participants.push(sender_uri.to_string());
+            }
+            self.message_threads.insert(thread_id, thread.clone());
+            thread
+        });
+
+        let thread = updated_thread.unwrap_or_else(|| {
+            self.message_threads.get(&thread_id).unwrap()
+        });
+
+        self.broadcast_sse(SseEvent {
+            event_type: "thread_reply".to_string(),
+            payload: serde_json::json!({
+                "thread": thread,
+                "message": msg,
+            }),
+        });
+
+        Ok((msg, thread))
+    }
+
+    /// Count replies to a given root message.
+    pub fn reply_count_for_message(&self, message_id: Uuid) -> i32 {
+        self.message_threads
+            .values()
+            .into_iter()
+            .find(|t| t.root_message_id == message_id)
+            .map(|t| t.reply_count)
+            .unwrap_or(0)
+    }
+
+    // ─── Per-endpoint rate limiting ───
+
+    /// Get the current rate limit configuration.
+    pub fn rate_limit_config(&self) -> RateLimitConfig {
+        self.rate_limit_config
+            .read()
+            .expect("rate limit config lock")
+            .clone()
+    }
+
+    /// Update rate limit configuration at runtime.
+    pub fn set_rate_limit_config(&self, config: RateLimitConfig) {
+        *self.rate_limit_config
+            .write()
+            .expect("rate limit config lock") = config;
+    }
+
+    /// Check per-endpoint-group rate limit. Returns true if allowed.
+    pub fn check_endpoint_rate_limit(
+        &self,
+        principal: &str,
+        group: EndpointGroup,
+    ) -> bool {
+        let config = self.rate_limit_config();
+        let max_per_minute = match group {
+            EndpointGroup::Default => config.default_rpm,
+            EndpointGroup::Auth => config.auth_rpm,
+            EndpointGroup::FileUpload => config.file_upload_rpm,
+            EndpointGroup::MessageSend => config.message_send_rpm,
+            EndpointGroup::SseConnect => config.sse_connections,
+        };
+        let max_tokens = max_per_minute as f64;
+        let refill_rate = max_tokens / 60.0; // tokens per second
+        let key = format!("{}::{:?}", principal, group);
+
+        self.endpoint_rate_limits.with_write(&key, |buckets| {
+            let now = Utc::now();
+            let bucket = buckets
+                .entry(key.clone())
+                .or_insert_with(|| RateLimitBucket {
+                    tokens: max_tokens,
+                    last_refill: now,
+                });
+
+            let elapsed =
+                (now - bucket.last_refill).num_milliseconds().max(0) as f64 / 1000.0;
+            bucket.tokens = (bucket.tokens + elapsed * refill_rate).min(max_tokens);
+            bucket.last_refill = now;
+
+            if bucket.tokens >= 1.0 {
+                bucket.tokens -= 1.0;
+                true
+            } else {
+                false
+            }
+        })
+    }
+
     /// Returns true if Postgres is connected and healthy.
     pub fn pg_healthy(&self) -> bool {
         if self.pg.is_none() {
@@ -12545,6 +12752,9 @@ pub struct RoomMessage {
     /// Optional adaptive card payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub card_payload: Option<AdaptiveCard>,
+    /// Thread this message belongs to (if it's a threaded reply).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<Uuid>,
 }
 
 fn default_message_priority() -> String {
@@ -12660,6 +12870,59 @@ pub struct ScheduleRoomMessageRequest {
     pub reply_to: Option<Uuid>,
     #[serde(default)]
     pub priority: Option<String>,
+}
+
+// ─── Message Threads ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageThread {
+    pub id: Uuid,
+    pub room_id: Uuid,
+    pub root_message_id: Uuid,
+    pub reply_count: i32,
+    pub last_reply_at: DateTime<Utc>,
+    pub participants: Vec<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ThreadReplyRequest {
+    pub body: String,
+    #[serde(default)]
+    pub priority: Option<String>,
+}
+
+// ─── Rate Limit Config ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitConfig {
+    pub default_rpm: u32,
+    pub auth_rpm: u32,
+    pub file_upload_rpm: u32,
+    pub message_send_rpm: u32,
+    pub sse_connections: u32,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            default_rpm: 100,
+            auth_rpm: 10,
+            file_upload_rpm: 20,
+            message_send_rpm: 60,
+            sse_connections: 5,
+        }
+    }
+}
+
+/// Identifies the endpoint group for per-group rate limiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EndpointGroup {
+    Default,
+    Auth,
+    FileUpload,
+    MessageSend,
+    SseConnect,
 }
 
 // ─── Tags ───

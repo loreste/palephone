@@ -676,6 +676,25 @@ export interface ServerRoomMessage {
   delivered?: boolean;
   delivery_status?: "pending" | "sent" | "delivered" | "failed";
   card_payload?: AdaptiveCardPayload | null;
+  thread_id?: string | null;
+}
+
+export interface ServerMessageThread {
+  id: string;
+  room_id: string;
+  root_message_id: string;
+  reply_count: number;
+  last_reply_at: string;
+  participants: string[];
+  created_at: string;
+}
+
+export interface ServerRateLimitConfig {
+  default_rpm: number;
+  auth_rpm: number;
+  file_upload_rpm: number;
+  message_send_rpm: number;
+  sse_connections: number;
 }
 
 // ─── Adaptive Cards ───
@@ -1049,6 +1068,37 @@ export function paleServerSendRoomMessage(
   return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/messages`, {
     method: "POST",
     body: JSON.stringify({ body, reply_to: replyTo ?? null, priority }),
+  });
+}
+
+// ─── Message Threads ───
+
+export function paleServerGetRoomThreads(
+  baseUrl: string,
+  token: string,
+  roomId: string,
+): Promise<ServerMessageThread[]> {
+  return serverFetch(baseUrl, token, `/v1/rooms/${roomId}/threads`);
+}
+
+export function paleServerGetThreadMessages(
+  baseUrl: string,
+  token: string,
+  threadId: string,
+): Promise<ServerRoomMessage[]> {
+  return serverFetch(baseUrl, token, `/v1/threads/${threadId}/messages`);
+}
+
+export function paleServerReplyToThread(
+  baseUrl: string,
+  token: string,
+  rootMessageId: string,
+  body: string,
+  priority: "normal" | "high" | "urgent" = "normal",
+): Promise<{ message: ServerRoomMessage; thread: ServerMessageThread }> {
+  return serverFetch(baseUrl, token, `/v1/threads/${rootMessageId}/reply`, {
+    method: "POST",
+    body: JSON.stringify({ body, priority }),
   });
 }
 
@@ -1751,4 +1801,24 @@ export function onHidHookSwitch(callback: (payload: { action: string }) => void)
 
 export function onHidMuteToggle(callback: (payload: { muted: boolean }) => void): Promise<UnlistenFn> {
   return listen<{ muted: boolean }>("hid_mute_toggle", (event) => callback(event.payload));
+}
+
+// ─── Rate Limit Admin ───
+
+export function paleServerGetRateLimits(
+  baseUrl: string,
+  token: string,
+): Promise<ServerRateLimitConfig> {
+  return serverFetch(baseUrl, token, "/v1/admin/rate-limits");
+}
+
+export function paleServerUpdateRateLimits(
+  baseUrl: string,
+  token: string,
+  config: ServerRateLimitConfig,
+): Promise<ServerRateLimitConfig> {
+  return serverFetch(baseUrl, token, "/v1/admin/rate-limits", {
+    method: "PUT",
+    body: JSON.stringify(config),
+  });
 }
