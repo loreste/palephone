@@ -5,6 +5,9 @@ node_modules
 dist
 dist-ssr
 
+# Public website source is deployed separately and must not be committed here.
+site/landing/
+
 # Rust build artifacts
 src-tauri/target/
 src-tauri/crates/*/target/
