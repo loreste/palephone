@@ -60,26 +60,6 @@ jobs:
             src-tauri/target/aarch64-linux-android/release/build/pjsip-sys-*/out/pjproject-*
           key: pjsip-android-arm64-v2.14.1-${{ hashFiles('src-tauri/crates/pjsip-sys/build.rs') }}
 
-      # Cross-compile OpenSSL for Android using NDK toolchain
-      - name: Build OpenSSL for Android aarch64
-        run: |
-          export ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.2.12479018
-          export PATH=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
-
-          # Download and build OpenSSL with NDK
-          curl -sL https://github.com/openssl/openssl/releases/download/openssl-3.3.1/openssl-3.3.1.tar.gz | tar xz
-          cd openssl-3.3.1
-          ./Configure android-arm64 no-shared no-tests \
-            --prefix=$HOME/openssl-android \
-            -D__ANDROID_API__=24
-          make -j$(nproc) > /dev/null 2>&1
-          make install_sw > /dev/null 2>&1
-          cd ..
-
-          echo "OPENSSL_DIR=$HOME/openssl-android" >> $GITHUB_ENV
-          echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
-          echo "AARCH64_LINUX_ANDROID_OPENSSL_DIR=$HOME/openssl-android" >> $GITHUB_ENV
-
       - name: Install npm dependencies
         run: npm ci
 

@@ -142,6 +142,7 @@ fn open_popout_window(
     );
     if let Some(window) = app.get_webview_window(&label) {
         let _ = window.show();
+        #[cfg(desktop)]
         let _ = window.unminimize();
         let _ = window.set_focus();
         return Ok(label);
@@ -1063,15 +1064,15 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
+        .run(|_app, _event| {
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen {
                 has_visible_windows,
                 ..
-            } = event
+            } = _event
             {
                 if !has_visible_windows {
-                    show_main_window(app);
+                    show_main_window(_app);
                 }
             }
         });
