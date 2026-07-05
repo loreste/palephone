@@ -77,7 +77,13 @@ function UnifiedLoginStep({ onNext, onSkip }: { onNext: () => void; onSkip?: () 
       // Persist server config
       const config = await getConfig().catch(() => null);
       if (config) {
-        config.server = { url: serverUrl, username: sipUri, auto_connect: true };
+        config.server = {
+          url: serverUrl,
+          username: sipUri,
+          auto_connect: true,
+          role: response.user.role,
+          display_name: response.user.display_name,
+        };
         await saveSettings(config).catch(() => {});
       }
 

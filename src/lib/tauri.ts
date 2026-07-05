@@ -125,6 +125,8 @@ export interface AppConfig {
     url: string;
     username: string;
     auto_connect: boolean;
+    role?: string | null;
+    display_name?: string | null;
   };
   notifications: {
     enabled: boolean;

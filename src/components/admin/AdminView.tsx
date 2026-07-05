@@ -30,7 +30,6 @@ import {
 import { cn } from "@/lib/cn";
 import {
   adminBaseUrl,
-  adminLogin,
   adminLogout,
   createAdminSipAccount,
   createAdminUser,
@@ -51,7 +50,7 @@ import {
 import { toast } from "@/components/ui/Toast";
 import { useServerStore } from "@/store/serverStore";
 import { disconnectServer } from "@/lib/session";
-import { paleServerApi, paleServerUploadFile } from "@/lib/tauri";
+import { getConfig, getSipPassword, paleLogin, paleServerApi, paleServerUploadFile, saveSettings } from "@/lib/tauri";
 import type { ServerCollaborationPolicy } from "@/lib/tauri";
 
 // Helper: all server calls go through Tauri invoke (not webview fetch)
@@ -129,13 +128,14 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
 export function AdminView() {
   const serverBaseUrl = useServerStore((s) => s.baseUrl);
   const serverToken = useServerStore((s) => s.token);
-  const [baseUrl] = useState(serverBaseUrl || adminBaseUrl());
+  const [baseUrl, setBaseUrl] = useState(serverBaseUrl || adminBaseUrl());
   const [token, setToken] = useState(() => serverToken || sessionStorage.getItem("pale.admin.token") || "");
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
   const [activeTab, setActiveTab] = useState<AdminTab>("overview");
   const [snapshot, setSnapshot] = useState<AdminSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
+  const [autoLoginChecking, setAutoLoginChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const setServerConnection = useServerStore((s) => s.setConnection);
 
@@ -148,6 +148,54 @@ export function AdminView() {
   }, [serverToken, token]);
 
   const authenticated = token.length > 0;
+
+  useEffect(() => {
+    if (authenticated) return;
+    let cancelled = false;
+
+    setAutoLoginChecking(true);
+    getConfig()
+      .then(async (config) => {
+        if (cancelled) return;
+        const savedServer = config.server;
+        if (!savedServer?.url || !savedServer.username || !savedServer.auto_connect) return;
+
+        setBaseUrl(savedServer.url);
+        setUsername(savedServer.username);
+
+        const savedPassword = await getSipPassword("pale-server-login");
+        if (!savedPassword || cancelled) return;
+
+        const response = await paleLogin(savedServer.url, savedServer.username, savedPassword);
+        if (cancelled) return;
+
+        sessionStorage.setItem("pale.admin.token", response.token);
+        setToken(response.token);
+        setServerConnection(
+          savedServer.url,
+          response.token,
+          response.expires_at,
+          response.user.role,
+          response.user.display_name
+        );
+        config.server = {
+          ...savedServer,
+          role: response.user.role,
+          display_name: response.user.display_name,
+        };
+        await saveSettings(config).catch(() => {});
+      })
+      .catch(() => {
+        // Fall back to the explicit admin login form.
+      })
+      .finally(() => {
+        if (!cancelled) setAutoLoginChecking(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticated, setServerConnection]);
 
   const refresh = useCallback(async () => {
     if (!token) return;
@@ -167,7 +215,19 @@ export function AdminView() {
   useEffect(() => {
     if (authenticated) {
       refresh();
-      setServerConnection(baseUrl, token);
+      getConfig()
+        .then((config) => {
+          setServerConnection(
+            baseUrl,
+            token,
+            null,
+            config.server?.role,
+            config.server?.display_name
+          );
+        })
+        .catch(() => {
+          setServerConnection(baseUrl, token);
+        });
     }
   }, [authenticated, baseUrl, refresh, setServerConnection, token]);
 
@@ -190,11 +250,25 @@ export function AdminView() {
     setLoading(true);
     setError(null);
     try {
-      const session = await adminLogin(baseUrl, username, password);
+      const session = await paleLogin(baseUrl, username, password);
+      if (session.user.role !== "admin") {
+        throw new Error("Your account is not an administrator.");
+      }
       sessionStorage.setItem("pale.admin.token", session.token);
       setToken(session.token);
       setPassword("");
-      setServerConnection(baseUrl, session.token, session.expires_at);
+      setServerConnection(baseUrl, session.token, session.expires_at, session.user.role, session.user.display_name);
+      const config = await getConfig().catch(() => null);
+      if (config) {
+        config.server = {
+          url: baseUrl,
+          username,
+          auto_connect: true,
+          role: session.user.role,
+          display_name: session.user.display_name,
+        };
+        await saveSettings(config).catch(() => {});
+      }
       toast({ type: "success", title: "Admin session started" });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Login failed";
@@ -218,6 +292,24 @@ export function AdminView() {
     }),
     [snapshot]
   );
+
+  if (!authenticated && autoLoginChecking) {
+    return (
+      <div className="h-full bg-base text-primary p-4 md:p-6">
+        <div className="max-w-[420px] mx-auto mt-8 border border-border-subtle bg-surface rounded-md p-4">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-md bg-accent-muted text-accent flex items-center justify-center">
+              <Lock size={18} />
+            </div>
+            <div>
+              <h1 className="text-lg font-semibold">Admin</h1>
+              <p className="text-sm text-secondary">Opening admin session...</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (!authenticated) {
     return (

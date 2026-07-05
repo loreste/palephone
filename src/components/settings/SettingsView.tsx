@@ -247,13 +247,19 @@ function ServerSettingsPanel() {
     try {
       const session = await adminLogin(url, username, password);
       sessionStorage.setItem("pale.admin.token", session.token);
-      setConnection(url, session.token, session.expires_at);
+      setConnection(url, session.token, session.expires_at, "admin", session.principal);
       setPassword("");
 
       // Persist server URL in app config
       const config = await getConfig().catch(() => null);
       if (config) {
-        config.server = { url, username, auto_connect: true };
+        config.server = {
+          url,
+          username,
+          auto_connect: true,
+          role: "admin",
+          display_name: session.principal,
+        };
         await saveSettings(config).catch(() => {});
       }
 

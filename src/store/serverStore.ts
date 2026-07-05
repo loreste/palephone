@@ -9,6 +9,7 @@ interface ServerStoreState {
   userDisplayName: string | null;
 
   setConnection: (baseUrl: string, token: string, expiresAt?: string | null, role?: string | null, displayName?: string | null) => void;
+  setIdentity: (role?: string | null, displayName?: string | null) => void;
   updateToken: (token: string, expiresAt: string) => void;
   disconnect: () => void;
   isAdmin: () => boolean;
@@ -22,8 +23,18 @@ export const useServerStore = create<ServerStoreState>((set, get) => ({
   userRole: null,
   userDisplayName: null,
 
-  setConnection: (baseUrl, token, expiresAt = null, role = null, displayName = null) =>
-    set({ baseUrl, token, tokenExpiresAt: expiresAt, connected: true, userRole: role, userDisplayName: displayName }),
+  setConnection: (baseUrl, token, expiresAt = null, role, displayName) =>
+    set((state) => ({
+      baseUrl,
+      token,
+      tokenExpiresAt: expiresAt,
+      connected: true,
+      userRole: role ?? state.userRole,
+      userDisplayName: displayName ?? state.userDisplayName,
+    })),
+
+  setIdentity: (role = null, displayName = null) =>
+    set({ userRole: role, userDisplayName: displayName }),
 
   updateToken: (token, expiresAt) =>
     set({ token, tokenExpiresAt: expiresAt }),

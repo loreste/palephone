@@ -183,6 +183,10 @@ pub struct ServerPersist {
     pub url: String,
     pub username: String,
     pub auto_connect: bool,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 impl Default for ServerPersist {
@@ -191,6 +195,8 @@ impl Default for ServerPersist {
             url: String::new(),
             username: "admin".into(),
             auto_connect: false,
+            role: None,
+            display_name: None,
         }
     }
 }
