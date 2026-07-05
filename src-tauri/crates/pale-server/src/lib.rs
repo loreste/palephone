@@ -5660,7 +5660,7 @@ impl AppState {
             "{}/.well-known/openid-configuration",
             issuer_url.trim_end_matches('/')
         );
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
         let resp = client
             .get(&well_known_url)
             .send()
@@ -5712,7 +5712,7 @@ impl AppState {
         jwks_uri: &str,
         kid: &str,
     ) -> Result<(jsonwebtoken::DecodingKey, jsonwebtoken::Algorithm), String> {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
         let resp = client
             .get(jwks_uri)
             .send()
@@ -5801,7 +5801,7 @@ impl AppState {
             .await?;
 
         // 3. Exchange the authorization code for tokens
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
         let token_resp = client
             .post(&discovery.token_endpoint)
             .form(&[
@@ -11191,7 +11191,7 @@ impl AppState {
             let payload = payload.clone();
             let event = event_type.to_string();
             tokio::spawn(async move {
-                let client = reqwest::Client::new();
+                let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
                 let _ = client
                     .post(&url)
                     .json(&serde_json::json!({ "event": event, "data": payload }))
@@ -11254,14 +11254,25 @@ impl AppState {
     pub async fn calendar_events_synced(&self, user_uri: &str) -> Vec<CalendarEvent> {
         let mut events = self.calendar_events_local(user_uri);
         let integrations = self.list_calendar_integrations(user_uri);
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
         for integration in integrations {
             if !integration.enabled {
                 continue;
             }
             let synced = match integration.provider.as_str() {
                 "google" => {
-                    sync_google_calendar(&client, &integration).await
+                    sync_google_calendar(&client, &integration)
+                        .await
+                        .map(|(evts, refreshed)| {
+                            // Persist refreshed access token if we got one
+                            if let Some(new_token) = refreshed {
+                                if let Some(mut updated) = self.calendar_integrations.get(&integration.id) {
+                                    updated.access_token_enc = new_token;
+                                    self.calendar_integrations.insert(integration.id, updated);
+                                }
+                            }
+                            evts
+                        })
                 }
                 "caldav" => {
                     sync_caldav_calendar(&client, &integration).await
@@ -11394,7 +11405,7 @@ impl AppState {
             let payload = payload.clone();
             let event = event_type.to_string();
             tokio::spawn(async move {
-                let client = reqwest::Client::new();
+                let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
                 let mut req = client
                     .post(&url)
                     .json(&serde_json::json!({ "event": event, "data": payload }))
@@ -17282,16 +17293,19 @@ async fn refresh_google_access_token(
 }
 
 /// Fetch events from Google Calendar API and convert to CalendarEvent.
+/// Returns (events, Option<refreshed_access_token>)
 async fn sync_google_calendar(
     client: &reqwest::Client,
     integration: &CalendarIntegration,
-) -> Result<Vec<CalendarEvent>, String> {
+) -> Result<(Vec<CalendarEvent>, Option<String>), String> {
     let mut access_token = integration.access_token_enc.clone();
+    let mut refreshed_token = None;
 
     // Try to refresh the token if we have a refresh token
     if let Some(ref refresh_token) = integration.refresh_token_enc {
         match refresh_google_access_token(client, refresh_token).await {
             Ok((new_token, _)) => {
+                refreshed_token = Some(new_token.clone());
                 access_token = new_token;
             }
             Err(e) => {
@@ -17376,7 +17390,7 @@ async fn sync_google_calendar(
             });
         }
     }
-    Ok(events)
+    Ok((events, refreshed_token))
 }
 
 // ─── CalDAV Sync ───
@@ -17500,9 +17514,13 @@ async fn clamav_scan(host: &str, body: &[u8]) -> Result<bool, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt as TokioAsyncWriteExt};
     use tokio::net::TcpStream;
 
-    let mut stream = TcpStream::connect(host)
-        .await
-        .map_err(|e| format!("ClamAV connect to {host} failed: {e}"))?;
+    let mut stream = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        TcpStream::connect(host),
+    )
+    .await
+    .map_err(|_| format!("ClamAV connect to {host} timed out"))?
+    .map_err(|e| format!("ClamAV connect to {host} failed: {e}"))?;
 
     // Send zINSTREAM\0
     stream
@@ -17530,12 +17548,15 @@ async fn clamav_scan(host: &str, body: &[u8]) -> Result<bool, String> {
         .await
         .map_err(|e| format!("ClamAV write terminator failed: {e}"))?;
 
-    // Read response
+    // Read response (with timeout)
     let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .await
-        .map_err(|e| format!("ClamAV read response failed: {e}"))?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        stream.read_to_end(&mut response),
+    )
+    .await
+    .map_err(|_| "ClamAV read response timed out".to_string())?
+    .map_err(|e| format!("ClamAV read response failed: {e}"))?;
 
     let response_str = String::from_utf8_lossy(&response);
     let response_str = response_str.trim().trim_end_matches('\0');
@@ -17594,7 +17615,7 @@ async fn llm_call_provider(
     max_tokens: usize,
     messages: &[serde_json::Value],
 ) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
     let provider = std::env::var("PALE_LLM_PROVIDER").unwrap_or_default();
     let api_key = std::env::var("PALE_LLM_API_KEY").ok();
 
@@ -17650,7 +17671,7 @@ async fn stt_call_provider(
     language: &str,
     filename: &str,
 ) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
     let provider = std::env::var("PALE_STT_PROVIDER").unwrap_or_default();
     let api_key = std::env::var("PALE_STT_API_KEY").ok();
 
@@ -17704,7 +17725,7 @@ async fn tts_call_provider(
     voice: &str,
     format: &str,
 ) -> Result<Vec<u8>, String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
     let provider = std::env::var("PALE_TTS_PROVIDER").unwrap_or_default();
     let api_key = std::env::var("PALE_TTS_API_KEY").ok();
 

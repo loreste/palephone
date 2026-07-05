@@ -208,7 +208,7 @@ pub async fn create_room(config: &LiveKitConfig, room_name: &str) -> Result<(), 
         "max_participants": 250,
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
         .post(&url)
         .header("Authorization", format!("Bearer {token}"))
@@ -241,7 +241,7 @@ pub async fn delete_room(config: &LiveKitConfig, room_name: &str) -> Result<(), 
 
     let body = serde_json::json!({ "room": room_name });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
         .post(&url)
         .header("Authorization", format!("Bearer {token}"))
@@ -298,7 +298,7 @@ pub async fn start_room_composite_egress(
         "audio_only": false,
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
         .post(&url)
         .header("Authorization", format!("Bearer {token}"))
@@ -336,7 +336,7 @@ pub async fn stop_egress(config: &LiveKitConfig, egress_id: &str) -> Result<(), 
 
     let body = serde_json::json!({ "egress_id": egress_id });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
         .post(&url)
         .header("Authorization", format!("Bearer {token}"))

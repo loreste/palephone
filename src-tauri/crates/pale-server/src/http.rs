@@ -7968,7 +7968,7 @@ async fn translate_text(
         ));
     }
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
         .post(&api_url)
         .json(&serde_json::json!({
@@ -8789,7 +8789,7 @@ async fn invoke_message_extension(
         .get_message_extension_by_command(&command)
         .ok_or(ApiError::NotFound)?;
     // Proxy to handler_url
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
         .post(&ext.handler_url)
         .json(&serde_json::json!({ "command": command, "input": req.input }))

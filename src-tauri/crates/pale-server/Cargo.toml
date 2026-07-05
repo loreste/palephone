@@ -42,4 +42,3 @@ jsonwebtoken = "9"
 url = "2"
 urlencoding = "2"
 clap = { version = "4", features = ["derive"] }
-jsonwebtoken = "9"
