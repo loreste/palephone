@@ -3266,7 +3266,7 @@ async fn upload_file(
     let mut hasher = Sha256::new();
     hasher.update(&body);
     let sha256 = to_hex(&hasher.finalize());
-    let governance = state.file_governance_for_upload(&owner, &filename, &content_type, &body);
+    let governance = state.file_governance_for_upload(&owner, &filename, &content_type, &body).await;
     if !governance.allowed {
         let action = if governance.dlp_status == "malware_blocked" {
             "file.upload_blocked_malware"
@@ -5022,6 +5022,7 @@ async fn ai_llm_chat(
     let principal = authenticated_principal(&headers, &state)?;
     let dispatch = state
         .llm_chat_dispatch(&principal, input)
+        .await
         .map_err(ApiError::Conflict)?;
     state.record_audit_event(&principal, "ai.llm.dispatch", Some(dispatch.status.clone()));
     Ok(Json(dispatch))
@@ -5035,6 +5036,7 @@ async fn ai_stt_transcribe(
     let principal = authenticated_principal(&headers, &state)?;
     let dispatch = state
         .stt_transcription_dispatch(&principal, input)
+        .await
         .map_err(ApiError::Conflict)?;
     state.record_audit_event(&principal, "ai.stt.dispatch", Some(dispatch.status.clone()));
     Ok(Json(dispatch))
@@ -5048,6 +5050,7 @@ async fn ai_tts_synthesize(
     let principal = authenticated_principal(&headers, &state)?;
     let dispatch = state
         .tts_synthesis_dispatch(&principal, input)
+        .await
         .map_err(ApiError::Conflict)?;
     state.record_audit_event(&principal, "ai.tts.dispatch", Some(dispatch.status.clone()));
     Ok(Json(dispatch))
@@ -7990,7 +7993,7 @@ async fn sync_calendar(
     headers: HeaderMap,
 ) -> Result<Json<Vec<crate::CalendarEvent>>, ApiError> {
     let principal = authenticated_principal(&headers, &state)?;
-    Ok(Json(state.calendar_events(&principal)))
+    Ok(Json(state.calendar_events_synced(&principal).await))
 }
 
 // ─── Contact Sync ───

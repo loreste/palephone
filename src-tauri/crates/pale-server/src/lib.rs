@@ -5085,7 +5085,7 @@ impl AppState {
             .collect()
     }
 
-    pub fn file_governance_for_upload(
+    pub async fn file_governance_for_upload(
         &self,
         owner: &str,
         filename: &str,
@@ -5098,8 +5098,11 @@ impl AppState {
             filename.to_string()
         };
         let dlp = self.scan_content_dlp(owner, &scan_content);
-        let malware_detected = self.advanced_threat_protection_available()
-            && malware_signature_detected(filename, content_type, body);
+        let malware_detected = if self.advanced_threat_protection_available() {
+            malware_scan_async(filename, content_type, body).await
+        } else {
+            false
+        };
         FileGovernanceDecision {
             allowed: dlp.allowed && !malware_detected,
             dlp_status: if malware_detected {
@@ -10825,8 +10828,7 @@ impl AppState {
         self.calendar_integrations.remove(&id).is_some()
     }
 
-    pub fn calendar_events(&self, user_uri: &str) -> Vec<CalendarEvent> {
-        // Return local meetings as calendar events
+    pub fn calendar_events_local(&self, user_uri: &str) -> Vec<CalendarEvent> {
         let meetings = self.scheduled_meetings.values();
         meetings
             .into_iter()
@@ -10839,6 +10841,49 @@ impl AppState {
                 source: "local".to_string(),
             })
             .collect()
+    }
+
+    pub async fn calendar_events_synced(&self, user_uri: &str) -> Vec<CalendarEvent> {
+        let mut events = self.calendar_events_local(user_uri);
+        let integrations = self.list_calendar_integrations(user_uri);
+        let client = reqwest::Client::new();
+        for integration in integrations {
+            if !integration.enabled {
+                continue;
+            }
+            let synced = match integration.provider.as_str() {
+                "google" => {
+                    sync_google_calendar(&client, &integration).await
+                }
+                "caldav" => {
+                    sync_caldav_calendar(&client, &integration).await
+                }
+                _ => {
+                    log::warn!("Unknown calendar provider: {}", integration.provider);
+                    continue;
+                }
+            };
+            match synced {
+                Ok(external_events) => {
+                    // Update last_sync timestamp
+                    if let Some(mut updated) = self.calendar_integrations.get(&integration.id) {
+                        updated.last_sync = Some(Utc::now());
+                        self.calendar_integrations.insert(integration.id, updated);
+                    }
+                    // Merge: skip duplicates by id
+                    for ev in external_events {
+                        if !events.iter().any(|e| e.id == ev.id) {
+                            events.push(ev);
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("Calendar sync failed for {} ({}): {}", integration.provider, integration.id, e);
+                }
+            }
+        }
+        events.sort_by_key(|e| e.start);
+        events
     }
 
     // ─── Contact Sync ───
@@ -16712,7 +16757,316 @@ fn text_has_any(text: &str, markers: &[&str]) -> bool {
     markers.iter().any(|marker| text.contains(marker))
 }
 
+// ─── Google Calendar Sync ───
+
+/// Refresh a Google OAuth2 access token using the refresh token.
+async fn refresh_google_access_token(
+    client: &reqwest::Client,
+    refresh_token: &str,
+) -> Result<(String, Option<i64>), String> {
+    let client_id =
+        std::env::var("PALE_GOOGLE_CLIENT_ID").map_err(|_| "PALE_GOOGLE_CLIENT_ID not set")?;
+    let client_secret = std::env::var("PALE_GOOGLE_CLIENT_SECRET")
+        .map_err(|_| "PALE_GOOGLE_CLIENT_SECRET not set")?;
+    let resp = client
+        .post("https://oauth2.googleapis.com/token")
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", &client_id),
+            ("client_secret", &client_secret),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("token refresh request failed: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("token refresh failed ({status}): {body}"));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("token refresh parse error: {e}"))?;
+    let access_token = body["access_token"]
+        .as_str()
+        .ok_or("missing access_token in refresh response")?
+        .to_string();
+    let expires_in = body["expires_in"].as_i64();
+    Ok((access_token, expires_in))
+}
+
+/// Fetch events from Google Calendar API and convert to CalendarEvent.
+async fn sync_google_calendar(
+    client: &reqwest::Client,
+    integration: &CalendarIntegration,
+) -> Result<Vec<CalendarEvent>, String> {
+    let mut access_token = integration.access_token_enc.clone();
+
+    // Try to refresh the token if we have a refresh token
+    if let Some(ref refresh_token) = integration.refresh_token_enc {
+        match refresh_google_access_token(client, refresh_token).await {
+            Ok((new_token, _)) => {
+                access_token = new_token;
+            }
+            Err(e) => {
+                log::warn!("Google token refresh failed, trying existing token: {e}");
+            }
+        }
+    }
+
+    let calendar_id = integration
+        .calendar_id
+        .as_deref()
+        .unwrap_or("primary");
+    let now = Utc::now();
+    let time_min = (now - Duration::days(7)).to_rfc3339();
+    let time_max = (now + Duration::days(30)).to_rfc3339();
+    let url = format!(
+        "https://www.googleapis.com/calendar/v3/calendars/{}/events",
+        urlencoding::encode(calendar_id)
+    );
+    let resp = client
+        .get(&url)
+        .bearer_auth(&access_token)
+        .query(&[
+            ("timeMin", time_min.as_str()),
+            ("timeMax", time_max.as_str()),
+            ("singleEvents", "true"),
+            ("orderBy", "startTime"),
+            ("maxResults", "250"),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("Google Calendar API request failed: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Google Calendar API error ({status}): {body}"));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Google Calendar API parse error: {e}"))?;
+    let items = body["items"].as_array().cloned().unwrap_or_default();
+    let mut events = Vec::new();
+    for item in &items {
+        let id = match item["id"].as_str() {
+            Some(id) => format!("google:{id}"),
+            None => continue,
+        };
+        let title = item["summary"]
+            .as_str()
+            .unwrap_or("(No title)")
+            .to_string();
+        // Google returns dateTime for timed events, date for all-day events
+        let start_str = item["start"]["dateTime"]
+            .as_str()
+            .or_else(|| item["start"]["date"].as_str());
+        let end_str = item["end"]["dateTime"]
+            .as_str()
+            .or_else(|| item["end"]["date"].as_str());
+        let (Some(start_str), Some(end_str)) = (start_str, end_str) else {
+            continue;
+        };
+        let start = DateTime::parse_from_rfc3339(start_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .or_else(|_| {
+                chrono::NaiveDate::parse_from_str(start_str, "%Y-%m-%d")
+                    .map(|d| d.and_hms_opt(0, 0, 0).unwrap().and_utc())
+            });
+        let end = DateTime::parse_from_rfc3339(end_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .or_else(|_| {
+                chrono::NaiveDate::parse_from_str(end_str, "%Y-%m-%d")
+                    .map(|d| d.and_hms_opt(0, 0, 0).unwrap().and_utc())
+            });
+        if let (Ok(start), Ok(end)) = (start, end) {
+            events.push(CalendarEvent {
+                id,
+                title,
+                start,
+                end,
+                source: "google".to_string(),
+            });
+        }
+    }
+    Ok(events)
+}
+
+// ─── CalDAV Sync ───
+
+/// Fetch events from a CalDAV server via REPORT request and parse VEVENT blocks.
+async fn sync_caldav_calendar(
+    client: &reqwest::Client,
+    integration: &CalendarIntegration,
+) -> Result<Vec<CalendarEvent>, String> {
+    let calendar_url = integration
+        .calendar_id
+        .as_deref()
+        .ok_or("CalDAV integration missing calendar URL (calendar_id)")?;
+
+    let now = Utc::now();
+    let time_min = (now - Duration::days(7)).format("%Y%m%dT%H%M%SZ");
+    let time_max = (now + Duration::days(30)).format("%Y%m%dT%H%M%SZ");
+
+    // Use a calendar-query REPORT to fetch events in the time range
+    let report_body = format!(
+        r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <D:getetag/>
+    <C:calendar-data/>
+  </D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR">
+      <C:comp-filter name="VEVENT">
+        <C:time-range start="{time_min}" end="{time_max}"/>
+      </C:comp-filter>
+    </C:comp-filter>
+  </C:filter>
+</C:calendar-query>"#
+    );
+
+    let resp = client
+        .request(reqwest::Method::from_bytes(b"REPORT").unwrap(), calendar_url)
+        .header("Content-Type", "application/xml; charset=utf-8")
+        .header("Depth", "1")
+        .basic_auth(&integration.access_token_enc, integration.refresh_token_enc.as_deref())
+        .body(report_body)
+        .send()
+        .await
+        .map_err(|e| format!("CalDAV REPORT request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("CalDAV REPORT error ({status}): {body}"));
+    }
+
+    let body = resp.text().await.map_err(|e| format!("CalDAV response read error: {e}"))?;
+    Ok(parse_ics_vevents(&body, "caldav"))
+}
+
+/// Simple VEVENT parser: extract events from iCalendar data embedded in CalDAV responses.
+fn parse_ics_vevents(text: &str, source: &str) -> Vec<CalendarEvent> {
+    let mut events = Vec::new();
+    // Split on VEVENT blocks — works for both raw ICS and XML-wrapped calendar-data
+    for block in text.split("BEGIN:VEVENT") {
+        if !block.contains("END:VEVENT") {
+            continue;
+        }
+        let vevent = &block[..block.find("END:VEVENT").unwrap_or(block.len())];
+        let uid = ics_prop(vevent, "UID").unwrap_or_default();
+        let summary = ics_prop(vevent, "SUMMARY").unwrap_or_else(|| "(No title)".to_string());
+        let dtstart = ics_prop(vevent, "DTSTART");
+        let dtend = ics_prop(vevent, "DTEND");
+        if let (Some(start), Some(end)) = (
+            dtstart.and_then(|s| parse_ics_datetime(&s)),
+            dtend.and_then(|s| parse_ics_datetime(&s)),
+        ) {
+            events.push(CalendarEvent {
+                id: format!("{source}:{uid}"),
+                title: summary,
+                start,
+                end,
+                source: source.to_string(),
+            });
+        }
+    }
+    events
+}
+
+fn ics_prop(vevent: &str, prop: &str) -> Option<String> {
+    for line in vevent.lines() {
+        // Handle properties with parameters like DTSTART;TZID=...:value
+        let line = line.trim();
+        if line.starts_with(prop) {
+            if let Some(idx) = line.find(':') {
+                return Some(line[idx + 1..].trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_ics_datetime(s: &str) -> Option<DateTime<Utc>> {
+    let s = s.trim();
+    // Try 20060102T150405Z format
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y%m%dT%H%M%SZ") {
+        return Some(dt.and_utc());
+    }
+    // Try without trailing Z
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y%m%dT%H%M%S") {
+        return Some(dt.and_utc());
+    }
+    // All-day: 20060102
+    if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y%m%d") {
+        return Some(d.and_hms_opt(0, 0, 0)?.and_utc());
+    }
+    None
+}
+
+// ─── ClamAV Integration ───
+
+/// Scan file content via ClamAV clamd TCP protocol (INSTREAM command).
+/// Returns Ok(true) if malware was found, Ok(false) if clean, Err on communication failure.
+async fn clamav_scan(host: &str, body: &[u8]) -> Result<bool, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt as TokioAsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let mut stream = TcpStream::connect(host)
+        .await
+        .map_err(|e| format!("ClamAV connect to {host} failed: {e}"))?;
+
+    // Send zINSTREAM\0
+    stream
+        .write_all(b"zINSTREAM\0")
+        .await
+        .map_err(|e| format!("ClamAV write command failed: {e}"))?;
+
+    // Send data in chunks (max 2 MiB per chunk per clamd protocol)
+    const CHUNK_SIZE: usize = 2 * 1024 * 1024;
+    for chunk in body.chunks(CHUNK_SIZE) {
+        let len = (chunk.len() as u32).to_be_bytes();
+        stream
+            .write_all(&len)
+            .await
+            .map_err(|e| format!("ClamAV write chunk len failed: {e}"))?;
+        stream
+            .write_all(chunk)
+            .await
+            .map_err(|e| format!("ClamAV write chunk data failed: {e}"))?;
+    }
+
+    // Send zero-length terminator
+    stream
+        .write_all(&0u32.to_be_bytes())
+        .await
+        .map_err(|e| format!("ClamAV write terminator failed: {e}"))?;
+
+    // Read response
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .map_err(|e| format!("ClamAV read response failed: {e}"))?;
+
+    let response_str = String::from_utf8_lossy(&response);
+    let response_str = response_str.trim().trim_end_matches('\0');
+
+    if response_str.contains("FOUND") {
+        log::warn!("ClamAV detected malware: {response_str}");
+        Ok(true)
+    } else if response_str.contains("OK") {
+        Ok(false)
+    } else {
+        Err(format!("ClamAV unexpected response: {response_str}"))
+    }
+}
+
 fn malware_signature_detected(filename: &str, content_type: &str, body: &[u8]) -> bool {
+    // Local EICAR / test pattern check (always runs as a baseline)
     const EICAR: &[u8] = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
     if body.windows(EICAR.len()).any(|window| window == EICAR) {
         return true;
@@ -16723,10 +17077,191 @@ fn malware_signature_detected(filename: &str, content_type: &str, body: &[u8]) -
     }
     if is_textual_content(content_type) {
         let text = String::from_utf8_lossy(body).to_ascii_lowercase();
-        text.contains("malware-test-signature") || text.contains("virus-test-signature")
-    } else {
-        false
+        if text.contains("malware-test-signature") || text.contains("virus-test-signature") {
+            return true;
+        }
     }
+    false
+}
+
+/// Async malware scan: tries ClamAV first if configured, falls back to local pattern matching.
+async fn malware_scan_async(filename: &str, content_type: &str, body: &[u8]) -> bool {
+    // Try ClamAV if configured
+    if let Ok(host) = std::env::var("PALE_CLAMAV_HOST") {
+        match clamav_scan(&host, body).await {
+            Ok(found) => return found,
+            Err(e) => {
+                log::error!("ClamAV scan failed, falling back to local patterns: {e}");
+            }
+        }
+    }
+    // Fallback to local pattern matching
+    malware_signature_detected(filename, content_type, body)
+}
+
+// ─── AI Service Adapters ───
+
+/// Call an LLM provider (Ollama or OpenAI-compatible) and return the response.
+async fn llm_call_provider(
+    endpoint_url: &str,
+    model: &str,
+    temperature: f32,
+    max_tokens: usize,
+    messages: &[serde_json::Value],
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let provider = std::env::var("PALE_LLM_PROVIDER").unwrap_or_default();
+    let api_key = std::env::var("PALE_LLM_API_KEY").ok();
+
+    let (url, body) = if provider == "ollama" {
+        // Ollama native API
+        let url = format!("{}/api/chat", endpoint_url.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "stream": false,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+            }
+        });
+        (url, body)
+    } else {
+        // OpenAI-compatible API
+        let url = format!("{}/v1/chat/completions", endpoint_url.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": false,
+        });
+        (url, body)
+    };
+
+    let mut req = client.post(&url).json(&body);
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("LLM request to {url} failed: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("LLM provider error ({status}): {body}"));
+    }
+    resp.json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("LLM response parse error: {e}"))
+}
+
+/// Call an STT provider (Whisper-compatible) with audio data.
+async fn stt_call_provider(
+    endpoint_url: &str,
+    audio_data: Vec<u8>,
+    language: &str,
+    filename: &str,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let provider = std::env::var("PALE_STT_PROVIDER").unwrap_or_default();
+    let api_key = std::env::var("PALE_STT_API_KEY").ok();
+
+    let url = if provider == "whisper" {
+        // Local Whisper API (e.g., faster-whisper-server)
+        format!("{}/asr", endpoint_url.trim_end_matches('/'))
+    } else {
+        // OpenAI-compatible API
+        format!(
+            "{}/v1/audio/transcriptions",
+            endpoint_url.trim_end_matches('/')
+        )
+    };
+
+    let file_part = reqwest::multipart::Part::bytes(audio_data)
+        .file_name(filename.to_string())
+        .mime_str("audio/wav")
+        .map_err(|e| format!("multipart mime error: {e}"))?;
+
+    let mut form = reqwest::multipart::Form::new()
+        .part("file", file_part)
+        .text("language", language.to_string());
+
+    if provider != "whisper" {
+        form = form.text("model", "whisper-1");
+    }
+
+    let mut req = client.post(&url).multipart(form);
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("STT request to {url} failed: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("STT provider error ({status}): {body}"));
+    }
+    resp.json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("STT response parse error: {e}"))
+}
+
+/// Call a TTS provider (Piper or OpenAI-compatible) with text, return audio bytes.
+async fn tts_call_provider(
+    endpoint_url: &str,
+    text: &str,
+    voice: &str,
+    format: &str,
+) -> Result<Vec<u8>, String> {
+    let client = reqwest::Client::new();
+    let provider = std::env::var("PALE_TTS_PROVIDER").unwrap_or_default();
+    let api_key = std::env::var("PALE_TTS_API_KEY").ok();
+
+    let (url, body) = if provider == "piper" {
+        // Piper TTS — simple POST text, get audio back
+        let url = format!("{}/api/tts", endpoint_url.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "text": text,
+            "speaker": voice,
+            "output_format": format,
+        });
+        (url, body)
+    } else {
+        // OpenAI-compatible TTS
+        let url = format!("{}/v1/audio/speech", endpoint_url.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "input": text,
+            "voice": voice,
+            "model": "tts-1",
+            "response_format": format,
+        });
+        (url, body)
+    };
+
+    let mut req = client.post(&url).json(&body);
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("TTS request to {url} failed: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("TTS provider error ({status}): {body}"));
+    }
+    resp.bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|e| format!("TTS response read error: {e}"))
 }
 
 // ─── AppState methods for new features ───
@@ -17238,7 +17773,7 @@ impl AppState {
         self.ai_provider_status(&kind)
     }
 
-    pub fn llm_chat_dispatch(
+    pub async fn llm_chat_dispatch(
         &self,
         principal: &str,
         input: LlmChatRequest,
@@ -17257,23 +17792,56 @@ impl AppState {
                 })
             })
             .collect();
+        let model = input.model.unwrap_or_else(|| "tenant-default".to_string());
+        let temperature = input.temperature.unwrap_or(0.2);
+        let max_tokens = input.max_tokens.unwrap_or(1024);
+
+        // Actually call the LLM provider if PALE_LLM_API_URL is set
+        let llm_api_url = std::env::var("PALE_LLM_API_URL").ok();
+
+        let (dispatch_status, payload) = if let Some(ref url) = llm_api_url {
+            match llm_call_provider(url, &model, temperature, max_tokens, &messages).await {
+                Ok(response) => (
+                    "completed".to_string(),
+                    serde_json::json!({
+                        "response": response,
+                        "model": model,
+                        "requested_by": principal,
+                    }),
+                ),
+                Err(e) => (
+                    format!("provider_error: {e}"),
+                    serde_json::json!({
+                        "model": model,
+                        "messages": messages,
+                        "requested_by": principal,
+                    }),
+                ),
+            }
+        } else {
+            (
+                if status.configured {
+                    "ready_for_external_dispatch".to_string()
+                } else {
+                    "blocked_provider_not_configured".to_string()
+                },
+                serde_json::json!({
+                    "protocols": status.supported_protocols,
+                    "model": model,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "messages": messages,
+                    "requested_by": principal,
+                }),
+            )
+        };
+
         Ok(AiProviderDispatch {
             kind: "llm".to_string(),
-            provider_configured: status.configured,
-            endpoint_url: status.endpoint_url.clone(),
-            status: if status.configured {
-                "ready_for_external_dispatch".to_string()
-            } else {
-                "blocked_provider_not_configured".to_string()
-            },
-            payload: serde_json::json!({
-                "protocols": status.supported_protocols,
-                "model": input.model.unwrap_or_else(|| "tenant-default".to_string()),
-                "temperature": input.temperature.unwrap_or(0.2),
-                "max_tokens": input.max_tokens.unwrap_or(1024),
-                "messages": messages,
-                "requested_by": principal,
-            }),
+            provider_configured: llm_api_url.is_some() || status.configured,
+            endpoint_url: llm_api_url.or_else(|| status.endpoint_url.clone()),
+            status: dispatch_status,
+            payload,
             warnings: status.warnings,
             governance: vec![
                 "caller must provide already-authorized context".to_string(),
@@ -17283,7 +17851,7 @@ impl AppState {
         })
     }
 
-    pub fn stt_transcription_dispatch(
+    pub async fn stt_transcription_dispatch(
         &self,
         principal: &str,
         input: SttTranscriptionRequest,
@@ -17291,6 +17859,7 @@ impl AppState {
         if input.recording_id.is_none() && input.file_id.is_none() {
             return Err("recording_id or file_id is required".to_string());
         }
+        // Validate references exist
         if let Some(recording_id) = input.recording_id {
             self.recording(recording_id)
                 .ok_or_else(|| "recording not found".to_string())?;
@@ -17300,24 +17869,73 @@ impl AppState {
                 .get(&file_id)
                 .ok_or_else(|| "file not found".to_string())?;
         }
+
         let status = self.ai_provider_status("stt").ok_or_else(|| "unknown provider kind".to_string())?;
+        let language = input.language.clone().unwrap_or_else(|| "en".to_string());
+
+        let stt_api_url = std::env::var("PALE_STT_API_URL").ok();
+
+        let (dispatch_status, payload) = if let Some(ref url) = stt_api_url {
+            // Read audio data only when we actually have a provider to call
+            let (audio_data, audio_filename) = if let Some(recording_id) = input.recording_id {
+                let rec = self.recording(recording_id).unwrap();
+                let fid = rec.file_id.ok_or_else(|| "recording has no associated file".to_string())?;
+                let path = self.file_path(fid);
+                let data = tokio::fs::read(&path).await
+                    .map_err(|e| format!("failed to read recording file: {e}"))?;
+                (data, format!("recording_{recording_id}.wav"))
+            } else {
+                let file_id = input.file_id.unwrap();
+                let file_record = self.files.get(&file_id).unwrap();
+                let path = self.file_path(file_id);
+                let data = tokio::fs::read(&path).await
+                    .map_err(|e| format!("failed to read file: {e}"))?;
+                (data, file_record.filename.clone())
+            };
+
+            match stt_call_provider(url, audio_data, &language, &audio_filename).await {
+                Ok(response) => (
+                    "completed".to_string(),
+                    serde_json::json!({
+                        "transcription": response,
+                        "language": language,
+                        "requested_by": principal,
+                    }),
+                ),
+                Err(e) => (
+                    format!("provider_error: {e}"),
+                    serde_json::json!({
+                        "recording_id": input.recording_id,
+                        "file_id": input.file_id,
+                        "language": language,
+                        "requested_by": principal,
+                    }),
+                ),
+            }
+        } else {
+            (
+                if status.configured {
+                    "ready_for_external_dispatch".to_string()
+                } else {
+                    "blocked_provider_not_configured".to_string()
+                },
+                serde_json::json!({
+                    "protocols": status.supported_protocols,
+                    "recording_id": input.recording_id,
+                    "file_id": input.file_id,
+                    "language": language,
+                    "diarization": input.diarization.unwrap_or(true),
+                    "requested_by": principal,
+                }),
+            )
+        };
+
         Ok(AiProviderDispatch {
             kind: "stt".to_string(),
-            provider_configured: status.configured,
-            endpoint_url: status.endpoint_url.clone(),
-            status: if status.configured {
-                "ready_for_external_dispatch".to_string()
-            } else {
-                "blocked_provider_not_configured".to_string()
-            },
-            payload: serde_json::json!({
-                "protocols": status.supported_protocols,
-                "recording_id": input.recording_id,
-                "file_id": input.file_id,
-                "language": input.language.unwrap_or_else(|| "en".to_string()),
-                "diarization": input.diarization.unwrap_or(true),
-                "requested_by": principal,
-            }),
+            provider_configured: stt_api_url.is_some() || status.configured,
+            endpoint_url: stt_api_url.or_else(|| status.endpoint_url.clone()),
+            status: dispatch_status,
+            payload,
             warnings: status.warnings,
             governance: vec![
                 "transcript text must be posted back through transcription completion APIs".to_string(),
@@ -17327,33 +17945,71 @@ impl AppState {
         })
     }
 
-    pub fn tts_synthesis_dispatch(
+    pub async fn tts_synthesis_dispatch(
         &self,
         principal: &str,
         input: TtsSynthesisRequest,
     ) -> Result<AiProviderDispatch, String> {
-        let text = input.text.trim();
+        let text = input.text.trim().to_string();
         if text.is_empty() {
             return Err("text is required".to_string());
         }
         let status = self.ai_provider_status("tts").ok_or_else(|| "unknown provider kind".to_string())?;
+        let voice = input.voice.unwrap_or_else(|| "tenant-default".to_string());
+        let format = input.format.unwrap_or_else(|| "wav".to_string());
+
+        let tts_api_url = std::env::var("PALE_TTS_API_URL").ok();
+
+        let (dispatch_status, payload) = if let Some(ref url) = tts_api_url {
+            match tts_call_provider(url, &text, &voice, &format).await {
+                Ok(audio_bytes) => {
+                    use base64::Engine;
+                    let audio_b64 = base64::engine::general_purpose::STANDARD.encode(&audio_bytes);
+                    (
+                        "completed".to_string(),
+                        serde_json::json!({
+                            "audio_bytes_len": audio_bytes.len(),
+                            "audio_base64": audio_b64,
+                            "format": format,
+                            "voice": voice,
+                            "requested_by": principal,
+                        }),
+                    )
+                }
+                Err(e) => (
+                    format!("provider_error: {e}"),
+                    serde_json::json!({
+                        "text": text,
+                        "voice": voice,
+                        "format": format,
+                        "requested_by": principal,
+                    }),
+                ),
+            }
+        } else {
+            (
+                if status.configured {
+                    "ready_for_external_dispatch".to_string()
+                } else {
+                    "blocked_provider_not_configured".to_string()
+                },
+                serde_json::json!({
+                    "protocols": status.supported_protocols,
+                    "text": text,
+                    "voice": voice,
+                    "language": input.language.unwrap_or_else(|| "en".to_string()),
+                    "format": format,
+                    "requested_by": principal,
+                }),
+            )
+        };
+
         Ok(AiProviderDispatch {
             kind: "tts".to_string(),
-            provider_configured: status.configured,
-            endpoint_url: status.endpoint_url.clone(),
-            status: if status.configured {
-                "ready_for_external_dispatch".to_string()
-            } else {
-                "blocked_provider_not_configured".to_string()
-            },
-            payload: serde_json::json!({
-                "protocols": status.supported_protocols,
-                "text": text,
-                "voice": input.voice.unwrap_or_else(|| "tenant-default".to_string()),
-                "language": input.language.unwrap_or_else(|| "en".to_string()),
-                "format": input.format.unwrap_or_else(|| "wav".to_string()),
-                "requested_by": principal,
-            }),
+            provider_configured: tts_api_url.is_some() || status.configured,
+            endpoint_url: tts_api_url.or_else(|| status.endpoint_url.clone()),
+            status: dispatch_status,
+            payload,
             warnings: status.warnings,
             governance: vec![
                 "audio bytes must come from the configured TTS provider".to_string(),
@@ -20033,8 +20689,8 @@ mod tests {
         assert!(!outsider.answer.contains("expand enterprise calling"));
     }
 
-    #[test]
-    fn ai_provider_apis_configure_llm_stt_and_tts_dispatch_contracts() {
+    #[tokio::test]
+    async fn ai_provider_apis_configure_llm_stt_and_tts_dispatch_contracts() {
         let state = AppState::new(
             PathBuf::from(format!("/tmp/pale-ai-providers-{}", Uuid::new_v4())),
             "012345678901234567890123".to_string(),
@@ -20109,6 +20765,7 @@ mod tests {
                     }],
                 },
             )
+            .await
             .unwrap();
         assert_eq!(llm_dispatch.status, "ready_for_external_dispatch");
         assert_eq!(llm_dispatch.payload["model"], "llama3.1");
@@ -20145,6 +20802,7 @@ mod tests {
                     diarization: Some(false),
                 },
             )
+            .await
             .unwrap();
         assert_eq!(stt_dispatch.status, "ready_for_external_dispatch");
         assert_eq!(stt_dispatch.payload["file_id"], file.id.to_string());
@@ -20160,6 +20818,7 @@ mod tests {
                     format: Some("mp3".to_string()),
                 },
             )
+            .await
             .unwrap();
         assert_eq!(tts_dispatch.status, "ready_for_external_dispatch");
         assert_eq!(tts_dispatch.payload["voice"], "alloy");
@@ -22357,8 +23016,8 @@ mod tests {
         assert_eq!(updated.last_exported_by.as_deref(), Some("admin"));
     }
 
-    #[test]
-    fn dlp_blocks_file_upload_content() {
+    #[tokio::test]
+    async fn dlp_blocks_file_upload_content() {
         let data_dir = std::env::temp_dir().join(format!("pale-file-dlp-{}", Uuid::new_v4()));
         let token = "012345678901234567890123".to_string();
         let admin_hash = sha256_hex("admin-password".as_bytes());
@@ -22413,7 +23072,7 @@ mod tests {
             "notes.txt",
             "text/plain",
             b"customer SECRET-123",
-        );
+        ).await;
 
         assert!(!decision.allowed);
         assert_eq!(decision.dlp_status, "blocked");
@@ -22461,7 +23120,7 @@ mod tests {
             "notes-2.txt",
             "text/plain",
             b"customer SECRET-456",
-        );
+        ).await;
         assert!(allowed.allowed);
         drop(state);
 
@@ -22482,8 +23141,8 @@ mod tests {
         assert_eq!(reloaded.list_dlp_violations().len(), 1);
     }
 
-    #[test]
-    fn advanced_threat_protection_blocks_known_malware_when_configured() {
+    #[tokio::test]
+    async fn advanced_threat_protection_blocks_known_malware_when_configured() {
         let state = AppState::new(
             PathBuf::from(format!("/tmp/pale-atp-{}", Uuid::new_v4())),
             "012345678901234567890123".to_string(),
@@ -22496,7 +23155,7 @@ mod tests {
             "eicar.txt",
             "text/plain",
             eicar,
-        );
+        ).await;
         assert!(before.allowed);
         assert_eq!(before.dlp_status, "clean");
         assert!(!state.advanced_threat_protection_available());
@@ -22522,7 +23181,7 @@ mod tests {
             "eicar.txt",
             "text/plain",
             eicar,
-        );
+        ).await;
         assert!(!after.allowed);
         assert_eq!(after.dlp_status, "malware_blocked");
         assert_eq!(after.dlp_violation_count, 1);
