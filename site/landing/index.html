@@ -636,6 +636,14 @@
               <strong>Android</strong>
               <span>APK package</span>
             </a>
+            <a class="download" href="/downloads/pale-server-linux-x86_64.tar.gz">
+              <strong>Pale Server</strong>
+              <span>Linux x86_64 tarball</span>
+            </a>
+            <a class="download" href="/downloads/pale-server-windows-x86_64.zip">
+              <strong>Pale Server</strong>
+              <span>Windows x86_64 zip</span>
+            </a>
           </div>
           <p class="note">
             The current built-in SIP registrar path requires
@@ -663,6 +671,7 @@
             <aside class="toc" aria-label="Documentation links">
               <strong>On this page</strong>
               <a href="#server-linux">Linux with Docker Compose</a>
+              <a href="#server-packages">Linux package repositories</a>
               <a href="#server-linux-bare-metal">Bare-metal Linux</a>
               <a href="#server-windows">Install Pale Server on Windows</a>
               <a href="#how-tos">How-tos</a>
@@ -701,6 +710,83 @@ curl http://localhost:8090/health</pre>
                   For public deployments, put TLS in front of the HTTP API or
                   set <code>PALE_HTTP_TLS_CERT</code> and <code>PALE_HTTP_TLS_KEY</code>.
                   Open only the ports your deployment actually uses.
+                </div>
+              </article>
+
+              <article class="doc-card" id="server-packages">
+                <h3>Install Pale Server from our Linux repositories</h3>
+                <p>
+                  The production package repositories are hosted on
+                  <code>drcpbx.com</code>. Packages install the
+                  <code>pale-server</code> binary, a systemd unit, and an
+                  example environment file. They do not auto-start the service,
+                  because the server must be configured with your own secrets,
+                  database URL, TLS choices, and network settings first.
+                </p>
+
+                <h4>Debian and Ubuntu with apt</h4>
+                <p>
+                  The APT repository is signed with the Pale repository key.
+                  This package depends on the runtime libraries Pale Server
+                  needs and recommends PostgreSQL and coturn.
+                </p>
+                <pre class="code-block">curl -fsSL https://drcpbx.com/pale-repo.gpg | sudo tee /usr/share/keyrings/pale-repo.gpg >/dev/null
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/pale-repo.gpg] https://drcpbx.com/apt stable main" | sudo tee /etc/apt/sources.list.d/pale-server.list
+sudo apt update
+sudo apt install pale-server</pre>
+
+                <h4>Red Hat, Rocky, AlmaLinux, CentOS Stream, and Fedora with dnf</h4>
+                <p>
+                  The RPM repository is available for x86_64 systems. The RPM
+                  package declares runtime dependencies such as glibc,
+                  OpenSSL 3, ALSA, Opus, libuuid, systemd, and CA certificates.
+                  RPM package signing is not enabled yet, so verify the package
+                  checksum from the published checksum file when you deploy.
+                </p>
+                <pre class="code-block">sudo curl -fsSL https://drcpbx.com/rpm/pale-server.repo -o /etc/yum.repos.d/pale-server.repo
+sudo dnf makecache
+sudo dnf install pale-server
+curl -fsSL https://drcpbx.com/downloads/pale-server-SHA256SUMS.txt</pre>
+
+                <h4>Configure after package install</h4>
+                <p>
+                  Both packages create a locked-down service user and install
+                  <code>/etc/pale/pale-server.env.example</code>. Copy it to the
+                  live environment file, replace every placeholder secret, then
+                  start the service.
+                </p>
+                <pre class="code-block">sudo cp /etc/pale/pale-server.env.example /etc/pale/pale-server.env
+sudo editor /etc/pale/pale-server.env
+sudo chown root:pale /etc/pale/pale-server.env
+sudo chmod 0640 /etc/pale/pale-server.env
+sudo systemctl enable --now pale-server
+sudo systemctl status pale-server
+curl http://127.0.0.1:8080/health</pre>
+
+                <h4>Important package configuration values</h4>
+                <ul>
+                  <li><code>PALE_SERVER_TOKEN</code>, <code>PALE_ADMIN_PASSWORD</code>, and <code>PALE_STORAGE_KEY</code> must be strong values with at least 24 characters.</li>
+                  <li><code>PALE_DATABASE_URL</code> should point to your PostgreSQL database for production.</li>
+                  <li><code>PALE_HTTP_ADDR=127.0.0.1:8080</code> is a good default when Nginx, Caddy, or another reverse proxy terminates HTTPS.</li>
+                  <li><code>PALE_SIP_EXTERNAL_ADDR</code> should be set when remote SIP clients need to reach this server.</li>
+                </ul>
+
+                <h4>Direct server downloads</h4>
+                <p>
+                  Operators who do not want a package manager can download the
+                  release artifacts directly. The current server binaries were
+                  built on the production host from commit <code>8977191</code>.
+                </p>
+                <ul>
+                  <li><a href="/downloads/pale-server-linux-x86_64.tar.gz">Linux x86_64 tarball</a></li>
+                  <li><a href="/downloads/pale-server-windows-x86_64.zip">Windows x86_64 zip</a></li>
+                  <li><a href="/downloads/pale-server-SHA256SUMS.txt">SHA256 checksums</a></li>
+                </ul>
+                <div class="callout">
+                  For production Linux deployments, prefer the APT or DNF
+                  package path over a loose binary. Packages make systemd,
+                  service users, config locations, and dependency tracking
+                  explicit.
                 </div>
               </article>
 
@@ -784,27 +870,24 @@ curl http://127.0.0.1:8080/health</pre>
               <article class="doc-card" id="server-windows">
                 <h3>Install Pale Server on Windows</h3>
                 <p>
-                  Windows can run Pale Server as a Rust-built executable. The
-                  production container path is Linux-first today, so treat the
-                  Windows install as a direct server runtime unless you wrap it
-                  with your own service manager such as WinSW or NSSM.
+                  Windows can run Pale Server as a console executable. Download
+                  the server zip, extract it into a stable directory, configure
+                  environment variables, then run it directly or wrap it with
+                  your own service manager such as WinSW or NSSM.
                 </p>
                 <ol>
-                  <li>Install Visual Studio Build Tools with the C++ workload.</li>
-                  <li>Install Rust for the MSVC toolchain.</li>
+                  <li>Download <a href="/downloads/pale-server-windows-x86_64.zip">pale-server-windows-x86_64.zip</a>.</li>
+                  <li>Extract it to a directory such as <code>C:\Pale\Server</code>.</li>
                   <li>Install PostgreSQL if you do not want local SQLite fallback.</li>
-                  <li>Build the server binary from the repository.</li>
+                  <li>Set the required environment variables before starting the executable.</li>
                 </ol>
-                <pre class="code-block">git clone https://github.com/loreste/palephone.git
-cd palephone\src-tauri\crates\pale-server
-cargo build --release --bin pale-server</pre>
                 <h4>Set the required environment variables</h4>
                 <pre class="code-block">$env:PALE_SERVER_TOKEN = "replace-with-strong-token-24-plus-chars"
 $env:PALE_ADMIN_PASSWORD = "replace-with-strong-admin-password"
 $env:PALE_STORAGE_KEY = "replace-with-strong-storage-key"
 $env:PALE_HTTP_ADDR = "0.0.0.0:8080"
 $env:PALE_DATABASE_URL = "host=localhost user=pale password=... dbname=pale"
-..\..\target\release\pale-server.exe</pre>
+C:\Pale\Server\pale-server.exe</pre>
                 <p>
                   Verify with <code>curl http://localhost:8080/health</code>.
                   If Windows Firewall is enabled, allow the HTTP API and any
