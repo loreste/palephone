@@ -97,6 +97,14 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/v1/conferences/{id}/spotlight", post(set_spotlight))
         .route(
+            "/v1/conferences/{id}/media-token",
+            get(get_conference_media_token),
+        )
+        .route(
+            "/v1/conferences/{id}/livekit-recording",
+            post(start_livekit_recording).delete(stop_livekit_recording),
+        )
+        .route(
             "/v1/conferences/{id}/layout",
             get(get_conference_layout).put(update_conference_layout),
         )
@@ -1465,7 +1473,7 @@ async fn join_conference(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(mut input): Json<JoinConferenceRequest>,
-) -> Result<Json<crate::Conference>, ApiError> {
+) -> Result<Json<crate::JoinConferenceResponse>, ApiError> {
     let (principal, role) = authenticated_principal_role(&headers, &state)?;
     if input.sip_uri != principal && role != crate::ROLE_ADMIN {
         return Err(ApiError::Forbidden);
@@ -1479,6 +1487,7 @@ async fn join_conference(
     }
     let bypass_lock =
         role == crate::ROLE_ADMIN || state.can_moderate_conference(id, &principal, false);
+    let sip_uri = input.sip_uri.clone();
     let conference = state
         .join_conference(id, input, bypass_lock)
         .map_err(|err| match err {
@@ -1490,12 +1499,48 @@ async fn join_conference(
                 ApiError::Conflict("town hall capacity reached".to_string())
             }
         })?;
+
+    // -- LiveKit integration: ensure room exists and generate a token --
+    let (livekit_url, livekit_token) = if state.livekit_config().is_some() {
+        // Ensure the room name is assigned on the conference
+        if let Some(room_name) = state.ensure_livekit_room_name(id) {
+            // Create the LiveKit room (idempotent – OK if already exists)
+            if let Err(e) = crate::livekit::create_room(
+                state.livekit_config().unwrap(),
+                &room_name,
+            )
+            .await
+            {
+                log::warn!("Failed to create LiveKit room {room_name}: {e}");
+                // Fall back to signaling-only mode
+                (None, None)
+            } else {
+                // Generate an access token for this participant
+                match state.generate_livekit_token(id, &sip_uri, &sip_uri) {
+                    Ok((url, token)) => (Some(url), Some(token)),
+                    Err(e) => {
+                        log::warn!("Failed to generate LiveKit token: {e}");
+                        (None, None)
+                    }
+                }
+            }
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
     state.record_audit_event(
         &principal,
         "conference.participant_joined",
         Some(id.to_string()),
     );
-    Ok(Json(conference))
+    Ok(Json(crate::JoinConferenceResponse {
+        conference,
+        livekit_url,
+        livekit_token,
+    }))
 }
 
 async fn set_conference_lock(
@@ -1539,6 +1584,25 @@ async fn leave_conference(
     let conference = state
         .leave_conference(id, user_id)
         .ok_or(ApiError::NotFound)?;
+
+    // Clean up the LiveKit room when the last participant leaves
+    if conference.participants.is_empty() {
+        if let (Some(config), Some(room_name)) =
+            (state.livekit_config(), conference.livekit_room.as_deref())
+        {
+            // Stop any active egress first
+            if let Some(egress_id) = conference.livekit_egress_id.as_deref() {
+                if let Err(e) = crate::livekit::stop_egress(config, egress_id).await {
+                    log::warn!("Failed to stop LiveKit egress {egress_id}: {e}");
+                }
+                state.set_livekit_egress_id(id, None);
+            }
+            if let Err(e) = crate::livekit::delete_room(config, room_name).await {
+                log::warn!("Failed to delete LiveKit room {room_name}: {e}");
+            }
+        }
+    }
+
     state.record_audit_event(
         &principal,
         "conference.participant_left",
@@ -1621,6 +1685,96 @@ async fn export_conference_attendance_csv(
             }),
     );
     Ok((resp_headers, csv).into_response())
+}
+
+// ── LiveKit media token ──────────────────────────────────────────
+
+/// GET /v1/conferences/{id}/media-token — returns a fresh LiveKit token
+/// for reconnection or late-joining participants.
+async fn get_conference_media_token(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (principal, _role) = authenticated_principal_role(&headers, &state)?;
+    if !state.conference_visible_to(id, &principal) {
+        return Err(ApiError::Forbidden);
+    }
+    let (livekit_url, livekit_token) = state
+        .generate_livekit_token(id, &principal, &principal)
+        .map_err(|e| ApiError::Conflict(e))?;
+    Ok(Json(json!({
+        "livekit_url": livekit_url,
+        "livekit_token": livekit_token,
+    })))
+}
+
+// ── LiveKit recording ───────────────────────────────────────────
+
+/// POST /v1/conferences/{id}/livekit-recording — start a LiveKit room
+/// composite recording.
+async fn start_livekit_recording(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (principal, role) = authenticated_principal_role(&headers, &state)?;
+    if !state.can_moderate_conference(id, &principal, role == crate::ROLE_ADMIN) {
+        return Err(ApiError::Forbidden);
+    }
+    let conference = state.get_conference(id).ok_or(ApiError::NotFound)?;
+    let room_name = conference
+        .livekit_room
+        .as_deref()
+        .ok_or_else(|| ApiError::Conflict("no LiveKit room for this conference".to_string()))?;
+    let config = state
+        .livekit_config()
+        .ok_or_else(|| ApiError::Conflict("LiveKit not configured".to_string()))?;
+    if conference.livekit_egress_id.is_some() {
+        return Err(ApiError::Conflict("recording already in progress".to_string()));
+    }
+    let output_path = format!("recordings/pale-conf-{id}.mp4");
+    let egress_id = crate::livekit::start_room_composite_egress(config, room_name, &output_path)
+        .await
+        .map_err(|e| ApiError::Conflict(e))?;
+    state.set_livekit_egress_id(id, Some(egress_id.clone()));
+    state.record_audit_event(
+        &principal,
+        "conference.livekit_recording_started",
+        Some(format!("{id}:{egress_id}")),
+    );
+    Ok(Json(json!({ "egress_id": egress_id })))
+}
+
+/// DELETE /v1/conferences/{id}/livekit-recording — stop the active
+/// LiveKit recording.
+async fn stop_livekit_recording(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (principal, role) = authenticated_principal_role(&headers, &state)?;
+    if !state.can_moderate_conference(id, &principal, role == crate::ROLE_ADMIN) {
+        return Err(ApiError::Forbidden);
+    }
+    let conference = state.get_conference(id).ok_or(ApiError::NotFound)?;
+    let egress_id = conference
+        .livekit_egress_id
+        .as_deref()
+        .ok_or_else(|| ApiError::Conflict("no active recording".to_string()))?;
+    let config = state
+        .livekit_config()
+        .ok_or_else(|| ApiError::Conflict("LiveKit not configured".to_string()))?;
+    crate::livekit::stop_egress(config, egress_id)
+        .await
+        .map_err(|e| ApiError::Conflict(e))?;
+    state.set_livekit_egress_id(id, None);
+    state.record_audit_event(
+        &principal,
+        "conference.livekit_recording_stopped",
+        Some(id.to_string()),
+    );
+    Ok(Json(json!({ "ok": true })))
 }
 
 // ── Spotlight ─────────────────────────────────────────────────────

@@ -15,6 +15,7 @@ use uuid::Uuid;
 pub mod cli;
 pub mod http;
 pub mod ldap_auth;
+pub mod livekit;
 pub mod metrics;
 pub mod pg_store;
 pub mod pjsip_runtime;
@@ -190,6 +191,8 @@ pub struct ServerConfig {
     pub ca_cert_path: Option<PathBuf>,
     /// When true, require and verify client certificates on SIP TLS connections.
     pub verify_client_certs: bool,
+    /// Optional LiveKit SFU configuration for multi-party media.
+    pub livekit: Option<livekit::LiveKitConfig>,
 }
 
 pub struct AppState {
@@ -388,6 +391,8 @@ pub struct AppState {
     ldap_config: std::sync::RwLock<ldap_auth::LdapConfig>,
     pg: Option<PgStore>,
     pg_failure_count: Arc<std::sync::atomic::AtomicU64>,
+    /// LiveKit SFU configuration (when set, conferences use LiveKit for media).
+    livekit: Option<livekit::LiveKitConfig>,
 }
 
 impl fmt::Debug for ServerConfig {
@@ -607,6 +612,7 @@ impl AppState {
             ldap_config: std::sync::RwLock::new(ldap_auth::LdapConfig::default()),
             pg: None,
             pg_failure_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            livekit: None,
         }
     }
 
@@ -628,6 +634,16 @@ impl AppState {
     /// Whether the active SIP backend can register clients.
     pub fn sip_registration_available(&self) -> bool {
         self.sip_registrar.is_some()
+    }
+
+    /// Set the LiveKit configuration for media-backed conferences.
+    pub fn set_livekit(&mut self, config: livekit::LiveKitConfig) {
+        self.livekit = Some(config);
+    }
+
+    /// Returns the LiveKit configuration, if present.
+    pub fn livekit_config(&self) -> Option<&livekit::LiveKitConfig> {
+        self.livekit.as_ref()
     }
 
     pub fn set_rate_limit_rps(&mut self, rps: u32) {
@@ -2709,6 +2725,8 @@ impl AppState {
             registration_enabled: input.registration_enabled.unwrap_or(false),
             max_registrations: input.max_registrations,
             registration_fields: input.registration_fields,
+            livekit_room: None,
+            livekit_egress_id: None,
         };
         self.conferences.insert(conference.id, conference.clone());
         self.conferences.trim_to_len(MAX_CONFERENCES);
@@ -2792,6 +2810,62 @@ impl AppState {
             self.open_attendance_record(id, &participant);
         }
         Ok(conference)
+    }
+
+    /// Ensure a LiveKit room exists for the given conference, setting
+    /// `livekit_room` on the conference if not already set.  This is a
+    /// synchronous state update; the actual room creation is done via the
+    /// async `livekit::create_room` by the caller (HTTP handler).
+    pub fn ensure_livekit_room_name(&self, conference_id: Uuid) -> Option<String> {
+        self.conferences.with_write(&conference_id, |conferences| {
+            let conference = conferences.get_mut(&conference_id)?;
+            if conference.livekit_room.is_none() {
+                let room = livekit::room_name_for_conference(conference_id);
+                conference.livekit_room = Some(room.clone());
+                Some(room)
+            } else {
+                conference.livekit_room.clone()
+            }
+        })
+    }
+
+    /// Generate a LiveKit access token for a participant.
+    pub fn generate_livekit_token(
+        &self,
+        conference_id: Uuid,
+        identity: &str,
+        display_name: &str,
+    ) -> Result<(String, String), String> {
+        let config = self
+            .livekit_config()
+            .ok_or_else(|| "LiveKit not configured".to_string())?;
+        let room_name = self
+            .conferences
+            .get(&conference_id)
+            .and_then(|c| c.livekit_room.clone())
+            .ok_or_else(|| "Conference has no LiveKit room".to_string())?;
+        let grant = livekit::VideoGrant::participant(&room_name);
+        let token = livekit::generate_token(
+            config,
+            identity,
+            display_name,
+            grant,
+            livekit::DEFAULT_TOKEN_TTL_SECS,
+        )?;
+        Ok((config.url.clone(), token))
+    }
+
+    /// Store the LiveKit egress ID on a conference for recording tracking.
+    pub fn set_livekit_egress_id(&self, conference_id: Uuid, egress_id: Option<String>) {
+        self.conferences.with_write(&conference_id, |conferences| {
+            if let Some(conference) = conferences.get_mut(&conference_id) {
+                conference.livekit_egress_id = egress_id;
+                // persist handled by caller
+            }
+        });
+        if let Some(conference) = self.conferences.get(&conference_id) {
+            self.persist(&conference);
+        }
     }
 
     pub fn can_moderate_conference(
@@ -12352,6 +12426,12 @@ pub struct Conference {
     pub max_registrations: Option<i32>,
     #[serde(default)]
     pub registration_fields: Option<serde_json::Value>,
+    /// LiveKit room name (set when LiveKit is configured).
+    #[serde(default)]
+    pub livekit_room: Option<String>,
+    /// LiveKit egress ID when recording is active via LiveKit.
+    #[serde(default)]
+    pub livekit_egress_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -12378,6 +12458,22 @@ pub enum JoinConferenceError {
     NotFound,
     Locked,
     CapacityReached,
+}
+
+/// Extended response from `join_conference` that includes optional LiveKit
+/// media credentials alongside the conference state.
+#[derive(Debug, Clone, Serialize)]
+pub struct JoinConferenceResponse {
+    #[serde(flatten)]
+    pub conference: Conference,
+    /// LiveKit server URL the frontend should connect to (only present when
+    /// LiveKit is configured).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub livekit_url: Option<String>,
+    /// Signed LiveKit access token for this participant (only present when
+    /// LiveKit is configured).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub livekit_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

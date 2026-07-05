@@ -1640,9 +1640,7 @@ fn invite_target(state: &AppState, routed_uri: &str) -> Option<(String, SocketAd
     let user_part = crate::sip_user_part(routed_uri);
     if let Some(gateway) = state.resolve_gateway(user_part) {
         let gateway_uri = format!("sip:{}@{}:{}", user_part, gateway.host, gateway.port);
-        let addr: SocketAddr = format!("{}:{}", gateway.host, gateway.port)
-            .parse()
-            .ok()?;
+        let addr: SocketAddr = format!("{}:{}", gateway.host, gateway.port).parse().ok()?;
         return Some((gateway_uri, addr));
     }
 

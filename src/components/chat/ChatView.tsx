@@ -454,7 +454,7 @@ function ConversationList({
   const joinConference = async (conf: ConferenceSummary) => {
     if (!connected || !baseUrl || !token) return;
     try {
-      await paleServerApi(baseUrl, token, `/v1/conferences/${conf.id}/participants`, {
+      const resp = await paleServerApi<ConferenceSummary & { livekit_url?: string; livekit_token?: string }>(baseUrl, token, `/v1/conferences/${conf.id}/participants`, {
         method: "POST",
         body: {
           user_id: NIL_UUID,
@@ -462,7 +462,14 @@ function ConversationList({
           role: "member",
         },
       });
-      await ipcMakeCall(`sip:conf-${conf.id}@pale.local`);
+      // When LiveKit is configured, store media credentials and skip SIP call
+      if (resp.livekit_url && resp.livekit_token) {
+        const { useMeetingStore } = await import("@/store/meetingStore");
+        useMeetingStore.getState().setActiveConferenceId(conf.id);
+        useMeetingStore.getState().setLiveKitCredentials(resp.livekit_url, resp.livekit_token);
+      } else {
+        await ipcMakeCall(`sip:conf-${conf.id}@pale.local`);
+      }
     } catch (err) {
       toast({ type: "error", title: "Failed to join conference", description: String(err) });
     }

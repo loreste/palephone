@@ -13,7 +13,7 @@ use serde::Deserialize;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 #[cfg(desktop)]
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 /// Shared engine state accessible from Tauri commands
 struct EngineState {
@@ -112,6 +112,53 @@ fn register_account(
         reg_expiry: account.reg_expiry,
     });
     save_config(&config_state.path, &current).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_popout_window(
+    app: AppHandle,
+    kind: String,
+    target_id: Option<String>,
+    title: Option<String>,
+) -> Result<String, String> {
+    let normalized_kind = match kind.trim().to_ascii_lowercase().as_str() {
+        "chat" | "meeting" | "call" | "files" | "calendar" => kind.trim().to_ascii_lowercase(),
+        _ => return Err("unsupported pop-out window kind".to_string()),
+    };
+    let safe_target = target_id
+        .as_deref()
+        .unwrap_or("main")
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+        .collect::<String>();
+    let label = format!(
+        "popout-{}-{}",
+        normalized_kind,
+        if safe_target.is_empty() {
+            "main"
+        } else {
+            &safe_target
+        }
+    );
+    if let Some(window) = app.get_webview_window(&label) {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        return Ok(label);
+    }
+    let mut path = format!("index.html?popout={normalized_kind}");
+    if !safe_target.is_empty() {
+        path.push_str("&target=");
+        path.push_str(&safe_target);
+    }
+    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(path.into()))
+        .title(title.unwrap_or_else(|| format!("Pale {}", normalized_kind)))
+        .inner_size(980.0, 720.0)
+        .min_inner_size(420.0, 360.0)
+        .resizable(true)
+        .build()
+        .map_err(|err| err.to_string())?;
+    Ok(label)
 }
 
 #[tauri::command]
@@ -823,6 +870,15 @@ fn start_event_bridge(
 // ─── System Tray (desktop only) ───
 
 #[cfg(desktop)]
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+#[cfg(desktop)]
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let show = MenuItemBuilder::with_id("show", "Show Pale").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
@@ -839,11 +895,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .menu(&menu)
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "show" => {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.unminimize();
-                    let _ = window.set_focus();
-                }
+                show_main_window(app);
             }
             "quit" => {
                 app.exit(0);
@@ -856,11 +908,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 ..
             } = event
             {
-                if let Some(window) = tray.app_handle().get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.unminimize();
-                    let _ = window.set_focus();
-                }
+                show_main_window(tray.app_handle());
             }
         })
         .build(app)?;
@@ -886,6 +934,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // SIP commands
             register_account,
+            open_popout_window,
             make_call,
             answer_call,
             hangup_call,
@@ -996,6 +1045,9 @@ pub fn run() {
                 });
             }
 
+            #[cfg(desktop)]
+            show_main_window(app.handle());
+
             if let Some(engine) = engine_for_bridge {
                 start_event_bridge(
                     app.handle().clone(),
@@ -1009,6 +1061,18 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows,
+                ..
+            } = event
+            {
+                if !has_visible_windows {
+                    show_main_window(app);
+                }
+            }
+        });
 }

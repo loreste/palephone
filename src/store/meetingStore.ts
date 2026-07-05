@@ -38,6 +38,14 @@ export interface ConferenceSummary {
   spotlight_participant_id?: string | null;
   green_room_enabled?: boolean;
   chat_room_id?: string | null;
+  livekit_room?: string | null;
+  livekit_egress_id?: string | null;
+}
+
+/** Extended join response that may include LiveKit credentials. */
+export interface JoinConferenceResponse extends ConferenceSummary {
+  livekit_url?: string | null;
+  livekit_token?: string | null;
 }
 
 export interface MeetingTemplate {
@@ -217,6 +225,11 @@ interface MeetingStoreState {
   activeConferenceId: string | null;
   setActiveConferenceId: (id: string | null) => void;
 
+  // LiveKit media session (set when joining a conference with LiveKit)
+  livekitUrl: string | null;
+  livekitToken: string | null;
+  setLiveKitCredentials: (url: string | null, token: string | null) => void;
+
   // Meeting reactions (ephemeral floating reactions)
   reactions: MeetingReaction[];
   addReaction: (reaction: MeetingReaction) => void;
@@ -295,6 +308,10 @@ export const useMeetingStore = create<MeetingStoreState>((set) => ({
 
   activeConferenceId: null,
   setActiveConferenceId: (activeConferenceId) => set({ activeConferenceId }),
+
+  livekitUrl: null,
+  livekitToken: null,
+  setLiveKitCredentials: (livekitUrl, livekitToken) => set({ livekitUrl, livekitToken }),
 
   reactions: [],
   addReaction: (reaction) =>

@@ -22,6 +22,14 @@ export function registerAccount(config: AccountConfig): Promise<void> {
   return invoke("register_account", { config });
 }
 
+export function openPopoutWindow(
+  kind: "chat" | "meeting" | "call" | "files" | "calendar",
+  targetId?: string | null,
+  title?: string,
+): Promise<string> {
+  return invoke("open_popout_window", { kind, targetId, title });
+}
+
 export function makeCall(uri: string): Promise<void> {
   return invoke("make_call", { uri });
 }
@@ -1314,6 +1322,67 @@ export interface SearchResult {
   room_id: string | null;
 }
 
+export interface UnifiedSearchResult {
+  id: string;
+  kind: "message" | "direct" | "room" | "channel" | "team" | "user" | "meeting" | "recording" | "file" | "app" | string;
+  title: string;
+  snippet: string;
+  source: string;
+  url?: string | null;
+  room_id?: string | null;
+  team_id?: string | null;
+  conference_id?: string | null;
+  user_uri?: string | null;
+  file_id?: string | null;
+  app_id?: string | null;
+  score: number;
+  updated_at: string;
+}
+
+export interface CopilotCitation {
+  index: number;
+  result: UnifiedSearchResult;
+}
+
+export interface CopilotAnswer {
+  question: string;
+  generated_at: string;
+  provider_configured: boolean;
+  grounded: boolean;
+  answer: string;
+  citations: CopilotCitation[];
+  suggested_prompts: string[];
+  governance: string[];
+}
+
+export function paleServerUnifiedSearch(
+  baseUrl: string,
+  token: string,
+  query: string,
+  limit?: number,
+): Promise<UnifiedSearchResult[]> {
+  const params = new URLSearchParams({ q: query });
+  if (limit) params.set("limit", String(limit));
+  return serverFetch(baseUrl, token, `/v1/search?${params}`);
+}
+
+export function paleServerCopilotQuery(
+  baseUrl: string,
+  token: string,
+  question: string,
+  contextQuery?: string,
+  limit = 8,
+): Promise<CopilotAnswer> {
+  return serverFetch(baseUrl, token, "/v1/copilot/query", {
+    method: "POST",
+    body: JSON.stringify({
+      question,
+      context_query: contextQuery || question,
+      limit,
+    }),
+  });
+}
+
 export function paleServerSearchMessages(
   baseUrl: string,
   token: string,
@@ -1444,15 +1513,23 @@ export async function paleServerUploadFile(
   baseUrl: string,
   token: string,
   file: File,
+  options: { roomId?: string; folderId?: string | null } = {},
 ): Promise<PaleServerFile> {
   const buffer = await file.arrayBuffer();
+  const headers: Record<string, string> = {
+    "Content-Type": file.type || "application/octet-stream",
+    Authorization: `Bearer ${token}`,
+    "X-Pale-Filename": file.name,
+  };
+  if (options.roomId) {
+    headers["X-Pale-Room-Id"] = options.roomId;
+  }
+  if (options.folderId) {
+    headers["X-Pale-Folder-Id"] = options.folderId;
+  }
   const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/files`, {
     method: "POST",
-    headers: {
-      "Content-Type": file.type || "application/octet-stream",
-      Authorization: `Bearer ${token}`,
-      "X-Pale-Filename": file.name,
-    },
+    headers,
     body: buffer,
   });
   if (!response.ok) {

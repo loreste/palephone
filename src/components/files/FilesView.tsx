@@ -21,6 +21,18 @@ import { MatrixLoginView } from "@/components/auth/MatrixLoginView";
 
 type FileSource = "chat" | "server";
 
+interface CloudStorageStatus {
+  provider_configured: boolean;
+  provider_name: string;
+  open_source_options: string[];
+  endpoint_url?: string | null;
+  admin_url?: string | null;
+  sync_mode: string;
+  local_file_count: number;
+  total_storage_bytes: number;
+  warnings: string[];
+}
+
 export function FilesView() {
   const authState = useMatrixStore((s) => s.authState);
   const { sharedFiles, transfers, serverFiles, setServerFiles, removeServerFile } = useFileStore();
@@ -42,6 +54,7 @@ export function FilesView() {
   // Version history state
   const [versionFileId, setVersionFileId] = useState<string | null>(null);
   const [versions, setVersions] = useState<FileVersion[]>([]);
+  const [cloudStatus, setCloudStatus] = useState<CloudStorageStatus | null>(null);
 
   // Load server files
   useEffect(() => {
@@ -49,6 +62,9 @@ export function FilesView() {
       paleServerGetFiles(baseUrl, token)
         .then(setServerFiles)
         .catch(() => {});
+      paleServerApi<CloudStorageStatus>(baseUrl, token, "/v1/files/cloud-storage/status")
+        .then(setCloudStatus)
+        .catch(() => setCloudStatus(null));
     }
   }, [serverConnected, baseUrl, token, setServerFiles]);
 
@@ -262,12 +278,21 @@ export function FilesView() {
           onChange={async (e) => {
             const file = e.target.files?.[0];
             if (file && baseUrl && token) {
+              const roomId = rooms[0]?.room_id;
               try {
-                const uploaded = await paleServerUploadFile(baseUrl, token, file);
-                setServerFiles([...serverFiles, uploaded]);
+                const uploaded = await paleServerUploadFile(baseUrl, token, file, {
+                  roomId,
+                  folderId: currentFolderId,
+                });
+                setServerFiles([
+                  uploaded,
+                  ...serverFiles.filter((existing) => existing.id !== uploaded.id),
+                ]);
                 toast({ type: "success", title: "File uploaded" });
               } catch (err) {
                 toast({ type: "error", title: "Upload failed", description: String(err) });
+              } finally {
+                e.currentTarget.value = "";
               }
             }
           }}
@@ -276,7 +301,8 @@ export function FilesView() {
 
       {/* Source tabs */}
       {serverConnected && (
-        <div className="flex gap-1 px-4 pb-2">
+        <div className="flex items-center justify-between gap-2 px-4 pb-2">
+          <div className="flex gap-1">
           <button
             onClick={() => setSource("chat")}
             className={cn(
@@ -296,6 +322,37 @@ export function FilesView() {
             <Server size={12} />
             Server Files
           </button>
+          </div>
+          {cloudStatus && source === "server" && (
+            <span
+              className={cn(
+                "inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] uppercase tracking-normal shrink-0",
+                cloudStatus.provider_configured ? "bg-green-500/10 text-green-600" : "bg-elevated text-tertiary"
+              )}
+              title={cloudStatus.endpoint_url || cloudStatus.open_source_options.join(", ")}
+            >
+              <Server size={11} />
+              {cloudStatus.provider_configured ? "external" : "local"}
+            </span>
+          )}
+        </div>
+      )}
+
+      {source === "server" && cloudStatus && (
+        <div className="px-4 pb-2">
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-border-subtle bg-surface px-3 py-2">
+            <div className="min-w-0">
+              <p className="text-xs font-medium text-primary truncate">
+                {cloudStatus.provider_configured ? cloudStatus.provider_name : "Local server storage"}
+              </p>
+              <p className="text-[10px] text-tertiary truncate">
+                {cloudStatus.endpoint_url || cloudStatus.open_source_options.join(", ")}
+              </p>
+            </div>
+            <p className="text-[10px] text-tertiary shrink-0">
+              {cloudStatus.local_file_count} files · {formatBytes(cloudStatus.total_storage_bytes)}
+            </p>
+          </div>
         </div>
       )}
 

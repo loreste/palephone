@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, type ReactNode } from "react";
 import {
   Hand,
   DoorOpen,
@@ -46,11 +46,12 @@ import {
 } from "@/store/meetingStore";
 import { useServerStore } from "@/store/serverStore";
 import { paleServerApi } from "@/lib/tauri";
+import { currentMediaRuntimeCapabilities, type MediaRuntimeCapabilities } from "@/lib/mediaCapabilities";
 import { toast } from "@/components/ui/Toast";
 
 function err(title: string) { toast({ type: "error", title }); }
 
-type MeetingTab = "people" | "lobby" | "hands" | "polls" | "qa" | "breakout" | "captions" | "reactions" | "chat" | "greenroom" | "registration" | "annotate" | "whiteboard";
+type MeetingTab = "people" | "lobby" | "hands" | "polls" | "qa" | "breakout" | "media" | "stream" | "townhall" | "present" | "captions" | "assistant" | "reactions" | "chat" | "greenroom" | "registration" | "annotate" | "whiteboard";
 
 export function MeetingPanel({ conferenceId }: { conferenceId: string }) {
   const [tab, setTab] = useState<MeetingTab>("lobby");
@@ -67,7 +68,12 @@ export function MeetingPanel({ conferenceId }: { conferenceId: string }) {
     { id: "polls", icon: BarChart3, label: "Polls" },
     { id: "qa", icon: MessageCircleQuestion, label: "Q&A" },
     { id: "breakout", icon: LayoutGrid, label: "Rooms" },
+    { id: "media", icon: Mic, label: "Media" },
+    { id: "stream", icon: Shield, label: "Stream" },
+    { id: "townhall", icon: Users, label: "Town" },
+    { id: "present", icon: ClipboardList, label: "Present" },
     { id: "captions", icon: Captions, label: "Captions" },
+    { id: "assistant", icon: Sparkles, label: "AI" },
     { id: "registration", icon: ClipboardList, label: "Register" },
     { id: "annotate", icon: PenTool, label: "Annotate" },
     { id: "whiteboard", icon: Pencil, label: "Board" },
@@ -111,7 +117,12 @@ export function MeetingPanel({ conferenceId }: { conferenceId: string }) {
         {tab === "polls" && <PollsPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "qa" && <QaPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "breakout" && <BreakoutPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
+        {tab === "media" && <MeetingMediaPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
+        {tab === "stream" && <StreamPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
+        {tab === "townhall" && <TownHallPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
+        {tab === "present" && <PresentationPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "captions" && <CaptionsPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
+        {tab === "assistant" && <MeetingAssistantPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "registration" && <RegistrationPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "annotate" && <AnnotationPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
         {tab === "whiteboard" && <WhiteboardPanel conferenceId={conferenceId} baseUrl={baseUrl} token={token} />}
@@ -1123,6 +1134,753 @@ function GreenRoomPanel({ conferenceId, baseUrl, token }: { conferenceId: string
   );
 }
 
+// ── Meeting Media Panel ───────────────────────────────────────────
+
+interface MeetingMediaSettings {
+  user_uri: string;
+  echo_cancellation: boolean;
+  noise_suppression: boolean;
+  auto_gain: boolean;
+  background_mode: "none" | "blur" | "image";
+  background_image_url?: string | null;
+  noise_suppression_configured: boolean;
+  virtual_backgrounds_configured: boolean;
+  updated_at: string;
+}
+
+interface ConferenceLayoutState {
+  conference_id: string;
+  mode: "speaker" | "gallery" | "together";
+  max_visible: number;
+  together_scene?: string | null;
+  stage_participant_ids: string[];
+  sfu_layout_configured: boolean;
+  gallery_capacity: number;
+  together_scene_supported: boolean;
+  layout_blockers: string[];
+  updated_by?: string | null;
+  updated_at: string;
+}
+
+function MeetingMediaPanel({ conferenceId, baseUrl, token }: { conferenceId: string; baseUrl: string | null; token: string | null }) {
+  const [settings, setSettings] = useState<MeetingMediaSettings | null>(null);
+  const [layout, setLayout] = useState<ConferenceLayoutState | null>(null);
+  const [backgroundUrl, setBackgroundUrl] = useState("");
+  const [runtime, setRuntime] = useState<MediaRuntimeCapabilities | null>(null);
+
+  const load = useCallback(async () => {
+    if (!baseUrl || !token) return;
+    try {
+      const [mediaSettings, layoutState] = await Promise.all([
+        paleServerApi<MeetingMediaSettings>(baseUrl, token, "/v1/media/settings"),
+        paleServerApi<ConferenceLayoutState>(baseUrl, token, `/v1/conferences/${conferenceId}/layout`),
+      ]);
+      setSettings(mediaSettings);
+      setLayout(layoutState);
+      setBackgroundUrl(mediaSettings.background_image_url || "");
+    } catch {
+      err("Failed to load media settings");
+    }
+  }, [baseUrl, token, conferenceId]);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    setRuntime(currentMediaRuntimeCapabilities());
+  }, []);
+
+  const saveSettings = async (patch: Partial<MeetingMediaSettings>) => {
+    if (!baseUrl || !token || !settings) return;
+    const next = { ...settings, ...patch };
+    setSettings(next);
+    try {
+      const saved = await paleServerApi<MeetingMediaSettings>(baseUrl, token, "/v1/media/settings", {
+        method: "PUT",
+        body: {
+          echo_cancellation: next.echo_cancellation,
+          noise_suppression: next.noise_suppression,
+          auto_gain: next.auto_gain,
+          background_mode: next.background_mode,
+          background_image_url: next.background_mode === "image" ? backgroundUrl : null,
+        },
+      });
+      setSettings(saved);
+      setBackgroundUrl(saved.background_image_url || "");
+    } catch {
+      err("Failed to save media settings");
+      load();
+    }
+  };
+
+  const saveLayout = async (patch: Partial<ConferenceLayoutState>) => {
+    if (!baseUrl || !token || !layout) return;
+    const next = { ...layout, ...patch };
+    setLayout(next);
+    try {
+      const saved = await paleServerApi<ConferenceLayoutState>(baseUrl, token, `/v1/conferences/${conferenceId}/layout`, {
+        method: "PUT",
+        body: {
+          mode: next.mode,
+          max_visible: next.max_visible,
+          together_scene: next.together_scene,
+          stage_participant_ids: next.stage_participant_ids,
+        },
+      });
+      setLayout(saved);
+    } catch {
+      err("Only hosts and moderators can change layout");
+      load();
+    }
+  };
+
+  if (!settings || !layout) {
+    return <p className="text-xs text-secondary text-center py-4">Loading media settings...</p>;
+  }
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <span className="text-sm font-medium">Media Effects</span>
+        <p className="text-[11px] text-secondary">
+          Noise {settings.noise_suppression_configured ? "ready" : "not configured"} · Backgrounds {settings.virtual_backgrounds_configured ? "ready" : "not configured"}
+        </p>
+        {runtime && (
+          <p className="text-[11px] text-secondary">
+            Client noise {runtime.noiseSuppression ? "available" : "unavailable"} · Client backgrounds {runtime.virtualBackgrounds ? "available" : runtime.backgroundBlur ? "blur only" : "unavailable"}
+          </p>
+        )}
+      </div>
+
+      <div className="space-y-2">
+        <label className="flex items-center justify-between text-xs">
+          <span>Echo cancellation</span>
+          <input type="checkbox" checked={settings.echo_cancellation} disabled={runtime ? !runtime.echoCancellation : false} onChange={(e) => saveSettings({ echo_cancellation: e.target.checked })} />
+        </label>
+        <label className="flex items-center justify-between text-xs">
+          <span>Noise suppression</span>
+          <input type="checkbox" checked={settings.noise_suppression} disabled={runtime ? !runtime.noiseSuppression : false} onChange={(e) => saveSettings({ noise_suppression: e.target.checked })} />
+        </label>
+        <label className="flex items-center justify-between text-xs">
+          <span>Auto gain</span>
+          <input type="checkbox" checked={settings.auto_gain} disabled={runtime ? !runtime.autoGainControl : false} onChange={(e) => saveSettings({ auto_gain: e.target.checked })} />
+        </label>
+      </div>
+
+      <div className="space-y-2">
+        <div className="text-xs font-medium text-secondary">Video background</div>
+        <div className="grid grid-cols-3 gap-1">
+          {(["none", "blur", "image"] as const).map((mode) => (
+            <button
+              key={mode}
+              disabled={mode === "blur" ? runtime ? !runtime.backgroundBlur : false : mode === "image" ? runtime ? !runtime.virtualBackgrounds : false : false}
+              onClick={() => saveSettings({ background_mode: mode })}
+              className={cn(
+                "py-1.5 text-xs rounded border capitalize",
+                settings.background_mode === mode ? "border-accent/40 bg-accent/10 text-accent" : "border-border-subtle bg-hover text-secondary",
+                (mode === "blur" ? runtime ? !runtime.backgroundBlur : false : mode === "image" ? runtime ? !runtime.virtualBackgrounds : false : false) && "opacity-40 cursor-not-allowed"
+              )}
+            >
+              {mode}
+            </button>
+          ))}
+        </div>
+        {runtime && runtime.blockers.length > 0 && (
+          <p className="text-[11px] text-tertiary">
+            Limited by {runtime.blockers.slice(0, 3).join(", ")}
+          </p>
+        )}
+        {settings.background_mode === "image" && (
+          <div className="flex gap-1">
+            <input
+              className="flex-1 text-xs rounded border border-border-subtle bg-input px-2 py-1.5"
+              value={backgroundUrl}
+              onChange={(e) => setBackgroundUrl(e.target.value)}
+              placeholder="Image URL"
+            />
+            <button onClick={() => saveSettings({ background_mode: "image" })} className="px-2 text-xs rounded bg-accent text-white">Save</button>
+          </div>
+        )}
+      </div>
+
+      <div className="border-t border-border-subtle pt-3 space-y-2">
+        <div>
+          <span className="text-sm font-medium">Meeting Layout</span>
+          <p className="text-[11px] text-secondary">
+            Gallery capacity {layout.gallery_capacity} · Together mode {layout.layout_blockers.length === 0 || layout.mode !== "together" ? "ready" : "blocked"}
+          </p>
+        </div>
+        <div className="grid grid-cols-3 gap-1">
+          {(["speaker", "gallery", "together"] as const).map((mode) => (
+            <button
+              key={mode}
+              disabled={mode === "together" && !layout.sfu_layout_configured}
+              onClick={() => saveLayout({ mode })}
+              className={cn(
+                "py-1.5 text-xs rounded border capitalize",
+                layout.mode === mode ? "border-accent/40 bg-accent/10 text-accent" : "border-border-subtle bg-hover text-secondary",
+                mode === "together" && !layout.sfu_layout_configured && "opacity-40 cursor-not-allowed"
+              )}
+            >
+              {mode}
+            </button>
+          ))}
+        </div>
+        <label className="block text-xs text-secondary">
+          Visible tiles
+          <input
+            type="number"
+            min={1}
+            max={layout.gallery_capacity || 49}
+            value={layout.max_visible}
+            onChange={(e) => saveLayout({ max_visible: Number(e.target.value) || 1 })}
+            className="mt-1 w-full text-sm rounded border border-border-subtle bg-input px-2 py-1.5 text-primary"
+          />
+        </label>
+        {layout.mode === "together" && (
+          <label className="block text-xs text-secondary">
+            Scene
+            <select
+              value={layout.together_scene || "auditorium"}
+              onChange={(e) => saveLayout({ together_scene: e.target.value })}
+              className="mt-1 w-full text-sm rounded border border-border-subtle bg-input px-2 py-1.5 text-primary"
+            >
+              <option value="auditorium">Auditorium</option>
+              <option value="conference">Conference</option>
+              <option value="classroom">Classroom</option>
+            </select>
+          </label>
+        )}
+        {layout.layout_blockers.length > 0 && (
+          <p className="text-[11px] text-tertiary">
+            Limited by {layout.layout_blockers.join(", ")}
+          </p>
+        )}
+      </div>
+
+      <LiveKitRecordingControls conferenceId={conferenceId} baseUrl={baseUrl} token={token} />
+    </div>
+  );
+}
+
+// ── LiveKit Recording Controls ──────────────────────────────────
+
+function LiveKitRecordingControls({ conferenceId, baseUrl, token }: { conferenceId: string; baseUrl: string | null; token: string | null }) {
+  const conference = useMeetingStore((s) => s.conferences[conferenceId]);
+  const setConference = useMeetingStore((s) => s.setConference);
+  const [loading, setLoading] = useState(false);
+
+  if (!conference?.livekit_room) return null;
+
+  const recording = !!conference.livekit_egress_id;
+
+  const toggleRecording = async () => {
+    if (!baseUrl || !token) return;
+    setLoading(true);
+    try {
+      if (recording) {
+        await paleServerApi(baseUrl, token, `/v1/conferences/${conferenceId}/livekit-recording`, { method: "DELETE" });
+        setConference({ ...conference, livekit_egress_id: null });
+      } else {
+        const resp = await paleServerApi<{ egress_id: string }>(baseUrl, token, `/v1/conferences/${conferenceId}/livekit-recording`, { method: "POST" });
+        setConference({ ...conference, livekit_egress_id: resp.egress_id });
+      }
+    } catch {
+      err(recording ? "Failed to stop recording" : "Failed to start recording");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="border-t border-border-subtle pt-3 space-y-2">
+      <span className="text-sm font-medium">LiveKit Recording</span>
+      <p className="text-[11px] text-secondary">
+        {recording ? "Recording in progress" : "Not recording"}
+      </p>
+      <button
+        onClick={toggleRecording}
+        disabled={loading}
+        className={cn(
+          "w-full py-1.5 rounded text-sm",
+          recording ? "bg-red-600 text-white hover:bg-red-500" : "bg-accent text-white hover:bg-accent/90",
+          loading && "opacity-50 cursor-not-allowed"
+        )}
+      >
+        {loading ? "..." : recording ? "Stop Recording" : "Start Recording"}
+      </button>
+    </div>
+  );
+}
+
+// ── Streaming Panel ───────────────────────────────────────────────
+
+interface MeetingStreamSession {
+  id: string;
+  conference_id: string;
+  target_kind: "rtmp" | "ndi";
+  name: string;
+  destination: string;
+  status: "pending" | "live" | "stopped" | "failed";
+  started_by: string;
+  started_at: string;
+  stopped_at?: string | null;
+  health: string;
+  gateway_configured: boolean;
+}
+
+function StreamPanel({ conferenceId, baseUrl, token }: { conferenceId: string; baseUrl: string | null; token: string | null }) {
+  const [sessions, setSessions] = useState<MeetingStreamSession[]>([]);
+  const [kind, setKind] = useState<"rtmp" | "ndi">("rtmp");
+  const [name, setName] = useState("Program");
+  const [destination, setDestination] = useState("");
+
+  const load = useCallback(async () => {
+    if (!baseUrl || !token) return;
+    try {
+      setSessions(await paleServerApi<MeetingStreamSession[]>(baseUrl, token, `/v1/conferences/${conferenceId}/streams`));
+    } catch {
+      err("Failed to load streams");
+    }
+  }, [baseUrl, token, conferenceId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const start = async () => {
+    if (!baseUrl || !token || !destination.trim()) return;
+    try {
+      await paleServerApi<MeetingStreamSession>(baseUrl, token, `/v1/conferences/${conferenceId}/streams`, {
+        method: "POST",
+        body: { target_kind: kind, name, destination },
+      });
+      setDestination("");
+      load();
+    } catch {
+      err("Streaming gateway is not configured or target is invalid");
+    }
+  };
+
+  const stop = async (sessionId: string) => {
+    if (!baseUrl || !token) return;
+    try {
+      await paleServerApi<MeetingStreamSession>(baseUrl, token, `/v1/streams/${sessionId}`, { method: "DELETE" });
+      load();
+    } catch {
+      err("Only hosts and moderators can stop streams");
+    }
+  };
+
+  const active = sessions.filter((session) => session.status === "live");
+  const gatewayConfigured = sessions[0]?.gateway_configured ?? false;
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <span className="text-sm font-medium">NDI / RTMP Streaming</span>
+        <p className="text-[11px] text-secondary">
+          Gateway {gatewayConfigured ? "configured" : "required"} · {active.length} live
+        </p>
+      </div>
+
+      <div className="space-y-2 p-2 border border-border-subtle rounded">
+        <div className="grid grid-cols-2 gap-1">
+          {(["rtmp", "ndi"] as const).map((value) => (
+            <button
+              key={value}
+              onClick={() => setKind(value)}
+              className={cn(
+                "py-1.5 text-xs rounded border uppercase",
+                kind === value ? "border-accent/40 bg-accent/10 text-accent" : "border-border-subtle bg-hover text-secondary"
+              )}
+            >
+              {value}
+            </button>
+          ))}
+        </div>
+        <input
+          className="w-full text-sm rounded border border-border-subtle bg-input px-2 py-1.5"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Stream name"
+        />
+        <input
+          className="w-full text-sm rounded border border-border-subtle bg-input px-2 py-1.5"
+          value={destination}
+          onChange={(e) => setDestination(e.target.value)}
+          placeholder={kind === "rtmp" ? "rtmps://live.example/app/key" : "NDI output name"}
+        />
+        <button onClick={start} disabled={!destination.trim()} className="w-full py-1.5 bg-accent text-white rounded text-sm hover:bg-accent/90 disabled:opacity-40">
+          Start Stream
+        </button>
+      </div>
+
+      <div className="space-y-1">
+        {sessions.map((session) => (
+          <div key={session.id} className="p-2 rounded border border-border-subtle bg-hover text-xs space-y-1">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-medium truncate">{session.name}</span>
+              <span className={cn(
+                "px-1.5 py-0.5 rounded text-[10px]",
+                session.status === "live" ? "bg-green-500/15 text-green-500" : "bg-surface text-secondary"
+              )}>
+                {session.status}
+              </span>
+            </div>
+            <div className="text-secondary truncate">{session.target_kind.toUpperCase()} · {session.destination}</div>
+            <div className="text-tertiary">{session.health}</div>
+            {session.status === "live" && (
+              <button onClick={() => stop(session.id)} className="w-full py-1 rounded bg-red-500 text-white text-xs">
+                Stop
+              </button>
+            )}
+          </div>
+        ))}
+        {sessions.length === 0 && <p className="text-xs text-secondary text-center py-4">No streams started</p>}
+      </div>
+    </div>
+  );
+}
+
+// ── Town Hall Panel ───────────────────────────────────────────────
+
+interface TownHallConfig {
+  conference_id: string;
+  enabled: boolean;
+  max_viewers: number;
+  registration_required: boolean;
+  presenter_only_video: boolean;
+  attendee_mic_disabled: boolean;
+  qna_moderation_required: boolean;
+  overflow_url?: string | null;
+  broadcast_provider_configured: boolean;
+  broadcast_capacity: number;
+  attendee_mode: string;
+  broadcast_ready: boolean;
+  broadcast_blockers: string[];
+  updated_by?: string | null;
+  updated_at: string;
+}
+
+function TownHallPanel({ conferenceId, baseUrl, token }: { conferenceId: string; baseUrl: string | null; token: string | null }) {
+  const [config, setConfig] = useState<TownHallConfig | null>(null);
+  const [overflowUrl, setOverflowUrl] = useState("");
+
+  const load = useCallback(async () => {
+    if (!baseUrl || !token) return;
+    try {
+      const data = await paleServerApi<TownHallConfig>(baseUrl, token, `/v1/conferences/${conferenceId}/town-hall`);
+      setConfig(data);
+      setOverflowUrl(data.overflow_url || "");
+    } catch {
+      err("Town hall requires an active webinar");
+    }
+  }, [baseUrl, token, conferenceId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const save = async (patch: Partial<TownHallConfig>) => {
+    if (!baseUrl || !token || !config) return;
+    const next = { ...config, ...patch };
+    setConfig(next);
+    try {
+      const saved = await paleServerApi<TownHallConfig>(baseUrl, token, `/v1/conferences/${conferenceId}/town-hall`, {
+        method: "PUT",
+        body: {
+          enabled: next.enabled,
+          max_viewers: next.max_viewers,
+          registration_required: next.registration_required,
+          presenter_only_video: next.presenter_only_video,
+          attendee_mic_disabled: next.attendee_mic_disabled,
+          qna_moderation_required: next.qna_moderation_required,
+          overflow_url: overflowUrl,
+        },
+      });
+      setConfig(saved);
+      setOverflowUrl(saved.overflow_url || "");
+    } catch {
+      err("Only webinar hosts and moderators can update town hall");
+      load();
+    }
+  };
+
+  if (!config) {
+    return <p className="text-xs text-secondary text-center py-4">Loading town hall settings...</p>;
+  }
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <span className="text-sm font-medium">Town Hall Broadcast</span>
+        <p className="text-[11px] text-secondary">
+          {config.attendee_mode || "interactive"} · effective capacity {(config.broadcast_capacity || config.max_viewers).toLocaleString()} · requested {config.max_viewers.toLocaleString()}
+        </p>
+        <p className="text-[11px] text-secondary">
+          Broadcast {config.broadcast_ready ? "ready" : config.broadcast_provider_configured ? "configured" : "provider required"}
+        </p>
+      </div>
+
+      <label className="flex items-center justify-between text-xs rounded border border-border-subtle bg-hover px-2 py-2">
+        <span>Broadcast mode</span>
+        <input type="checkbox" checked={config.enabled} onChange={(e) => save({ enabled: e.target.checked })} />
+      </label>
+
+      <label className="block text-xs text-secondary">
+        Max viewers
+        <input
+          type="number"
+          min={1}
+          max={100000}
+          value={config.max_viewers}
+          onChange={(e) => save({ max_viewers: Number(e.target.value) || 1 })}
+          className="mt-1 w-full text-sm rounded border border-border-subtle bg-input px-2 py-1.5 text-primary"
+        />
+      </label>
+
+      <div className="space-y-2">
+        <TownHallToggle label="Require registration" checked={config.registration_required} onChange={(value) => save({ registration_required: value })} />
+        <TownHallToggle label="Presenter video only" checked={config.presenter_only_video} onChange={(value) => save({ presenter_only_video: value })} />
+        <TownHallToggle label="Disable attendee mics" checked={config.attendee_mic_disabled} onChange={(value) => save({ attendee_mic_disabled: value })} />
+        <TownHallToggle label="Moderate Q&A" checked={config.qna_moderation_required} onChange={(value) => save({ qna_moderation_required: value })} />
+        {config.broadcast_blockers.length > 0 && (
+          <p className="text-[11px] text-tertiary">
+            Limited by {config.broadcast_blockers.join(", ")}
+          </p>
+        )}
+      </div>
+
+      <label className="block text-xs text-secondary">
+        Overflow URL
+        <div className="mt-1 flex gap-1">
+          <input
+            value={overflowUrl}
+            onChange={(e) => setOverflowUrl(e.target.value)}
+            placeholder="https://cdn.example/overflow"
+            className="flex-1 text-xs rounded border border-border-subtle bg-input px-2 py-1.5 text-primary"
+          />
+          <button onClick={() => save({ overflow_url: overflowUrl })} className="px-2 text-xs rounded bg-accent text-white">
+            Save
+          </button>
+        </div>
+      </label>
+    </div>
+  );
+}
+
+function TownHallToggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) {
+  return (
+    <label className="flex items-center justify-between text-xs">
+      <span>{label}</span>
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+    </label>
+  );
+}
+
+// ── PowerPoint Live Panel ─────────────────────────────────────────
+
+interface PresentationSlide {
+  index: number;
+  title: string;
+  notes?: string | null;
+  render_url?: string | null;
+}
+
+interface PresentationSession {
+  id: string;
+  conference_id: string;
+  title: string;
+  source_file_id?: string | null;
+  presenter_uri: string;
+  slides: PresentationSlide[];
+  current_slide: number;
+  attendee_navigation_enabled: boolean;
+  renderer_configured: boolean;
+  ended_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function PresentationPanel({ conferenceId, baseUrl, token }: { conferenceId: string; baseUrl: string | null; token: string | null }) {
+  const [sessions, setSessions] = useState<PresentationSession[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [title, setTitle] = useState("");
+  const [slideText, setSlideText] = useState("Opening\nPlan\nRisks\nNext steps");
+  const [attendeeNav, setAttendeeNav] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!baseUrl || !token) return;
+    try {
+      const data = await paleServerApi<PresentationSession[]>(baseUrl, token, `/v1/conferences/${conferenceId}/presentations`);
+      setSessions(data);
+    } catch {
+      err("Failed to load presentations");
+    }
+  }, [baseUrl, token, conferenceId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const active = sessions.find((session) => !session.ended_at) ?? sessions[0];
+  const slide = active?.slides[active.current_slide];
+
+  const create = async () => {
+    if (!baseUrl || !token) return;
+    const slides = slideText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => ({ title: line, notes: null, render_url: null }));
+    if (slides.length === 0) return;
+    try {
+      await paleServerApi<PresentationSession>(baseUrl, token, `/v1/conferences/${conferenceId}/presentations`, {
+        method: "POST",
+        body: {
+          title: title.trim() || "Presentation",
+          source_file_id: null,
+          slides,
+          attendee_navigation_enabled: attendeeNav,
+        },
+      });
+      setCreating(false);
+      setTitle("");
+      load();
+    } catch {
+      err("Only hosts and moderators can start presentations");
+    }
+  };
+
+  const update = async (session: PresentationSession, patch: Partial<Pick<PresentationSession, "current_slide" | "attendee_navigation_enabled" | "presenter_uri">>) => {
+    if (!baseUrl || !token) return;
+    try {
+      await paleServerApi<PresentationSession>(baseUrl, token, `/v1/presentations/${session.id}`, {
+        method: "PUT",
+        body: patch,
+      });
+      load();
+    } catch {
+      err("Only hosts and moderators can control presentations");
+    }
+  };
+
+  const end = async (session: PresentationSession) => {
+    if (!baseUrl || !token) return;
+    try {
+      await paleServerApi<PresentationSession>(baseUrl, token, `/v1/presentations/${session.id}`, { method: "DELETE" });
+      load();
+    } catch {
+      err("Failed to end presentation");
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <span className="text-sm font-medium">PowerPoint Live</span>
+          <p className="text-[11px] text-secondary">
+            {active?.renderer_configured ? "Renderer configured" : "Presenter-control mode"}
+          </p>
+        </div>
+        <button onClick={() => setCreating(!creating)} className="text-xs text-accent hover:underline">
+          {creating ? "Cancel" : "+ New deck"}
+        </button>
+      </div>
+
+      {creating && (
+        <div className="space-y-2 p-2 border border-border-subtle rounded">
+          <input
+            className="w-full text-sm rounded border border-border-subtle bg-input px-2 py-1.5"
+            placeholder="Deck title"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+          />
+          <textarea
+            className="w-full h-24 text-sm rounded border border-border-subtle bg-input px-2 py-1.5 resize-none"
+            value={slideText}
+            onChange={(e) => setSlideText(e.target.value)}
+            placeholder="One slide title per line"
+          />
+          <label className="flex items-center gap-2 text-xs text-secondary">
+            <input type="checkbox" checked={attendeeNav} onChange={(e) => setAttendeeNav(e.target.checked)} />
+            Allow attendee navigation
+          </label>
+          <button onClick={create} className="w-full py-1.5 bg-accent text-white rounded text-sm hover:bg-accent/90">
+            Start Presentation
+          </button>
+        </div>
+      )}
+
+      {!active ? (
+        <p className="text-xs text-secondary text-center py-4">No active presentation</p>
+      ) : (
+        <div className="space-y-3">
+          <div className={cn("rounded border p-3", active.ended_at ? "border-border-subtle bg-hover/40" : "border-accent/30 bg-accent/5")}>
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-sm font-medium truncate">{active.title}</div>
+                <div className="text-[11px] text-secondary">
+                  Slide {active.current_slide + 1} of {active.slides.length} · {active.presenter_uri.replace(/^sip:/, "")}
+                </div>
+              </div>
+              <span className={cn("text-[10px] px-1.5 py-0.5 rounded shrink-0", active.ended_at ? "bg-hover text-secondary" : "bg-green-500/15 text-green-500")}>
+                {active.ended_at ? "ended" : "live"}
+              </span>
+            </div>
+
+            <div className="mt-3 aspect-video rounded bg-base border border-border-subtle p-3 flex flex-col justify-between">
+              <div className="text-[10px] uppercase text-tertiary">Current slide</div>
+              <div className="text-lg font-semibold text-primary break-words">{slide?.title || "Slide"}</div>
+              <div className="text-[11px] text-secondary">
+                {slide?.render_url ? "Rendered slide available" : active.renderer_configured ? "Waiting for renderer output" : "Renderer not configured"}
+              </div>
+            </div>
+
+            {!active.ended_at && (
+              <div className="grid grid-cols-2 gap-2 mt-3">
+                <button
+                  onClick={() => update(active, { current_slide: Math.max(0, active.current_slide - 1) })}
+                  disabled={active.current_slide === 0}
+                  className="py-1.5 text-xs rounded bg-hover border border-border-subtle disabled:opacity-40"
+                >
+                  Previous
+                </button>
+                <button
+                  onClick={() => update(active, { current_slide: Math.min(active.slides.length - 1, active.current_slide + 1) })}
+                  disabled={active.current_slide >= active.slides.length - 1}
+                  className="py-1.5 text-xs rounded bg-hover border border-border-subtle disabled:opacity-40"
+                >
+                  Next
+                </button>
+                <button
+                  onClick={() => update(active, { attendee_navigation_enabled: !active.attendee_navigation_enabled })}
+                  className={cn("py-1.5 text-xs rounded border", active.attendee_navigation_enabled ? "bg-accent/15 border-accent/30 text-accent" : "bg-hover border-border-subtle")}
+                >
+                  Attendee Nav {active.attendee_navigation_enabled ? "On" : "Off"}
+                </button>
+                <button onClick={() => end(active)} className="py-1.5 text-xs rounded bg-red-500 text-white">
+                  End
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-1 max-h-48 overflow-y-auto">
+            {active.slides.map((item) => (
+              <button
+                key={item.index}
+                disabled={Boolean(active.ended_at)}
+                onClick={() => update(active, { current_slide: item.index })}
+                className={cn(
+                  "w-full text-left px-2 py-1.5 rounded text-xs border",
+                  item.index === active.current_slide ? "border-accent/40 bg-accent/10 text-primary" : "border-border-subtle bg-hover text-secondary"
+                )}
+              >
+                {item.index + 1}. {item.title}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Captions Panel ────────────────────────────────────────────────
 
 const CAPTION_LANGUAGES = [
@@ -1202,6 +1960,119 @@ function CaptionsPanel({ conferenceId, baseUrl, token }: { conferenceId: string;
         </>
       )}
     </div>
+  );
+}
+
+// ── Meeting Assistant Panel ───────────────────────────────────────
+
+interface MeetingAssistantReport {
+  conference_id: string;
+  title: string;
+  generated_at: string;
+  transcript_segments: number;
+  ai_provider_configured: boolean;
+  summary: string;
+  key_topics: string[];
+  action_items: { owner?: string | null; text: string; source_segment_id: string }[];
+  decisions: string[];
+  risks: string[];
+  open_questions: string[];
+  speaker_stats: { speaker_uri: string; speaker_name: string; segments: number; words: number }[];
+}
+
+function MeetingAssistantPanel({ conferenceId, baseUrl, token }: { conferenceId: string; baseUrl: string | null; token: string | null }) {
+  const [report, setReport] = useState<MeetingAssistantReport | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!baseUrl || !token) return;
+    setLoading(true);
+    try {
+      const data = await paleServerApi<MeetingAssistantReport>(baseUrl, token, `/v1/conferences/${conferenceId}/assistant`);
+      setReport(data);
+    } catch {
+      err("Failed to generate meeting assistant report");
+    } finally {
+      setLoading(false);
+    }
+  }, [baseUrl, token, conferenceId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <span className="text-sm font-medium">Meeting Assistant</span>
+          <p className="text-[11px] text-secondary">
+            {report?.ai_provider_configured ? "AI provider configured" : "Local extractive mode"}
+          </p>
+        </div>
+        <button onClick={load} disabled={loading} className="text-xs text-accent hover:underline disabled:text-tertiary">
+          {loading ? "Generating..." : "Refresh"}
+        </button>
+      </div>
+      {!report ? (
+        <p className="text-xs text-secondary text-center py-4">No assistant report available.</p>
+      ) : (
+        <>
+          <div className="rounded-md bg-hover p-2">
+            <div className="text-xs font-medium text-secondary mb-1">Summary</div>
+            <p className="text-sm text-primary">{report.summary}</p>
+            <div className="text-[10px] text-tertiary mt-2">
+              {report.transcript_segments} transcript segments · {new Date(report.generated_at).toLocaleString()}
+            </div>
+          </div>
+          <AssistantSection title="Topics" empty="No topics yet">
+            <div className="flex flex-wrap gap-1">
+              {report.key_topics.map((topic) => (
+                <span key={topic} className="px-1.5 py-0.5 rounded bg-accent/10 text-accent text-[11px]">{topic}</span>
+              ))}
+            </div>
+          </AssistantSection>
+          <AssistantSection title="Action Items" empty="No action items detected" showEmpty={report.action_items.length === 0}>
+            {report.action_items.map((item) => (
+              <div key={item.source_segment_id} className="rounded bg-base px-2 py-1 text-xs">
+                <div className="text-primary">{item.text}</div>
+                {item.owner && <div className="text-[10px] text-tertiary mt-0.5">Owner: {item.owner}</div>}
+              </div>
+            ))}
+          </AssistantSection>
+          <AssistantList title="Decisions" items={report.decisions} empty="No decisions detected" />
+          <AssistantList title="Risks" items={report.risks} empty="No risks detected" />
+          <AssistantList title="Open Questions" items={report.open_questions} empty="No open questions detected" />
+          <AssistantSection title="Speaker Stats" empty="No speaker stats" showEmpty={report.speaker_stats.length === 0}>
+            {report.speaker_stats.map((stat) => (
+              <div key={stat.speaker_uri} className="flex items-center justify-between rounded bg-base px-2 py-1 text-xs">
+                <span className="truncate">{stat.speaker_name || stat.speaker_uri.replace(/^sip:/, "")}</span>
+                <span className="text-tertiary shrink-0">{stat.words} words</span>
+              </div>
+            ))}
+          </AssistantSection>
+        </>
+      )}
+    </div>
+  );
+}
+
+function AssistantSection({ title, empty, showEmpty, children }: { title: string; empty: string; showEmpty?: boolean; children: ReactNode }) {
+  return (
+    <div className="space-y-1">
+      <div className="text-xs font-medium text-secondary">{title}</div>
+      {showEmpty ? <p className="text-xs text-tertiary">{empty}</p> : children}
+    </div>
+  );
+}
+
+function AssistantList({ title, items, empty }: { title: string; items: string[]; empty: string }) {
+  return (
+    <AssistantSection title={title} empty={empty} showEmpty={items.length === 0}>
+      <div className="space-y-1">
+        {items.map((item) => (
+          <div key={item} className="rounded bg-base px-2 py-1 text-xs text-primary">{item}</div>
+        ))}
+      </div>
+    </AssistantSection>
   );
 }
 

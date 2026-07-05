@@ -1,5 +1,5 @@
-use clap::{Parser, Subcommand};
 use crate::AppState;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(name = "pale-server", about = "Pale server administration CLI")]
@@ -75,7 +75,10 @@ pub fn run_cli(cli: Cli, state: &AppState) {
         CliCommand::User { action } => match action {
             UserAction::List => {
                 let users = state.all_users();
-                println!("{:<38} {:<30} {:<30} {:<8} {:<8}", "ID", "SIP URI", "Display Name", "Role", "Active");
+                println!(
+                    "{:<38} {:<30} {:<30} {:<8} {:<8}",
+                    "ID", "SIP URI", "Display Name", "Role", "Active"
+                );
                 println!("{}", "-".repeat(114));
                 for user in users {
                     println!(
@@ -88,7 +91,12 @@ pub fn run_cli(cli: Cli, state: &AppState) {
                     );
                 }
             }
-            UserAction::Create { username, display_name, password, role } => {
+            UserAction::Create {
+                username,
+                display_name,
+                password,
+                role,
+            } => {
                 let sip_uri = if username.starts_with("sip:") {
                     username.clone()
                 } else {
@@ -106,18 +114,16 @@ pub fn run_cli(cli: Cli, state: &AppState) {
                     Err(e) => eprintln!("Failed to create user: {}", e),
                 }
             }
-            UserAction::Deactivate { id } => {
-                match uuid::Uuid::parse_str(&id) {
-                    Ok(uuid) => {
-                        if state.set_user_active(uuid, false, "cli-admin").is_some() {
-                            println!("User {} deactivated", id);
-                        } else {
-                            eprintln!("User {} not found", id);
-                        }
+            UserAction::Deactivate { id } => match uuid::Uuid::parse_str(&id) {
+                Ok(uuid) => {
+                    if state.set_user_active(uuid, false, "cli-admin").is_some() {
+                        println!("User {} deactivated", id);
+                    } else {
+                        eprintln!("User {} not found", id);
                     }
-                    Err(_) => eprintln!("Invalid UUID: {}", id),
                 }
-            }
+                Err(_) => eprintln!("Invalid UUID: {}", id),
+            },
         },
         CliCommand::Policy { action } => match action {
             PolicyAction::List => {
@@ -148,12 +154,10 @@ pub fn run_cli(cli: Cli, state: &AppState) {
                     ));
                 }
                 match output {
-                    Some(path) => {
-                        match std::fs::write(&path, &csv) {
-                            Ok(()) => println!("Exported {} audit events to {}", events.len(), path),
-                            Err(e) => eprintln!("Failed to write file: {}", e),
-                        }
-                    }
+                    Some(path) => match std::fs::write(&path, &csv) {
+                        Ok(()) => println!("Exported {} audit events to {}", events.len(), path),
+                        Err(e) => eprintln!("Failed to write file: {}", e),
+                    },
                     None => print!("{}", csv),
                 }
             }

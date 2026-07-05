@@ -17,6 +17,261 @@ use crate::{
 
 pub type PgError = Box<dyn std::error::Error + Send + Sync>;
 
+pub const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "001_initial_schema.sql",
+        include_str!("../migrations/001_initial_schema.sql"),
+    ),
+    (
+        "002_rooms_search_receipts_avatars.sql",
+        include_str!("../migrations/002_rooms_search_receipts_avatars.sql"),
+    ),
+    (
+        "003_voicemail_recordings.sql",
+        include_str!("../migrations/003_voicemail_recordings.sql"),
+    ),
+    (
+        "004_dba_fixes.sql",
+        include_str!("../migrations/004_dba_fixes.sql"),
+    ),
+    (
+        "005_user_auth.sql",
+        include_str!("../migrations/005_user_auth.sql"),
+    ),
+    (
+        "006_call_routing.sql",
+        include_str!("../migrations/006_call_routing.sql"),
+    ),
+    (
+        "007_voicemail_followme.sql",
+        include_str!("../migrations/007_voicemail_followme.sql"),
+    ),
+    (
+        "008_pbx_features.sql",
+        include_str!("../migrations/008_pbx_features.sql"),
+    ),
+    (
+        "009_call_center.sql",
+        include_str!("../migrations/009_call_center.sql"),
+    ),
+    (
+        "010_extension_user_link.sql",
+        include_str!("../migrations/010_extension_user_link.sql"),
+    ),
+    (
+        "011_call_center_enterprise.sql",
+        include_str!("../migrations/011_call_center_enterprise.sql"),
+    ),
+    (
+        "012_chat_enterprise.sql",
+        include_str!("../migrations/012_chat_enterprise.sql"),
+    ),
+    (
+        "013_comprehensive_routing.sql",
+        include_str!("../migrations/013_comprehensive_routing.sql"),
+    ),
+    (
+        "014_user_uniqueness.sql",
+        include_str!("../migrations/014_user_uniqueness.sql"),
+    ),
+    (
+        "015_room_call_metadata.sql",
+        include_str!("../migrations/015_room_call_metadata.sql"),
+    ),
+    (
+        "016_business_collaboration.sql",
+        include_str!("../migrations/016_business_collaboration.sql"),
+    ),
+    (
+        "017_room_message_mentions.sql",
+        include_str!("../migrations/017_room_message_mentions.sql"),
+    ),
+    (
+        "018_file_governance.sql",
+        include_str!("../migrations/018_file_governance.sql"),
+    ),
+    (
+        "019_meeting_lifecycle.sql",
+        include_str!("../migrations/019_meeting_lifecycle.sql"),
+    ),
+    (
+        "020_recording_governance.sql",
+        include_str!("../migrations/020_recording_governance.sql"),
+    ),
+    (
+        "021_channel_governance.sql",
+        include_str!("../migrations/021_channel_governance.sql"),
+    ),
+    (
+        "022_message_priority_saved.sql",
+        include_str!("../migrations/022_message_priority_saved.sql"),
+    ),
+    (
+        "023_identity_lifecycle.sql",
+        include_str!("../migrations/023_identity_lifecycle.sql"),
+    ),
+    (
+        "024_call_policy.sql",
+        include_str!("../migrations/024_call_policy.sql"),
+    ),
+    (
+        "025_mfa_sessions_certauth.sql",
+        include_str!("../migrations/025_mfa_sessions_certauth.sql"),
+    ),
+    (
+        "026_information_barriers.sql",
+        include_str!("../migrations/026_information_barriers.sql"),
+    ),
+    (
+        "027_sensitivity_labels.sql",
+        include_str!("../migrations/027_sensitivity_labels.sql"),
+    ),
+    (
+        "028_custom_roles.sql",
+        include_str!("../migrations/028_custom_roles.sql"),
+    ),
+    (
+        "029_policy_packages.sql",
+        include_str!("../migrations/029_policy_packages.sql"),
+    ),
+    (
+        "030_meeting_templates.sql",
+        include_str!("../migrations/030_meeting_templates.sql"),
+    ),
+    (
+        "031_meeting_enterprise_parity.sql",
+        include_str!("../migrations/031_meeting_enterprise_parity.sql"),
+    ),
+    (
+        "032_chat_enterprise_parity.sql",
+        include_str!("../migrations/032_chat_enterprise_parity.sql"),
+    ),
+    (
+        "033_file_versioning_folders.sql",
+        include_str!("../migrations/033_file_versioning_folders.sql"),
+    ),
+    (
+        "034_approvals.sql",
+        include_str!("../migrations/034_approvals.sql"),
+    ),
+    (
+        "035_recording_policies_hold_music.sql",
+        include_str!("../migrations/035_recording_policies_hold_music.sql"),
+    ),
+    (
+        "036_personal_call_groups.sql",
+        include_str!("../migrations/036_personal_call_groups.sql"),
+    ),
+    (
+        "037_sso_providers.sql",
+        include_str!("../migrations/037_sso_providers.sql"),
+    ),
+    (
+        "038_encryption_config.sql",
+        include_str!("../migrations/038_encryption_config.sql"),
+    ),
+    (
+        "039_admin_elevations.sql",
+        include_str!("../migrations/039_admin_elevations.sql"),
+    ),
+    (
+        "040_devices_rooms_delegation.sql",
+        include_str!("../migrations/040_devices_rooms_delegation.sql"),
+    ),
+    (
+        "041_custom_emojis.sql",
+        include_str!("../migrations/041_custom_emojis.sql"),
+    ),
+    (
+        "042_wiki_pages.sql",
+        include_str!("../migrations/042_wiki_pages.sql"),
+    ),
+    (
+        "043_task_boards.sql",
+        include_str!("../migrations/043_task_boards.sql"),
+    ),
+    (
+        "044_adaptive_cards.sql",
+        include_str!("../migrations/044_adaptive_cards.sql"),
+    ),
+    (
+        "045_platform_integrations.sql",
+        include_str!("../migrations/045_platform_integrations.sql"),
+    ),
+    (
+        "046_conditional_access.sql",
+        include_str!("../migrations/046_conditional_access.sql"),
+    ),
+    (
+        "047_webinar_registrations.sql",
+        include_str!("../migrations/047_webinar_registrations.sql"),
+    ),
+    (
+        "048_channel_tabs.sql",
+        include_str!("../migrations/048_channel_tabs.sql"),
+    ),
+    (
+        "049_scheduling_panels.sql",
+        include_str!("../migrations/049_scheduling_panels.sql"),
+    ),
+    (
+        "050_guest_users.sql",
+        include_str!("../migrations/050_guest_users.sql"),
+    ),
+    (
+        "051_message_extensions.sql",
+        include_str!("../migrations/051_message_extensions.sql"),
+    ),
+    (
+        "052_whiteboards.sql",
+        include_str!("../migrations/052_whiteboards.sql"),
+    ),
+    (
+        "053_app_catalog.sql",
+        include_str!("../migrations/053_app_catalog.sql"),
+    ),
+    (
+        "054_automation_rules.sql",
+        include_str!("../migrations/054_automation_rules.sql"),
+    ),
+    (
+        "055_cnam_cache.sql",
+        include_str!("../migrations/055_cnam_cache.sql"),
+    ),
+    (
+        "056_sip_gateways.sql",
+        include_str!("../migrations/056_sip_gateways.sql"),
+    ),
+    (
+        "057_bandwidth_policies.sql",
+        include_str!("../migrations/057_bandwidth_policies.sql"),
+    ),
+    (
+        "058_location_routing.sql",
+        include_str!("../migrations/058_location_routing.sql"),
+    ),
+    (
+        "059_federation.sql",
+        include_str!("../migrations/059_federation.sql"),
+    ),
+    (
+        "060_signage_displays.sql",
+        include_str!("../migrations/060_signage_displays.sql"),
+    ),
+    (
+        "061_loop_components.sql",
+        include_str!("../migrations/061_loop_components.sql"),
+    ),
+    (
+        "062_compliance_reviews.sql",
+        include_str!("../migrations/062_compliance_reviews.sql"),
+    ),
+    (
+        "063_data_residency.sql",
+        include_str!("../migrations/063_data_residency.sql"),
+    ),
+];
+
 /// PostgreSQL-backed persistent store using deadpool connection pool.
 /// Write-through layer: AppState memory caches remain the primary
 /// read path; PgStore is the durable source of truth.
@@ -62,71 +317,7 @@ impl PgStore {
     pub async fn run_migrations(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let client = self.pool.get().await?;
 
-        let migrations = [
-            include_str!("../migrations/001_initial_schema.sql"),
-            include_str!("../migrations/002_rooms_search_receipts_avatars.sql"),
-            include_str!("../migrations/003_voicemail_recordings.sql"),
-            include_str!("../migrations/004_dba_fixes.sql"),
-            include_str!("../migrations/005_user_auth.sql"),
-            include_str!("../migrations/006_call_routing.sql"),
-            include_str!("../migrations/007_voicemail_followme.sql"),
-            include_str!("../migrations/008_pbx_features.sql"),
-            include_str!("../migrations/009_call_center.sql"),
-            include_str!("../migrations/010_extension_user_link.sql"),
-            include_str!("../migrations/011_call_center_enterprise.sql"),
-            include_str!("../migrations/012_chat_enterprise.sql"),
-            include_str!("../migrations/013_comprehensive_routing.sql"),
-            include_str!("../migrations/013_user_uniqueness.sql"),
-            include_str!("../migrations/014_room_call_metadata.sql"),
-            include_str!("../migrations/015_business_collaboration.sql"),
-            include_str!("../migrations/016_room_message_mentions.sql"),
-            include_str!("../migrations/017_file_governance.sql"),
-            include_str!("../migrations/018_meeting_lifecycle.sql"),
-            include_str!("../migrations/019_recording_governance.sql"),
-            include_str!("../migrations/020_channel_governance.sql"),
-            include_str!("../migrations/021_message_priority_saved.sql"),
-            include_str!("../migrations/022_identity_lifecycle.sql"),
-            include_str!("../migrations/023_call_policy.sql"),
-            include_str!("../migrations/024_mfa_sessions_certauth.sql"),
-            include_str!("../migrations/025_information_barriers.sql"),
-            include_str!("../migrations/026_sensitivity_labels.sql"),
-            include_str!("../migrations/027_custom_roles.sql"),
-            include_str!("../migrations/028_policy_packages.sql"),
-            include_str!("../migrations/029_meeting_templates.sql"),
-            include_str!("../migrations/030_meeting_enterprise_parity.sql"),
-            include_str!("../migrations/031_chat_enterprise_parity.sql"),
-            include_str!("../migrations/032_file_versioning_folders.sql"),
-            include_str!("../migrations/033_approvals.sql"),
-            include_str!("../migrations/034_recording_policies_hold_music.sql"),
-            include_str!("../migrations/035_personal_call_groups.sql"),
-            include_str!("../migrations/036_sso_providers.sql"),
-            include_str!("../migrations/037_encryption_config.sql"),
-            include_str!("../migrations/038_admin_elevations.sql"),
-            include_str!("../migrations/039_devices_rooms_delegation.sql"),
-            include_str!("../migrations/040_custom_emojis.sql"),
-            include_str!("../migrations/041_wiki_pages.sql"),
-            include_str!("../migrations/042_task_boards.sql"),
-            include_str!("../migrations/043_adaptive_cards.sql"),
-            include_str!("../migrations/044_platform_integrations.sql"),
-            include_str!("../migrations/045_conditional_access.sql"),
-            include_str!("../migrations/046_webinar_registrations.sql"),
-            include_str!("../migrations/047_guest_users.sql"),
-            include_str!("../migrations/048_cnam_cache.sql"),
-            include_str!("../migrations/049_sip_gateways.sql"),
-            include_str!("../migrations/050_location_routing.sql"),
-            include_str!("../migrations/051_federation.sql"),
-            include_str!("../migrations/052_loop_components.sql"),
-            include_str!("../migrations/053_compliance_reviews.sql"),
-            include_str!("../migrations/054_data_residency.sql"),
-            include_str!("../migrations/046_channel_tabs.sql"),
-            include_str!("../migrations/047_message_extensions.sql"),
-            include_str!("../migrations/048_app_catalog.sql"),
-            include_str!("../migrations/049_guest_users.sql"),
-            include_str!("../migrations/050_bandwidth_policies.sql"),
-            include_str!("../migrations/051_signage_displays.sql"),
-        ];
-
-        for (i, sql) in migrations.iter().enumerate() {
+        for (i, (_, sql)) in POSTGRES_MIGRATIONS.iter().enumerate() {
             client.batch_execute(sql).await?;
             log::info!("PostgreSQL migration {} applied", i + 1);
         }
@@ -1185,7 +1376,10 @@ impl PgStore {
         let client = self.pool.get().await?;
         let mentions = serde_json::to_value(&msg.mentions)?;
         let mentioned_user_uris = serde_json::to_value(&msg.mentioned_user_uris)?;
-        let card_json = msg.card_payload.as_ref().map(|c| serde_json::to_value(c).unwrap_or_default());
+        let card_json = msg
+            .card_payload
+            .as_ref()
+            .map(|c| serde_json::to_value(c).unwrap_or_default());
         client.execute(
             "INSERT INTO room_messages (id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned, mentions, mentioned_user_uris, priority, saved_by, scheduled_at, delivered, delivery_status, card_payload)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
@@ -1616,27 +1810,39 @@ impl PgStore {
 
     pub async fn upsert_tag(&self, tag: &crate::Tag) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute(
-            "INSERT INTO tags (id, team_id, name, members, created_at)
+        client
+            .execute(
+                "INSERT INTO tags (id, team_id, name, members, created_at)
              VALUES ($1,$2,$3,$4,$5)
              ON CONFLICT (id) DO UPDATE SET name=$3, members=$4",
-            &[&tag.id, &tag.team_id, &tag.name, &tag.members, &tag.created_at],
-        ).await?;
+                &[
+                    &tag.id,
+                    &tag.team_id,
+                    &tag.name,
+                    &tag.members,
+                    &tag.created_at,
+                ],
+            )
+            .await?;
         Ok(())
     }
 
     pub async fn delete_tag(&self, id: Uuid) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM tags WHERE id = $1", &[&id]).await?;
+        client
+            .execute("DELETE FROM tags WHERE id = $1", &[&id])
+            .await?;
         Ok(())
     }
 
     pub async fn load_tags(&self) -> Result<Vec<crate::Tag>, PgError> {
         let client = self.pool.get().await?;
-        let rows = client.query(
-            "SELECT id, team_id, name, members, created_at FROM tags ORDER BY created_at",
-            &[],
-        ).await?;
+        let rows = client
+            .query(
+                "SELECT id, team_id, name, members, created_at FROM tags ORDER BY created_at",
+                &[],
+            )
+            .await?;
         Ok(rows
             .iter()
             .map(|r| crate::Tag {
@@ -1692,24 +1898,32 @@ impl PgStore {
             "SELECT id, name, provider_type, client_id, client_secret_enc, issuer_url, redirect_uri, enabled, created_at FROM sso_providers ORDER BY created_at",
             &[],
         ).await?;
-        Ok(rows.iter().filter_map(|r| {
-            Some(crate::SsoProvider {
-                id: r.try_get("id").ok()?,
-                name: r.try_get("name").ok()?,
-                provider_type: r.try_get("provider_type").unwrap_or_else(|_| "oidc".to_string()),
-                client_id: r.try_get("client_id").unwrap_or_default(),
-                client_secret_enc: r.try_get("client_secret_enc").unwrap_or_default(),
-                issuer_url: r.try_get("issuer_url").unwrap_or_default(),
-                redirect_uri: r.try_get("redirect_uri").unwrap_or_default(),
-                enabled: r.try_get("enabled").unwrap_or(true),
-                created_at: r.try_get("created_at").ok()?,
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                Some(crate::SsoProvider {
+                    id: r.try_get("id").ok()?,
+                    name: r.try_get("name").ok()?,
+                    provider_type: r
+                        .try_get("provider_type")
+                        .unwrap_or_else(|_| "oidc".to_string()),
+                    client_id: r.try_get("client_id").unwrap_or_default(),
+                    client_secret_enc: r.try_get("client_secret_enc").unwrap_or_default(),
+                    issuer_url: r.try_get("issuer_url").unwrap_or_default(),
+                    redirect_uri: r.try_get("redirect_uri").unwrap_or_default(),
+                    enabled: r.try_get("enabled").unwrap_or(true),
+                    created_at: r.try_get("created_at").ok()?,
+                })
             })
-        }).collect())
+            .collect())
     }
 
     // ─── Encryption Config ───
 
-    pub async fn upsert_encryption_config(&self, c: &crate::EncryptionConfig) -> Result<(), PgError> {
+    pub async fn upsert_encryption_config(
+        &self,
+        c: &crate::EncryptionConfig,
+    ) -> Result<(), PgError> {
         let client = self.pool.get().await?;
         client.execute(
             "INSERT INTO encryption_config (id, key_id, key_source, wrapped_key_enc, created_at, rotated_at)
@@ -1726,16 +1940,21 @@ impl PgStore {
             "SELECT id, key_id, key_source, wrapped_key_enc, created_at, rotated_at FROM encryption_config ORDER BY created_at DESC",
             &[],
         ).await?;
-        Ok(rows.iter().filter_map(|r| {
-            Some(crate::EncryptionConfig {
-                id: r.try_get("id").ok()?,
-                key_id: r.try_get("key_id").unwrap_or_default(),
-                key_source: r.try_get("key_source").unwrap_or_else(|_| "server".to_string()),
-                wrapped_key_enc: r.try_get("wrapped_key_enc").unwrap_or_default(),
-                created_at: r.try_get("created_at").ok()?,
-                rotated_at: r.try_get("rotated_at").ok().flatten(),
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                Some(crate::EncryptionConfig {
+                    id: r.try_get("id").ok()?,
+                    key_id: r.try_get("key_id").unwrap_or_default(),
+                    key_source: r
+                        .try_get("key_source")
+                        .unwrap_or_else(|_| "server".to_string()),
+                    wrapped_key_enc: r.try_get("wrapped_key_enc").unwrap_or_default(),
+                    created_at: r.try_get("created_at").ok()?,
+                    rotated_at: r.try_get("rotated_at").ok().flatten(),
+                })
             })
-        }).collect())
+            .collect())
     }
 
     // ─── Admin Elevations ───
@@ -1757,20 +1976,25 @@ impl PgStore {
             "SELECT id, user_id, reason, granted_by, granted_at, expires_at, revoked_at FROM admin_elevations ORDER BY granted_at DESC LIMIT 500",
             &[],
         ).await?;
-        Ok(rows.iter().filter_map(|r| {
-            Some(crate::AdminElevation {
-                id: r.try_get("id").ok()?,
-                user_id: r.try_get("user_id").ok()?,
-                reason: r.try_get("reason").unwrap_or_default(),
-                granted_by: r.try_get("granted_by").unwrap_or_default(),
-                granted_at: r.try_get("granted_at").ok()?,
-                expires_at: r.try_get("expires_at").ok()?,
-                revoked_at: r.try_get("revoked_at").ok().flatten(),
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                Some(crate::AdminElevation {
+                    id: r.try_get("id").ok()?,
+                    user_id: r.try_get("user_id").ok()?,
+                    reason: r.try_get("reason").unwrap_or_default(),
+                    granted_by: r.try_get("granted_by").unwrap_or_default(),
+                    granted_at: r.try_get("granted_at").ok()?,
+                    expires_at: r.try_get("expires_at").ok()?,
+                    revoked_at: r.try_get("revoked_at").ok().flatten(),
+                })
             })
-        }).collect())
+            .collect())
     }
 
-    pub async fn load_notification_preferences(&self) -> Result<Vec<crate::NotificationPreference>, PgError> {
+    pub async fn load_notification_preferences(
+        &self,
+    ) -> Result<Vec<crate::NotificationPreference>, PgError> {
         let client = self.pool.get().await?;
         let rows = client.query(
             "SELECT room_id, user_uri, notification_level, updated_at FROM notification_preferences",
@@ -1815,7 +2039,9 @@ impl PgStore {
 
     pub async fn delete_line_delegation(&self, id: Uuid) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM line_delegations WHERE id = $1", &[&id]).await?;
+        client
+            .execute("DELETE FROM line_delegations WHERE id = $1", &[&id])
+            .await?;
         Ok(())
     }
 
@@ -1825,20 +2051,25 @@ impl PgStore {
             "SELECT id, owner_uri, delegate_uri, can_answer, can_make, can_view_history, created_at FROM line_delegations ORDER BY created_at",
             &[],
         ).await?;
-        Ok(rows.iter().map(|r| crate::LineDelegation {
-            id: r.get("id"),
-            owner_uri: r.get("owner_uri"),
-            delegate_uri: r.get("delegate_uri"),
-            can_answer: r.get("can_answer"),
-            can_make: r.get("can_make"),
-            can_view_history: r.get("can_view_history"),
-            created_at: r.get("created_at"),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| crate::LineDelegation {
+                id: r.get("id"),
+                owner_uri: r.get("owner_uri"),
+                delegate_uri: r.get("delegate_uri"),
+                can_answer: r.get("can_answer"),
+                can_make: r.get("can_make"),
+                can_view_history: r.get("can_view_history"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
     }
 
     pub async fn delete_custom_emoji(&self, id: Uuid) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM custom_emojis WHERE id = $1", &[&id]).await?;
+        client
+            .execute("DELETE FROM custom_emojis WHERE id = $1", &[&id])
+            .await?;
         Ok(())
     }
 
@@ -1848,19 +2079,25 @@ impl PgStore {
             "SELECT id, team_id, shortcode, image_url, uploaded_by, created_at FROM custom_emojis ORDER BY created_at",
             &[],
         ).await?;
-        Ok(rows.iter().map(|r| crate::CustomEmoji {
-            id: r.get("id"),
-            team_id: r.get("team_id"),
-            shortcode: r.get("shortcode"),
-            image_url: r.get("image_url"),
-            uploaded_by: r.get("uploaded_by"),
-            created_at: r.get("created_at"),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| crate::CustomEmoji {
+                id: r.get("id"),
+                team_id: r.get("team_id"),
+                shortcode: r.get("shortcode"),
+                image_url: r.get("image_url"),
+                uploaded_by: r.get("uploaded_by"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
     }
 
     // ─── Common Area Phones ───
 
-    pub async fn upsert_common_area_phone(&self, p: &crate::CommonAreaPhone) -> Result<(), PgError> {
+    pub async fn upsert_common_area_phone(
+        &self,
+        p: &crate::CommonAreaPhone,
+    ) -> Result<(), PgError> {
         let client = self.pool.get().await?;
         client.execute(
             "INSERT INTO common_area_phones (id, name, extension, location, features, enabled, created_at)
@@ -1886,7 +2123,9 @@ impl PgStore {
 
     pub async fn delete_common_area_phone(&self, id: Uuid) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM common_area_phones WHERE id = $1", &[&id]).await?;
+        client
+            .execute("DELETE FROM common_area_phones WHERE id = $1", &[&id])
+            .await?;
         Ok(())
     }
 
@@ -1896,15 +2135,18 @@ impl PgStore {
             "SELECT id, name, extension, location, features, enabled, created_at FROM common_area_phones ORDER BY name",
             &[],
         ).await?;
-        Ok(rows.iter().map(|r| crate::CommonAreaPhone {
-            id: r.get("id"),
-            name: r.get("name"),
-            extension: r.get("extension"),
-            location: r.get("location"),
-            features: r.get("features"),
-            enabled: r.get("enabled"),
-            created_at: r.get("created_at"),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| crate::CommonAreaPhone {
+                id: r.get("id"),
+                name: r.get("name"),
+                extension: r.get("extension"),
+                location: r.get("location"),
+                features: r.get("features"),
+                enabled: r.get("enabled"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
     }
 
     // ─── Meeting Rooms ───
@@ -1922,7 +2164,9 @@ impl PgStore {
 
     pub async fn delete_meeting_room(&self, id: Uuid) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM meeting_rooms WHERE id = $1", &[&id]).await?;
+        client
+            .execute("DELETE FROM meeting_rooms WHERE id = $1", &[&id])
+            .await?;
         Ok(())
     }
 
@@ -1932,15 +2176,18 @@ impl PgStore {
             "SELECT id, name, location, capacity, equipment, bookable, created_at FROM meeting_rooms ORDER BY name",
             &[],
         ).await?;
-        Ok(rows.iter().map(|r| crate::MeetingRoom {
-            id: r.get("id"),
-            name: r.get("name"),
-            location: r.get("location"),
-            capacity: r.get("capacity"),
-            equipment: r.get("equipment"),
-            bookable: r.get("bookable"),
-            created_at: r.get("created_at"),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| crate::MeetingRoom {
+                id: r.get("id"),
+                name: r.get("name"),
+                location: r.get("location"),
+                capacity: r.get("capacity"),
+                equipment: r.get("equipment"),
+                bookable: r.get("bookable"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
     }
 
     pub async fn upsert_room_booking(&self, b: &crate::RoomBooking) -> Result<(), PgError> {
@@ -1956,7 +2203,9 @@ impl PgStore {
 
     pub async fn delete_room_booking(&self, id: Uuid) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM room_bookings WHERE id = $1", &[&id]).await?;
+        client
+            .execute("DELETE FROM room_bookings WHERE id = $1", &[&id])
+            .await?;
         Ok(())
     }
 
@@ -1966,20 +2215,26 @@ impl PgStore {
             "SELECT id, room_id, meeting_id, booked_by, start_time, end_time, created_at FROM room_bookings ORDER BY start_time",
             &[],
         ).await?;
-        Ok(rows.iter().map(|r| crate::RoomBooking {
-            id: r.get("id"),
-            room_id: r.get("room_id"),
-            meeting_id: r.try_get("meeting_id").ok().flatten(),
-            booked_by: r.get("booked_by"),
-            start_time: r.get("start_time"),
-            end_time: r.get("end_time"),
-            created_at: r.get("created_at"),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| crate::RoomBooking {
+                id: r.get("id"),
+                room_id: r.get("room_id"),
+                meeting_id: r.try_get("meeting_id").ok().flatten(),
+                booked_by: r.get("booked_by"),
+                start_time: r.get("start_time"),
+                end_time: r.get("end_time"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
     }
 
     // ─── Provisioned Devices ───
 
-    pub async fn upsert_provisioned_device(&self, d: &crate::ProvisionedDevice) -> Result<(), PgError> {
+    pub async fn upsert_provisioned_device(
+        &self,
+        d: &crate::ProvisionedDevice,
+    ) -> Result<(), PgError> {
         let client = self.pool.get().await?;
         client.execute(
             "INSERT INTO provisioned_devices (id, mac_address, model, assigned_user, config_template, provisioned_at, last_seen)
@@ -1992,7 +2247,9 @@ impl PgStore {
 
     pub async fn delete_provisioned_device(&self, id: Uuid) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM provisioned_devices WHERE id = $1", &[&id]).await?;
+        client
+            .execute("DELETE FROM provisioned_devices WHERE id = $1", &[&id])
+            .await?;
         Ok(())
     }
 
@@ -2002,15 +2259,18 @@ impl PgStore {
             "SELECT id, mac_address, model, assigned_user, config_template, provisioned_at, last_seen FROM provisioned_devices ORDER BY provisioned_at",
             &[],
         ).await?;
-        Ok(rows.iter().map(|r| crate::ProvisionedDevice {
-            id: r.get("id"),
-            mac_address: r.get("mac_address"),
-            model: r.get("model"),
-            assigned_user: r.try_get("assigned_user").ok().flatten(),
-            config_template: r.get("config_template"),
-            provisioned_at: r.get("provisioned_at"),
-            last_seen: r.try_get("last_seen").ok().flatten(),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| crate::ProvisionedDevice {
+                id: r.get("id"),
+                mac_address: r.get("mac_address"),
+                model: r.get("model"),
+                assigned_user: r.try_get("assigned_user").ok().flatten(),
+                config_template: r.get("config_template"),
+                provisioned_at: r.get("provisioned_at"),
+                last_seen: r.try_get("last_seen").ok().flatten(),
+            })
+            .collect())
     }
 
     // ─── Hot Desk Sessions ───
@@ -2032,18 +2292,23 @@ impl PgStore {
             "SELECT id, device_id, user_uri, logged_in_at, logged_out_at FROM hotdesk_sessions WHERE logged_out_at IS NULL ORDER BY logged_in_at",
             &[],
         ).await?;
-        Ok(rows.iter().map(|r| crate::HotdeskSession {
-            id: r.get("id"),
-            device_id: r.get("device_id"),
-            user_uri: r.get("user_uri"),
-            logged_in_at: r.get("logged_in_at"),
-            logged_out_at: r.try_get("logged_out_at").ok().flatten(),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| crate::HotdeskSession {
+                id: r.get("id"),
+                device_id: r.get("device_id"),
+                user_uri: r.get("user_uri"),
+                logged_in_at: r.get("logged_in_at"),
+                logged_out_at: r.try_get("logged_out_at").ok().flatten(),
+            })
+            .collect())
     }
 
     pub async fn delete_wiki_page(&self, id: Uuid) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM wiki_pages WHERE id = $1", &[&id]).await?;
+        client
+            .execute("DELETE FROM wiki_pages WHERE id = $1", &[&id])
+            .await?;
         Ok(())
     }
 
@@ -2053,35 +2318,48 @@ impl PgStore {
             "SELECT id, team_id, title, body, created_by, updated_by, created_at, updated_at, parent_id FROM wiki_pages ORDER BY created_at",
             &[],
         ).await?;
-        Ok(rows.iter().map(|r| crate::WikiPage {
-            id: r.get("id"),
-            team_id: r.get("team_id"),
-            title: r.get("title"),
-            body: r.get("body"),
-            created_by: r.get("created_by"),
-            updated_by: r.get("updated_by"),
-            created_at: r.get("created_at"),
-            updated_at: r.get("updated_at"),
-            parent_id: r.try_get("parent_id").ok().flatten(),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| crate::WikiPage {
+                id: r.get("id"),
+                team_id: r.get("team_id"),
+                title: r.get("title"),
+                body: r.get("body"),
+                created_by: r.get("created_by"),
+                updated_by: r.get("updated_by"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+                parent_id: r.try_get("parent_id").ok().flatten(),
+            })
+            .collect())
     }
 
     // ─── Task Boards & Tasks ───
 
     pub async fn upsert_task_board(&self, board: &crate::TaskBoard) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute(
-            "INSERT INTO task_boards (id, team_id, name, created_by, created_at)
+        client
+            .execute(
+                "INSERT INTO task_boards (id, team_id, name, created_by, created_at)
              VALUES ($1,$2,$3,$4,$5)
              ON CONFLICT (id) DO UPDATE SET name=$3",
-            &[&board.id, &board.team_id, &board.name, &board.created_by, &board.created_at],
-        ).await?;
+                &[
+                    &board.id,
+                    &board.team_id,
+                    &board.name,
+                    &board.created_by,
+                    &board.created_at,
+                ],
+            )
+            .await?;
         Ok(())
     }
 
     pub async fn delete_task_board(&self, id: Uuid) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM task_boards WHERE id = $1", &[&id]).await?;
+        client
+            .execute("DELETE FROM task_boards WHERE id = $1", &[&id])
+            .await?;
         Ok(())
     }
 
@@ -2098,7 +2376,49 @@ impl PgStore {
 
     pub async fn delete_task(&self, id: Uuid) -> Result<(), PgError> {
         let client = self.pool.get().await?;
-        client.execute("DELETE FROM tasks WHERE id = $1", &[&id]).await?;
+        client
+            .execute("DELETE FROM tasks WHERE id = $1", &[&id])
+            .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::POSTGRES_MIGRATIONS;
+    use std::collections::HashSet;
+
+    #[test]
+    fn postgres_migration_manifest_matches_directory_and_is_monotonic() {
+        let manifest: Vec<String> = POSTGRES_MIGRATIONS
+            .iter()
+            .map(|(name, _)| (*name).to_string())
+            .collect();
+        let migrations_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let mut files: Vec<String> = std::fs::read_dir(migrations_dir)
+            .expect("migrations directory")
+            .map(|entry| {
+                entry
+                    .expect("migration entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .filter(|name| name.ends_with(".sql"))
+            .collect();
+        files.sort();
+
+        assert_eq!(manifest, files);
+
+        let mut seen = HashSet::new();
+        for (index, name) in manifest.iter().enumerate() {
+            let prefix = name
+                .split('_')
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or_else(|| panic!("invalid migration prefix: {name}"));
+            assert!(seen.insert(prefix), "duplicate migration prefix: {prefix}");
+            assert_eq!(prefix, index + 1, "migration sequence gap at {name}");
+        }
     }
 }

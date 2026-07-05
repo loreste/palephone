@@ -14,6 +14,7 @@ import { Badge } from "@/components/ui/Badge";
 import { toast } from "@/components/ui/Toast";
 import { CallLineIndicator } from "./CallLineIndicator";
 import { MeetingPanel } from "@/components/meeting/MeetingPanel";
+import { LiveKitRoom } from "@/components/meeting/LiveKitRoom";
 import { useMeetingStore } from "@/store/meetingStore";
 import { useServerStore } from "@/store/serverStore";
 import { paleServerApi } from "@/lib/tauri";
@@ -29,6 +30,7 @@ export function ActiveCallView() {
   const [showMeetingPanel, setShowMeetingPanel] = useState(false);
   const [consultationTarget, setConsultationTarget] = useState<string | null>(null);
   const activeConferenceId = useMeetingStore((s) => s.activeConferenceId);
+  const livekitUrl = useMeetingStore((s) => s.livekitUrl);
   const raisedHands = useMeetingStore((s) => s.raisedHands);
   const captionsEnabled = useMeetingStore((s) => s.captionsEnabled);
   const setCaptionsEnabled = useMeetingStore((s) => s.setCaptionsEnabled);
@@ -289,6 +291,10 @@ export function ActiveCallView() {
         <span>End Call</span>
       </motion.button>
     </div>
+    {/* LiveKit media room (rendered when LiveKit credentials are available) */}
+    {activeConferenceId && livekitUrl && (
+      <LiveKitRoom conferenceId={activeConferenceId} />
+    )}
     {showMeetingPanel && activeConferenceId && (
       <MeetingPanel conferenceId={activeConferenceId} />
     )}

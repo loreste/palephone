@@ -72,6 +72,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         log::info!("No PALE_DATABASE_URL set — using SQLite-only persistence");
     }
 
+    // Configure LiveKit SFU if environment variables are set
+    if let Some(lk_config) = pale_server::livekit::LiveKitConfig::from_env() {
+        log::info!(
+            "LiveKit configured: {} (key={})",
+            lk_config.url,
+            lk_config.api_key
+        );
+        app_state.set_livekit(lk_config);
+    } else {
+        log::info!("LiveKit not configured — conferences use signaling-only mode");
+    }
+
     // CLI mode: if --cli flag is passed, run CLI commands and exit
     if std::env::args().any(|arg| arg == "--cli") {
         let cli_args: Vec<String> = std::env::args()
@@ -219,10 +231,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             tokio::time::sleep(Duration::from_secs(30)).await;
             let delivered = scheduled_state.deliver_scheduled_messages();
             if !delivered.is_empty() {
-                log::info!(
-                    "Delivered {} scheduled message(s)",
-                    delivered.len()
-                );
+                log::info!("Delivered {} scheduled message(s)", delivered.len());
             }
         }
     });
@@ -375,6 +384,7 @@ fn config_from_env() -> Result<ServerConfig, String> {
         media: media_config_from_env(),
         ca_cert_path: optional_env("PALE_CA_CERT_PATH").map(PathBuf::from),
         verify_client_certs: env_bool("PALE_VERIFY_CLIENT_CERTS", false),
+        livekit: pale_server::livekit::LiveKitConfig::from_env(),
     })
 }
 

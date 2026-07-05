@@ -1,5 +1,5 @@
-import { useState, useCallback, useEffect } from "react";
-import { WifiOff } from "lucide-react";
+import { lazy, Suspense, useState, useCallback, useEffect } from "react";
+import { ExternalLink, WifiOff } from "lucide-react";
 import { TitleBar } from "./TitleBar";
 import { StatusBar } from "./StatusBar";
 import { BottomNav } from "./BottomNav";
@@ -14,7 +14,6 @@ import { RecentCallsList } from "@/components/recent/RecentCallsList";
 import { ChatView } from "@/components/chat/ChatView";
 import { PeopleView } from "@/components/people/PeopleView";
 import { FilesView } from "@/components/files/FilesView";
-import { AdminView } from "@/components/admin/AdminView";
 import { CalendarView } from "@/components/calendar/CalendarView";
 import { ActiveCallView } from "@/components/call/ActiveCallView";
 import { IncomingCallOverlay } from "@/components/call/IncomingCallOverlay";
@@ -28,7 +27,7 @@ import { useAutoAway } from "@/hooks/useAutoAway";
 import { useMeetingReminders } from "@/hooks/useMeetingReminders";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
-import { getConfig, getSipPassword, paleLogin, registerAccount } from "@/lib/tauri";
+import { getConfig, getSipPassword, openPopoutWindow, paleLogin, registerAccount, saveSettings } from "@/lib/tauri";
 
 /**
  * Persisted on the frontend (localStorage) rather than in config.ui: the Rust
@@ -36,6 +35,7 @@ import { getConfig, getSipPassword, paleLogin, registerAccount } from "@/lib/tau
  * would be silently dropped by save_settings.
  */
 const SETUP_COMPLETE_KEY = "pale.setup_complete";
+const AdminView = lazy(() => import("@/components/admin/AdminView").then((module) => ({ default: module.AdminView })));
 
 const views = {
   dialpad: DialpadView,
@@ -51,6 +51,7 @@ const views = {
 export function AppShell() {
   const activeTab = useUiStore((s) => s.activeTab);
   const activeCallId = useCallStore((s) => s.activeCallId);
+  const activeRoomId = useChatStore((s) => s.activeRoomId);
   const hasActiveCall = activeCallId !== null;
   const isOffline = useChatStore((s) => s.isOffline);
   const queuedCount = useChatStore((s) => s.queuedMessages.length);
@@ -66,12 +67,20 @@ export function AppShell() {
   const openSearch = useCallback(() => setSearchOpen(true), []);
   const closeSearch = useCallback(() => setSearchOpen(false), []);
 
+  const popoutCurrentView = useCallback(() => {
+    const kind = hasActiveCall ? "call" : activeTab === "chat" ? "chat" : activeTab === "files" ? "files" : activeTab === "calendar" ? "calendar" : null;
+    if (!kind) return;
+    const targetId = hasActiveCall ? String(activeCallId) : activeTab === "chat" ? activeRoomId : null;
+    openPopoutWindow(kind, targetId, `Pale ${kind}`).catch(() => {});
+  }, [activeCallId, activeRoomId, activeTab, hasActiveCall]);
+
   useKeyboardShortcuts({ onOpenCommandPalette: openCommandPalette, onOpenSearch: openSearch });
 
   // Connect to pale-server SSE for real-time presence & message events
   const serverBaseUrl = useServerStore((s) => s.baseUrl);
   const serverToken = useServerStore((s) => s.token);
   const setServerConnection = useServerStore((s) => s.setConnection);
+  const setServerIdentity = useServerStore((s) => s.setIdentity);
   useServerEvents(serverBaseUrl, serverToken);
   useAutoAway();
   useMeetingReminders();
@@ -82,6 +91,10 @@ export function AppShell() {
   useEffect(() => {
     getConfig()
       .then(async (config) => {
+        if (config.server?.role) {
+          setServerIdentity(config.server.role, config.server.display_name);
+        }
+
         // Auto-login: if server is configured with auto_connect and not already connected
         const alreadyConnected = useServerStore.getState().connected;
         if (!alreadyConnected && config.server?.url && config.server.username && config.server.auto_connect) {
@@ -91,6 +104,12 @@ export function AppShell() {
               const response = await paleLogin(config.server.url, config.server.username, savedPassword);
               sessionStorage.setItem("pale.admin.token", response.token);
               setServerConnection(config.server.url, response.token, response.expires_at, response.user.role, response.user.display_name);
+              config.server = {
+                ...config.server,
+                role: response.user.role,
+                display_name: response.user.display_name,
+              };
+              await saveSettings(config).catch(() => {});
 
               // Auto-register SIP
               if (response.sip_credentials) {
@@ -138,7 +157,7 @@ export function AppShell() {
         }
         setWizardChecked(true);
       });
-  }, [setAccount, setServerConnection]);
+  }, [setAccount, setServerConnection, setServerIdentity]);
 
   if (!wizardChecked) return null;
 
@@ -165,6 +184,16 @@ export function AppShell() {
     <div className="flex flex-col h-screen w-screen overflow-hidden safe-area-top safe-area-bottom">
       {!mobile && <TitleBar />}
       <StatusBar />
+      {!mobile && (hasActiveCall || activeTab === "chat" || activeTab === "files" || activeTab === "calendar") && (
+        <button
+          onClick={popoutCurrentView}
+          className="fixed right-3 top-10 z-30 h-8 w-8 inline-flex items-center justify-center rounded-md border border-border-subtle bg-surface text-tertiary hover:text-primary hover:bg-elevated"
+          aria-label="Open in separate window"
+          title="Open in separate window"
+        >
+          <ExternalLink size={15} />
+        </button>
+      )}
 
       {/* Offline indicator banner */}
       {isOffline && (
@@ -184,7 +213,13 @@ export function AppShell() {
       )}
 
       <main className="flex-1 overflow-y-auto relative">
-        {hasActiveCall ? <ActiveCallView /> : <View />}
+        {hasActiveCall ? (
+          <ActiveCallView />
+        ) : (
+          <Suspense fallback={<div className="p-4 text-sm text-secondary">Loading...</div>}>
+            <View />
+          </Suspense>
+        )}
       </main>
 
       {!hasActiveCall && <BottomNav />}
