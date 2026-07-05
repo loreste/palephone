@@ -57,6 +57,9 @@ export interface ChatMessage {
     actions: { action_type: string; title: string; url?: string | null; data?: unknown }[];
   } | null;
   translated_text?: string;
+  thread_id?: string | null;
+  thread_reply_count?: number;
+  thread_last_reply_at?: string;
 }
 
 export interface QueuedMessage {

@@ -1429,6 +1429,7 @@ impl PgStore {
                     .ok()
                     .flatten()
                     .and_then(|v| serde_json::from_value(v).ok()),
+                thread_id: r.try_get("thread_id").ok().flatten(),
             })
             .collect())
     }

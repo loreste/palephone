@@ -226,6 +226,29 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
         } catch { /* ignore */ }
       });
 
+      es.addEventListener("thread_reply", (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          const msg = data.message;
+          const currentSipUri = useAccountStore.getState().account?.sipUri;
+          const isOwn = currentSipUri != null && msg.sender_uri === currentSipUri;
+          addMessage({
+            event_id: msg.id,
+            room_id: msg.room_id,
+            sender: msg.sender_uri,
+            sender_name: null,
+            body: msg.body,
+            msg_type: "text" as const,
+            timestamp: Math.floor(new Date(msg.created_at).getTime() / 1000),
+            is_encrypted: false,
+            is_own: isOwn,
+            thread_id: data.thread?.id ?? null,
+            priority: msg.priority ?? "normal",
+            delivery_status: msg.delivery_status ?? "sent",
+          });
+        } catch { /* ignore */ }
+      });
+
       es.addEventListener("message_edited", (e) => {
         try {
           const msg = JSON.parse(e.data);

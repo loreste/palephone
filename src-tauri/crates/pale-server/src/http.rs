@@ -256,6 +256,15 @@ pub fn router(state: SharedState) -> Router {
             post(start_room_call).delete(end_room_call),
         )
         .route("/v1/rooms/{id}/typing", post(room_typing))
+        // Message threads
+        .route("/v1/rooms/{id}/threads", get(list_room_threads))
+        .route("/v1/threads/{id}/messages", get(list_thread_messages))
+        .route("/v1/threads/{id}/reply", post(reply_to_thread))
+        // Rate limit admin
+        .route(
+            "/v1/admin/rate-limits",
+            get(get_rate_limits).put(update_rate_limits),
+        )
         .route("/v1/search", get(unified_search))
         .route("/v1/copilot/query", post(copilot_query))
         .route("/v1/ai/providers", get(list_ai_providers))
@@ -1054,6 +1063,10 @@ async fn admin_login(
     headers: HeaderMap,
     Json(input): Json<AdminLoginRequest>,
 ) -> Result<Json<crate::AdminSession>, ApiError> {
+    let ip = extract_client_ip(&headers);
+    if !state.check_endpoint_rate_limit(&ip, crate::EndpointGroup::Auth) {
+        return Err(ApiError::TooManyRequests);
+    }
     state
         .authenticate_admin(
             &input.username,
@@ -1138,6 +1151,9 @@ async fn user_login(
     Json(input): Json<UserLoginRequest>,
 ) -> Result<Json<crate::UserLoginResponse>, ApiError> {
     let client_ip = extract_client_ip(&headers);
+    if !state.check_endpoint_rate_limit(&client_ip, crate::EndpointGroup::Auth) {
+        return Err(ApiError::TooManyRequests);
+    }
     let device_type = headers
         .get("x-device-type")
         .and_then(|v| v.to_str().ok())
@@ -3415,6 +3431,9 @@ async fn upload_file(
     body: Bytes,
 ) -> Result<Json<FileRecord>, ApiError> {
     let owner = authenticated_principal(&headers, &state)?;
+    if !state.check_endpoint_rate_limit(&owner, crate::EndpointGroup::FileUpload) {
+        return Err(ApiError::TooManyRequests);
+    }
     if body.len() as u64 > state.max_upload_bytes() {
         return Err(ApiError::PayloadTooLarge);
     }
@@ -4899,6 +4918,9 @@ async fn send_room_message(
 ) -> Result<Json<crate::RoomMessage>, ApiError> {
     let principal = authenticated_principal(&headers, &state)?;
     require_room_member(&state, id, &principal)?;
+    if !state.check_endpoint_rate_limit(&principal, crate::EndpointGroup::MessageSend) {
+        return Err(ApiError::TooManyRequests);
+    }
     state
         .send_room_message_with_card(
             id,
@@ -5049,6 +5071,72 @@ async fn room_typing(
         }),
     });
     Ok(Json(json!({ "ok": true })))
+}
+
+// ─── Message Threads ───
+
+async fn list_room_threads(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::MessageThread>>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    require_room_member(&state, id, &principal)?;
+    Ok(Json(state.room_threads(id)))
+}
+
+async fn list_thread_messages(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::RoomMessage>>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    let thread = state.get_thread(id).ok_or(ApiError::NotFound)?;
+    require_room_member(&state, thread.room_id, &principal)?;
+    Ok(Json(state.thread_messages(id)))
+}
+
+async fn reply_to_thread(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::ThreadReplyRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_principal(&headers, &state)?;
+    // `id` here is the root message id — the reply_to_thread method handles
+    // finding or creating the thread.
+    let root_msg = state.room_message(id).ok_or(ApiError::NotFound)?;
+    require_room_member(&state, root_msg.room_id, &principal)?;
+
+    if !state.check_endpoint_rate_limit(&principal, crate::EndpointGroup::MessageSend) {
+        return Err(ApiError::TooManyRequests);
+    }
+
+    let (msg, thread) = state
+        .reply_to_thread(id, &principal, &input.body, input.priority)
+        .map_err(ApiError::Conflict)?;
+    Ok(Json(json!({ "message": msg, "thread": thread })))
+}
+
+// ─── Rate Limit Admin ───
+
+async fn get_rate_limits(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::RateLimitConfig>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.rate_limit_config()))
+}
+
+async fn update_rate_limits(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::RateLimitConfig>,
+) -> Result<Json<crate::RateLimitConfig>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    state.set_rate_limit_config(input.clone());
+    state.record_audit_event(&principal, "rate_limits.updated", None);
+    Ok(Json(input))
 }
 
 // ─── Search ───
@@ -8283,6 +8371,9 @@ async fn sse_stream(
     } else {
         authenticated_principal(&headers, &state)?
     };
+    if !state.check_endpoint_rate_limit(&principal, crate::EndpointGroup::SseConnect) {
+        return Err(ApiError::TooManyRequests);
+    }
     let rx = state.sse_subscribe();
     let visible_state = state.clone();
     let stream = BroadcastStream::new(rx).filter_map(move |result| match result {
@@ -8590,7 +8681,7 @@ enum ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let status = match self {
+        let status = match &self {
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::Forbidden => StatusCode::FORBIDDEN,
             ApiError::NotFound => StatusCode::NOT_FOUND,
@@ -8600,6 +8691,14 @@ impl IntoResponse for ApiError {
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::Io(_) | ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
+        if matches!(&self, ApiError::TooManyRequests) {
+            return (
+                status,
+                [(header::HeaderName::from_static("retry-after"), HeaderValue::from_static("60"))],
+                Json(json!({ "error": self.to_string() })),
+            )
+                .into_response();
+        }
         (status, Json(json!({ "error": self.to_string() }))).into_response()
     }
 }
