@@ -1134,10 +1134,16 @@ struct UserLoginRequest {
 
 async fn user_login(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Json(input): Json<UserLoginRequest>,
 ) -> Result<Json<crate::UserLoginResponse>, ApiError> {
+    let client_ip = extract_client_ip(&headers);
+    let device_type = headers
+        .get("x-device-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("desktop");
     state
-        .authenticate_user(&input.sip_uri, input.password.expose())
+        .authenticate_user(&input.sip_uri, input.password.expose(), &client_ip, device_type)
         .map(Json)
         .map_err(|err| match err {
             AuthError::Unauthorized => ApiError::Unauthorized,
@@ -7521,26 +7527,37 @@ async fn sso_login(
 struct SsoCallbackInput {
     code: String,
     state: String,
+    /// Optional: the provider is resolved from the stored state parameter, but
+    /// clients may still send provider_id for logging purposes.
     #[serde(default)]
+    #[allow(dead_code)]
     provider_id: Option<Uuid>,
 }
 
 async fn sso_callback(
-    State(_state): State<SharedState>,
+    State(state): State<SharedState>,
+    headers: HeaderMap,
     Json(input): Json<SsoCallbackInput>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // In a full implementation, exchange code for tokens at the provider's
-    // token endpoint, validate the ID token, and map the subject to a user.
-    // For now, validate the code is present and return a session placeholder.
     if input.code.is_empty() || input.state.is_empty() {
         return Err(ApiError::Conflict("missing code or state".into()));
     }
-    // Placeholder: a production implementation would verify the ID token here
+
+    let client_ip = extract_client_ip(&headers);
+
+    let login_response = state
+        .sso_authenticate(&input.code, &input.state, &client_ip)
+        .await
+        .map_err(|e| {
+            log::warn!("SSO callback failed: {e}");
+            ApiError::Unauthorized
+        })?;
+
     Ok(Json(json!({
-        "status": "sso_callback_received",
-        "code": input.code,
-        "state": input.state,
-        "provider_id": input.provider_id,
+        "token": login_response.token,
+        "user": login_response.user,
+        "expires_at": login_response.expires_at.to_rfc3339(),
+        "mfa_required": login_response.mfa_required,
     })))
 }
 
@@ -8409,6 +8426,23 @@ fn bearer_token(headers: &HeaderMap) -> &str {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .unwrap_or("")
+}
+
+/// Extract client IP from X-Forwarded-For header, falling back to X-Real-IP,
+/// then to "unknown".
+fn extract_client_ip(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|s| s.trim().to_string())
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_string())
+        })
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn authenticated_principal(headers: &HeaderMap, state: &AppState) -> Result<String, ApiError> {
@@ -9344,7 +9378,7 @@ mod auth_tests {
             })
             .expect("create user");
         let login = state
-            .authenticate_user("sip:bob@example.com", "user-password")
+            .authenticate_user("sip:bob@example.com", "user-password", "127.0.0.1", "desktop")
             .expect("user login");
 
         let headers = bearer_headers(&login.token);
@@ -9388,7 +9422,7 @@ mod auth_tests {
             .expect("create bob");
 
         let login = state
-            .authenticate_user("sip:alice@example.com", "alice-password")
+            .authenticate_user("sip:alice@example.com", "alice-password", "127.0.0.1", "desktop")
             .expect("alice login");
         let headers = bearer_headers(&login.token);
 
@@ -9415,7 +9449,7 @@ mod auth_tests {
             })
             .expect("create alice");
         let login = state
-            .authenticate_user("sip:alice@example.com", "alice-password")
+            .authenticate_user("sip:alice@example.com", "alice-password", "127.0.0.1", "desktop")
             .expect("alice login");
         let headers = bearer_headers(&login.token);
 
@@ -9660,11 +9694,11 @@ mod auth_tests {
         // LDAP cannot verify (unreachable) — the wrong local password MUST
         // still be rejected (fail closed, no auth bypass)...
         assert!(state
-            .authenticate_user("sip:carol@example.com", "wrong-password")
+            .authenticate_user("sip:carol@example.com", "wrong-password", "127.0.0.1", "desktop")
             .is_err());
         // ...and the correct local password still works.
         assert!(state
-            .authenticate_user("sip:carol@example.com", "carol-password")
+            .authenticate_user("sip:carol@example.com", "carol-password", "127.0.0.1", "desktop")
             .is_ok());
     }
 }

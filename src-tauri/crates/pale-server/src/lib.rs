@@ -307,6 +307,10 @@ pub struct AppState {
     personal_call_groups: ShardedMap<Uuid, PersonalCallGroup>,
     // SSO providers
     sso_providers: ShardedMap<Uuid, SsoProvider>,
+    /// Pending SSO login states: state_value -> (provider_id, nonce, created_at)
+    sso_pending_states: ShardedMap<String, SsoPendingState>,
+    /// Cached OIDC discovery documents: issuer_url -> OidcDiscovery
+    oidc_discovery_cache: ShardedMap<String, OidcDiscovery>,
     // Encryption config (BYOK)
     encryption_configs: RwLock<Vec<EncryptionConfig>>,
     // Admin elevations (PAM)
@@ -557,6 +561,8 @@ impl AppState {
             hold_music: ShardedMap::new(),
             personal_call_groups: ShardedMap::new(),
             sso_providers: ShardedMap::new(),
+            sso_pending_states: ShardedMap::new(),
+            oidc_discovery_cache: ShardedMap::new(),
             encryption_configs: RwLock::new(Vec::new()),
             admin_elevations: RwLock::new(Vec::new()),
             line_delegations: ShardedMap::new(),
@@ -1724,6 +1730,8 @@ impl AppState {
         &self,
         sip_uri: &str,
         password: &str,
+        client_ip: &str,
+        device_type: &str,
     ) -> Result<UserLoginResponse, AuthError> {
         // Extract username for LDAP
         let username = split_sip_aor_simple(sip_uri)
@@ -1811,7 +1819,7 @@ impl AppState {
         }
 
         // Evaluate conditional access policies before creating session
-        let ca_result = self.evaluate_conditional_access("", "", &[]);
+        let ca_result = self.evaluate_conditional_access(client_ip, device_type, &[]);
         if ca_result.block {
             return Err(AuthError::Unauthorized);
         }
@@ -1881,7 +1889,7 @@ impl AppState {
         self.update_presence(&user.sip_uri, PresenceStatus::Online, None);
 
         // Track session
-        self.track_session(user.id, &session.token, "Desktop", "desktop", "direct");
+        self.track_session(user.id, &session.token, device_type, device_type, client_ip);
 
         Ok(UserLoginResponse {
             token: session.token,
@@ -5577,6 +5585,7 @@ impl AppState {
     }
 
     /// Build OIDC authorization URL with state and nonce parameters.
+    /// The state and nonce are stored server-side so the callback can verify them.
     pub fn sso_login_url(&self, provider_id: Uuid) -> Option<(String, String, String)> {
         let provider = self.sso_providers.get(&provider_id)?;
         if !provider.enabled {
@@ -5584,15 +5593,340 @@ impl AppState {
         }
         let state = Uuid::new_v4().to_string();
         let nonce = Uuid::new_v4().to_string();
+
+        // Store state -> (provider_id, nonce) for callback verification
+        self.sso_pending_states.insert(
+            state.clone(),
+            SsoPendingState {
+                provider_id,
+                nonce: nonce.clone(),
+                created_at: Utc::now(),
+            },
+        );
+        // Prune expired pending states (older than 10 minutes)
+        let cutoff = Utc::now() - Duration::minutes(10);
+        self.sso_pending_states
+            .retain(|_k, v| v.created_at > cutoff);
+
+        // Use discovered authorization_endpoint if cached, else fall back to
+        // the provider issuer_url with /authorize appended.
+        let auth_endpoint = self
+            .oidc_discovery_cache
+            .get(&provider.issuer_url)
+            .map(|d| d.authorization_endpoint.clone())
+            .unwrap_or_else(|| {
+                format!("{}/authorize", provider.issuer_url.trim_end_matches('/'))
+            });
+
         let url = format!(
-            "{}/authorize?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email%20profile&state={}&nonce={}",
-            provider.issuer_url.trim_end_matches('/'),
+            "{}?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email%20profile&state={}&nonce={}",
+            auth_endpoint,
             urlencoding::encode(&provider.client_id),
             urlencoding::encode(&provider.redirect_uri),
             urlencoding::encode(&state),
             urlencoding::encode(&nonce),
         );
         Some((url, state, nonce))
+    }
+
+    /// Consume a pending SSO state, returning the stored provider_id and nonce.
+    /// Returns `None` if the state is unknown or expired (>10 min).
+    pub fn consume_sso_state(&self, state: &str) -> Option<SsoPendingState> {
+        let pending = self.sso_pending_states.remove(&state.to_string())?;
+        let age = Utc::now() - pending.created_at;
+        if age > Duration::minutes(10) {
+            return None;
+        }
+        Some(pending)
+    }
+
+    /// Fetch and cache OIDC discovery document from the provider's well-known endpoint.
+    pub async fn discover_oidc_config(
+        &self,
+        issuer_url: &str,
+    ) -> Result<OidcDiscovery, String> {
+        // Return cached if fresh (< 1 hour)
+        if let Some(cached) = self.oidc_discovery_cache.get(&issuer_url.to_string()) {
+            let age = Utc::now() - cached.fetched_at;
+            if age < Duration::hours(1) {
+                return Ok(cached);
+            }
+        }
+
+        let well_known_url = format!(
+            "{}/.well-known/openid-configuration",
+            issuer_url.trim_end_matches('/')
+        );
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(&well_known_url)
+            .send()
+            .await
+            .map_err(|e| format!("OIDC discovery fetch failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "OIDC discovery returned status {}",
+                resp.status()
+            ));
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("OIDC discovery parse failed: {e}"))?;
+
+        let discovery = OidcDiscovery {
+            issuer: body["issuer"]
+                .as_str()
+                .unwrap_or(issuer_url)
+                .to_string(),
+            authorization_endpoint: body["authorization_endpoint"]
+                .as_str()
+                .ok_or("missing authorization_endpoint")?
+                .to_string(),
+            token_endpoint: body["token_endpoint"]
+                .as_str()
+                .ok_or("missing token_endpoint")?
+                .to_string(),
+            jwks_uri: body["jwks_uri"]
+                .as_str()
+                .ok_or("missing jwks_uri")?
+                .to_string(),
+            userinfo_endpoint: body["userinfo_endpoint"]
+                .as_str()
+                .map(|s| s.to_string()),
+            fetched_at: Utc::now(),
+        };
+
+        self.oidc_discovery_cache
+            .insert(issuer_url.to_string(), discovery.clone());
+        Ok(discovery)
+    }
+
+    /// Fetch the JWKS from the provider and build a `DecodingKey` for the given
+    /// key ID (`kid`). Returns the key and the algorithm.
+    pub async fn fetch_jwks_key(
+        &self,
+        jwks_uri: &str,
+        kid: &str,
+    ) -> Result<(jsonwebtoken::DecodingKey, jsonwebtoken::Algorithm), String> {
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(jwks_uri)
+            .send()
+            .await
+            .map_err(|e| format!("JWKS fetch failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("JWKS returned status {}", resp.status()));
+        }
+        let jwks: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("JWKS parse failed: {e}"))?;
+
+        let keys = jwks["keys"]
+            .as_array()
+            .ok_or("JWKS missing keys array")?;
+
+        let jwk = keys
+            .iter()
+            .find(|k| k["kid"].as_str() == Some(kid))
+            .ok_or_else(|| format!("No JWKS key found for kid={kid}"))?;
+
+        let alg_str = jwk["alg"].as_str().unwrap_or("RS256");
+        let algorithm = match alg_str {
+            "RS256" => jsonwebtoken::Algorithm::RS256,
+            "RS384" => jsonwebtoken::Algorithm::RS384,
+            "RS512" => jsonwebtoken::Algorithm::RS512,
+            "ES256" => jsonwebtoken::Algorithm::ES256,
+            "ES384" => jsonwebtoken::Algorithm::ES384,
+            other => return Err(format!("Unsupported JWKS algorithm: {other}")),
+        };
+
+        // Build the decoding key from the JWK components
+        let kty = jwk["kty"].as_str().unwrap_or("");
+        let decoding_key = match kty {
+            "RSA" => {
+                let n = jwk["n"]
+                    .as_str()
+                    .ok_or("RSA JWK missing 'n'")?;
+                let e = jwk["e"]
+                    .as_str()
+                    .ok_or("RSA JWK missing 'e'")?;
+                jsonwebtoken::DecodingKey::from_rsa_components(n, e)
+                    .map_err(|e| format!("Failed to build RSA key: {e}"))?
+            }
+            "EC" => {
+                let x = jwk["x"]
+                    .as_str()
+                    .ok_or("EC JWK missing 'x'")?;
+                let y = jwk["y"]
+                    .as_str()
+                    .ok_or("EC JWK missing 'y'")?;
+                jsonwebtoken::DecodingKey::from_ec_components(x, y)
+                    .map_err(|e| format!("Failed to build EC key: {e}"))?
+            }
+            other => return Err(format!("Unsupported JWK key type: {other}")),
+        };
+
+        Ok((decoding_key, algorithm))
+    }
+
+    /// Authenticate a user via SSO/OIDC: exchange the authorization code for
+    /// tokens, validate the ID token, and create a session.
+    pub async fn sso_authenticate(
+        &self,
+        code: &str,
+        state: &str,
+        client_ip: &str,
+    ) -> Result<UserLoginResponse, String> {
+        // 1. Consume and verify the pending state
+        let pending = self
+            .consume_sso_state(state)
+            .ok_or("Invalid or expired SSO state")?;
+
+        let provider = self
+            .sso_providers
+            .get(&pending.provider_id)
+            .ok_or("SSO provider not found")?;
+        if !provider.enabled {
+            return Err("SSO provider is disabled".into());
+        }
+
+        // 2. Discover OIDC endpoints
+        let discovery = self
+            .discover_oidc_config(&provider.issuer_url)
+            .await?;
+
+        // 3. Exchange the authorization code for tokens
+        let client = reqwest::Client::new();
+        let token_resp = client
+            .post(&discovery.token_endpoint)
+            .form(&[
+                ("grant_type", "authorization_code"),
+                ("code", code),
+                ("redirect_uri", &provider.redirect_uri),
+                ("client_id", &provider.client_id),
+                ("client_secret", &provider.client_secret_enc),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("Token exchange failed: {e}"))?;
+
+        if !token_resp.status().is_success() {
+            let status = token_resp.status();
+            let body = token_resp
+                .text()
+                .await
+                .unwrap_or_default();
+            return Err(format!(
+                "Token endpoint returned {status}: {body}"
+            ));
+        }
+
+        let token_body: serde_json::Value = token_resp
+            .json()
+            .await
+            .map_err(|e| format!("Token response parse failed: {e}"))?;
+
+        let id_token_str = token_body["id_token"]
+            .as_str()
+            .ok_or("Token response missing id_token")?;
+
+        // 4. Decode the JWT header to get the kid
+        let jwt_header = jsonwebtoken::decode_header(id_token_str)
+            .map_err(|e| format!("Failed to decode JWT header: {e}"))?;
+        let kid = jwt_header
+            .kid
+            .ok_or("ID token JWT header missing kid")?;
+
+        // 5. Fetch the signing key from JWKS and validate signature
+        let (decoding_key, algorithm) = self
+            .fetch_jwks_key(&discovery.jwks_uri, &kid)
+            .await?;
+
+        let mut validation = jsonwebtoken::Validation::new(algorithm);
+        validation.set_audience(&[&provider.client_id]);
+        validation.set_issuer(&[&discovery.issuer]);
+        validation.validate_exp = true;
+
+        let token_data = jsonwebtoken::decode::<OidcIdTokenClaims>(
+            id_token_str,
+            &decoding_key,
+            &validation,
+        )
+        .map_err(|e| format!("ID token validation failed: {e}"))?;
+        let claims = token_data.claims;
+
+        // 6. Verify nonce
+        if claims.nonce.as_deref() != Some(&pending.nonce) {
+            return Err("ID token nonce mismatch".into());
+        }
+
+        // 7. Extract user identity (email or sub)
+        let email = claims
+            .email
+            .as_deref()
+            .or(claims.preferred_username.as_deref())
+            .ok_or("ID token missing email and preferred_username")?;
+        let display_name = claims
+            .name
+            .unwrap_or_else(|| email.to_string());
+
+        // 8. Look up or auto-provision local user
+        let sip_uri = format!("sip:{}@sso", email.split('@').next().unwrap_or(email));
+        if !self.user_exists(&sip_uri) {
+            let _ = self.create_user(CreateUserRequest {
+                display_name: display_name.clone(),
+                sip_uri: sip_uri.clone(),
+                matrix_user_id: None,
+                password: None,
+                role: Some("user".to_string()),
+            });
+            log::info!("Auto-provisioned SSO user: {sip_uri} from {email}");
+        }
+
+        let user = self
+            .user_by_sip_uri(&sip_uri)
+            .ok_or("Failed to find or provision SSO user")?;
+        if !user.active {
+            return Err("User account is deactivated".into());
+        }
+
+        // 9. Evaluate conditional access
+        let ca_result = self.evaluate_conditional_access(client_ip, "desktop", &[]);
+        if ca_result.block {
+            return Err("Blocked by conditional access policy".into());
+        }
+
+        // 10. Create session
+        let session = AdminSession {
+            token: Uuid::new_v4().to_string(),
+            principal: user.sip_uri.clone(),
+            role: user.role.clone(),
+            expires_at: Utc::now() + Duration::hours(12),
+        };
+        self.admin_sessions
+            .insert(session.token.clone(), session.clone());
+        self.admin_sessions.trim_to_len(MAX_ADMIN_SESSIONS);
+
+        // Track session
+        self.track_session(user.id, &session.token, "SSO", "desktop", client_ip);
+
+        self.update_presence(&user.sip_uri, PresenceStatus::Online, None);
+
+        self.record_audit_event(
+            &user.sip_uri,
+            "user.sso_login",
+            Some(provider.name.clone()),
+        );
+
+        Ok(UserLoginResponse {
+            token: session.token,
+            user,
+            sip_credentials: None,
+            expires_at: session.expires_at,
+            mfa_required: false,
+        })
     }
 
     // ─── Encryption Config (BYOK) ───
@@ -14140,6 +14474,61 @@ pub struct SsoProvider {
     pub created_at: DateTime<Utc>,
 }
 
+/// Pending SSO login state stored server-side for CSRF and nonce verification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SsoPendingState {
+    pub provider_id: Uuid,
+    pub nonce: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Cached OIDC discovery document from `.well-known/openid-configuration`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OidcDiscovery {
+    pub issuer: String,
+    pub authorization_endpoint: String,
+    pub token_endpoint: String,
+    pub jwks_uri: String,
+    #[serde(default)]
+    pub userinfo_endpoint: Option<String>,
+    pub fetched_at: DateTime<Utc>,
+}
+
+/// JWT claims expected in an OIDC ID token.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OidcIdTokenClaims {
+    pub iss: String,
+    pub sub: String,
+    pub aud: OidcAudience,
+    pub exp: i64,
+    pub iat: i64,
+    #[serde(default)]
+    pub nonce: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub preferred_username: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// OIDC `aud` claim can be a single string or an array.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum OidcAudience {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl OidcAudience {
+    pub fn contains(&self, client_id: &str) -> bool {
+        match self {
+            OidcAudience::Single(s) => s == client_id,
+            OidcAudience::Multiple(v) => v.iter().any(|s| s == client_id),
+        }
+    }
+}
+
 // ─── Line Delegation (Boss-Secretary) ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19539,7 +19928,7 @@ mod tests {
             })
             .unwrap();
         let login = state
-            .authenticate_user("sip:alice@example.com", "test123")
+            .authenticate_user("sip:alice@example.com", "test123", "127.0.0.1", "desktop")
             .unwrap();
         assert_eq!(
             state.principal_for_bearer(&login.token),
@@ -19556,13 +19945,13 @@ mod tests {
         assert!(!inactive.active);
         assert!(inactive.deactivated_at.is_some());
         assert!(matches!(
-            state.authenticate_user("sip:alice@example.com", "test123"),
+            state.authenticate_user("sip:alice@example.com", "test123", "127.0.0.1", "desktop"),
             Err(AuthError::Unauthorized)
         ));
         let active = state.set_user_active(user.id, true, "admin").unwrap();
         assert!(active.active);
         assert!(state
-            .authenticate_user("sip:alice@example.com", "test123")
+            .authenticate_user("sip:alice@example.com", "test123", "127.0.0.1", "desktop")
             .is_ok());
 
         state.upsert_sip_account(CreateSipAccountRequest {
