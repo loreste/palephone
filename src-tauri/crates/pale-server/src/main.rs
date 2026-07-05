@@ -167,6 +167,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // responses must not point clients at it.
     match sip_backend {
         SipBackend::UdpParser => app_state.set_sip_registrar(sip_external.clone()),
+        SipBackend::Disabled => log::warn!(
+            "SIP backend disabled for this build; login responses will not advertise a SIP registrar"
+        ),
         #[cfg(feature = "native-pjsip")]
         SipBackend::Pjsip => log::info!(
             "SIP backend 'pjsip' does not implement REGISTER; login responses will not advertise a SIP registrar"
@@ -246,6 +249,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     std::process::exit(1);
                 }
             });
+            None
+        }
+        SipBackend::Disabled => {
+            log::warn!(
+                "No SIP listener started because the configured SIP backend is unavailable in this build"
+            );
             None
         }
     };
@@ -556,6 +565,7 @@ enum SipBackend {
     #[cfg(feature = "native-pjsip")]
     Pjsip,
     UdpParser,
+    Disabled,
 }
 
 fn sip_backend_from_env() -> SipBackend {
@@ -570,10 +580,10 @@ fn sip_backend_from_env() -> SipBackend {
         #[cfg(not(feature = "native-pjsip"))]
         other => {
             log::warn!(
-                "PALE_SIP_BACKEND={} requested, but this pale-server build does not include native PJSIP; using udp-parser",
+                "PALE_SIP_BACKEND={} requested, but this pale-server build does not include native PJSIP; disabling SIP listener",
                 other
             );
-            SipBackend::UdpParser
+            SipBackend::Disabled
         }
     }
 }
