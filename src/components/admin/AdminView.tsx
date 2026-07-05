@@ -125,6 +125,43 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "signage", label: "Signage", icon: Monitor },
 ];
 
+const adminNavGroups: { label: string; tabs: AdminTab[] }[] = [
+  {
+    label: "Core",
+    tabs: ["overview", "users", "sip", "extensions", "dids", "routing", "directory"],
+  },
+  {
+    label: "Voice",
+    tabs: ["ring_groups", "queues", "ivr", "hours", "holidays", "paging", "media", "calls", "cdrs"],
+  },
+  {
+    label: "Meetings",
+    tabs: ["conferences", "meeting_templates", "recording_policies", "meeting_rooms_admin", "scheduling_panels"],
+  },
+  {
+    label: "Contact Center",
+    tabs: ["agents", "wallboard", "qa", "vip", "cqd"],
+  },
+  {
+    label: "Files & Data",
+    tabs: ["files", "retention", "ediscovery", "dlp", "labels", "data_residency"],
+  },
+  {
+    label: "Security",
+    tabs: ["policy", "security_score", "barriers", "roles", "sso", "encryption", "pam", "conditional_access", "compliance"],
+  },
+  {
+    label: "Devices",
+    tabs: ["common_area_phones", "devices", "sip_gateways", "location_routing", "emergency"],
+  },
+  {
+    label: "Platform",
+    tabs: ["packages", "analytics", "hold_music", "custom_emojis", "api_clients", "bots", "connectors", "guests", "automations", "federation", "enterprise_integrations", "message_extensions", "app_store", "bandwidth", "signage"],
+  },
+];
+
+const adminTabById = new Map(adminTabs.map((tab) => [tab.id, tab]));
+
 export function AdminView() {
   const serverBaseUrl = useServerStore((s) => s.baseUrl);
   const serverToken = useServerStore((s) => s.token);
@@ -292,6 +329,7 @@ export function AdminView() {
     }),
     [snapshot]
   );
+  const activeGroup = adminNavGroups.find((group) => group.tabs.includes(activeTab)) ?? adminNavGroups[0];
 
   if (!authenticated && autoLoginChecking) {
     return (
@@ -397,22 +435,49 @@ export function AdminView() {
           <Metric label="Subscriptions" value={totals.subscriptions} />
         </div>
 
-        <div className="flex gap-1 overflow-x-auto border-b border-border-subtle">
-          {adminTabs.map(({ id, label, icon: Icon }) => (
-            <button
-              key={id}
-              onClick={() => setActiveTab(id)}
-              className={cn(
-                "h-10 px-3 text-sm flex items-center gap-2 border-b-2 shrink-0",
-                activeTab === id
-                  ? "border-accent text-accent"
-                  : "border-transparent text-secondary hover:text-primary"
-              )}
-            >
-              <Icon size={16} />
-              {label}
-            </button>
-          ))}
+        <div className="rounded-md border border-border-subtle bg-surface">
+          <div className="flex flex-wrap gap-1 border-b border-border-subtle p-2">
+            {adminNavGroups.map((group) => {
+              const selected = group.label === activeGroup.label;
+              const firstTab = group.tabs[0];
+              return (
+                <button
+                  key={group.label}
+                  onClick={() => setActiveTab(firstTab)}
+                  className={cn(
+                    "h-8 px-3 rounded-md text-xs font-medium transition-colors",
+                    selected
+                      ? "bg-accent text-white"
+                      : "text-secondary hover:text-primary hover:bg-elevated"
+                  )}
+                >
+                  {group.label}
+                </button>
+              );
+            })}
+          </div>
+          <div className="flex flex-wrap gap-2 p-2">
+            {activeGroup.tabs.map((id) => {
+              const tab = adminTabById.get(id);
+              if (!tab) return null;
+              const Icon = tab.icon;
+              return (
+                <button
+                  key={id}
+                  onClick={() => setActiveTab(id)}
+                  className={cn(
+                    "h-9 px-3 rounded-md text-sm flex items-center gap-2 transition-colors",
+                    activeTab === id
+                      ? "bg-accent-muted text-accent"
+                      : "text-secondary hover:text-primary hover:bg-elevated"
+                  )}
+                >
+                  <Icon size={16} />
+                  {tab.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         {activeTab === "overview" && <Overview snapshot={snapshot} />}
