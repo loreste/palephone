@@ -325,6 +325,94 @@
         font-size: 0.95rem;
       }
 
+      .docs-layout {
+        display: grid;
+        grid-template-columns: 280px minmax(0, 1fr);
+        gap: 24px;
+        align-items: start;
+      }
+
+      .toc {
+        position: sticky;
+        top: 96px;
+        border: 1px solid var(--line);
+        background: var(--panel);
+        border-radius: 8px;
+        padding: 18px;
+      }
+
+      .toc strong,
+      .doc-card strong {
+        display: block;
+      }
+
+      .toc a {
+        display: block;
+        color: var(--muted);
+        text-decoration: none;
+        margin-top: 10px;
+      }
+
+      .doc-stack {
+        display: grid;
+        gap: 16px;
+      }
+
+      .doc-card {
+        border: 1px solid var(--line);
+        background: var(--panel);
+        border-radius: 8px;
+        padding: 22px;
+      }
+
+      .doc-card h3 {
+        margin: 0 0 12px;
+        font-size: 1.35rem;
+      }
+
+      .doc-card h4 {
+        margin: 22px 0 8px;
+        font-size: 1rem;
+      }
+
+      .doc-card p,
+      .doc-card li {
+        color: var(--muted);
+      }
+
+      .doc-card p {
+        margin: 0 0 14px;
+      }
+
+      .doc-card ol,
+      .doc-card ul {
+        margin: 10px 0 0;
+        padding-left: 22px;
+      }
+
+      .doc-card li + li {
+        margin-top: 8px;
+      }
+
+      .code-block {
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        background: #0c0d10;
+        border-radius: 8px;
+        padding: 14px;
+        color: #e8e3d8;
+        font: 0.9rem/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        white-space: pre;
+      }
+
+      .callout {
+        border-left: 3px solid var(--accent-2);
+        background: rgba(242, 184, 75, 0.08);
+        padding: 12px 14px;
+        color: var(--muted);
+        margin-top: 14px;
+      }
+
       footer {
         padding: 34px 0;
         color: var(--muted);
@@ -345,8 +433,13 @@
 
         .hero-grid,
         .grid,
-        .downloads {
+        .downloads,
+        .docs-layout {
           grid-template-columns: 1fr;
+        }
+
+        .toc {
+          position: static;
         }
 
         .hero {
@@ -366,6 +459,7 @@
           <a href="#capabilities">Capabilities</a>
           <a href="#enterprise">Enterprise</a>
           <a href="#downloads">Downloads</a>
+          <a href="#docs">Docs</a>
           <a href="https://github.com/loreste/palephone">GitHub</a>
         </nav>
       </div>
@@ -545,10 +639,217 @@
           </div>
           <p class="note">
             The current built-in SIP registrar path requires
-            <code>PALE_SIP_BACKEND=udp-parser</code>. The default server runtime
-            uses the PJSIP transport path and does not advertise itself as a
-            client registrar.
+            <code>PALE_SIP_BACKEND=udp-parser</code> and the explicit
+            development fallback gate for insecure UDP parsing. The default
+            server runtime uses the PJSIP transport path and does not advertise
+            itself as a client registrar.
           </p>
+        </div>
+      </section>
+
+      <section id="docs">
+        <div class="shell">
+          <div class="section-head">
+            <h2>Docs for getting Pale running.</h2>
+            <p>
+              These notes are meant for operators, not brochure readers. They
+              cover the parts people usually need first: installing the server,
+              creating users, pointing clients at the right host, and fixing
+              the most common setup problems.
+            </p>
+          </div>
+
+          <div class="docs-layout">
+            <aside class="toc" aria-label="Documentation links">
+              <strong>On this page</strong>
+              <a href="#server-linux">Install Pale Server on Linux</a>
+              <a href="#server-windows">Install Pale Server on Windows</a>
+              <a href="#how-tos">How-tos</a>
+              <a href="#tls">TLS guidance</a>
+              <a href="#troubleshooting">Troubleshooting</a>
+              <a href="#production-notes">Production notes</a>
+            </aside>
+
+            <div class="doc-stack">
+              <article class="doc-card" id="server-linux">
+                <h3>Install Pale Server on Linux</h3>
+                <p>
+                  The supported Linux path in this repository is Docker Compose.
+                  It runs Pale Server with PostgreSQL, coturn, and NATS, then
+                  exposes the HTTP API on port 8090 and SIP on 5060/5061.
+                </p>
+                <ol>
+                  <li>Install Docker and Docker Compose on a Linux host.</li>
+                  <li>Clone the repository and enter the project directory.</li>
+                  <li>Generate secrets, review the generated <code>.env</code>, then start the stack.</li>
+                </ol>
+                <pre class="code-block">git clone https://github.com/loreste/palephone.git
+cd palephone
+./scripts/generate-secrets.sh
+docker compose up -d
+curl http://localhost:8090/health</pre>
+                <h4>Important Linux settings</h4>
+                <ul>
+                  <li><code>PALE_SERVER_TOKEN</code>, <code>PALE_ADMIN_PASSWORD</code>, and <code>PALE_STORAGE_KEY</code> are required and must be at least 24 characters.</li>
+                  <li><code>PALE_DATABASE_URL</code> points Pale Server at PostgreSQL. Docker Compose sets this for you.</li>
+                  <li><code>PALE_SIP_EXTERNAL_ADDR</code> should be passed to Pale Server for remote SIP clients, especially when using a registrar path.</li>
+                  <li><code>PALE_SIP_BACKEND</code> defaults to <code>pjsip</code>. The <code>udp-parser</code> backend is a development fallback for the current built-in REGISTER/PBX parser path and also requires <code>PALE_ALLOW_INSECURE_SIP_UDP=1</code>.</li>
+                </ul>
+                <div class="callout">
+                  For public deployments, put TLS in front of the HTTP API or
+                  set <code>PALE_HTTP_TLS_CERT</code> and <code>PALE_HTTP_TLS_KEY</code>.
+                  Open only the ports your deployment actually uses.
+                </div>
+              </article>
+
+              <article class="doc-card" id="server-windows">
+                <h3>Install Pale Server on Windows</h3>
+                <p>
+                  Windows can run Pale Server as a Rust-built executable. The
+                  production container path is Linux-first today, so treat the
+                  Windows install as a direct server runtime unless you wrap it
+                  with your own service manager such as WinSW or NSSM.
+                </p>
+                <ol>
+                  <li>Install Visual Studio Build Tools with the C++ workload.</li>
+                  <li>Install Rust for the MSVC toolchain.</li>
+                  <li>Install PostgreSQL if you do not want local SQLite fallback.</li>
+                  <li>Build the server binary from the repository.</li>
+                </ol>
+                <pre class="code-block">git clone https://github.com/loreste/palephone.git
+cd palephone\src-tauri\crates\pale-server
+cargo build --release --bin pale-server</pre>
+                <h4>Set the required environment variables</h4>
+                <pre class="code-block">$env:PALE_SERVER_TOKEN = "replace-with-strong-token-24-plus-chars"
+$env:PALE_ADMIN_PASSWORD = "replace-with-strong-admin-password"
+$env:PALE_STORAGE_KEY = "replace-with-strong-storage-key"
+$env:PALE_HTTP_ADDR = "0.0.0.0:8080"
+$env:PALE_DATABASE_URL = "host=localhost user=pale password=... dbname=pale"
+..\..\target\release\pale-server.exe</pre>
+                <p>
+                  Verify with <code>curl http://localhost:8080/health</code>.
+                  If Windows Firewall is enabled, allow the HTTP API and any
+                  SIP/TURN ports you plan to expose.
+                </p>
+              </article>
+
+              <article class="doc-card" id="how-tos">
+                <h3>How-tos</h3>
+                <h4>Create an admin user</h4>
+                <p>
+                  Pale Server ships with an admin account controlled by
+                  <code>PALE_ADMIN_USERNAME</code> and <code>PALE_ADMIN_PASSWORD</code>.
+                  You can also create users through the server CLI.
+                </p>
+                <pre class="code-block">docker compose exec pale-server pale-server user create \
+  --username sip:admin@example.com \
+  --display-name "Admin" \
+  --password "replace-with-a-strong-password" \
+  --role admin</pre>
+                <h4>Point a client at your server</h4>
+                <ol>
+                  <li>Install the Palephone client for macOS, Linux, Windows, or Android.</li>
+                  <li>Open Settings, set the server URL, and sign in with the SIP URI and password for that user.</li>
+                  <li>Admin appears only for users whose server role is <code>admin</code>.</li>
+                </ol>
+                <h4>Check server health</h4>
+                <pre class="code-block">curl https://your-domain.example/health</pre>
+                <p>
+                  A healthy server returns JSON with <code>ok</code>,
+                  <code>service</code>, and <code>status</code> fields.
+                </p>
+              </article>
+
+              <article class="doc-card" id="tls">
+                <h3>TLS guidance</h3>
+                <p>
+                  We recommend TLS anywhere Pale is reachable outside a trusted
+                  local machine. The server handles sign-in, bearer tokens,
+                  admin actions, files, call records, presence, and meeting
+                  data. Sending that over plain HTTP makes credentials and
+                  session traffic easier to intercept.
+                </p>
+                <h4>HTTP API</h4>
+                <p>
+                  The simplest production pattern is to terminate HTTPS at a
+                  reverse proxy such as Nginx, Caddy, or Traefik, then proxy to
+                  Pale Server on localhost or a private network. Pale Server can
+                  also serve TLS directly when <code>PALE_HTTP_TLS_CERT</code>
+                  and <code>PALE_HTTP_TLS_KEY</code> are set.
+                </p>
+                <pre class="code-block">PALE_HTTP_ADDR=0.0.0.0:8080
+PALE_HTTP_TLS_CERT=/etc/letsencrypt/live/your-domain/fullchain.pem
+PALE_HTTP_TLS_KEY=/etc/letsencrypt/live/your-domain/privkey.pem</pre>
+                <h4>SIP signaling</h4>
+                <p>
+                  SIP TLS should be used when SIP traffic crosses networks you
+                  do not fully control. Set <code>PALE_SIP_TLS_CERT</code> and
+                  <code>PALE_SIP_TLS_KEY</code> to enable SIP TLS, and expose
+                  port 5061 only when your deployment actually uses it.
+                </p>
+                <pre class="code-block">PALE_SIP_TLS=true
+PALE_SIP_TLS_CERT=/etc/letsencrypt/live/your-domain/fullchain.pem
+PALE_SIP_TLS_KEY=/etc/letsencrypt/live/your-domain/privkey.pem
+PALE_SIP_TLS_PORT=5061</pre>
+                <div class="callout">
+                  TLS protects signaling and API traffic. Media privacy still
+                  depends on your media path, SRTP settings, and TURN
+                  deployment, so test calls from the real networks your users
+                  will use.
+                </div>
+              </article>
+
+              <article class="doc-card" id="troubleshooting">
+                <h3>Troubleshooting</h3>
+                <h4>Sign-in says unauthorized</h4>
+                <ul>
+                  <li>Confirm the client is using the same server URL you tested with <code>/health</code>.</li>
+                  <li>Check the SIP URI format. Use <code>sip:name@domain</code> when the user was created that way.</li>
+                  <li>Reset the user's password from the admin UI or recreate the user with the CLI.</li>
+                </ul>
+                <h4>The Admin tab disappears</h4>
+                <ul>
+                  <li>The tab is role-based. The signed-in user must have role <code>admin</code>.</li>
+                  <li>Sign out and sign back in after changing a user's role so the client refreshes the stored session.</li>
+                </ul>
+                <h4>SIP clients do not register</h4>
+                <ul>
+                  <li>Pass <code>PALE_SIP_EXTERNAL_ADDR</code> to Pale Server with the public SIP host and port clients should use.</li>
+                  <li>Use a dedicated SIP registrar/proxy for production, or use <code>PALE_SIP_BACKEND=udp-parser</code> plus <code>PALE_ALLOW_INSECURE_SIP_UDP=1</code> only when you intentionally accept the current fallback parser path.</li>
+                  <li>Check firewall rules for SIP and RTP/TURN traffic.</li>
+                </ul>
+                <h4>Calls connect but audio fails</h4>
+                <ul>
+                  <li>Verify TURN settings: <code>PALE_TURN_SERVER</code>, <code>PALE_TURN_USERNAME</code>, <code>PALE_TURN_PASSWORD</code>, and <code>PALE_TURN_REALM</code>.</li>
+                  <li>Make sure UDP relay ports are reachable from the client networks.</li>
+                  <li>If you terminate TLS at a proxy, confirm WebSocket/SSE and long-running HTTP requests are not being buffered or dropped.</li>
+                </ul>
+                <h4>Browsers or clients reject the server</h4>
+                <ul>
+                  <li>Check that the certificate covers the exact hostname users enter in the client.</li>
+                  <li>Confirm the full certificate chain is served, not just the leaf certificate.</li>
+                  <li>If TLS terminates at a proxy, forward the original host and protocol headers so generated URLs stay correct.</li>
+                </ul>
+              </article>
+
+              <article class="doc-card" id="production-notes">
+                <h3>Production notes</h3>
+                <p>
+                  Pale gives you the communications surface and the admin hooks,
+                  but a production deployment still needs real infrastructure
+                  around it: DNS, TLS certificates, backups, monitoring, a TURN
+                  relay, PostgreSQL, and any external providers you decide to
+                  use for AI, speech, malware scanning, storage, PSTN, or E911.
+                </p>
+                <ul>
+                  <li>Keep <code>.env</code> and generated secrets out of Git.</li>
+                  <li>Back up PostgreSQL and any file storage location before upgrades.</li>
+                  <li>Rotate <code>PALE_SERVER_TOKEN</code> and admin passwords when staff changes.</li>
+                  <li>Use the admin readiness reports to separate configured providers from fully tested integrations.</li>
+                </ul>
+              </article>
+            </div>
+          </div>
         </div>
       </section>
     </main>
