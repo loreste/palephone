@@ -150,6 +150,14 @@ jobs:
           $version = $line.Matches[0].Groups[1].Value
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
+      - name: Install Windows build dependencies
+        shell: pwsh
+        run: |
+          choco install nasm --no-progress -y
+          if (Test-Path "C:\Program Files\NASM") {
+            "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Append
+          }
+
       - name: Build pale-server
         working-directory: src-tauri
         run: cargo build --release -p pale-server --bin pale-server --no-default-features
