@@ -167,7 +167,7 @@ export function AdminView() {
   const serverToken = useServerStore((s) => s.token);
   const [baseUrl, setBaseUrl] = useState(serverBaseUrl || adminBaseUrl());
   const [token, setToken] = useState(() => serverToken || sessionStorage.getItem("pale.admin.token") || "");
-  const [username, setUsername] = useState("admin");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [activeTab, setActiveTab] = useState<AdminTab>("overview");
   const [snapshot, setSnapshot] = useState<AdminSnapshot | null>(null);
@@ -359,12 +359,12 @@ export function AdminView() {
             </div>
             <div>
               <h1 className="text-lg font-semibold">Admin</h1>
-              <p className="text-sm text-secondary">Sign in to manage backend resources.</p>
+              <p className="text-sm text-secondary">Sign in with an administrator Pale account.</p>
             </div>
           </div>
           <form onSubmit={onLogin} className="space-y-3">
             <ReadOnlyField label="Server URL" value={baseUrl} />
-            <Field label="Username" value={username} onChange={setUsername} />
+            <Field label="SIP URI" value={username} onChange={setUsername} />
             <Field label="Password" value={password} onChange={setPassword} type="password" />
             {error && <p className="text-sm text-destructive">{error}</p>}
             <button

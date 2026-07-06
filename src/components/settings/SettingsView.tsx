@@ -7,8 +7,8 @@ import { useUiStore } from "@/store/uiStore";
 import { t, getLocale, setLocale, LOCALE_LABELS, type Locale } from "@/lib/i18n";
 import { AudioSettings } from "./AudioSettings";
 import { NetworkSettings } from "./NetworkSettings";
-import { registerAccount, storeSipPassword, getConfig, saveSettings, paleServerApi } from "@/lib/tauri";
-import { adminLogin, adminLogout, adminBaseUrl, getMfaStatus, setupMfa, verifyMfa, disableMfa, listSessions, revokeSession, revokeAllSessions } from "@/lib/adminApi";
+import { registerAccount, storeSipPassword, getConfig, saveSettings, paleLogin, paleServerApi } from "@/lib/tauri";
+import { adminLogout, adminBaseUrl, getMfaStatus, setupMfa, verifyMfa, disableMfa, listSessions, revokeSession, revokeAllSessions } from "@/lib/adminApi";
 import type { MfaSetupResponse, SessionInfo } from "@/lib/adminApi";
 import { disconnectServer, signOut } from "@/lib/session";
 import { toast } from "@/components/ui/Toast";
@@ -237,17 +237,29 @@ function AccountSettingsPanel() {
 function ServerSettingsPanel() {
   const { baseUrl, connected, setConnection } = useServerStore();
   const [url, setUrl] = useState(baseUrl ?? adminBaseUrl());
-  const [username, setUsername] = useState("admin");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [testing, setTesting] = useState(false);
+
+  useEffect(() => {
+    getConfig()
+      .then((config) => {
+        if (config.server?.url) setUrl(config.server.url);
+        if (config.server?.username) setUsername(config.server.username);
+      })
+      .catch(() => {});
+  }, []);
 
   const handleConnect = async () => {
     if (!url || !password) return;
     setTesting(true);
     try {
-      const session = await adminLogin(url, username, password);
+      const session = await paleLogin(url, username, password);
+      if (session.user.role !== "admin") {
+        throw new Error("This Pale account is not an administrator.");
+      }
       sessionStorage.setItem("pale.admin.token", session.token);
-      setConnection(url, session.token, session.expires_at, "admin", session.principal);
+      setConnection(url, session.token, session.expires_at, session.user.role, session.user.display_name);
       setPassword("");
 
       // Persist server URL in app config
@@ -257,8 +269,8 @@ function ServerSettingsPanel() {
           url,
           username,
           auto_connect: true,
-          role: "admin",
-          display_name: session.principal,
+          role: session.user.role,
+          display_name: session.user.display_name,
         };
         await saveSettings(config).catch(() => {});
       }
@@ -324,10 +336,10 @@ function ServerSettingsPanel() {
       {!connected && (
         <>
           <FormField
-            label="Username"
+            label="SIP URI"
             value={username}
             onChange={setUsername}
-            placeholder="admin"
+            placeholder="sip:admin@example.com"
           />
           <FormField
             label="Password"
