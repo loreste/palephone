@@ -6,7 +6,7 @@ import { useMatrixStore } from "@/store/matrixStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
-import { matrixSendMessage, matrixSetTyping, matrixCreateDm, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, paleServerApi, paleServerPinMessage, paleServerSaveMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerEndRoomCall, paleServerGetConferences, paleServerGetMeetings, paleServerCreateMeeting, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerGetRoomMessages, paleServerGetRoomMessageState, paleServerSendRoomMessage, paleServerScheduleRoomMessage, paleServerGetChannelWebhooks, paleServerCreateChannelWebhook, paleServerUpdateChannelWebhook, paleServerDeleteChannelWebhook, paleServerEditMessage, paleServerDeleteMessage, paleServerGetNotificationPreference, paleServerSetNotificationPreference, paleServerSearchGifs, paleServerGetTags, paleServerTranslate, paleServerGetCustomEmojis, paleServerGetWikiPages, paleServerCreateWikiPage, paleServerUpdateWikiPage, paleServerDeleteWikiPage, paleServerGetTaskBoards, paleServerCreateTaskBoard, paleServerGetTasks, paleServerCreateTask, paleServerUpdateTask, paleServerGetRoomThreads, paleServerGetThreadMessages, paleServerReplyToThread, type ServerRoom, type ServerUser, type ServerRoomMessage, type ServerRoomMessageState, type ServerMeeting, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult, type ServerChannelWebhook, type GifResult, type ServerTag, type CustomEmoji, type WikiPage, type TaskBoard, type TaskItem, type ServerMessageThread } from "@/lib/tauri";
+import { matrixSendMessage, matrixSetTyping, matrixCreateDm, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, getConfig, getSipPassword, paleLogin, paleServerApi, paleServerPinMessage, paleServerSaveMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerEndRoomCall, paleServerGetConferences, paleServerGetMeetings, paleServerCreateMeeting, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerGetRoomMessages, paleServerGetRoomMessageState, paleServerSendRoomMessage, paleServerScheduleRoomMessage, paleServerGetChannelWebhooks, paleServerCreateChannelWebhook, paleServerUpdateChannelWebhook, paleServerDeleteChannelWebhook, paleServerEditMessage, paleServerDeleteMessage, paleServerGetNotificationPreference, paleServerSetNotificationPreference, paleServerSearchGifs, paleServerGetTags, paleServerTranslate, paleServerGetCustomEmojis, paleServerGetWikiPages, paleServerCreateWikiPage, paleServerUpdateWikiPage, paleServerDeleteWikiPage, paleServerGetTaskBoards, paleServerCreateTaskBoard, paleServerGetTasks, paleServerCreateTask, paleServerUpdateTask, paleServerGetRoomThreads, paleServerGetThreadMessages, paleServerReplyToThread, type ServerRoom, type ServerUser, type ServerRoomMessage, type ServerRoomMessageState, type ServerMeeting, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult, type ServerChannelWebhook, type GifResult, type ServerTag, type CustomEmoji, type WikiPage, type TaskBoard, type TaskItem, type ServerMessageThread } from "@/lib/tauri";
 import { joinScheduledMeeting } from "@/lib/meetingJoin";
 import { toast } from "@/components/ui/Toast";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
@@ -145,6 +145,36 @@ function serverRoomToSummary(room: ServerRoom, currentSipUri?: string | null, na
     call_uri: room.call_uri ?? null,
     conference_id: room.conference_id ?? null,
   };
+}
+
+async function resolvePaleServerSession(current: {
+  baseUrl: string | null;
+  token: string | null;
+}): Promise<{ baseUrl: string; token: string } | null> {
+  if (current.baseUrl && current.token) {
+    return { baseUrl: current.baseUrl, token: current.token };
+  }
+
+  const config = await getConfig().catch(() => null);
+  if (!config?.server?.url || !config.server.username || !config.server.auto_connect) {
+    return null;
+  }
+
+  const password = await getSipPassword("pale-server-login").catch(() => null);
+  if (!password) return null;
+
+  const response = await paleLogin(config.server.url, config.server.username, password);
+  sessionStorage.setItem("pale.admin.token", response.token);
+  useServerStore
+    .getState()
+    .setConnection(
+      config.server.url,
+      response.token,
+      response.expires_at,
+      response.user.role,
+      response.user.display_name,
+    );
+  return { baseUrl: config.server.url, token: response.token };
 }
 
 function sipUriForExtension(extension: string, currentSipUri?: string | null): string {
@@ -373,8 +403,9 @@ function ConversationList({
 
   const handleNewDm = async (user: { display_name: string; sip_uri: string; matrix_user_id?: string | null }) => {
     try {
-      if (connected && baseUrl && token) {
-        const room = await paleServerCreateDirectRoom(baseUrl, token, user);
+      const session = await resolvePaleServerSession({ baseUrl, token });
+      if (session) {
+        const room = await paleServerCreateDirectRoom(session.baseUrl, session.token, user);
         upsertRoom(serverRoomToSummary(room, undefined, user.display_name));
         setShowNewChat(false);
         onSelect(room.id);

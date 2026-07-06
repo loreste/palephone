@@ -165,7 +165,7 @@ fn open_popout_window(
 #[tauri::command]
 fn make_call(
     state: State<EngineState>,
-    runtime: State<SipRuntimeState>,
+    runtime: State<Arc<SipRuntimeState>>,
     uri: String,
 ) -> Result<(), String> {
     validate_no_nul("uri", &uri)?;
@@ -495,7 +495,7 @@ async fn matrix_is_logged_in(state: State<'_, MatrixState>) -> Result<bool, Stri
 #[tauri::command]
 fn make_video_call(
     state: State<EngineState>,
-    runtime: State<SipRuntimeState>,
+    runtime: State<Arc<SipRuntimeState>>,
     uri: String,
 ) -> Result<(), String> {
     validate_no_nul("uri", &uri)?;
