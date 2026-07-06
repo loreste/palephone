@@ -398,6 +398,8 @@ pub struct AppState {
     /// active SIP backend cannot register clients (e.g. the pjsip backend),
     /// in which case login/provisioning responses must not advertise one.
     sip_registrar: Option<String>,
+    /// Transport paired with `sip_registrar` in login/provisioning responses.
+    sip_registrar_transport: String,
     ldap_config: std::sync::RwLock<ldap_auth::LdapConfig>,
     pg: Option<PgStore>,
     pg_failure_count: Arc<std::sync::atomic::AtomicU64>,
@@ -632,6 +634,7 @@ impl AppState {
             endpoint_rate_limits: ShardedMap::new(),
             message_threads: ShardedMap::new(),
             sip_registrar: None,
+            sip_registrar_transport: "tls".to_string(),
             ldap_config: std::sync::RwLock::new(ldap_auth::LdapConfig::default()),
             pg: None,
             pg_failure_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -652,15 +655,25 @@ impl AppState {
     }
 
     /// Advertise `addr` as the SIP registrar in login/provisioning responses.
-    /// Only call this when the active SIP backend actually implements
-    /// REGISTER (currently only the udp-parser backend does).
-    pub fn set_sip_registrar(&mut self, addr: String) {
+    /// Only call this when the active SIP backend actually implements REGISTER.
+    pub fn set_sip_registrar(&mut self, addr: String, transport: impl Into<String>) {
         self.sip_registrar = Some(addr);
+        self.sip_registrar_transport = transport.into();
     }
 
     /// Whether the active SIP backend can register clients.
     pub fn sip_registration_available(&self) -> bool {
         self.sip_registrar.is_some()
+    }
+
+    pub fn sip_registrar_uri(&self) -> Option<String> {
+        self.sip_registrar
+            .as_ref()
+            .map(|registrar| format!("sip:{}", registrar))
+    }
+
+    pub fn sip_registrar_transport(&self) -> String {
+        self.sip_registrar_transport.clone()
     }
 
     /// Set the LiveKit configuration for media-backed conferences.
@@ -2020,7 +2033,7 @@ impl AppState {
                 registration_available: self.sip_registrar.is_some(),
                 username: username.clone(),
                 password: password.to_string(),
-                transport: "udp".to_string(),
+                transport: self.sip_registrar_transport.clone(),
                 domain,
             }
         });
@@ -7424,7 +7437,7 @@ impl AppState {
             registration_available: self.sip_registrar.is_some(),
             username,
             password: input.password,
-            transport: "udp".to_string(),
+            transport: self.sip_registrar_transport.clone(),
             domain,
         });
 
@@ -15624,7 +15637,7 @@ impl AppState {
             name: req.name,
             host: req.host,
             port: req.port.unwrap_or(5060),
-            transport: req.transport.unwrap_or_else(|| "udp".to_string()),
+            transport: req.transport.unwrap_or_else(|| "tls".to_string()),
             username: req.username.and_then(non_empty_string),
             password_enc: req
                 .password

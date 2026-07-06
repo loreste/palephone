@@ -119,7 +119,7 @@ export function AppShell() {
                   sipUri: creds.sip_uri,
                   registrarUri: creds.registrar_uri,
                   authUsername: creds.username,
-                  transport: (creds.transport as "udp" | "tcp" | "tls") || "udp",
+                  transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
                 });
                 await registerAccount({
                   display_name: response.user.display_name,
@@ -127,7 +127,7 @@ export function AppShell() {
                   registrar_uri: creds.registrar_uri,
                   auth_username: creds.username,
                   auth_password: creds.password,
-                  transport: (creds.transport as "udp" | "tcp" | "tls") || "udp",
+                  transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
                 }).catch(() => {});
               }
 

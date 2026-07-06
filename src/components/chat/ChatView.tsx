@@ -121,8 +121,17 @@ const EMOJI_CATEGORIES: { label: string; emojis: string[] }[] = [
 
 function directRoomName(room: ServerRoom, currentSipUri?: string | null): string {
   if (!room.is_direct || !currentSipUri) return room.name;
-  const other = room.members.find((member) => member.user_sip_uri !== currentSipUri);
+  const current = normalizeSipUri(currentSipUri);
+  const other = room.members.find((member) => normalizeSipUri(member.user_sip_uri) !== current);
   return other?.user_sip_uri.replace(/^sip:/, "") ?? room.name;
+}
+
+function normalizeSipUri(uri?: string | null): string {
+  const trimmed = (uri ?? "").trim().toLowerCase();
+  if (!trimmed) return "";
+  return trimmed.startsWith("sip:") || trimmed.startsWith("sips:")
+    ? trimmed.replace(/^sips:/, "sip:")
+    : `sip:${trimmed}`;
 }
 
 function serverRoomToSummary(room: ServerRoom, currentSipUri?: string | null, nameOverride?: string): RoomSummary {
@@ -1085,8 +1094,8 @@ function ChatRoom({
   const updateMessage = useChatStore((s) => s.updateMessage);
   const upsertRoom = useChatStore((s) => s.upsertRoom);
   const isServerRoom = !room.room_id.startsWith("!");
-  const localMemberUri = currentSipUri ?? room.created_by;
-  const otherDirectMember = room.members?.find((member) => member !== localMemberUri);
+  const localMemberUri = normalizeSipUri(currentSipUri ?? room.created_by);
+  const otherDirectMember = room.members?.find((member) => normalizeSipUri(member) !== localMemberUri);
   const canStartRoomCall = isServerRoom && (!room.is_direct || Boolean(otherDirectMember));
   const canManageConnectors = isServerRoom && !room.is_direct && (
     room.created_by === currentSipUri

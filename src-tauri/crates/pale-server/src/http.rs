@@ -2981,11 +2981,11 @@ async fn mfa_validate(
     let sip_creds = crate::split_sip_aor_simple(&user.sip_uri).map(|(username, domain)| {
         crate::SipCredentials {
             sip_uri: user.sip_uri.clone(),
-            registrar_uri: None,
+            registrar_uri: state.sip_registrar_uri(),
             registration_available: state.sip_registration_available(),
             username,
             password: String::new(), // Password not available after MFA flow
-            transport: "udp".to_string(),
+            transport: state.sip_registrar_transport(),
             domain,
         }
     });

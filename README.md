@@ -14,7 +14,7 @@ We are also not pretending the hard parts are magic. Speech, AI, malware scannin
 
 ## Why Pale?
 
-- **Built to own the phone layer.** Pale includes SIP account records, PBX routing, emergency calling models, PSTN gateway readiness, and call center workflows. The default `pjsip` server backend is a SIP transport/telemetry path; registrar/PBX behavior requires `PALE_SIP_BACKEND=udp-parser` today or a dedicated SIP registrar/proxy in front of Pale.
+- **Built to own the phone layer.** Pale includes SIP account records, PBX routing, emergency calling models, PSTN gateway readiness, and call center workflows. The built-in parser backend provides the current registrar/PBX path over SIP TLS/TCP; UDP is an explicit fallback, not the production default.
 - **Your data stays yours.** Core calls, messages, files, SIP signaling, media, and chat run on your servers. Optional external providers are explicit integrations, not hidden dependencies.
 - **Matrix-backed encrypted chat.** The Matrix client path supports Olm/Megolm encryption for conversations and encrypted file transfer.
 - **One app, not five.** Calling, video, chat, files, meetings, compliance, voicemail, presence, and admin live in one interface.
@@ -164,7 +164,7 @@ The admin console covers PBX, collaboration, compliance, security, devices, apps
 
 | Layer | What | How |
 |-------|------|-----|
-| SIP signaling | Call setup, registration | SIP TLS when enabled; UDP parser registrar is available through `PALE_SIP_BACKEND=udp-parser` |
+| SIP signaling | Call setup, registration | SIP TLS by default when certificate paths are configured; TCP fallback; UDP only when explicitly enabled |
 | Voice/video media | RTP audio and video streams | SRTP with DTLS key exchange |
 | Chat messages | Matrix-backed 1:1 and group conversations | Olm / Megolm |
 | File attachments | Uploaded files | AES-256-CTR with per-file key |
@@ -314,30 +314,39 @@ PALE_ADMIN_PASSWORD=<strong admin password>
 PALE_STORAGE_KEY=<strong random value>
 PALE_HTTP_ADDR=127.0.0.1:8080
 PALE_DATA_DIR=/var/lib/pale-server
-PALE_SIP_BACKEND=pjsip
+PALE_SIP_BACKEND=udp-parser
+PALE_SIP_TLS_CERT=/etc/letsencrypt/live/your-host/fullchain.pem
+PALE_SIP_TLS_KEY=/etc/letsencrypt/live/your-host/privkey.pem
+PALE_SIP_EXTERNAL_ADDR=your-host.example.com:5060
+PALE_SIP_TLS_EXTERNAL_ADDR=your-host.example.com:5061
 ```
 
-Set `PALE_SIP_BACKEND=udp-parser` only when this Pale Server instance should run
-the built-in UDP SIP registrar/PBX parser. Otherwise place a dedicated SIP
-registrar/proxy in front of Pale and keep the server API behind TLS.
+The built-in parser is the current registrar/PBX path. It starts SIP TLS on
+5061 when `PALE_SIP_TLS_CERT` and `PALE_SIP_TLS_KEY` are set, starts SIP TCP on
+5060 by default, and keeps UDP off unless `PALE_SIP_UDP=true` plus
+`PALE_ALLOW_INSECURE_SIP_UDP=1` are both set. If you prefer OpenSIPS, Kamailio,
+or another registrar/proxy in front of Pale, keep Pale's HTTP API behind TLS and
+point clients at that SIP edge.
 
 The server exposes:
 - **HTTP API** on port 8090
-- **SIP UDP** on port 5060
-- **SIP TLS** on port 5061 when `PALE_SIP_TLS=true` and cert/key paths are set
+- **SIP TCP** on port 5060
+- **SIP TLS** on port 5061 when cert/key paths are set
+- **SIP UDP** on port 5060 only when explicitly enabled as a fallback
 - **TURN relay** on port 3478
 
 All settings are environment variables — see [`.env.example`](.env.example)
 for the full annotated list. Two you will almost certainly want in production:
 
-- `PALE_SIP_EXTERNAL_ADDR` — the public hostname/IP clients use to reach SIP.
-  This matters when using the UDP parser registrar backend; without it, remote
-  clients may be given a loopback registrar address.
-- `PALE_SIP_BACKEND` — defaults to `pjsip`. Use `udp-parser` for the current
-  built-in REGISTER/PBX parser path, or place a dedicated SIP registrar/proxy in
-  front of Pale for production SIP deployments.
+- `PALE_SIP_EXTERNAL_ADDR` — the public hostname/IP clients use to reach SIP TCP.
+  Without it, remote clients may be given a loopback registrar address.
+- `PALE_SIP_TLS_EXTERNAL_ADDR` — optional public SIP TLS hostname and port. If
+  omitted, Pale derives it from `PALE_SIP_EXTERNAL_ADDR` and `PALE_SIP_TLS_PORT`.
+- `PALE_SIP_BACKEND` — defaults to `udp-parser`, which now means the built-in
+  parser registrar over TLS/TCP first. Use a dedicated SIP registrar/proxy in
+  front of Pale if you need a deeper SIP edge.
 - `PALE_SIP_TLS_CERT` / `PALE_SIP_TLS_KEY` — providing both enables SIP over
-  TLS automatically (and disables plain UDP by default).
+  TLS automatically. UDP remains disabled unless explicitly enabled.
 - `NATS_URL` — optional NATS server URL, for example `nats://nats:4222`.
   When set, pale-server publishes SSE events to `pale.events.<event_type>` as
   JSON for server-side automations and integrations.

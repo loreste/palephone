@@ -97,7 +97,7 @@ function UnifiedLoginStep({ onNext, onSkip }: { onNext: () => void; onSkip?: () 
           sipUri: creds.sip_uri,
           registrarUri: creds.registrar_uri,
           authUsername: creds.username,
-          transport: (creds.transport as "udp" | "tcp" | "tls") || "udp",
+          transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
         });
 
         await registerAccount({
@@ -106,7 +106,7 @@ function UnifiedLoginStep({ onNext, onSkip }: { onNext: () => void; onSkip?: () 
           registrar_uri: creds.registrar_uri,
           auth_username: creds.username,
           auth_password: creds.password,
-          transport: (creds.transport as "udp" | "tcp" | "tls") || "udp",
+          transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
         }).catch(() => {});
 
         // Persist account config
@@ -116,7 +116,7 @@ function UnifiedLoginStep({ onNext, onSkip }: { onNext: () => void; onSkip?: () 
             sip_uri: creds.sip_uri,
             registrar_uri: creds.registrar_uri,
             auth_username: creds.username,
-            transport: (creds.transport as "udp" | "tcp" | "tls") || "udp",
+            transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
             reg_expiry: 3600,
           };
           await saveSettings(config).catch(() => {});

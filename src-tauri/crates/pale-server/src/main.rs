@@ -162,11 +162,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             addr.replace("0.0.0.0", "127.0.0.1")
         }
     };
+    let parser_tls = parser_tls_config_from_env(config.sip_addr.port())?;
+    let parser_tls_external = parser_tls.as_ref().map(|tls| {
+        optional_env("PALE_SIP_TLS_EXTERNAL_ADDR").unwrap_or_else(|| {
+            let host = sip_external
+                .rsplit_once(':')
+                .map(|(host, _)| host)
+                .unwrap_or(sip_external.as_str());
+            format!("{host}:{}", tls.port)
+        })
+    });
     // Only advertise a registrar when the active backend implements REGISTER.
     // The pjsip backend cannot register clients, so login/provisioning
     // responses must not point clients at it.
     match sip_backend {
-        SipBackend::UdpParser => app_state.set_sip_registrar(sip_external.clone()),
+        SipBackend::UdpParser => {
+            if let Some(external) = parser_tls_external.clone() {
+                app_state.set_sip_registrar(external, "tls");
+            } else if env_bool("PALE_SIP_TCP", true) {
+                app_state.set_sip_registrar(sip_external.clone(), "tcp");
+            } else {
+                app_state.set_sip_registrar(sip_external.clone(), "udp");
+            }
+        }
         SipBackend::Disabled => log::warn!(
             "SIP backend disabled for this build; login responses will not advertise a SIP registrar"
         ),
@@ -221,34 +239,98 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         SipBackend::UdpParser => {
             state.set_runtime_event_persistence(false);
-            // Bind synchronously at startup: if the SIP listener cannot
-            // start, the process must exit nonzero instead of silently
-            // serving HTTP with no SIP listener.
-            let socket = match sip::bind_udp_socket(config.sip_addr).await {
-                Ok(socket) => socket,
-                Err(err) => {
-                    log::error!(
-                        "failed to start SIP parser server on {}: {}",
-                        config.sip_addr,
-                        err
-                    );
-                    std::process::exit(1);
-                }
-            };
+            let enable_tcp = env_bool("PALE_SIP_TCP", true);
+            let enable_udp = env_bool("PALE_SIP_UDP", false);
+            let tls_label = parser_tls
+                .as_ref()
+                .map(|tls| format!("on (port {})", tls.port))
+                .unwrap_or_else(|| "off".to_string());
             log::info!(
-                "Pale SIP parser UDP server listening on {}",
-                config.sip_addr
+                "Config: SIP parser {} [UDP {} / TCP {} / TLS {}] | registrar advertised as {} over {}",
+                config.sip_addr,
+                onoff(enable_udp),
+                onoff(enable_tcp),
+                tls_label,
+                parser_tls_external.as_deref().unwrap_or(&sip_external),
+                if parser_tls_external.is_some() {
+                    "tls"
+                } else if enable_tcp {
+                    "tcp"
+                } else {
+                    "udp"
+                },
             );
-            let sip_state = state.clone();
-            tokio::spawn(async move {
-                if let Err(err) = sip::serve_udp(socket, sip_state).await {
-                    // The receive loop only exits on unrecoverable socket
-                    // errors; treat that as a fatal outage rather than
-                    // continuing to serve HTTP with no SIP listener.
-                    log::error!("SIP parser server stopped: {}", err);
-                    std::process::exit(1);
-                }
-            });
+            if let Some(tls) = parser_tls.clone() {
+                let tls_addr = SocketAddr::new(config.sip_addr.ip(), tls.port);
+                let listener = sip::bind_tcp_listener(tls_addr).await.map_err(|err| {
+                    format!("failed to bind SIP TLS parser listener on {tls_addr}: {err}")
+                })?;
+                log::info!("Pale SIP parser TLS server listening on {}", tls_addr);
+                let sip_state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(err) =
+                        sip::serve_tls(listener, &tls.cert_file, &tls.privkey_file, sip_state).await
+                    {
+                        log::error!("SIP TLS parser server stopped: {}", err);
+                        std::process::exit(1);
+                    }
+                });
+            }
+            if enable_tcp {
+                let listener = sip::bind_tcp_listener(config.sip_addr)
+                    .await
+                    .map_err(|err| {
+                        format!(
+                            "failed to bind SIP TCP parser listener on {}: {err}",
+                            config.sip_addr
+                        )
+                    })?;
+                log::info!(
+                    "Pale SIP parser TCP server listening on {}",
+                    config.sip_addr
+                );
+                let sip_state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = sip::serve_tcp(listener, sip_state).await {
+                        log::error!("SIP TCP parser server stopped: {}", err);
+                        std::process::exit(1);
+                    }
+                });
+            }
+            if enable_udp {
+                // Bind synchronously at startup: if the SIP listener cannot
+                // start, the process must exit nonzero instead of silently
+                // serving HTTP with no SIP listener.
+                let socket = match sip::bind_udp_socket(config.sip_addr).await {
+                    Ok(socket) => socket,
+                    Err(err) => {
+                        log::error!(
+                            "failed to start SIP parser UDP server on {}: {}",
+                            config.sip_addr,
+                            err
+                        );
+                        std::process::exit(1);
+                    }
+                };
+                log::info!(
+                    "Pale SIP parser UDP server listening on {}",
+                    config.sip_addr
+                );
+                let sip_state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = sip::serve_udp(socket, sip_state).await {
+                        // The receive loop only exits on unrecoverable socket
+                        // errors; treat that as a fatal outage rather than
+                        // continuing to serve HTTP with no SIP listener.
+                        log::error!("SIP parser UDP server stopped: {}", err);
+                        std::process::exit(1);
+                    }
+                });
+            }
+            if parser_tls.is_none() && !enable_tcp && !enable_udp {
+                log::error!("no SIP parser listener enabled; enable PALE_SIP_TLS, PALE_SIP_TCP, or PALE_SIP_UDP");
+                std::process::exit(1);
+            }
             None
         }
         SipBackend::Disabled => {
@@ -527,7 +609,54 @@ fn tls_config_from_env(
     }))
 }
 
+#[cfg(not(feature = "native-pjsip"))]
+fn parser_tls_config_from_env(
+    sip_port: u16,
+) -> Result<Option<ParserTlsConfig>, Box<dyn std::error::Error + Send + Sync>> {
+    let certs_present =
+        optional_env("PALE_SIP_TLS_CERT").is_some() && optional_env("PALE_SIP_TLS_KEY").is_some();
+    if !env_bool("PALE_SIP_TLS", certs_present) {
+        if certs_present {
+            log::warn!(
+                "PALE_SIP_TLS_CERT/KEY are set but PALE_SIP_TLS=false; SIP TLS stays disabled"
+            );
+        } else {
+            log::warn!(
+                "SIP TLS disabled; new clients will fall back to TCP unless PALE_SIP_TLS_CERT and PALE_SIP_TLS_KEY are set"
+            );
+        }
+        return Ok(None);
+    }
+
+    let cert_file = required_env("PALE_SIP_TLS_CERT")?;
+    let privkey_file = required_env("PALE_SIP_TLS_KEY")?;
+    let port = std::env::var("PALE_SIP_TLS_PORT")
+        .ok()
+        .map(|value| value.parse::<u16>())
+        .transpose()?
+        .unwrap_or_else(|| sip_port.saturating_add(1));
+
+    Ok(Some(ParserTlsConfig {
+        port,
+        cert_file,
+        privkey_file,
+    }))
+}
+
 #[cfg(feature = "native-pjsip")]
+fn parser_tls_config_from_env(
+    _sip_port: u16,
+) -> Result<Option<ParserTlsConfig>, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(None)
+}
+
+#[derive(Clone)]
+struct ParserTlsConfig {
+    port: u16,
+    cert_file: String,
+    privkey_file: String,
+}
+
 fn required_env(name: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     std::env::var(name)
         .ok()
@@ -541,7 +670,6 @@ fn optional_env(name: &str) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
-#[cfg(feature = "native-pjsip")]
 fn onoff(value: bool) -> &'static str {
     if value {
         "on"

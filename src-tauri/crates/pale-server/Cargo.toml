@@ -30,6 +30,9 @@ md-5 = "0.10"
 pjsip-sys = { path = "../pjsip-sys", optional = true }
 rsip = "0.4"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = "0.23"
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
 base64 = "0.22"
 chacha20poly1305 = "0.10"
 rusqlite = { version = "0.37", features = ["bundled", "chrono", "uuid"] }

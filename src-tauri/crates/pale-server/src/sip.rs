@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::convert::TryFrom;
+use std::fs::File;
+use std::io::BufReader;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -7,8 +9,12 @@ use std::time::Duration as StdDuration;
 use chrono::{Duration, Utc};
 use rsip::headers::untyped::UntypedHeader;
 use rsip::{Header, Headers, Request, Response, StatusCode, Version};
-use tokio::net::UdpSocket;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::ServerConfig;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, UdpSocket};
 use tokio::time::timeout;
+use tokio_rustls::TlsAcceptor;
 use uuid::Uuid;
 
 use crate::{
@@ -39,6 +45,124 @@ pub async fn run_udp_server(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let socket = bind_udp_socket(addr).await?;
     serve_udp(socket, state).await
+}
+
+pub async fn bind_tcp_listener(
+    addr: SocketAddr,
+) -> Result<TcpListener, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(TcpListener::bind(addr).await?)
+}
+
+pub async fn serve_tcp(
+    listener: TcpListener,
+    state: Arc<AppState>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        let state = state.clone();
+        tokio::spawn(async move {
+            if let Err(err) = serve_stream(stream, peer, state).await {
+                log::warn!("SIP TCP connection from {peer} closed with error: {err}");
+            }
+        });
+    }
+}
+
+pub async fn serve_tls(
+    listener: TcpListener,
+    cert_file: &str,
+    key_file: &str,
+    state: Arc<AppState>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let acceptor = TlsAcceptor::from(Arc::new(load_tls_config(cert_file, key_file)?));
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        let acceptor = acceptor.clone();
+        let state = state.clone();
+        tokio::spawn(async move {
+            match acceptor.accept(stream).await {
+                Ok(tls_stream) => {
+                    if let Err(err) = serve_stream(tls_stream, peer, state).await {
+                        log::warn!("SIP TLS connection from {peer} closed with error: {err}");
+                    }
+                }
+                Err(err) => log::warn!("SIP TLS handshake from {peer} failed: {err}"),
+            }
+        });
+    }
+}
+
+async fn serve_stream<S>(
+    mut stream: S,
+    peer: SocketAddr,
+    state: Arc<AppState>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut read_buf = [0_u8; 4096];
+    let mut pending = Vec::<u8>::new();
+    loop {
+        let len = stream.read(&mut read_buf).await?;
+        if len == 0 {
+            return Ok(());
+        }
+        pending.extend_from_slice(&read_buf[..len]);
+        while let Some(packet) = drain_sip_message(&mut pending) {
+            if let Some(response) = handle_packet(&packet, peer, &state) {
+                stream.write_all(response.as_bytes()).await?;
+            }
+        }
+    }
+}
+
+fn drain_sip_message(buffer: &mut Vec<u8>) -> Option<String> {
+    let header_end = buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|idx| idx + 4)?;
+    let headers = String::from_utf8_lossy(&buffer[..header_end]);
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("content-length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    let total = header_end + content_length;
+    if buffer.len() < total {
+        return None;
+    }
+    let packet = buffer.drain(..total).collect::<Vec<_>>();
+    String::from_utf8(packet).ok()
+}
+
+fn load_tls_config(
+    cert_file: &str,
+    key_file: &str,
+) -> Result<ServerConfig, Box<dyn std::error::Error + Send + Sync>> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let mut cert_reader = BufReader::new(File::open(cert_file)?);
+    let certs = rustls_pemfile::certs(&mut cert_reader)
+        .collect::<Result<Vec<CertificateDer<'static>>, _>>()?;
+    if certs.is_empty() {
+        return Err(
+            format!("SIP TLS certificate file {cert_file} contains no certificates").into(),
+        );
+    }
+
+    let mut key_reader = BufReader::new(File::open(key_file)?);
+    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_reader)?
+        .ok_or_else(|| format!("SIP TLS key file {key_file} contains no private key"))?;
+
+    Ok(ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?)
 }
 
 /// Receive loop over an already-bound socket. Only returns on socket errors.
@@ -3353,6 +3477,23 @@ Authorization: {}\r\n\r\n",
             state.call_history_for_user("sip:alice@example.com").len(),
             1
         );
+    }
+
+    #[test]
+    fn sip_stream_framing_waits_for_body_and_keeps_next_message() {
+        let first = "MESSAGE sip:bob@example.com SIP/2.0\r\nContent-Length: 5\r\n\r\nhello";
+        let second = "OPTIONS sip:bob@example.com SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        let mut buffer = format!("{first}{second}").into_bytes();
+
+        assert_eq!(drain_sip_message(&mut buffer).as_deref(), Some(first));
+        assert_eq!(drain_sip_message(&mut buffer).as_deref(), Some(second));
+        assert!(buffer.is_empty());
+
+        let mut partial =
+            b"MESSAGE sip:bob@example.com SIP/2.0\r\nContent-Length: 5\r\n\r\nhel".to_vec();
+        assert!(drain_sip_message(&mut partial).is_none());
+        partial.extend_from_slice(b"lo");
+        assert_eq!(drain_sip_message(&mut partial).as_deref(), Some(first));
     }
 
     fn test_state() -> AppState {
