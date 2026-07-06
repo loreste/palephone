@@ -18,8 +18,8 @@ AppUpdatesURL={#MyAppURL}/#downloads
 DefaultDirName={autopf}\Pale Server
 DefaultGroupName=Pale Server
 DisableProgramGroupPage=yes
-LicenseFile=LICENSE
-OutputDir=dist\windows-server
+LicenseFile=..\..\..\LICENSE
+OutputDir=..\..\..\dist\windows-server
 OutputBaseFilename=PaleServerSetup-{#MyAppVersion}-x64
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
@@ -27,8 +27,8 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
-SetupIconFile=src-tauri\icons\icon.ico
-WizardSmallImageFile=packaging\windows\server\pale-server-wizard-small.bmp
+SetupIconFile=..\..\..\src-tauri\icons\icon.ico
+WizardSmallImageFile=pale-server-wizard-small.bmp
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\pale-server.ico
 VersionInfoDescription={#MyAppName} Installer
@@ -43,12 +43,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "configure"; Description: "Run Pale Server configuration after install"; GroupDescription: "Post-install setup:"; Flags: checkedonce
 
 [Files]
-Source: "dist\windows-server\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "dist\windows-server\PaleServerService.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "packaging\windows\server\Configure-PaleServer.ps1"; DestDir: "{app}"; Flags: ignoreversion
-Source: "packaging\windows\server\Run-PaleServer.ps1"; DestDir: "{app}"; Flags: ignoreversion
-Source: "packaging\windows\server\THIRD_PARTY_NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "src-tauri\icons\icon.ico"; DestDir: "{app}"; DestName: "pale-server.ico"; Flags: ignoreversion
+Source: "..\..\..\dist\windows-server\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\..\dist\windows-server\PaleServerService.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "Configure-PaleServer.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "Run-PaleServer.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "THIRD_PARTY_NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\..\src-tauri\icons\icon.ico"; DestDir: "{app}"; DestName: "pale-server.ico"; Flags: ignoreversion
 
 [Dirs]
 Name: "{commonappdata}\Pale Server"
