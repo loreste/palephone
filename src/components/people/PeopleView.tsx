@@ -1,11 +1,13 @@
 import { useState, useEffect, useCallback } from "react";
-import { Search, Phone, MessageSquare, Users, Star, X } from "lucide-react";
+import { Search, Phone, MessageSquare, Users, Star, X, Video } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useServerStore } from "@/store/serverStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
-import { paleServerCreateDirectRoom, paleServerGetUsers, makeCall, paleServerGetFavorites, paleServerAddFavorite, paleServerRemoveFavorite, type ServerRoom, type ServerUser } from "@/lib/tauri";
+import { paleServerCreateDirectRoom, paleServerGetUsers, makeCall, makeVideoCall, paleServerGetFavorites, paleServerAddFavorite, paleServerRemoveFavorite, type ServerRoom, type ServerUser } from "@/lib/tauri";
 import { useUiStore } from "@/store/uiStore";
 import { useChatStore } from "@/store/chatStore";
+import { useAccountStore } from "@/store/accountStore";
+import { preflightSipCall } from "@/lib/callTargets";
 import { CallerAvatar } from "@/components/call/CallerAvatar";
 import { toast } from "@/components/ui/Toast";
 
@@ -229,14 +231,34 @@ function PersonRow({
   const upsertRoom = useChatStore((s) => s.upsertRoom);
   const rooms = useChatStore((s) => s.rooms);
   const { baseUrl, token } = useServerStore();
+  const account = useAccountStore((s) => s.account);
+  const regState = useAccountStore((s) => s.regState);
   const presence = presenceMap[user.sip_uri];
   const status: PresenceStatus = presence?.status ?? "offline";
 
   const handleCall = async () => {
+    const target = preflightSipCall(user.sip_uri, account, regState);
+    if (!target.ok) {
+      toast({ type: "error", title: "Call unavailable", description: target.reason });
+      return;
+    }
     try {
-      await makeCall(user.sip_uri);
+      await makeCall(target.uri);
     } catch (err) {
       toast({ type: "error", title: "Call failed", description: String(err) });
+    }
+  };
+
+  const handleVideoCall = async () => {
+    const target = preflightSipCall(user.sip_uri, account, regState);
+    if (!target.ok) {
+      toast({ type: "error", title: "Video unavailable", description: target.reason });
+      return;
+    }
+    try {
+      await makeVideoCall(target.uri);
+    } catch (err) {
+      toast({ type: "error", title: "Video call failed", description: String(err) });
     }
   };
 
@@ -315,6 +337,13 @@ function PersonRow({
           <Phone size={14} />
         </button>
         <button
+          onClick={handleVideoCall}
+          className="p-1.5 rounded-md text-tertiary hover:text-accent hover:bg-accent/10 transition-colors"
+          title="Video call"
+        >
+          <Video size={14} />
+        </button>
+        <button
           onClick={handleChat}
           className="p-1.5 rounded-md text-tertiary hover:text-accent hover:bg-accent/10 transition-colors"
           title="Chat"
@@ -333,15 +362,36 @@ function UserProfileCard({ user, onClose }: { user: ServerUser; onClose: () => v
   const upsertRoom = useChatStore((s) => s.upsertRoom);
   const rooms = useChatStore((s) => s.rooms);
   const { baseUrl, token } = useServerStore();
+  const account = useAccountStore((s) => s.account);
+  const regState = useAccountStore((s) => s.regState);
   const presence = presenceMap[user.sip_uri];
   const status: PresenceStatus = presence?.status ?? "offline";
 
   const handleCall = async () => {
     onClose();
+    const target = preflightSipCall(user.sip_uri, account, regState);
+    if (!target.ok) {
+      toast({ type: "error", title: "Call unavailable", description: target.reason });
+      return;
+    }
     try {
-      await makeCall(user.sip_uri);
+      await makeCall(target.uri);
     } catch (err) {
       toast({ type: "error", title: "Call failed", description: String(err) });
+    }
+  };
+
+  const handleVideoCall = async () => {
+    onClose();
+    const target = preflightSipCall(user.sip_uri, account, regState);
+    if (!target.ok) {
+      toast({ type: "error", title: "Video unavailable", description: target.reason });
+      return;
+    }
+    try {
+      await makeVideoCall(target.uri);
+    } catch (err) {
+      toast({ type: "error", title: "Video call failed", description: String(err) });
     }
   };
 
@@ -409,7 +459,7 @@ function UserProfileCard({ user, onClose }: { user: ServerUser; onClose: () => v
           )}
         </div>
 
-        <div className="flex gap-2 pt-1">
+        <div className="grid grid-cols-3 gap-2 pt-1">
           <button
             onClick={handleCall}
             className={cn(
@@ -418,6 +468,15 @@ function UserProfileCard({ user, onClose }: { user: ServerUser; onClose: () => v
             )}
           >
             <Phone size={13} /> Call
+          </button>
+          <button
+            onClick={handleVideoCall}
+            className={cn(
+              "flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium",
+              "bg-accent/10 text-accent hover:bg-accent/20 transition-colors"
+            )}
+          >
+            <Video size={13} /> Video
           </button>
           <button
             onClick={handleChat}

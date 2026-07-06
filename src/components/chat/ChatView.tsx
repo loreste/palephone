@@ -6,6 +6,7 @@ import { useMatrixStore } from "@/store/matrixStore";
 import { usePresenceStore, type PresenceStatus } from "@/store/presenceStore";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
+import { preflightSipCall } from "@/lib/callTargets";
 import { matrixSendMessage, matrixSetTyping, matrixCreateDm, makeCall as ipcMakeCall, makeVideoCall as ipcMakeVideoCall, getConfig, getSipPassword, paleLogin, paleServerApi, paleServerPinMessage, paleServerSaveMessage, paleServerMarkRead, paleServerGetUsers, paleServerSetTyping, paleServerUploadFile, paleServerGetRooms, paleServerCreateRoom, paleServerCreateDirectRoom, paleServerStartRoomCall, paleServerEndRoomCall, paleServerGetConferences, paleServerGetMeetings, paleServerCreateMeeting, paleServerGetRingGroups, paleServerGetQueues, paleServerGetPagingGroups, paleServerSearchCollaboration, paleServerGetRoomMessages, paleServerGetRoomMessageState, paleServerSendRoomMessage, paleServerScheduleRoomMessage, paleServerGetChannelWebhooks, paleServerCreateChannelWebhook, paleServerUpdateChannelWebhook, paleServerDeleteChannelWebhook, paleServerEditMessage, paleServerDeleteMessage, paleServerGetNotificationPreference, paleServerSetNotificationPreference, paleServerSearchGifs, paleServerGetTags, paleServerTranslate, paleServerGetCustomEmojis, paleServerGetWikiPages, paleServerCreateWikiPage, paleServerUpdateWikiPage, paleServerDeleteWikiPage, paleServerGetTaskBoards, paleServerCreateTaskBoard, paleServerGetTasks, paleServerCreateTask, paleServerUpdateTask, paleServerGetRoomThreads, paleServerGetThreadMessages, paleServerReplyToThread, type ServerRoom, type ServerUser, type ServerRoomMessage, type ServerRoomMessageState, type ServerMeeting, type ConferenceSummary, type RingGroupSummary, type CallQueueSummary, type PagingGroupSummary, type ServerCollaborationSearchResult, type ServerChannelWebhook, type GifResult, type ServerTag, type CustomEmoji, type WikiPage, type TaskBoard, type TaskItem, type ServerMessageThread } from "@/lib/tauri";
 import { joinScheduledMeeting } from "@/lib/meetingJoin";
 import { toast } from "@/components/ui/Toast";
@@ -283,7 +284,8 @@ export function ChatView() {
   const authState = useMatrixStore((s) => s.authState);
   const { rooms, activeRoomId, setActiveRoomId, setRooms, messages, typingByRoom } = useChatStore();
   const { baseUrl, token, connected } = useServerStore();
-  const currentSipUri = useAccountStore((s) => s.account?.sipUri);
+  const account = useAccountStore((s) => s.account);
+  const currentSipUri = account?.sipUri;
 
   // Load server rooms
   useEffect(() => {
@@ -1089,14 +1091,19 @@ function ChatRoom({
   const typingSentRef = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const { baseUrl, token, connected } = useServerStore();
-  const currentSipUri = useAccountStore((s) => s.account?.sipUri);
+  const account = useAccountStore((s) => s.account);
+  const currentSipUri = account?.sipUri;
+  const regState = useAccountStore((s) => s.regState);
   const addMessage = useChatStore((s) => s.addMessage);
   const updateMessage = useChatStore((s) => s.updateMessage);
   const upsertRoom = useChatStore((s) => s.upsertRoom);
   const isServerRoom = !room.room_id.startsWith("!");
   const localMemberUri = normalizeSipUri(currentSipUri ?? room.created_by);
   const otherDirectMember = room.members?.find((member) => normalizeSipUri(member) !== localMemberUri);
-  const canStartRoomCall = isServerRoom && (!room.is_direct || Boolean(otherDirectMember));
+  const canStartRoomCall =
+    isServerRoom &&
+    regState === "registered" &&
+    (!room.is_direct || Boolean(otherDirectMember));
   const canManageConnectors = isServerRoom && !room.is_direct && (
     room.created_by === currentSipUri
     || room.channel_owners?.includes(currentSipUri ?? "")
@@ -1689,11 +1696,15 @@ function ChatRoom({
   const startRoomCall = async (mode: "audio" | "video") => {
     try {
       if (room.is_direct) {
-        const target = otherDirectMember ?? room.name;
+        const target = preflightSipCall(otherDirectMember ?? room.name, account, regState);
+        if (!target.ok) {
+          toast({ type: "error", title: `${mode === "video" ? "Video" : "Call"} unavailable`, description: target.reason });
+          return;
+        }
         if (mode === "video") {
-          await ipcMakeVideoCall(target);
+          await ipcMakeVideoCall(target.uri);
         } else {
-          await ipcMakeCall(target);
+          await ipcMakeCall(target.uri);
         }
         return;
       }
@@ -1708,10 +1719,15 @@ function ChatRoom({
         call_uri: target.call_uri,
         conference_id: target.conference_id,
       });
+      const callTarget = preflightSipCall(target.call_uri, account, regState);
+      if (!callTarget.ok) {
+        toast({ type: "error", title: `${mode === "video" ? "Video" : "Call"} unavailable`, description: callTarget.reason });
+        return;
+      }
       if (mode === "video") {
-        await ipcMakeVideoCall(target.call_uri);
+        await ipcMakeVideoCall(callTarget.uri);
       } else {
-        await ipcMakeCall(target.call_uri);
+        await ipcMakeCall(callTarget.uri);
       }
     } catch (err) {
       toast({ type: "error", title: `Failed to start ${mode} call`, description: String(err) });
@@ -1720,8 +1736,13 @@ function ChatRoom({
 
   const joinActiveRoomCall = async () => {
     if (!room.call_uri) return;
+    const target = preflightSipCall(room.call_uri, account, regState);
+    if (!target.ok) {
+      toast({ type: "error", title: "Call unavailable", description: target.reason });
+      return;
+    }
     try {
-      await ipcMakeCall(room.call_uri);
+      await ipcMakeCall(target.uri);
     } catch (err) {
       toast({ type: "error", title: "Failed to join call", description: String(err) });
     }

@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use pale_core::{
     load_config, save_config, AccountPersist, AppConfig, CallHistoryDb, CallRecord, EngineCommand,
-    PaleEvent, PjsipEngine, SipAccountConfig, Transport,
+    PaleEvent, PjsipEngine, RegState, SipAccountConfig, Transport,
 };
 use pale_matrix::{MatrixClient, MatrixEvent, RoomSummary};
 use serde::Deserialize;
@@ -43,7 +43,7 @@ struct ConfigState {
 
 /// Runtime metadata that is learned from PJSIP callbacks.
 struct SipRuntimeState {
-    default_account_id: Mutex<Option<i32>>,
+    registered_account_id: Mutex<Option<i32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -170,10 +170,10 @@ fn make_call(
 ) -> Result<(), String> {
     validate_no_nul("uri", &uri)?;
     let account_id = runtime
-        .default_account_id
+        .registered_account_id
         .lock()
         .map_err(|e| e.to_string())?
-        .unwrap_or(0);
+        .ok_or_else(|| "SIP account is not registered yet".to_string())?;
 
     state
         .get()?
@@ -500,10 +500,10 @@ fn make_video_call(
 ) -> Result<(), String> {
     validate_no_nul("uri", &uri)?;
     let account_id = runtime
-        .default_account_id
+        .registered_account_id
         .lock()
         .map_err(|e| e.to_string())?
-        .unwrap_or(0);
+        .ok_or_else(|| "SIP account is not registered yet".to_string())?;
 
     state
         .get()?
@@ -679,9 +679,15 @@ fn track_call_event(
     runtime: &SipRuntimeState,
 ) {
     match event {
-        PaleEvent::RegistrationState { account_id, .. } => {
-            if let Ok(mut default_account_id) = runtime.default_account_id.lock() {
-                *default_account_id = Some(*account_id);
+        PaleEvent::RegistrationState {
+            account_id, state, ..
+        } => {
+            if let Ok(mut registered_account_id) = runtime.registered_account_id.lock() {
+                if matches!(state, RegState::Registered) {
+                    *registered_account_id = Some(*account_id);
+                } else if matches!(*registered_account_id, Some(current) if current == *account_id) {
+                    *registered_account_id = None;
+                }
             }
         }
         PaleEvent::IncomingCall {
@@ -924,7 +930,7 @@ pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let runtime = Arc::new(SipRuntimeState {
-        default_account_id: Mutex::new(None),
+        registered_account_id: Mutex::new(None),
     });
     let runtime_for_bridge = runtime.clone();
 

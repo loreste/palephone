@@ -2,13 +2,15 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Phone, Settings, Volume2, Clock, Search,
-  MessageSquare, Users, FolderLock, ShieldCheck, Server,
+  MessageSquare, Users, FolderLock, ShieldCheck, Server, Video,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useUiStore } from "@/store/uiStore";
 import { useServerStore } from "@/store/serverStore";
 import { usePresenceStore } from "@/store/presenceStore";
-import { makeCall, paleServerGetUsers, type ServerUser } from "@/lib/tauri";
+import { useAccountStore } from "@/store/accountStore";
+import { makeCall, makeVideoCall, paleServerGetUsers, type ServerUser } from "@/lib/tauri";
+import { preflightSipCall } from "@/lib/callTargets";
 import { toast } from "@/components/ui/Toast";
 
 interface CommandItem {
@@ -32,6 +34,8 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
   const setActiveTab = useUiStore((s) => s.setActiveTab);
   const { baseUrl, token, connected } = useServerStore();
   const presenceMap = usePresenceStore((s) => s.presenceMap);
+  const account = useAccountStore((s) => s.account);
+  const regState = useAccountStore((s) => s.regState);
 
   // Load contacts from server when opened (with cancellation to avoid race conditions)
   useEffect(() => {
@@ -110,26 +114,45 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
       },
     ];
 
-    // Add contacts as callable commands
-    const contactCmds: CommandItem[] = contacts.map((user) => {
+    const contactCmds: CommandItem[] = contacts.flatMap((user) => {
       const presence = presenceMap[user.sip_uri];
       const statusLabel = presence ? ` (${presence.status})` : "";
-      return {
-        id: `call-${user.id}`,
-        label: `Call ${user.display_name}${statusLabel}`,
-        icon: Phone,
-        category: "Contacts",
-        action: () => {
-          makeCall(user.sip_uri).catch((err) =>
-            toast({ type: "error", title: "Call failed", description: String(err) })
-          );
-          onClose();
-        },
+      const startCall = (video: boolean) => {
+        const target = preflightSipCall(user.sip_uri, account, regState);
+        if (!target.ok) {
+          toast({ type: "error", title: video ? "Video unavailable" : "Call unavailable", description: target.reason });
+          return;
+        }
+        (video ? makeVideoCall(target.uri) : makeCall(target.uri)).catch((err) =>
+          toast({ type: "error", title: video ? "Video call failed" : "Call failed", description: String(err) })
+        );
       };
+      return [
+        {
+          id: `call-${user.id}`,
+          label: `Call ${user.display_name}${statusLabel}`,
+          icon: Phone,
+          category: "Contacts",
+          action: () => {
+            startCall(false);
+            onClose();
+          },
+        },
+        {
+          id: `video-${user.id}`,
+          label: `Video call ${user.display_name}${statusLabel}`,
+          icon: Video,
+          category: "Contacts",
+          action: () => {
+            startCall(true);
+            onClose();
+          },
+        },
+      ];
     });
 
     return [...contactCmds, ...nav];
-  }, [onClose, setActiveTab, contacts, presenceMap]);
+  }, [onClose, setActiveTab, contacts, presenceMap, account, regState]);
 
   const filtered = useMemo(() => {
     if (!query.trim()) return commands;

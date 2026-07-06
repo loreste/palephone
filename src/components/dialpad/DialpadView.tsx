@@ -6,7 +6,7 @@ import { toast } from "@/components/ui/Toast";
 import { makeCall as ipcMakeCall, paleServerApi } from "@/lib/tauri";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
-import type { SipAccount } from "@/types";
+import { accountDomain, preflightSipCall } from "@/lib/callTargets";
 
 const dialpadKeys = [
   { digit: "1", letters: "" },
@@ -27,22 +27,6 @@ interface SpeedDial {
   code: string;
   destination: string;
   label: string;
-}
-
-/**
- * Derive the SIP domain to use for bare-number dialing from the registered
- * account: prefer the host part of the account's SIP URI, falling back to
- * the registrar URI (stripped of scheme/params).
- */
-function accountDomain(account: SipAccount | null): string | null {
-  if (!account) return null;
-  const fromSipUri = account.sipUri?.split("@")[1]?.split(/[;>]/)[0]?.trim();
-  if (fromSipUri) return fromSipUri;
-  const fromRegistrar = account.registrarUri
-    ?.replace(/^sips?:/, "")
-    .split(/[;>]/)[0]
-    ?.trim();
-  return fromRegistrar || null;
 }
 
 export function DialpadView() {
@@ -83,25 +67,22 @@ export function DialpadView() {
     (!isBareNumber || (regState === "registered" && !!defaultDomain));
 
   const handleCall = useCallback(async () => {
-    const trimmed = input.trim();
-    if (!trimmed) return;
-    if (!trimmed.includes("@") && (regState !== "registered" || !defaultDomain)) return;
+    const target = preflightSipCall(input, account, regState);
+    if (!target.ok) {
+      toast({ type: "error", title: "Call unavailable", description: target.reason });
+      return;
+    }
 
-    const uri = trimmed.includes("@")
-      ? (trimmed.startsWith("sip:") ? trimmed : `sip:${trimmed}`)
-      : `sip:${trimmed}@${defaultDomain}`;
-    const name = trimmed.includes("@") ? trimmed.split("@")[0]?.replace("sip:", "") : trimmed;
-
-    toast({ type: "info", title: `Calling ${name}...` });
+    toast({ type: "info", title: `Calling ${target.label}...` });
 
     try {
       // Real PJSIP call via Tauri IPC — the backend emits CallState events
       // that useSipEvents picks up to create the call session.
-      await ipcMakeCall(uri);
+      await ipcMakeCall(target.uri);
     } catch (err) {
       toast({ type: "error", title: "Call failed", description: String(err) });
     }
-  }, [input, regState, defaultDomain]);
+  }, [input, account, regState]);
 
   return (
     <div className="flex flex-col items-center justify-between h-full px-6 py-4">
@@ -150,8 +131,13 @@ export function DialpadView() {
               key={sd.code}
               onClick={() => {
                 setInput(sd.destination);
-                toast({ type: "info", title: `Calling ${sd.label}...` });
-                ipcMakeCall(sd.destination.startsWith("sip:") ? sd.destination : `sip:${sd.destination}`).catch((err) =>
+                const target = preflightSipCall(sd.destination, account, regState);
+                if (!target.ok) {
+                  toast({ type: "error", title: "Call unavailable", description: target.reason });
+                  return;
+                }
+                toast({ type: "info", title: `Calling ${sd.label || target.label}...` });
+                ipcMakeCall(target.uri).catch((err) =>
                   toast({ type: "error", title: "Call failed", description: String(err) })
                 );
               }}
