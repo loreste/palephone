@@ -239,7 +239,7 @@ When an INVITE arrives, pale-server evaluates in order:
 
 - Node.js 22+
 - Rust 1.93+
-- Docker and Docker Compose (for pale-server)
+- Docker and Docker Compose (only for the Docker server path)
 - autoconf, automake (for PJSIP build)
 
 ```bash
@@ -251,7 +251,34 @@ sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libasound2-dev \
   libpulse-dev libssl-dev libopus-dev autoconf automake
 ```
 
-### Deploy Pale Server
+### Install Pale Server
+
+Pale Server can run from Docker, Linux packages, a bare-metal binary, or the
+Windows server installer. For a first production-style install, use one of the
+packaged paths so the service, data directory, and local configuration are
+created consistently.
+
+#### Windows Server Installer
+
+Download the **Pale Server** installer,
+`PaleServerSetup-<version>-x64.exe`, from the project downloads page or from the
+`pale-server-windows-installer` GitHub Actions artifact.
+
+The installer:
+
+- installs `pale-server.exe` under `Program Files`;
+- creates `C:\ProgramData\Pale Server`;
+- generates local server/storage secrets;
+- asks for the admin password during configuration;
+- creates a `PaleServer` Windows service;
+- adds Start Menu shortcuts for configure, start, stop, restart, health check,
+  and uninstall.
+
+By default the Windows installer binds the HTTP API to `127.0.0.1:8080` and
+does not expose SIP until an admin configures a SIP backend. Use TLS termination
+in front of the service before exposing it to users over a network.
+
+#### Docker Compose
 
 ```bash
 # Generate secrets (writes .env, which docker compose reads automatically)
@@ -264,6 +291,35 @@ docker compose up -d
 curl http://localhost:8090/health
 # {"ok":true,"service":"pale-server","status":"healthy"}
 ```
+
+#### Bare-Metal Linux
+
+For Debian, Ubuntu, RHEL, Rocky, AlmaLinux, CentOS, and Fedora-compatible
+systems, use the installer script:
+
+```bash
+curl -fsSL https://drcpbx.com/install-pale-server.sh | sudo bash
+```
+
+The script installs from the public Pale package repository, writes local secrets
+to `/etc/pale-server/pale-server.env`, creates or updates the systemd service,
+and starts Pale Server.
+
+For a manual install, keep the environment file outside the repository and set
+at least:
+
+```bash
+PALE_SERVER_TOKEN=<strong random value>
+PALE_ADMIN_PASSWORD=<strong admin password>
+PALE_STORAGE_KEY=<strong random value>
+PALE_HTTP_ADDR=127.0.0.1:8080
+PALE_DATA_DIR=/var/lib/pale-server
+PALE_SIP_BACKEND=pjsip
+```
+
+Set `PALE_SIP_BACKEND=udp-parser` only when this Pale Server instance should run
+the built-in UDP SIP registrar/PBX parser. Otherwise place a dedicated SIP
+registrar/proxy in front of Pale and keep the server API behind TLS.
 
 The server exposes:
 - **HTTP API** on port 8090

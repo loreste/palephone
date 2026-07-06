@@ -7,10 +7,12 @@ on:
       - "src-tauri/crates/pale-server/**"
       - "Dockerfile.pale-server"
       - "docker-compose.yml"
+      - "packaging/windows/server/**"
       - ".github/workflows/pale-server.yml"
   pull_request:
     paths:
       - "src-tauri/crates/pale-server/**"
+      - "packaging/windows/server/**"
       - ".github/workflows/pale-server.yml"
 
 env:
@@ -118,3 +120,62 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+  windows-installer:
+    name: Build Windows server installer
+    needs: test
+    runs-on: windows-2022
+    if: github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: windows-pale-server-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Read pale-server version
+        id: version
+        shell: pwsh
+        run: |
+          $line = Select-String -Path src-tauri/crates/pale-server/Cargo.toml -Pattern '^version = "(.+)"$'
+          $version = $line.Matches[0].Groups[1].Value
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Build pale-server
+        working-directory: src-tauri
+        run: cargo build --release -p pale-server --bin pale-server --no-default-features
+
+      - name: Stage installer inputs
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/windows-server | Out-Null
+          Copy-Item src-tauri/target/release/pale-server.exe dist/windows-server/pale-server.exe
+          Invoke-WebRequest `
+            -Uri https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe `
+            -OutFile dist/windows-server/PaleServerService.exe
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=${{ steps.version.outputs.version }}" packaging/windows/server/PaleServer.iss
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pale-server-windows-installer
+          path: |
+            dist/windows-server/PaleServerSetup-*.exe
+            dist/windows-server/pale-server.exe
