@@ -87,34 +87,38 @@ function UnifiedLoginStep({ onNext, onSkip }: { onNext: () => void; onSkip?: () 
         await saveSettings(config).catch(() => {});
       }
 
-      // Auto-register SIP if credentials were provisioned
+      // Auto-register SIP if credentials and registrar were provisioned
       if (response.sip_credentials) {
         const creds = response.sip_credentials;
         await storeSipPassword(creds.sip_uri, creds.password).catch(() => {});
 
-        setAccount({
-          displayName: response.user.display_name,
-          sipUri: creds.sip_uri,
-          registrarUri: creds.registrar_uri,
-          authUsername: creds.username,
-          transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
-        });
+        if (creds.registrar_uri) {
+          setAccount({
+            displayName: response.user.display_name,
+            sipUri: creds.sip_uri,
+            registrarUri: creds.registrar_uri,
+            authUsername: creds.username,
+            transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
+          });
 
-        await registerAccount({
-          display_name: response.user.display_name,
-          sip_uri: creds.sip_uri,
-          registrar_uri: creds.registrar_uri,
-          auth_username: creds.username,
-          auth_password: creds.password,
-          transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
-        }).catch(() => {});
+          await registerAccount({
+            display_name: response.user.display_name,
+            sip_uri: creds.sip_uri,
+            registrar_uri: creds.registrar_uri,
+            auth_username: creds.username,
+            auth_password: creds.password,
+            transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
+          }).catch((e) => {
+            console.warn("SIP auto-registration failed:", e);
+          });
+        }
 
         // Persist account config
         if (config) {
           config.account = {
             display_name: response.user.display_name,
             sip_uri: creds.sip_uri,
-            registrar_uri: creds.registrar_uri,
+            registrar_uri: creds.registrar_uri ?? "",
             auth_username: creds.username,
             transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
             reg_expiry: 3600,

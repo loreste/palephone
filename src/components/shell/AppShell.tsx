@@ -111,24 +111,26 @@ export function AppShell() {
               };
               await saveSettings(config).catch(() => {});
 
-              // Auto-register SIP
-              if (response.sip_credentials) {
+              // Auto-register SIP if the server provides a registrar
+              if (response.sip_credentials?.registrar_uri) {
                 const creds = response.sip_credentials;
                 setAccount({
                   displayName: response.user.display_name,
                   sipUri: creds.sip_uri,
-                  registrarUri: creds.registrar_uri,
+                  registrarUri: creds.registrar_uri!,
                   authUsername: creds.username,
                   transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
                 });
                 await registerAccount({
                   display_name: response.user.display_name,
                   sip_uri: creds.sip_uri,
-                  registrar_uri: creds.registrar_uri,
+                  registrar_uri: creds.registrar_uri!,
                   auth_username: creds.username,
                   auth_password: creds.password,
                   transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
-                }).catch(() => {});
+                }).catch((e) => {
+                  console.warn("SIP auto-registration failed:", e);
+                });
               }
 
               // Auto-subscribe to push notifications (non-blocking)

@@ -1,11 +1,11 @@
 import { useEffect } from "react";
-import { getConfig } from "@/lib/tauri";
+import { getConfig, getSipPassword, registerAccount } from "@/lib/tauri";
 import { useAccountStore } from "@/store/accountStore";
 import { useUiStore } from "@/store/uiStore";
 
 /**
  * Loads persisted config on app startup and restores state.
- * Attempts to auto-register if a saved account exists.
+ * Automatically registers the SIP account if saved credentials exist.
  */
 export function useConfigLoader() {
   const setAccount = useAccountStore((s) => s.setAccount);
@@ -25,15 +25,31 @@ export function useConfigLoader() {
           setTheme(config.ui.theme as "dark" | "light");
         }
 
-        // Restore account (without password)
-        if (config.account) {
+        // Restore account and auto-register with PJSIP
+        if (config.account?.sip_uri && config.account?.registrar_uri) {
+          const acct = config.account;
           setAccount({
-            displayName: config.account.display_name,
-            sipUri: config.account.sip_uri,
-            registrarUri: config.account.registrar_uri,
-            authUsername: config.account.auth_username,
-            transport: config.account.transport,
+            displayName: acct.display_name,
+            sipUri: acct.sip_uri,
+            registrarUri: acct.registrar_uri,
+            authUsername: acct.auth_username,
+            transport: acct.transport,
           });
+
+          // Retrieve password from OS keychain and register with PJSIP
+          const password = await getSipPassword(acct.sip_uri).catch(() => null);
+          if (password && !cancelled) {
+            await registerAccount({
+              display_name: acct.display_name,
+              sip_uri: acct.sip_uri,
+              registrar_uri: acct.registrar_uri,
+              auth_username: acct.auth_username,
+              auth_password: password,
+              transport: (acct.transport as "udp" | "tcp" | "tls") || "tls",
+            }).catch((e) => {
+              console.warn("Auto SIP registration failed:", e);
+            });
+          }
         }
       } catch {
         // Config not available yet — first run

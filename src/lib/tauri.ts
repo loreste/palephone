@@ -1521,7 +1521,8 @@ export interface UserLoginResponse {
   };
   sip_credentials: {
     sip_uri: string;
-    registrar_uri: string;
+    registrar_uri: string | null;
+    registration_available: boolean;
     username: string;
     password: string;
     transport: string;
