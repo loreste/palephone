@@ -30,7 +30,23 @@ export function openPopoutWindow(
   return invoke("open_popout_window", { kind, targetId, title });
 }
 
-export function makeCall(uri: string): Promise<void> {
+async function requestMediaForNativeCall(video = false): Promise<void> {
+  const mediaDevices = globalThis.navigator?.mediaDevices;
+  if (!mediaDevices?.getUserMedia) return;
+
+  let stream: MediaStream | null = null;
+  try {
+    stream = await mediaDevices.getUserMedia({ audio: true, video });
+  } catch (error) {
+    const label = video ? "microphone/camera" : "microphone";
+    throw new Error(`Allow ${label} access before starting a call.`);
+  } finally {
+    stream?.getTracks().forEach((track) => track.stop());
+  }
+}
+
+export async function makeCall(uri: string): Promise<void> {
+  await requestMediaForNativeCall(false);
   return invoke("make_call", { uri });
 }
 
@@ -211,7 +227,8 @@ export function onRecordingState(
 
 // ─── Video Commands ───
 
-export function makeVideoCall(uri: string): Promise<void> {
+export async function makeVideoCall(uri: string): Promise<void> {
+  await requestMediaForNativeCall(true);
   return invoke("make_video_call", { uri });
 }
 

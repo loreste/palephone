@@ -422,20 +422,51 @@ impl PjsipEngine {
         unsafe {
             let dest = CString::new(uri).unwrap();
             let mut dest_pj = pj_str_from_cstring(&dest);
+            let mut opt: pjsip_sys::pjsua_call_setting = std::mem::zeroed();
+            pjsip_sys::pjsua_call_setting_default(&mut opt);
+            opt.aud_cnt = 1;
+            opt.vid_cnt = 0;
             let mut call_id: pjsip_sys::pjsua_call_id = -1;
 
-            let status = pjsip_sys::pjsua_call_make_call(
+            let mut status = pjsip_sys::pjsua_call_make_call(
                 acc_id,
                 &mut dest_pj,
-                std::ptr::null(),
+                &opt,
                 std::ptr::null_mut(),
                 std::ptr::null(),
                 &mut call_id,
             );
 
+            if status == 70004 {
+                log::warn!(
+                    "Audio call setup returned PJ_EINVAL for {uri}; retrying with null sound device"
+                );
+                let snd_status = pjsip_sys::pjsua_set_null_snd_dev();
+                if snd_status == 0 {
+                    call_id = -1;
+                    status = pjsip_sys::pjsua_call_make_call(
+                        acc_id,
+                        &mut dest_pj,
+                        &opt,
+                        std::ptr::null_mut(),
+                        std::ptr::null(),
+                        &mut call_id,
+                    );
+                } else {
+                    log::warn!("Failed to switch to null sound device: status={snd_status}");
+                }
+            }
+
             if status != 0 {
+                let message = if status == 70004 {
+                    format!(
+                        "Could not start audio call to {uri}. Check microphone permission and audio device settings."
+                    )
+                } else {
+                    format!("Failed to make call to {uri}: status={status}")
+                };
                 emit_event(PaleEvent::Error {
-                    message: format!("Failed to make call to {}: status={}", uri, status),
+                    message,
                 });
             } else {
                 log::info!("Call initiated: call_id={}", call_id);
@@ -561,7 +592,7 @@ impl PjsipEngine {
             opt.aud_cnt = 1;
 
             let mut call_id: pjsip_sys::pjsua_call_id = -1;
-            let status = pjsip_sys::pjsua_call_make_call(
+            let mut status = pjsip_sys::pjsua_call_make_call(
                 acc_id,
                 &mut dest_pj,
                 &opt,
@@ -570,9 +601,36 @@ impl PjsipEngine {
                 &mut call_id,
             );
 
+            if status == 70004 {
+                log::warn!(
+                    "Video call setup returned PJ_EINVAL for {uri}; retrying with null sound device"
+                );
+                let snd_status = pjsip_sys::pjsua_set_null_snd_dev();
+                if snd_status == 0 {
+                    call_id = -1;
+                    status = pjsip_sys::pjsua_call_make_call(
+                        acc_id,
+                        &mut dest_pj,
+                        &opt,
+                        std::ptr::null_mut(),
+                        std::ptr::null(),
+                        &mut call_id,
+                    );
+                } else {
+                    log::warn!("Failed to switch to null sound device: status={snd_status}");
+                }
+            }
+
             if status != 0 {
+                let message = if status == 70004 {
+                    format!(
+                        "Could not start video call to {uri}. Check microphone/camera permission and audio device settings."
+                    )
+                } else {
+                    format!("Failed to make video call to {uri}: status={status}")
+                };
                 emit_event(PaleEvent::Error {
-                    message: format!("Failed to make video call to {}: status={}", uri, status),
+                    message,
                 });
             } else {
                 log::info!("Video call initiated: call_id={}", call_id);
