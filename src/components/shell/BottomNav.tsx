@@ -17,7 +17,7 @@ const allTabs: { id: Tab; labelKey: string; icon: typeof Phone; adminOnly?: bool
   { id: "settings", labelKey: "nav.settings", icon: Settings },
 ];
 
-export function BottomNav() {
+export function BottomNav({ variant = "bottom" }: { variant?: "bottom" | "rail" }) {
   const { t } = useTranslation();
   const { activeTab, setActiveTab } = useUiStore();
   const userRole = useServerStore((s) => s.userRole);
@@ -25,13 +25,15 @@ export function BottomNav() {
   const totalUnread = useChatStore((s) =>
     s.rooms.reduce((sum, r) => sum + r.unread_count, 0)
   );
+  const isRail = variant === "rail";
 
   return (
     <nav
       className={cn(
-        "flex items-stretch h-[56px] md:h-[48px]",
-        "bg-surface border-t border-border-subtle",
-        "shrink-0"
+        "bg-surface/95 border-border-subtle shrink-0",
+        isRail
+          ? "w-[76px] border-r py-3 flex flex-col items-center gap-1"
+          : "flex items-stretch h-[56px] border-t"
       )}
     >
       {tabs.map(({ id, labelKey, icon: Icon }) => {
@@ -42,16 +44,26 @@ export function BottomNav() {
             key={id}
             onClick={() => setActiveTab(id)}
             className={cn(
-              "flex-1 flex flex-col items-center justify-center gap-0.5",
-              "transition-colors relative",
-              isActive ? "text-accent" : "text-tertiary hover:text-secondary"
+              "group relative transition-colors",
+              isRail
+                ? "w-[60px] h-[54px] rounded-md flex flex-col items-center justify-center gap-1"
+                : "flex-1 flex flex-col items-center justify-center gap-0.5",
+              isActive
+                ? "text-accent bg-accent-muted"
+                : "text-tertiary hover:text-secondary hover:bg-elevated/70"
             )}
             aria-label={label}
             aria-current={isActive ? "page" : undefined}
+            title={label}
           >
             {/* Active indicator bar */}
             {isActive && (
-              <span className="absolute top-0 left-1/4 right-1/4 h-[2px] bg-accent rounded-full" />
+              <span
+                className={cn(
+                  "absolute bg-accent rounded-full",
+                  isRail ? "left-0 top-3 bottom-3 w-[3px]" : "top-0 left-1/4 right-1/4 h-[2px]"
+                )}
+              />
             )}
             <span className="relative">
               <Icon size={20} strokeWidth={isActive ? 2 : 1.5} />
@@ -61,7 +73,7 @@ export function BottomNav() {
                 </span>
               )}
             </span>
-            <span className="text-[10px] font-medium">{label}</span>
+            <span className="text-[10px] font-medium leading-none max-w-[58px] truncate">{label}</span>
           </button>
         );
       })}

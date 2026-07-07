@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState, useCallback, useEffect } from "react";
-import { ExternalLink, WifiOff } from "lucide-react";
+import { AlertTriangle, ExternalLink, RefreshCw, WifiOff } from "lucide-react";
 import { TitleBar } from "./TitleBar";
 import { StatusBar } from "./StatusBar";
 import { BottomNav } from "./BottomNav";
@@ -60,6 +60,8 @@ export function AppShell() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [showWizard, setShowWizard] = useState(false);
   const [wizardChecked, setWizardChecked] = useState(false);
+  const [connectionIssue, setConnectionIssue] = useState<string | null>(null);
+  const [reconnecting, setReconnecting] = useState(false);
   const mobile = isMobile();
 
   const openCommandPalette = useCallback(() => setCmdPaletteOpen(true), []);
@@ -87,6 +89,79 @@ export function AppShell() {
 
   const setAccount = useAccountStore((s) => s.setAccount);
 
+  const connectFromSavedConfig = useCallback(async () => {
+    const config = await getConfig();
+    if (!config.server?.url || !config.server.username || !config.server.auto_connect) {
+      return false;
+    }
+
+    const savedPassword = await getSipPassword("pale-server-login");
+    if (!savedPassword) {
+      setConnectionIssue("Pale Server is configured, but the saved password is missing. Sign in again from Settings.");
+      return false;
+    }
+
+    const response = await paleLogin(config.server.url, config.server.username, savedPassword);
+    sessionStorage.setItem("pale.admin.token", response.token);
+    setServerConnection(config.server.url, response.token, response.expires_at, response.user.role, response.user.display_name);
+    config.server = {
+      ...config.server,
+      role: response.user.role,
+      display_name: response.user.display_name,
+    };
+    await saveSettings(config).catch(() => {});
+
+    let sipIssue: string | null = null;
+    const registrarUri = response.sip_credentials?.registrar_uri ?? null;
+    if (response.sip_credentials && registrarUri) {
+      const creds = response.sip_credentials;
+      setAccount({
+        displayName: response.user.display_name,
+        sipUri: creds.sip_uri,
+        registrarUri,
+        authUsername: creds.username,
+        transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
+      });
+      try {
+        await registerAccount({
+          display_name: response.user.display_name,
+          sip_uri: creds.sip_uri,
+          registrar_uri: registrarUri,
+          auth_username: creds.username,
+          auth_password: creds.password,
+          transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
+        });
+      } catch (e) {
+        sipIssue = `Signed in, but SIP registration failed: ${String(e)}`;
+      }
+    } else {
+      sipIssue = "Signed in, but the server did not return SIP credentials. Calls are unavailable.";
+    }
+
+    import("@/lib/pushSubscription")
+      .then(({ subscribeToPush }) =>
+        subscribeToPush(config.server!.url!, response.token)
+      )
+      .catch(() => {});
+
+    setConnectionIssue(sipIssue);
+    return true;
+  }, [setAccount, setServerConnection]);
+
+  const retryConnection = useCallback(async () => {
+    setReconnecting(true);
+    try {
+      const connected = await connectFromSavedConfig();
+      if (!connected) {
+        setConnectionIssue("Could not reconnect. Open Settings > Server and sign in again.");
+      }
+    } catch (err) {
+      setConnectionIssue(err instanceof Error ? err.message : "Could not reconnect to Pale Server.");
+    } finally {
+      setReconnecting(false);
+    }
+  }, [connectFromSavedConfig]);
+
   // Check if this is first run or auto-login with saved credentials
   useEffect(() => {
     getConfig()
@@ -99,52 +174,13 @@ export function AppShell() {
         const alreadyConnected = useServerStore.getState().connected;
         if (!alreadyConnected && config.server?.url && config.server.username && config.server.auto_connect) {
           try {
-            const savedPassword = await getSipPassword("pale-server-login");
-            if (savedPassword) {
-              const response = await paleLogin(config.server.url, config.server.username, savedPassword);
-              sessionStorage.setItem("pale.admin.token", response.token);
-              setServerConnection(config.server.url, response.token, response.expires_at, response.user.role, response.user.display_name);
-              config.server = {
-                ...config.server,
-                role: response.user.role,
-                display_name: response.user.display_name,
-              };
-              await saveSettings(config).catch(() => {});
-
-              // Auto-register SIP if the server provides a registrar
-              if (response.sip_credentials?.registrar_uri) {
-                const creds = response.sip_credentials;
-                setAccount({
-                  displayName: response.user.display_name,
-                  sipUri: creds.sip_uri,
-                  registrarUri: creds.registrar_uri!,
-                  authUsername: creds.username,
-                  transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
-                });
-                await registerAccount({
-                  display_name: response.user.display_name,
-                  sip_uri: creds.sip_uri,
-                  registrar_uri: creds.registrar_uri!,
-                  auth_username: creds.username,
-                  auth_password: creds.password,
-                  transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
-                }).catch((e) => {
-                  console.warn("SIP auto-registration failed:", e);
-                });
-              }
-
-              // Auto-subscribe to push notifications (non-blocking)
-              import("@/lib/pushSubscription")
-                .then(({ subscribeToPush }) =>
-                  subscribeToPush(config.server!.url!, response.token)
-                )
-                .catch(() => {});
-
+            const connected = await connectFromSavedConfig();
+            if (connected) {
               setWizardChecked(true);
               return;
             }
-          } catch {
-            // Auto-login failed, fall through to show wizard
+          } catch (err) {
+            setConnectionIssue(err instanceof Error ? err.message : "Could not connect to Pale Server.");
           }
         }
 
@@ -166,7 +202,7 @@ export function AppShell() {
         }
         setWizardChecked(true);
       });
-  }, [setAccount, setServerConnection, setServerIdentity]);
+  }, [connectFromSavedConfig, setServerIdentity]);
 
   if (!wizardChecked) return null;
 
@@ -204,6 +240,26 @@ export function AppShell() {
         </button>
       )}
 
+      {/* Connection issue banner */}
+      {connectionIssue && (
+        <div
+          className="flex items-center gap-3 px-4 py-2 bg-warning-muted border-b border-warning/30 text-warning text-xs"
+          role="alert"
+          aria-live="assertive"
+        >
+          <AlertTriangle size={15} aria-hidden="true" />
+          <span className="min-w-0 flex-1 truncate">{connectionIssue}</span>
+          <button
+            onClick={retryConnection}
+            disabled={reconnecting}
+            className="h-7 px-2 rounded-md border border-warning/40 hover:bg-warning/10 disabled:opacity-60 inline-flex items-center gap-1"
+          >
+            <RefreshCw size={13} className={reconnecting ? "animate-spin" : ""} />
+            Reconnect
+          </button>
+        </div>
+      )}
+
       {/* Offline indicator banner */}
       {isOffline && (
         <div
@@ -221,17 +277,20 @@ export function AppShell() {
         </div>
       )}
 
-      <main className="flex-1 overflow-y-auto relative">
-        {hasActiveCall ? (
-          <ActiveCallView />
-        ) : (
-          <Suspense fallback={<div className="p-4 text-sm text-secondary">Loading...</div>}>
-            <View />
-          </Suspense>
-        )}
-      </main>
+      <div className="flex flex-1 min-h-0 overflow-hidden">
+        {!hasActiveCall && !mobile && <BottomNav variant="rail" />}
+        <main className="flex-1 min-w-0 overflow-y-auto relative">
+          {hasActiveCall ? (
+            <ActiveCallView />
+          ) : (
+            <Suspense fallback={<div className="p-4 text-sm text-secondary">Loading...</div>}>
+              <View />
+            </Suspense>
+          )}
+        </main>
+      </div>
 
-      {!hasActiveCall && <BottomNav />}
+      {!hasActiveCall && mobile && <BottomNav />}
 
       {/* Overlays */}
       <IncomingCallOverlay />

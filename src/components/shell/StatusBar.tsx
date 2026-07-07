@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Volume2, Server, Search } from "lucide-react";
+import { Search, Server, Volume2 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useAccountStore } from "@/store/accountStore";
 import { useServerStore } from "@/store/serverStore";
@@ -31,13 +31,17 @@ export function StatusBar() {
   return (
     <div
       className={cn(
-        "flex items-center justify-between h-[36px] px-3",
-        "bg-surface border-b border-border-subtle",
+        "flex items-center justify-between h-[40px] px-3",
+        "bg-surface/95 border-b border-border-subtle",
         "shrink-0"
       )}
     >
       <div className="flex items-center gap-2 min-w-0">
-        {/* Status dot */}
+        <span className="hidden sm:inline-flex text-[11px] font-semibold uppercase tracking-[0.08em] text-tertiary">
+          Pale
+        </span>
+        <span className="hidden sm:block h-4 w-px bg-border-subtle" aria-hidden />
+
         <span className="relative flex items-center justify-center w-2 h-2 shrink-0">
           <span
             className={cn(
@@ -54,7 +58,6 @@ export function StatusBar() {
           )}
         </span>
 
-        {/* Account info */}
         <span className="text-xs text-secondary truncate">
           {account?.displayName ?? account?.sipUri ?? config.label}
         </span>
@@ -70,7 +73,7 @@ export function StatusBar() {
       <div className="flex items-center gap-1">
         <button
           onClick={() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "f", metaKey: true }))}
-          className="p-1 rounded-sm hover:bg-elevated text-tertiary hover:text-secondary transition-colors"
+          className="p-1.5 rounded-md hover:bg-elevated text-tertiary hover:text-secondary transition-colors"
           aria-label="Search messages"
           title="Search (Cmd+F)"
         >
@@ -78,7 +81,7 @@ export function StatusBar() {
         </button>
 
         <button
-          className="p-1 rounded-sm hover:bg-elevated text-tertiary hover:text-secondary transition-colors"
+          className="p-1.5 rounded-md hover:bg-elevated text-tertiary hover:text-secondary transition-colors"
           aria-label="Audio settings"
         >
           <Volume2 size={14} />
@@ -104,7 +107,11 @@ function PresenceIndicator({
   // Determine current presence from own entry
   const presenceMap = usePresenceStore((s) => s.presenceMap);
   const account = useAccountStore((s) => s.account);
-  const ownUri = account?.sipUri ? `sip:${account.sipUri}` : null;
+  const ownUri = account?.sipUri
+    ? account.sipUri.startsWith("sip:")
+      ? account.sipUri
+      : `sip:${account.sipUri}`
+    : null;
   const ownPresence = ownUri ? presenceMap[ownUri] : undefined;
   const currentStatus = ownPresence?.status ?? (serverConnected ? "online" : "offline");
   const currentColor = presenceOptions.find((p) => p.status === currentStatus)?.color ?? "bg-gray-400";
@@ -144,15 +151,20 @@ function PresenceIndicator({
     <div className="relative ml-2 shrink-0" ref={dropdownRef}>
       <button
         onClick={() => serverConnected && setOpen(!open)}
-        className="flex items-center gap-1 text-xs text-tertiary hover:text-secondary transition-colors"
+        className={cn(
+          "flex items-center gap-1.5 h-6 px-1.5 rounded-md text-xs transition-colors",
+          serverConnected
+            ? "text-tertiary hover:text-secondary hover:bg-elevated"
+            : "text-tertiary cursor-default"
+        )}
         title={serverConnected ? `Status: ${currentStatus}` : "Server disconnected"}
       >
-        <Server size={11} />
+        <Server size={12} />
         <span className={cn("w-2 h-2 rounded-full", serverConnected ? currentColor : "bg-tertiary")} />
       </button>
 
       {open && (
-        <div className="absolute top-full left-0 mt-1 w-48 bg-surface border border-border-subtle rounded-md shadow-lg z-50 py-1">
+        <div className="absolute top-full left-0 mt-1 w-52 bg-surface border border-border-subtle rounded-md shadow-lg z-50 py-1">
           {presenceOptions.map((opt) => (
             <button
               key={opt.status}

@@ -5,7 +5,8 @@ import { useUiStore } from "@/store/uiStore";
 
 /**
  * Loads persisted config on app startup and restores state.
- * Automatically registers the SIP account if saved credentials exist.
+ * Server auto-login performs registration for Pale Server accounts; standalone
+ * SIP accounts register from the saved account config and keychain password.
  */
 export function useConfigLoader() {
   const setAccount = useAccountStore((s) => s.setAccount);
@@ -25,7 +26,7 @@ export function useConfigLoader() {
           setTheme(config.ui.theme as "dark" | "light");
         }
 
-        // Restore account and auto-register with PJSIP
+        // Restore account state for the UI.
         if (config.account?.sip_uri && config.account?.registrar_uri) {
           const acct = config.account;
           setAccount({
@@ -36,19 +37,25 @@ export function useConfigLoader() {
             transport: acct.transport,
           });
 
-          // Retrieve password from OS keychain and register with PJSIP
-          const password = await getSipPassword(acct.sip_uri).catch(() => null);
-          if (password && !cancelled) {
-            await registerAccount({
-              display_name: acct.display_name,
-              sip_uri: acct.sip_uri,
-              registrar_uri: acct.registrar_uri,
-              auth_username: acct.auth_username,
-              auth_password: password,
-              transport: (acct.transport as "udp" | "tcp" | "tls") || "tls",
-            }).catch((e) => {
-              console.warn("Auto SIP registration failed:", e);
-            });
+          const serverAutoLogin =
+            !!config.server?.auto_connect &&
+            !!config.server?.url &&
+            !!config.server?.username;
+
+          if (!serverAutoLogin) {
+            const password = await getSipPassword(acct.sip_uri).catch(() => null);
+            if (password && !cancelled) {
+              await registerAccount({
+                display_name: acct.display_name,
+                sip_uri: acct.sip_uri,
+                registrar_uri: acct.registrar_uri,
+                auth_username: acct.auth_username,
+                auth_password: password,
+                transport: (acct.transport as "udp" | "tcp" | "tls") || "tls",
+              }).catch((e) => {
+                console.warn("Auto SIP registration failed:", e);
+              });
+            }
           }
         }
       } catch {
