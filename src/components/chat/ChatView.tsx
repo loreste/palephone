@@ -1797,7 +1797,7 @@ function ChatRoom({
           <select
             value={notificationLevel}
             onChange={(e) => handleNotificationLevelChange(e.target.value as typeof notificationLevel)}
-            className="h-8 rounded-md bg-surface border border-border-subtle px-1.5 text-xs text-tertiary hover:text-primary focus:outline-none focus:border-border-focus"
+            className="hidden sm:block h-8 max-w-[9rem] rounded-md bg-surface border border-border-subtle px-2 text-xs text-secondary hover:text-primary focus:outline-none focus:border-border-focus"
             aria-label="Notification level"
             title="Notification level"
           >
@@ -2229,67 +2229,56 @@ function ChatRoom({
       )}
 
       {/* Compose bar */}
-      <div className="flex items-center gap-2 px-3 py-2 border-t border-border-subtle shrink-0">
-        <button
-          className="p-2 text-tertiary hover:text-secondary rounded-md hover:bg-elevated"
-          aria-label="Attach file"
-        >
-          <Paperclip size={18} />
-        </button>
-        {isServerRoom && !editingMessage && (
+      <div className="px-3 py-2 border-t border-border-subtle shrink-0 bg-base/95">
+        <div className="flex items-center gap-1.5 pb-2">
           <button
-            onClick={() => setShowLoopInsert(!showLoopInsert)}
-            className={cn(
-              "p-2 rounded-md transition-colors",
-              showLoopInsert ? "text-accent bg-accent/10" : "text-tertiary hover:text-secondary hover:bg-elevated"
-            )}
-            aria-label="Insert loop component"
-            title="Insert a live component (checklist, table, paragraph)"
+            className="p-2 text-tertiary hover:text-secondary rounded-md hover:bg-elevated"
+            aria-label="Attach file"
           >
-            <ListTodo size={18} />
+            <Paperclip size={18} />
           </button>
-        )}
-        {isServerRoom && !editingMessage && (
-          <button
-            onClick={() => { setShowGifPicker(!showGifPicker); setShowScheduleSend(false); }}
-            className={cn(
-              "p-2 rounded-md transition-colors",
-              showGifPicker ? "text-accent bg-accent/10" : "text-tertiary hover:text-secondary hover:bg-elevated"
-            )}
-            aria-label="GIF picker"
-            title="Send a GIF"
-          >
-            <ImageLucide size={18} />
-          </button>
-        )}
-        {!editingMessage && (
-          <select
-            value={messagePriority}
-            onChange={(event) => setMessagePriority(event.target.value as typeof messagePriority)}
-            className="h-9 rounded-md bg-surface border border-border-subtle px-2 text-xs text-primary focus:outline-none focus:border-border-focus"
-            aria-label="Message priority"
-          >
-            <option value="normal">Normal</option>
-            <option value="high">High</option>
-            <option value="urgent">Urgent</option>
-          </select>
-        )}
-        <div className="flex-1 flex flex-col">
-          {/* Rich text toolbar */}
-          <div className="flex items-center gap-0.5 px-1 pb-1">
-            <button onClick={() => insertMarkdown("bold")} className="p-1 rounded text-tertiary hover:text-primary hover:bg-elevated" title="Bold (Ctrl+B)">
-              <Bold size={14} />
+          {isServerRoom && !editingMessage && (
+            <button
+              onClick={() => setShowLoopInsert(!showLoopInsert)}
+              className={cn(
+                "p-2 rounded-md transition-colors",
+                showLoopInsert ? "text-accent bg-accent/10" : "text-tertiary hover:text-secondary hover:bg-elevated"
+              )}
+              aria-label="Insert loop component"
+              title="Insert a live component (checklist, table, paragraph)"
+            >
+              <ListTodo size={18} />
             </button>
-            <button onClick={() => insertMarkdown("italic")} className="p-1 rounded text-tertiary hover:text-primary hover:bg-elevated" title="Italic (Ctrl+I)">
-              <Italic size={14} />
+          )}
+          {isServerRoom && !editingMessage && (
+            <button
+              onClick={() => { setShowGifPicker(!showGifPicker); setShowScheduleSend(false); }}
+              className={cn(
+                "p-2 rounded-md transition-colors",
+                showGifPicker ? "text-accent bg-accent/10" : "text-tertiary hover:text-secondary hover:bg-elevated"
+              )}
+              aria-label="GIF picker"
+              title="Send a GIF"
+            >
+              <ImageLucide size={18} />
             </button>
-            <button onClick={() => insertMarkdown("code")} className="p-1 rounded text-tertiary hover:text-primary hover:bg-elevated" title="Code">
-              <Code size={14} />
+          )}
+          <div className="ml-auto flex items-center gap-1.5">
+            <button onClick={() => insertMarkdown("bold")} className="p-2 rounded text-tertiary hover:text-primary hover:bg-elevated" title="Bold (Ctrl+B)">
+              <Bold size={15} />
             </button>
-            <button onClick={() => insertMarkdown("link")} className="p-1 rounded text-tertiary hover:text-primary hover:bg-elevated" title="Link">
-              <Link size={14} />
+            <button onClick={() => insertMarkdown("italic")} className="p-2 rounded text-tertiary hover:text-primary hover:bg-elevated" title="Italic (Ctrl+I)">
+              <Italic size={15} />
+            </button>
+            <button onClick={() => insertMarkdown("code")} className="p-2 rounded text-tertiary hover:text-primary hover:bg-elevated" title="Code">
+              <Code size={15} />
+            </button>
+            <button onClick={() => insertMarkdown("link")} className="p-2 rounded text-tertiary hover:text-primary hover:bg-elevated" title="Link">
+              <Link size={15} />
             </button>
           </div>
+        </div>
+        <div className="flex items-end gap-2 min-w-0">
           <input
             ref={inputRef}
             type="text"
@@ -2298,42 +2287,54 @@ function ChatRoom({
             onKeyDown={handleComposeKeyDown}
             placeholder={editingMessage ? "Edit your message..." : "Type a message..."}
             className={cn(
-              "w-full bg-surface border border-border-subtle rounded-lg",
-              "px-3 py-2 text-sm text-primary",
-              "placeholder:text-tertiary",
-              "focus:outline-none focus:border-border-focus",
-              editingMessage && "border-warning/50"
+              "min-w-0 flex-1 h-11 bg-surface border border-border-default rounded-xl",
+              "px-3 text-sm text-primary shadow-inner",
+              "placeholder:text-secondary",
+              "focus:outline-none focus:border-border-focus focus:ring-2 focus:ring-accent/20",
+              editingMessage && "border-warning/60"
             )}
           />
-        </div>
-        {isServerRoom && !editingMessage && (
-          <button
-            onClick={() => { setShowScheduleSend(!showScheduleSend); setShowGifPicker(false); }}
-            className={cn(
-              "p-2 rounded-md transition-colors",
-              showScheduleSend ? "text-accent bg-accent/10" : "text-tertiary hover:text-secondary hover:bg-elevated"
-            )}
-            aria-label="Schedule send"
-            title="Schedule message for later"
-          >
-            <Clock size={18} />
-          </button>
-        )}
-        <button
-          onClick={handleSend}
-          disabled={!input.trim()}
-          className={cn(
-            "p-2 rounded-lg transition-colors",
-            input.trim()
-              ? editingMessage
-                ? "bg-warning text-white hover:bg-warning/80"
-                : "bg-accent text-white hover:bg-accent-hover"
-              : "text-tertiary cursor-not-allowed"
+          {!editingMessage && (
+            <select
+              value={messagePriority}
+              onChange={(event) => setMessagePriority(event.target.value as typeof messagePriority)}
+              className="hidden sm:block h-11 w-[5.75rem] rounded-xl bg-surface border border-border-default px-2 text-xs text-primary focus:outline-none focus:border-border-focus"
+              aria-label="Message priority"
+            >
+              <option value="normal">Normal</option>
+              <option value="high">High</option>
+              <option value="urgent">Urgent</option>
+            </select>
           )}
-          aria-label={editingMessage ? "Save edit" : "Send"}
-        >
-          {editingMessage ? <Check size={18} /> : <Send size={18} />}
-        </button>
+          {isServerRoom && !editingMessage && (
+            <button
+              onClick={() => { setShowScheduleSend(!showScheduleSend); setShowGifPicker(false); }}
+              className={cn(
+                "h-11 w-11 shrink-0 rounded-xl transition-colors flex items-center justify-center",
+                showScheduleSend ? "text-accent bg-accent/10" : "text-tertiary hover:text-secondary hover:bg-elevated"
+              )}
+              aria-label="Schedule send"
+              title="Schedule message for later"
+            >
+              <Clock size={18} />
+            </button>
+          )}
+          <button
+            onClick={handleSend}
+            disabled={!input.trim()}
+            className={cn(
+              "h-11 w-11 shrink-0 rounded-xl transition-colors flex items-center justify-center",
+              input.trim()
+                ? editingMessage
+                  ? "bg-warning text-white hover:bg-warning/80"
+                  : "bg-accent text-white hover:bg-accent-hover"
+                : "bg-elevated text-tertiary cursor-not-allowed"
+            )}
+            aria-label={editingMessage ? "Save edit" : "Send"}
+          >
+            {editingMessage ? <Check size={18} /> : <Send size={18} />}
+          </button>
+        </div>
       </div>
       </>}
 

@@ -69,6 +69,57 @@ struct AccountConfig {
     transport: String,
 }
 
+fn normalize_sip_transport(value: &str) -> Result<Transport, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "tls" => Ok(Transport::Tls),
+        "tcp" => Ok(Transport::Tcp),
+        "udp" => Ok(Transport::Udp),
+        other => Err(format!("unsupported SIP transport '{other}'")),
+    }
+}
+
+fn registrar_has_port(authority: &str) -> bool {
+    let host_port = authority.split(';').next().unwrap_or(authority);
+    if let Some(rest) = host_port.strip_prefix('[') {
+        return rest
+            .split_once(']')
+            .map(|(_, suffix)| suffix.starts_with(':'))
+            .unwrap_or(false);
+    }
+    host_port
+        .rsplit_once(':')
+        .map(|(_, port)| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()))
+        .unwrap_or(false)
+}
+
+fn normalize_registrar_uri(registrar_uri: &str, transport: Transport) -> String {
+    let trimmed = registrar_uri.trim();
+    let bare = trimmed
+        .strip_prefix("sips:")
+        .or_else(|| trimmed.strip_prefix("sip:"))
+        .unwrap_or(trimmed);
+
+    match transport {
+        Transport::Tls => {
+            let with_port = if registrar_has_port(bare) {
+                bare.to_string()
+            } else {
+                let mut parts = bare.split(';');
+                let host = parts.next().unwrap_or_default();
+                let params: Vec<_> = parts.collect();
+                if params.is_empty() {
+                    format!("{host}:5061")
+                } else {
+                    format!("{host}:5061;{}", params.join(";"))
+                }
+            };
+            format!("sips:{with_port}")
+        }
+        Transport::Tcp => format!("sip:{bare}"),
+        Transport::Udp => format!("sip:{bare}"),
+    }
+}
+
 #[tauri::command]
 fn register_account(
     engine: State<EngineState>,
@@ -81,16 +132,13 @@ fn register_account(
     validate_no_nul("auth_username", &config.auth_username)?;
     validate_no_nul("auth_password", &config.auth_password)?;
 
-    let transport = match config.transport.as_str() {
-        "tls" => Transport::Tls,
-        "tcp" => Transport::Tcp,
-        _ => Transport::Udp,
-    };
+    let transport = normalize_sip_transport(&config.transport)?;
+    let registrar_uri = normalize_registrar_uri(&config.registrar_uri, transport);
 
     let account = SipAccountConfig {
         display_name: config.display_name,
         sip_uri: config.sip_uri,
-        registrar_uri: config.registrar_uri,
+        registrar_uri,
         auth_username: config.auth_username,
         auth_password: config.auth_password,
         transport,
@@ -697,7 +745,8 @@ fn track_call_event(
             if let Ok(mut registered_account_id) = runtime.registered_account_id.lock() {
                 if matches!(state, RegState::Registered) {
                     *registered_account_id = Some(*account_id);
-                } else if matches!(*registered_account_id, Some(current) if current == *account_id) {
+                } else if matches!(*registered_account_id, Some(current) if current == *account_id)
+                {
                     *registered_account_id = None;
                 }
             }

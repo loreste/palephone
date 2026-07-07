@@ -144,10 +144,14 @@ export function NetworkSettings() {
       </div>
 
       <SectionHeader title="Ports" />
+      <p className="text-xs text-tertiary">
+        Pale registers voice and video over SIP/TLS on remote port 5061 by default.
+        This local base port is used by the embedded SIP stack; its TLS listener is one port higher.
+      </p>
 
       <div className="grid grid-cols-2 gap-3">
         <FormField
-          label="SIP Port"
+          label="Local SIP base port"
           value={String(config.sipPort)}
           onChange={(v) => setConfig({ ...config, sipPort: parseInt(v) || 5060 })}
           placeholder="5060"

@@ -8,6 +8,7 @@ import { t, getLocale, setLocale, LOCALE_LABELS, type Locale } from "@/lib/i18n"
 import { AudioSettings } from "./AudioSettings";
 import { NetworkSettings } from "./NetworkSettings";
 import { registerAccount, storeSipPassword, getConfig, saveSettings, paleLogin, paleServerApi } from "@/lib/tauri";
+import { normalizeProvisionedSipAccount } from "@/lib/sipDefaults";
 import { adminLogout, adminBaseUrl, getMfaStatus, setupMfa, verifyMfa, disableMfa, listSessions, revokeSession, revokeAllSessions } from "@/lib/adminApi";
 import type { MfaSetupResponse, SessionInfo } from "@/lib/adminApi";
 import { disconnectServer, signOut } from "@/lib/session";
@@ -114,23 +115,31 @@ function AccountSettingsPanel() {
   const [password, setPassword] = useState("");
 
   const handleSave = async () => {
-    setAccount(form);
+    const normalizedAccount = normalizeProvisionedSipAccount({
+      displayName: form.displayName,
+      sipUri: form.sipUri,
+      registrarUri: form.registrarUri,
+      authUsername: form.authUsername,
+      transport: form.transport,
+    });
+    setForm(normalizedAccount);
+    setAccount(normalizedAccount);
     useAccountStore.getState().setRegState("registering");
     try {
       // Store password in OS keychain (never on disk)
       if (password) {
-        await storeSipPassword(form.sipUri, password).catch(() => {});
+        await storeSipPassword(normalizedAccount.sipUri, password).catch(() => {});
       }
 
       // Persist account config (minus password) to disk
       const currentConfig = await getConfig().catch(() => null);
       if (currentConfig) {
         currentConfig.account = {
-          display_name: form.displayName,
-          sip_uri: form.sipUri,
-          registrar_uri: form.registrarUri,
-          auth_username: form.authUsername,
-          transport: form.transport,
+          display_name: normalizedAccount.displayName,
+          sip_uri: normalizedAccount.sipUri,
+          registrar_uri: normalizedAccount.registrarUri,
+          auth_username: normalizedAccount.authUsername,
+          transport: normalizedAccount.transport,
           reg_expiry: 3600,
         };
         await saveSettings(currentConfig).catch(() => {});
@@ -138,12 +147,12 @@ function AccountSettingsPanel() {
 
       // Register with SIP server
       await registerAccount({
-        display_name: form.displayName,
-        sip_uri: form.sipUri,
-        registrar_uri: form.registrarUri,
-        auth_username: form.authUsername,
+        display_name: normalizedAccount.displayName,
+        sip_uri: normalizedAccount.sipUri,
+        registrar_uri: normalizedAccount.registrarUri,
+        auth_username: normalizedAccount.authUsername,
         auth_password: password,
-        transport: form.transport,
+        transport: normalizedAccount.transport,
       });
       toast({ type: "info", title: "Registering..." });
     } catch (err) {

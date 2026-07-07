@@ -52,7 +52,7 @@ impl Default for SipAccountConfig {
             registrar_uri: String::new(),
             auth_username: String::new(),
             auth_password: String::new(),
-            transport: Transport::Udp,
+            transport: Transport::Tls,
             reg_expiry: 3600,
         }
     }

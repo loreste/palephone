@@ -28,6 +28,7 @@ import { useMeetingReminders } from "@/hooks/useMeetingReminders";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
 import { getConfig, getSipPassword, openPopoutWindow, paleLogin, registerAccount, saveSettings } from "@/lib/tauri";
+import { normalizeProvisionedSipAccount } from "@/lib/sipDefaults";
 
 /**
  * Persisted on the frontend (localStorage) rather than in config.ui: the Rust
@@ -115,21 +116,22 @@ export function AppShell() {
     const registrarUri = response.sip_credentials?.registrar_uri ?? null;
     if (response.sip_credentials && registrarUri) {
       const creds = response.sip_credentials;
-      setAccount({
+      const account = normalizeProvisionedSipAccount({
         displayName: response.user.display_name,
         sipUri: creds.sip_uri,
         registrarUri,
         authUsername: creds.username,
-        transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
+        transport: creds.transport,
       });
+      setAccount(account);
       try {
         await registerAccount({
-          display_name: response.user.display_name,
-          sip_uri: creds.sip_uri,
-          registrar_uri: registrarUri,
-          auth_username: creds.username,
+          display_name: account.displayName,
+          sip_uri: account.sipUri,
+          registrar_uri: account.registrarUri,
+          auth_username: account.authUsername,
           auth_password: creds.password,
-          transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
+          transport: account.transport,
         });
       } catch (e) {
         sipIssue = `Signed in, but SIP registration failed: ${String(e)}`;

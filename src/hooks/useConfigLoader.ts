@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { getConfig, getSipPassword, registerAccount } from "@/lib/tauri";
+import { normalizeProvisionedSipAccount } from "@/lib/sipDefaults";
 import { useAccountStore } from "@/store/accountStore";
 import { useUiStore } from "@/store/uiStore";
 
@@ -29,13 +30,14 @@ export function useConfigLoader() {
         // Restore account state for the UI.
         if (config.account?.sip_uri && config.account?.registrar_uri) {
           const acct = config.account;
-          setAccount({
+          const account = normalizeProvisionedSipAccount({
             displayName: acct.display_name,
             sipUri: acct.sip_uri,
             registrarUri: acct.registrar_uri,
             authUsername: acct.auth_username,
             transport: acct.transport,
           });
+          setAccount(account);
 
           const serverAutoLogin =
             !!config.server?.auto_connect &&
@@ -46,12 +48,12 @@ export function useConfigLoader() {
             const password = await getSipPassword(acct.sip_uri).catch(() => null);
             if (password && !cancelled) {
               await registerAccount({
-                display_name: acct.display_name,
-                sip_uri: acct.sip_uri,
-                registrar_uri: acct.registrar_uri,
-                auth_username: acct.auth_username,
+                display_name: account.displayName,
+                sip_uri: account.sipUri,
+                registrar_uri: account.registrarUri,
+                auth_username: account.authUsername,
                 auth_password: password,
-                transport: (acct.transport as "udp" | "tcp" | "tls") || "tls",
+                transport: account.transport,
               }).catch((e) => {
                 console.warn("Auto SIP registration failed:", e);
               });

@@ -353,16 +353,6 @@ impl PjsipEngine {
                 CString::new(format!("\"{}\" <{}>", config.display_name, sip_uri)).unwrap();
             acc_cfg.id = pj_str_from_cstring(&id_str);
 
-            let reg_uri_str = if config.registrar_uri.starts_with("sip:")
-                || config.registrar_uri.starts_with("sips:")
-            {
-                config.registrar_uri.clone()
-            } else {
-                format!("sip:{}", config.registrar_uri)
-            };
-            let reg_uri = CString::new(reg_uri_str).unwrap();
-            acc_cfg.reg_uri = pj_str_from_cstring(&reg_uri);
-
             acc_cfg.cred_count = 1;
             let realm = CString::new("*").unwrap();
             acc_cfg.cred_info[0].realm = pj_str_from_cstring(&realm);
@@ -377,26 +367,19 @@ impl PjsipEngine {
 
             acc_cfg.reg_timeout = config.reg_expiry;
 
-            // Set transport based on config — strip existing sip:/sips: prefix first
+            // Set transport based on config. Keep the CString alive until pjsua_acc_add.
             let bare_registrar = config
                 .registrar_uri
                 .strip_prefix("sips:")
                 .or_else(|| config.registrar_uri.strip_prefix("sip:"))
                 .unwrap_or(&config.registrar_uri);
-            match config.transport {
-                Transport::Tls => {
-                    let reg_uri_tls = CString::new(format!("sips:{}", bare_registrar)).unwrap();
-                    acc_cfg.reg_uri = pj_str_from_cstring(&reg_uri_tls);
-                }
-                Transport::Tcp => {
-                    let reg_uri_tcp =
-                        CString::new(format!("sip:{};transport=tcp", bare_registrar)).unwrap();
-                    acc_cfg.reg_uri = pj_str_from_cstring(&reg_uri_tcp);
-                }
-                Transport::Udp => {
-                    // Default — already set above
-                }
-            }
+            let reg_uri_str = match config.transport {
+                Transport::Tls => format!("sips:{}", bare_registrar),
+                Transport::Tcp => format!("sip:{};transport=tcp", bare_registrar),
+                Transport::Udp => format!("sip:{}", bare_registrar),
+            };
+            let reg_uri = CString::new(reg_uri_str).unwrap();
+            acc_cfg.reg_uri = pj_str_from_cstring(&reg_uri);
 
             let (rtp_port, rtp_port_range) =
                 normalize_rtp_port_range(network.rtp_port_min, network.rtp_port_max);

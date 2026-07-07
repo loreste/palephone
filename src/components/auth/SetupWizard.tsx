@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Phone, MessageSquare, Lock, ArrowRight, Check, Server } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { registerAccount, storeSipPassword, getConfig, saveSettings, paleLogin } from "@/lib/tauri";
+import { normalizeProvisionedSipAccount } from "@/lib/sipDefaults";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
 import { toast } from "@/components/ui/Toast";
@@ -54,7 +55,7 @@ function WelcomeStep({ onNext }: { onNext: () => void }) {
 }
 
 function UnifiedLoginStep({ onNext, onSkip }: { onNext: () => void; onSkip?: () => void }) {
-  const [serverUrl, setServerUrl] = useState("http://localhost:8080");
+  const [serverUrl, setServerUrl] = useState("https://drcpbx.com");
   const [sipUri, setSipUri] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -93,21 +94,22 @@ function UnifiedLoginStep({ onNext, onSkip }: { onNext: () => void; onSkip?: () 
         await storeSipPassword(creds.sip_uri, creds.password).catch(() => {});
 
         if (creds.registrar_uri) {
-          setAccount({
+          const account = normalizeProvisionedSipAccount({
             displayName: response.user.display_name,
             sipUri: creds.sip_uri,
             registrarUri: creds.registrar_uri,
             authUsername: creds.username,
-            transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
+            transport: creds.transport,
           });
+          setAccount(account);
 
           await registerAccount({
-            display_name: response.user.display_name,
-            sip_uri: creds.sip_uri,
-            registrar_uri: creds.registrar_uri,
-            auth_username: creds.username,
+            display_name: account.displayName,
+            sip_uri: account.sipUri,
+            registrar_uri: account.registrarUri,
+            auth_username: account.authUsername,
             auth_password: creds.password,
-            transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
+            transport: account.transport,
           }).catch((e) => {
             console.warn("SIP auto-registration failed:", e);
           });
@@ -115,12 +117,19 @@ function UnifiedLoginStep({ onNext, onSkip }: { onNext: () => void; onSkip?: () 
 
         // Persist account config
         if (config) {
+          const account = normalizeProvisionedSipAccount({
+            displayName: response.user.display_name,
+            sipUri: creds.sip_uri,
+            registrarUri: creds.registrar_uri ?? "",
+            authUsername: creds.username,
+            transport: creds.transport,
+          });
           config.account = {
-            display_name: response.user.display_name,
-            sip_uri: creds.sip_uri,
-            registrar_uri: creds.registrar_uri ?? "",
-            auth_username: creds.username,
-            transport: (creds.transport as "udp" | "tcp" | "tls") || "tls",
+            display_name: account.displayName,
+            sip_uri: account.sipUri,
+            registrar_uri: account.registrarUri,
+            auth_username: account.authUsername,
+            transport: account.transport,
             reg_expiry: 3600,
           };
           await saveSettings(config).catch(() => {});
@@ -150,8 +159,8 @@ function UnifiedLoginStep({ onNext, onSkip }: { onNext: () => void; onSkip?: () 
           label="Server URL"
           value={serverUrl}
           onChange={setServerUrl}
-          placeholder="http://localhost:8080"
-          hint="Server default is port 8080; the docker-compose setup maps it to 8090 externally."
+          placeholder="https://drcpbx.com"
+          hint="Use HTTPS for Pale Server. Voice and video registration uses SIP over TLS on port 5061."
         />
         <Input label="SIP URI" value={sipUri} onChange={setSipUri} placeholder="sip:you@company.com" />
         <Input label="Password" value={password} onChange={setPassword} placeholder="password" type="password" />
