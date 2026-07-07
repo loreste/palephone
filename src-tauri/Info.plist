@@ -4,5 +4,9 @@
 <dict>
     <key>NSMicrophoneUsageDescription</key>
     <string>Pale needs microphone access to make and receive phone calls.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Pale needs camera access to make and receive video calls.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Pale needs screen recording access when you choose to share your screen.</string>
 </dict>
 </plist>
