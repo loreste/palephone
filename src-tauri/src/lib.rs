@@ -13,7 +13,9 @@ use serde::Deserialize;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 #[cfg(desktop)]
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, State};
+#[cfg(desktop)]
+use tauri::{WebviewUrl, WebviewWindowBuilder};
 
 /// Shared engine state accessible from Tauri commands
 struct EngineState {
@@ -938,6 +940,7 @@ fn start_event_bridge(
 // ─── System Tray (desktop only) ───
 
 #[cfg(desktop)]
+#[cfg(desktop)]
 fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -988,7 +991,14 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Android may already have a logger; env_logger only works on desktop (stdout/stderr)
+    #[cfg(not(target_os = "android"))]
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    #[cfg(target_os = "android")]
+    {
+        let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+            .try_init();
+    }
 
     let runtime = Arc::new(SipRuntimeState {
         registered_account_id: Mutex::new(None),
@@ -1080,12 +1090,19 @@ pub fn run() {
 
             // Initialize call history database
             let db_path = app_data.join("call_history.db");
-            let history_db = Arc::new(Mutex::new(CallHistoryDb::open(&db_path).map_err(|e| {
-                format!(
-                    "failed to open call history database at {}: {e}",
-                    db_path.display()
-                )
-            })?));
+            let history_db = match CallHistoryDb::open(&db_path) {
+                Ok(db) => Arc::new(Mutex::new(db)),
+                Err(e) => {
+                    log::error!(
+                        "Failed to open call history at {}: {e}; using in-memory fallback",
+                        db_path.display()
+                    );
+                    Arc::new(Mutex::new(
+                        CallHistoryDb::open(std::path::Path::new(":memory:"))
+                            .expect("in-memory SQLite should never fail"),
+                    ))
+                }
+            };
             app.manage(HistoryState(history_db.clone()));
             log::info!("Call history DB opened at {:?}", db_path);
             let call_tracker = Arc::new(Mutex::new(HashMap::new()));

@@ -5,7 +5,13 @@ import { cn } from "@/lib/cn";
 import { useActivityStore } from "@/store/activityStore";
 import { ActivityFeed } from "@/components/chat/ActivityFeed";
 
-const appWindow = getCurrentWindow();
+// Initialize lazily — getCurrentWindow() may not work on mobile
+let appWindow: ReturnType<typeof getCurrentWindow> | null = null;
+try {
+  appWindow = getCurrentWindow();
+} catch {
+  // Not available on mobile platforms
+}
 
 export function TitleBar() {
   const [showActivity, setShowActivity] = useState(false);
@@ -60,21 +66,21 @@ export function TitleBar() {
         </div>
 
         <button
-          onClick={() => appWindow.minimize()}
+          onClick={() => appWindow?.minimize()}
           className="p-1 rounded-sm hover:bg-elevated text-tertiary hover:text-secondary transition-colors"
           aria-label="Minimize"
         >
           <Minus size={14} />
         </button>
         <button
-          onClick={() => appWindow.toggleMaximize()}
+          onClick={() => appWindow?.toggleMaximize()}
           className="p-1 rounded-sm hover:bg-elevated text-tertiary hover:text-secondary transition-colors"
           aria-label="Maximize"
         >
           <Square size={12} />
         </button>
         <button
-          onClick={() => appWindow.close()}
+          onClick={() => appWindow?.close()}
           className="p-1 rounded-sm hover:bg-destructive/20 text-tertiary hover:text-destructive transition-colors"
           aria-label="Close"
         >
