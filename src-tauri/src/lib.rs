@@ -114,6 +114,18 @@ fn register_account(
     save_config(&config_state.path, &current).map_err(|e| e.to_string())
 }
 
+#[cfg(mobile)]
+#[tauri::command]
+fn open_popout_window(
+    _app: AppHandle,
+    _kind: String,
+    _target_id: Option<String>,
+    _title: Option<String>,
+) -> Result<String, String> {
+    Err("Pop-out windows are not available on mobile".to_string())
+}
+
+#[cfg(desktop)]
 #[tauri::command]
 fn open_popout_window(
     app: AppHandle,
@@ -1041,15 +1053,18 @@ pub fn run() {
             #[cfg(desktop)]
             setup_tray(app)?;
 
-            // Close-to-tray: hide window instead of quitting
-            if let Some(window) = app.get_webview_window("main") {
-                let win = window.clone();
-                window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        let _ = win.hide();
-                    }
-                });
+            // Close-to-tray: hide window instead of quitting (desktop only)
+            #[cfg(desktop)]
+            {
+                if let Some(window) = app.get_webview_window("main") {
+                    let win = window.clone();
+                    window.on_window_event(move |event| {
+                        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                            api.prevent_close();
+                            let _ = win.hide();
+                        }
+                    });
+                }
             }
 
             #[cfg(desktop)]
