@@ -940,7 +940,6 @@ fn start_event_bridge(
 // ─── System Tray (desktop only) ───
 
 #[cfg(desktop)]
-#[cfg(desktop)]
 fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
