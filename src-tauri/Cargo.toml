@@ -1,6 +1,6 @@
 [package]
 name = "pale"
-version = "0.1.4"
+version = "0.1.5"
 description = "Cross-platform SIP softphone"
 authors = ["loreste"]
 license = "GPL-2.0-only"
