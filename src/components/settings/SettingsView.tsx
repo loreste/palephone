@@ -245,6 +245,8 @@ function AccountSettingsPanel() {
 
 function ServerSettingsPanel() {
   const { baseUrl, connected, setConnection } = useServerStore();
+  const setAccount = useAccountStore((s) => s.setAccount);
+  const setRegState = useAccountStore((s) => s.setRegState);
   const [url, setUrl] = useState(baseUrl ?? adminBaseUrl());
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -269,6 +271,31 @@ function ServerSettingsPanel() {
       }
       sessionStorage.setItem("pale.admin.token", session.token);
       setConnection(url, session.token, session.expires_at, session.user.role, session.user.display_name);
+      await storeSipPassword("pale-server-login", password).catch(() => {});
+
+      let provisionedAccount: SipAccount | null = null;
+      const registrarUri = session.sip_credentials?.registrar_uri ?? null;
+      if (session.sip_credentials && registrarUri) {
+        const creds = session.sip_credentials;
+        await storeSipPassword(creds.sip_uri, creds.password).catch(() => {});
+        provisionedAccount = normalizeProvisionedSipAccount({
+          displayName: session.user.display_name,
+          sipUri: creds.sip_uri,
+          registrarUri,
+          authUsername: creds.username,
+          transport: creds.transport,
+        });
+        setAccount(provisionedAccount);
+        setRegState("registering");
+        await registerAccount({
+          display_name: provisionedAccount.displayName,
+          sip_uri: provisionedAccount.sipUri,
+          registrar_uri: provisionedAccount.registrarUri,
+          auth_username: provisionedAccount.authUsername,
+          auth_password: creds.password,
+          transport: provisionedAccount.transport,
+        });
+      }
       setPassword("");
 
       // Persist server URL in app config
@@ -281,6 +308,16 @@ function ServerSettingsPanel() {
           role: session.user.role,
           display_name: session.user.display_name,
         };
+        if (provisionedAccount) {
+          config.account = {
+            display_name: provisionedAccount.displayName,
+            sip_uri: provisionedAccount.sipUri,
+            registrar_uri: provisionedAccount.registrarUri,
+            auth_username: provisionedAccount.authUsername,
+            transport: provisionedAccount.transport,
+            reg_expiry: 3600,
+          };
+        }
         await saveSettings(config).catch(() => {});
       }
 

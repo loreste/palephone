@@ -27,7 +27,7 @@ import { useAutoAway } from "@/hooks/useAutoAway";
 import { useMeetingReminders } from "@/hooks/useMeetingReminders";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
-import { getConfig, getSipPassword, openPopoutWindow, paleLogin, registerAccount, saveSettings } from "@/lib/tauri";
+import { getConfig, getSipPassword, openPopoutWindow, paleLogin, registerAccount, saveSettings, storeSipPassword } from "@/lib/tauri";
 import { normalizeProvisionedSipAccount } from "@/lib/sipDefaults";
 
 /**
@@ -89,6 +89,50 @@ export function AppShell() {
   useMeetingReminders();
 
   const setAccount = useAccountStore((s) => s.setAccount);
+  const setRegState = useAccountStore((s) => s.setRegState);
+
+  const registerPersistedSipAccount = useCallback(async () => {
+    const config = await getConfig();
+    const acct = config.account;
+    if (!acct?.sip_uri || !acct.registrar_uri) {
+      return false;
+    }
+
+    const account = normalizeProvisionedSipAccount({
+      displayName: acct.display_name,
+      sipUri: acct.sip_uri,
+      registrarUri: acct.registrar_uri,
+      authUsername: acct.auth_username,
+      transport: acct.transport,
+    });
+    setAccount(account);
+
+    const password =
+      (await getSipPassword(acct.sip_uri).catch(() => null)) ||
+      (await getSipPassword("pale-server-login").catch(() => null));
+    if (!password) {
+      setConnectionIssue("Pale Server is connected, but the SIP password is missing. Sign in again from Settings.");
+      return false;
+    }
+
+    setRegState("registering");
+    try {
+      await registerAccount({
+        display_name: account.displayName,
+        sip_uri: account.sipUri,
+        registrar_uri: account.registrarUri,
+        auth_username: account.authUsername,
+        auth_password: password,
+        transport: account.transport,
+      });
+      await storeSipPassword(account.sipUri, password).catch(() => {});
+      return true;
+    } catch (err) {
+      setRegState("unregistered", String(err));
+      setConnectionIssue(`Pale Server is connected, but SIP registration failed: ${String(err)}`);
+      return false;
+    }
+  }, [setAccount, setRegState]);
 
   const connectFromSavedConfig = useCallback(async () => {
     const config = await getConfig();
@@ -116,6 +160,7 @@ export function AppShell() {
     const registrarUri = response.sip_credentials?.registrar_uri ?? null;
     if (response.sip_credentials && registrarUri) {
       const creds = response.sip_credentials;
+      await storeSipPassword(creds.sip_uri, creds.password).catch(() => {});
       const account = normalizeProvisionedSipAccount({
         displayName: response.user.display_name,
         sipUri: creds.sip_uri,
@@ -125,6 +170,7 @@ export function AppShell() {
       });
       setAccount(account);
       try {
+        setRegState("registering");
         await registerAccount({
           display_name: account.displayName,
           sip_uri: account.sipUri,
@@ -133,7 +179,17 @@ export function AppShell() {
           auth_password: creds.password,
           transport: account.transport,
         });
+        config.account = {
+          display_name: account.displayName,
+          sip_uri: account.sipUri,
+          registrar_uri: account.registrarUri,
+          auth_username: account.authUsername,
+          transport: account.transport,
+          reg_expiry: 3600,
+        };
+        await saveSettings(config).catch(() => {});
       } catch (e) {
+        setRegState("unregistered", String(e));
         sipIssue = `Signed in, but SIP registration failed: ${String(e)}`;
       }
     } else {
@@ -148,7 +204,7 @@ export function AppShell() {
 
     setConnectionIssue(sipIssue);
     return true;
-  }, [setAccount, setServerConnection]);
+  }, [setAccount, setRegState, setServerConnection]);
 
   const retryConnection = useCallback(async () => {
     setReconnecting(true);
@@ -184,6 +240,10 @@ export function AppShell() {
           } catch (err) {
             setConnectionIssue(err instanceof Error ? err.message : "Could not connect to Pale Server.");
           }
+        } else if (alreadyConnected && config.account?.sip_uri && config.account?.registrar_uri) {
+          registerPersistedSipAccount().catch((err) => {
+            setConnectionIssue(err instanceof Error ? err.message : "Could not register SIP account.");
+          });
         }
 
         // Show wizard if not connected to server and the user has never
@@ -204,7 +264,7 @@ export function AppShell() {
         }
         setWizardChecked(true);
       });
-  }, [connectFromSavedConfig, setServerIdentity]);
+  }, [connectFromSavedConfig, registerPersistedSipAccount, setServerIdentity]);
 
   if (!wizardChecked) return null;
 
