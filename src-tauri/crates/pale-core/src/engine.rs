@@ -427,9 +427,18 @@ impl PjsipEngine {
             acc_cfg.rtp_cfg.port_range = rtp_port_range as u32;
             acc_cfg.rtp_cfg.randomize_port = 1;
 
-            let (use_srtp, secure_signaling) = srtp_policy(network.srtp_mode);
+            let (use_srtp, _secure_signaling) = srtp_policy(network.srtp_mode);
             acc_cfg.use_srtp = use_srtp;
-            acc_cfg.srtp_secure_signaling = secure_signaling;
+            // Always set srtp_secure_signaling=0 to prevent PJSIP_ESESSIONINSECURE.
+            // Signaling security is handled by the transport binding (TLS transport)
+            // rather than by checking the request-URI scheme. PJSIP's scheme-based
+            // check fails for proxied calls where the URI is sip: but the actual
+            // transport is TLS.
+            acc_cfg.srtp_secure_signaling = 0;
+            log::info!(
+                "Account SRTP: use_srtp={}, secure_signaling=0",
+                use_srtp
+            );
 
             // Bind the account to its signaling transport so outgoing calls use
             // it (e.g. TLS) instead of defaulting to plaintext UDP based on the
@@ -500,25 +509,18 @@ impl PjsipEngine {
                 &mut call_id,
             );
 
-            // 420006 = PJSIP_ESESSIONINSECURE — PJSIP thinks the signaling
-            // is not secure enough for the SRTP policy. This happens when the
-            // request-URI uses sip: instead of sips: even though the actual
-            // transport is TLS. Retry with a sips: URI so PJSIP is satisfied.
+            // 420006 = PJMEDIA_EAUD_NODEFDEV — no default audio device.
+            // This happens when macOS hasn't granted microphone permission or
+            // no audio device is available. Switch to null sound device and retry.
             if status == 420006 {
-                let sips_uri = if uri.starts_with("sip:") {
-                    uri.replacen("sip:", "sips:", 1)
-                } else {
-                    format!("sips:{}", uri.trim_start_matches("sips:"))
-                };
                 log::warn!(
-                    "Call to {uri} rejected as insecure (420006); retrying as {sips_uri}"
+                    "No default audio device (420006) for call to {uri}; switching to null sound device"
                 );
-                let dest_sips = CString::new(sips_uri).unwrap();
-                let mut dest_sips_pj = pj_str_from_cstring(&dest_sips);
+                pjsip_sys::pjsua_set_null_snd_dev();
                 call_id = -1;
                 status = pjsip_sys::pjsua_call_make_call(
                     acc_id,
-                    &mut dest_sips_pj,
+                    &mut dest_pj,
                     &opt,
                     std::ptr::null_mut(),
                     std::ptr::null(),
