@@ -615,6 +615,14 @@ pub fn router(state: SharedState) -> Router {
             "/v1/admin/encryption/rotate-key",
             post(rotate_encryption_key),
         )
+        .route(
+            "/v1/admin/rotate-admin-password",
+            post(rotate_admin_password),
+        )
+        .route(
+            "/v1/admin/rotate-server-token",
+            post(rotate_server_token),
+        )
         // Privileged access management
         .route(
             "/v1/admin/elevations",
@@ -7795,6 +7803,65 @@ async fn rotate_encryption_key(
         Some(config.key_id.clone()),
     );
     Ok(Json(config))
+}
+
+/// Generate fresh secrets for rotation. The admin copies the new values
+/// into the environment file and restarts the server. This ensures
+/// secrets are never stored in the database or transmitted unnecessarily.
+async fn rotate_admin_password(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let new_password: String = (0..32)
+        .map(|_| {
+            let idx = rng.gen_range(0..62);
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[idx] as char
+        })
+        .collect();
+    let new_token: String = (0..32)
+        .map(|_| {
+            let idx = rng.gen_range(0..62);
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[idx] as char
+        })
+        .collect();
+    let new_storage_key: String = (0..32)
+        .map(|_| {
+            let idx = rng.gen_range(0..62);
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[idx] as char
+        })
+        .collect();
+
+    state.record_audit_event(&principal, "secrets.generated", None);
+    Ok(Json(json!({
+        "PALE_ADMIN_PASSWORD": new_password,
+        "PALE_SERVER_TOKEN": new_token,
+        "PALE_STORAGE_KEY": new_storage_key,
+        "instructions": "Update your .env file with these values and restart the server. Do NOT store these in the database."
+    })))
+}
+
+async fn rotate_server_token(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let new_token: String = (0..44)
+        .map(|_| {
+            let idx = rng.gen_range(0..62);
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[idx] as char
+        })
+        .collect();
+
+    state.record_audit_event(&principal, "server.token_generated", None);
+    Ok(Json(json!({
+        "PALE_SERVER_TOKEN": new_token,
+        "instructions": "Update your .env file and restart the server. All existing sessions will be invalidated."
+    })))
 }
 
 // ─── Privileged Access Management ───
