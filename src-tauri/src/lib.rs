@@ -379,6 +379,7 @@ async fn pale_server_login(input: PaleLoginRequest) -> Result<serde_json::Value,
     let response = client
         .post(&url)
         .header("Content-Type", "application/json")
+        .header("User-Agent", format!("Pale/{}", env!("CARGO_PKG_VERSION")))
         .body(body.to_string())
         .send()
         .await

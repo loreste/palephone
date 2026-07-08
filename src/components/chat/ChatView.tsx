@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, type ReactNode } from "react";
-import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Video, Users, UserPlus, Reply, Pencil, Pin, Forward, Check, CheckCheck, Search, Radio, Hash, CalendarClock, Star, AlertTriangle, Plug, Copy, Trash2, Clock, Image as ImageLucide, Languages, Bold, Italic, Code, Link, BookOpen, ListTodo, ExternalLink, MessagesSquare } from "lucide-react";
+import { Send, Paperclip, MessageSquare, FileIcon, ImageIcon, Plus, X, Loader2, Phone, Video, Users, UserPlus, Reply, Pencil, Pin, Forward, Check, CheckCheck, Search, Radio, Hash, CalendarClock, Star, AlertTriangle, Plug, Copy, Trash2, Clock, Image as ImageLucide, Languages, Bold, Italic, Code, Link, BookOpen, ListTodo, ExternalLink, MessagesSquare, Smile } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useChatStore, type ChatMessage, type RoomSummary } from "@/store/chatStore";
 import { useMatrixStore } from "@/store/matrixStore";
@@ -1684,6 +1684,20 @@ function ChatRoom({
     }, 0);
   };
 
+  const insertEmoji = (emoji: string) => {
+    const el = inputRef.current;
+    if (!el) { setInput(input + emoji); return; }
+    const start = el.selectionStart ?? input.length;
+    const end = el.selectionEnd ?? input.length;
+    const newInput = input.slice(0, start) + emoji + input.slice(end);
+    setInput(newInput);
+    setTimeout(() => {
+      el.focus();
+      const newPos = start + emoji.length;
+      el.setSelectionRange(newPos, newPos);
+    }, 0);
+  };
+
   const handleComposeKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       handleSend();
@@ -2263,6 +2277,7 @@ function ChatRoom({
               <ImageLucide size={18} />
             </button>
           )}
+          <ComposeEmojiPicker onSelect={insertEmoji} customEmojis={customEmojis} />
           <div className="ml-auto flex items-center gap-1.5">
             <button onClick={() => insertMarkdown("bold")} className="p-2 rounded text-tertiary hover:text-primary hover:bg-elevated" title="Bold (Ctrl+B)">
               <Bold size={15} />
@@ -3398,6 +3413,73 @@ function EmojiPickerButton({ onSelect, customEmojis }: { onSelect: (emoji: strin
                     key={emoji.id}
                     onClick={() => { onSelect(`:${emoji.shortcode}:`); setOpen(false); }}
                     className="w-6 h-6 flex items-center justify-center rounded hover:bg-elevated"
+                    title={`:${emoji.shortcode}:`}
+                  >
+                    <img src={emoji.image_url} alt={emoji.shortcode} className="w-5 h-5 object-contain" />
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ComposeEmojiPicker({ onSelect, customEmojis }: { onSelect: (emoji: string) => void; customEmojis?: CustomEmoji[] }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [open]);
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen(!open)}
+        className={cn(
+          "p-2 rounded-md transition-colors",
+          open ? "text-accent bg-accent/10" : "text-tertiary hover:text-secondary hover:bg-elevated"
+        )}
+        aria-label="Emoji picker"
+        title="Insert emoji"
+      >
+        <Smile size={18} />
+      </button>
+      {open && (
+        <div className="absolute bottom-10 left-0 z-50 bg-surface border border-border-subtle rounded-lg shadow-lg p-2.5 w-72 max-h-72 overflow-y-auto">
+          {EMOJI_CATEGORIES.map((cat) => (
+            <div key={cat.label} className="mb-2">
+              <p className="text-[10px] font-semibold text-tertiary uppercase tracking-wider mb-1 px-0.5">{cat.label}</p>
+              <div className="flex flex-wrap gap-0.5">
+                {cat.emojis.map((emoji) => (
+                  <button
+                    key={emoji}
+                    onClick={() => { onSelect(emoji); setOpen(false); }}
+                    className="w-8 h-8 flex items-center justify-center rounded-md hover:bg-elevated text-lg transition-colors"
+                  >
+                    {emoji}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+          {customEmojis && customEmojis.length > 0 && (
+            <div className="mb-2">
+              <p className="text-[10px] font-semibold text-tertiary uppercase tracking-wider mb-1 px-0.5">Custom</p>
+              <div className="flex flex-wrap gap-0.5">
+                {customEmojis.map((emoji) => (
+                  <button
+                    key={emoji.id}
+                    onClick={() => { onSelect(`:${emoji.shortcode}:`); setOpen(false); }}
+                    className="w-8 h-8 flex items-center justify-center rounded-md hover:bg-elevated transition-colors"
                     title={`:${emoji.shortcode}:`}
                   >
                     <img src={emoji.image_url} alt={emoji.shortcode} className="w-5 h-5 object-contain" />
