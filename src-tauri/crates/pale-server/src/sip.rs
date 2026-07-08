@@ -286,6 +286,12 @@ pub fn handle_packet(packet: &str, peer: SocketAddr, state: &AppState) -> Option
     response
 }
 
+/// Returns true if the string looks like a phone number (digits, +, at least 3 chars).
+fn looks_like_phone_number(s: &str) -> bool {
+    let stripped = s.trim_start_matches('+');
+    stripped.len() >= 3 && stripped.chars().all(|c| c.is_ascii_digit())
+}
+
 fn is_pale_sip_client(request: &SipRequest) -> bool {
     request
         .header("user-agent")
@@ -463,6 +469,29 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
             None
         }
     };
+
+    // ── Inbound DID routing ──
+    // If the caller is not a locally registered user (external/gateway call)
+    // and the destination matches a DID, route to the DID's destination.
+    let caller_is_local = state.registration_for(&from_aor).is_some();
+    if !caller_is_local {
+        let did_number = crate::sip_user_part(&requested_uri);
+        if let Some(ext) = state.resolve_extension(did_number).filter(|e| e.is_did) {
+            tracing::info!(
+                did = %did_number,
+                destination = %ext.destination,
+                "Inbound DID call routed",
+            );
+            if let Some(resp) = make_redirect(&ext.destination) {
+                state.record_cdr_end(&call_id_str, "answered");
+                return Some(resp);
+            }
+            // DID destination unavailable — voicemail fallback
+            state.create_voicemail_for_user(&ext.destination, &from_aor, "", 0, None);
+            state.record_cdr_end(&call_id_str, "voicemail");
+            return Some(request.response(200, "OK", &[]));
+        }
+    }
 
     // ── DND check ──
     let (is_dnd, dnd_forward) = state.check_dnd(&requested_uri);
@@ -819,6 +848,64 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
             "Moved Temporarily",
             &[("Contact", format!("<{}>", routed_uri))],
         ));
+    }
+
+    // ── Outbound PSTN gateway routing ──
+    // If the destination looks like a phone number (digits, possibly with +),
+    // find a matching SIP gateway by prefix and redirect to the gateway.
+    let user_part = crate::sip_user_part(&routed_uri);
+    let normalized = crate::normalize_dialed_number(user_part);
+    if looks_like_phone_number(&normalized) {
+        if let Some(gw) = state.resolve_gateway(&normalized) {
+            let transport_param = match gw.transport.as_str() {
+                "tls" | "TLS" => ";transport=tls",
+                "tcp" | "TCP" => ";transport=tcp",
+                _ => "",
+            };
+            let gateway_uri = format!(
+                "sip:{}@{}:{}{}",
+                normalized, gw.host, gw.port, transport_param
+            );
+
+            // Determine outbound caller ID.
+            // Use the caller's DID if they have one assigned, otherwise use
+            // their SIP user part. The P-Asserted-Identity header tells the
+            // gateway (and carrier) who is calling.
+            let caller_did = state.list_dids().into_iter().find(|d| {
+                d.destination == from_aor
+                    || d.destination == format!("sip:{}", crate::sip_user_part(&from_aor))
+            });
+            let pai = if let Some(did) = &caller_did {
+                format!("<sip:{}@{}>", did.extension, gw.host)
+            } else {
+                format!("<{}>", from_aor)
+            };
+
+            tracing::info!(
+                number = %normalized,
+                gateway = %gw.name,
+                pai = %pai,
+                "Routing outbound call via PSTN gateway",
+            );
+            state.upsert_sip_dialog(UpsertSipDialog {
+                call_id: call_id_str.clone(),
+                from_uri: from_aor,
+                to_uri: requested_uri,
+                target_contact: Some(gateway_uri.clone()),
+                status: SipDialogStatus::Routing,
+                media_types: media,
+                peer: Default::default(),
+            });
+            state.record_cdr_end(&call_id_str, "answered");
+            return Some(request.response(
+                302,
+                "Moved Temporarily",
+                &[
+                    ("Contact", format!("<{}>", gateway_uri)),
+                    ("P-Asserted-Identity", pai),
+                ],
+            ));
+        }
     }
 
     // ── 480 Unavailable ──
