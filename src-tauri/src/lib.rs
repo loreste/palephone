@@ -635,6 +635,14 @@ fn list_audio_devices(state: State<EngineState>) -> Result<Vec<AudioDeviceInfo>,
     }
 }
 
+#[tauri::command]
+fn refresh_registration(state: State<EngineState>) -> Result<(), String> {
+    state
+        .get()?
+        .send_command(EngineCommand::RefreshRegistration)
+        .map_err(|e| e.to_string())
+}
+
 #[derive(serde::Serialize)]
 struct HidAudioDevice {
     name: String,
@@ -1044,6 +1052,7 @@ pub fn run() {
             delete_sip_password,
             // Audio devices
             list_audio_devices,
+            refresh_registration,
             detect_hid_devices,
             // Video
             make_video_call,

@@ -259,6 +259,11 @@ export function toggleVideo(callId: number, enabled: boolean): Promise<void> {
   return invoke("toggle_video", { callId, enabled });
 }
 
+/** Force all SIP accounts to re-register. Call on app resume or network change. */
+export function refreshRegistration(): Promise<void> {
+  return invoke("refresh_registration");
+}
+
 export function startScreenShare(callId: number, enabled: boolean): Promise<void> {
   return invoke("start_screen_share", { callId, enabled });
 }

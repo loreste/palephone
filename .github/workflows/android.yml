@@ -86,6 +86,26 @@ jobs:
       - name: Initialize Tauri Android
         run: npm run tauri android init
 
+      - name: Add Android permissions for background calling
+        run: |
+          MANIFEST="src-tauri/gen/android/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST" ]; then
+            # Insert permissions before the closing </manifest> tag
+            sed -i '/<\/manifest>/i \
+                <uses-permission android:name="android.permission.RECORD_AUDIO" />\
+                <uses-permission android:name="android.permission.CAMERA" />\
+                <uses-permission android:name="android.permission.INTERNET" />\
+                <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />\
+                <uses-permission android:name="android.permission.WAKE_LOCK" />\
+                <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\
+                <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />\
+                <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\
+                <uses-permission android:name="android.permission.VIBRATE" />\
+                <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\
+                <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />' "$MANIFEST"
+            echo "Android permissions injected"
+          fi
+
       - name: Build Android APK
         run: npm run tauri android build -- --target aarch64 --apk
         env:

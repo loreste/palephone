@@ -79,6 +79,9 @@ pub enum EngineCommand {
         call_id: CallId,
     },
     ListAudioDevices,
+    /// Re-register all accounts. Called when the app resumes from background
+    /// or when a network change is detected.
+    RefreshRegistration,
     Shutdown,
 }
 
@@ -330,6 +333,9 @@ impl PjsipEngine {
                     EngineCommand::ListAudioDevices => {
                         Self::handle_list_audio_devices();
                     }
+                    EngineCommand::RefreshRegistration => {
+                        Self::handle_refresh_registration();
+                    }
                 },
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     // No command — continue polling
@@ -375,7 +381,16 @@ impl PjsipEngine {
             let password = CString::new(config.auth_password.as_str()).unwrap();
             acc_cfg.cred_info[0].data = pj_str_from_cstring(&password);
 
-            acc_cfg.reg_timeout = config.reg_expiry;
+            // On mobile, use shorter registration interval to detect
+            // network changes faster. Desktop uses the configured value.
+            #[cfg(mobile)]
+            {
+                acc_cfg.reg_timeout = config.reg_expiry.min(300); // 5 min max on mobile
+            }
+            #[cfg(desktop)]
+            {
+                acc_cfg.reg_timeout = config.reg_expiry;
+            }
 
             // Set transport based on config. Keep the CString alive until pjsua_acc_add.
             let bare_registrar = config
@@ -867,6 +882,23 @@ impl PjsipEngine {
                 recording: false,
                 file_path,
             });
+        }
+    }
+
+    /// Force all accounts to re-register. Called on app resume or network change.
+    fn handle_refresh_registration() {
+        unsafe {
+            let count = pjsip_sys::pjsua_acc_get_count();
+            for i in 0..count {
+                if pjsip_sys::pjsua_acc_is_valid(i as _) == 1 {
+                    let status = pjsip_sys::pjsua_acc_set_registration(i as _, 1);
+                    if status == 0 {
+                        log::info!("Re-registration triggered for account {}", i);
+                    } else {
+                        log::warn!("Re-registration failed for account {}: status={}", i, status);
+                    }
+                }
+            }
         }
     }
 

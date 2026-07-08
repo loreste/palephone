@@ -266,6 +266,19 @@ export function AppShell() {
       });
   }, [connectFromSavedConfig, registerPersistedSipAccount, setServerIdentity]);
 
+  // Re-register SIP when the app returns to the foreground (mobile resume)
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible" && useServerStore.getState().connected) {
+        import("@/lib/tauri").then(({ refreshRegistration }) => {
+          refreshRegistration().catch(() => {});
+        });
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, []);
+
   if (!wizardChecked) return null;
 
   if (showWizard) {
