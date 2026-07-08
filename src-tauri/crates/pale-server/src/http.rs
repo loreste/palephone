@@ -961,6 +961,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/push/vapid-key", get(push_vapid_key))
         .route("/v1/events", get(sse_stream))
         .layer(from_fn(crate::metrics::request_metrics))
+        .layer(from_fn(require_pale_client))
         .layer(from_fn(cors))
         .layer(DefaultBodyLimit::max(max_upload_bytes))
         .with_state(state)
@@ -998,6 +999,35 @@ fn apply_cors_headers(headers: &mut HeaderMap, origin: Option<&str>) {
         header::ACCESS_CONTROL_ALLOW_HEADERS,
         HeaderValue::from_static("Authorization, Content-Type, X-Pale-Filename"),
     );
+}
+
+/// Reject HTTP requests that do not come from a recognised Pale client.
+/// Health, metrics, root, and CORS preflight requests are exempt so that
+/// load-balancers and monitoring tools still work.
+async fn require_pale_client(request: Request<axum::body::Body>, next: Next) -> Response {
+    let path = request.uri().path();
+
+    // Always allow health-checks, metrics, root page, and OPTIONS preflight
+    if matches!(path, "/" | "/health" | "/metrics") || request.method() == Method::OPTIONS {
+        return next.run(request).await;
+    }
+
+    let is_pale = request
+        .headers()
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|ua| ua.starts_with("Pale/"))
+        .unwrap_or(false);
+
+    if !is_pale {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Pale client required"})),
+        )
+            .into_response();
+    }
+
+    next.run(request).await
 }
 
 fn origin_allowed(origin: &str) -> bool {

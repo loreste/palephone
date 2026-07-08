@@ -419,7 +419,9 @@ async fn pale_server_request(input: PaleServerRequest) -> Result<serde_json::Val
         _ => client.get(&url),
     };
 
-    req = req.header("Content-Type", "application/json");
+    req = req
+        .header("Content-Type", "application/json")
+        .header("User-Agent", format!("Pale/{}", env!("CARGO_PKG_VERSION")));
 
     if let Some(token) = &input.token {
         req = req.header("Authorization", format!("Bearer {}", token));

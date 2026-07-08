@@ -286,7 +286,26 @@ pub fn handle_packet(packet: &str, peer: SocketAddr, state: &AppState) -> Option
     response
 }
 
+fn is_pale_sip_client(request: &SipRequest) -> bool {
+    request
+        .header("user-agent")
+        .map(|ua| ua.starts_with("Pale/"))
+        .unwrap_or(false)
+}
+
 fn handle_request(request: &SipRequest, peer: SocketAddr, state: &AppState) -> Option<String> {
+    // Allow OPTIONS (keep-alive probes) from any client; reject everything
+    // else that does not identify as a Pale client.
+    if request.method() != "OPTIONS" && !is_pale_sip_client(request) {
+        tracing::warn!(
+            peer = %peer,
+            method = %request.method(),
+            ua = ?request.header("user-agent"),
+            "SIP request rejected: not a Pale client",
+        );
+        return Some(request.response(403, "Forbidden", &[]));
+    }
+
     match request.method().as_str() {
         "REGISTER" => handle_register(&request, peer, state),
         "INVITE" => handle_invite(&request, state),

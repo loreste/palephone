@@ -173,6 +173,9 @@ impl PjsipEngine {
                     return;
                 }
             };
+            let ua_string = CString::new(format!("Pale/{}", env!("CARGO_PKG_VERSION")))
+                .unwrap_or_else(|_| CString::new("Pale").unwrap());
+            cfg.user_agent = pj_str_from_cstring(&ua_string);
             cfg.cb.on_reg_state2 = Some(on_reg_state2);
             cfg.cb.on_incoming_call = Some(on_incoming_call);
             cfg.cb.on_call_state = Some(on_call_state);
