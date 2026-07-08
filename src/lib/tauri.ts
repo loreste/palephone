@@ -386,6 +386,21 @@ export function onAudioDevicesChanged(
   return listen("audio://devices-changed", () => handler());
 }
 
+export interface VideoStreamEvent {
+  call_id: number;
+  active: boolean;
+  has_incoming: boolean;
+  has_outgoing: boolean;
+}
+
+export function onVideoStream(
+  handler: (event: VideoStreamEvent) => void
+): Promise<UnlistenFn> {
+  return listen<VideoStreamEvent>("video://stream-state", (e) =>
+    handler(e.payload)
+  );
+}
+
 export function onPaleError(
   handler: (event: PaleErrorEvent) => void
 ): Promise<UnlistenFn> {

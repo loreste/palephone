@@ -33,6 +33,12 @@ pub enum PaleEvent {
         recording: bool,
         file_path: String,
     },
+    VideoStreamState {
+        call_id: i32,
+        active: bool,
+        has_incoming: bool,
+        has_outgoing: bool,
+    },
     AudioDevicesChanged,
     Error {
         message: String,

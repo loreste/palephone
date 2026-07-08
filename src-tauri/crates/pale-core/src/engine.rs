@@ -404,6 +404,13 @@ impl PjsipEngine {
             acc_cfg.use_srtp = use_srtp;
             acc_cfg.srtp_secure_signaling = secure_signaling;
 
+            // Video: auto-show incoming video, auto-transmit when video is
+            // negotiated, and use the default capture/render devices.
+            acc_cfg.vid_in_auto_show = 1;
+            acc_cfg.vid_out_auto_transmit = 1;
+            acc_cfg.vid_cap_dev = -1; // PJMEDIA_VID_DEFAULT_CAPTURE_DEV
+            acc_cfg.vid_rend_dev = -2; // PJMEDIA_VID_DEFAULT_RENDER_DEV
+
             let mut acc_id: pjsip_sys::pjsua_acc_id = -1;
             let status = pjsip_sys::pjsua_acc_add(&acc_cfg, 1, &mut acc_id);
 
@@ -1094,11 +1101,59 @@ unsafe extern "C" fn on_call_media_state(call_id: pjsip_sys::pjsua_call_id) {
     let mut ci: pjsip_sys::pjsua_call_info = std::mem::zeroed();
     pjsip_sys::pjsua_call_get_info(call_id, &mut ci);
 
+    // ── Audio ──
     if ci.media_status == pjsip_sys::pjsua_call_media_status_PJSUA_CALL_MEDIA_ACTIVE {
-        // Connect call audio to sound device
         pjsip_sys::pjsua_conf_connect(ci.conf_slot, 0);
         pjsip_sys::pjsua_conf_connect(0, ci.conf_slot);
         log::info!("Call {} media active — audio connected", call_id);
+    }
+
+    // ── Video ──
+    // Iterate all media streams to detect video and show/hide native
+    // video windows. PJSIP creates native overlay windows via the
+    // platform video device (AVFoundation on macOS, DirectShow/null on
+    // Windows). We show the incoming video window and emit an event so
+    // the frontend can adjust its UI.
+    let mut has_incoming_video = false;
+    let mut has_outgoing_video = false;
+    for i in 0..ci.media_cnt as usize {
+        let media = &ci.media[i];
+        // PJMEDIA_TYPE_VIDEO = 2
+        if media.type_ != 2 {
+            continue;
+        }
+        let active = media.status
+            == pjsip_sys::pjsua_call_media_status_PJSUA_CALL_MEDIA_ACTIVE;
+        // dir: 1=capture/encoding, 2=render/decoding, 3=both
+        let dir = media.dir;
+        if active && (dir == 2 || dir == 3) {
+            has_incoming_video = true;
+        }
+        if active && (dir == 1 || dir == 3) {
+            has_outgoing_video = true;
+        }
+
+        // Show/hide native incoming video window
+        let win_id = media.stream.vid.win_in;
+        if win_id >= 0 {
+            pjsip_sys::pjsua_vid_win_set_show(
+                win_id,
+                if active { 1 } else { 0 },
+            );
+            log::info!(
+                "Call {} video stream {}: active={}, dir={}, win={}",
+                call_id, i, active, dir, win_id
+            );
+        }
+    }
+
+    if has_incoming_video || has_outgoing_video {
+        emit_event(PaleEvent::VideoStreamState {
+            call_id,
+            active: true,
+            has_incoming: has_incoming_video,
+            has_outgoing: has_outgoing_video,
+        });
     }
 }
 

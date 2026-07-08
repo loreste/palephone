@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import {
   PhoneOff, Mic, MicOff, Video, VideoOff,
   Monitor, Pause, Play,
@@ -14,9 +14,13 @@ import { invoke } from "@tauri-apps/api/core";
 
 /**
  * Video call view — displays remote and self video with call controls.
- * Since native video rendering requires platform-specific code,
- * this view shows the call state and controls; actual video frames
- * will be rendered in a native overlay window by PJSIP.
+ *
+ * PJSIP renders video via platform-native windows (AVFoundation on macOS,
+ * DirectShow on Windows). These native windows overlay the app and are
+ * positioned/shown automatically by the engine when a video stream is active.
+ *
+ * The React UI provides the call controls and status information beneath
+ * the native video overlay area.
  */
 export function VideoCallView() {
   const { sessions, activeCallId, setMuted, setHeld, updateSessionState, removeSession } =
@@ -25,6 +29,19 @@ export function VideoCallView() {
 
   const [videoEnabled, setVideoEnabled] = useState(true);
   const [screenSharing, setScreenSharing] = useState(false);
+  const [hasIncomingVideo, setHasIncomingVideo] = useState(false);
+  const [hasOutgoingVideo, setHasOutgoingVideo] = useState(false);
+
+  // Listen for video stream state changes from the engine
+  useEffect(() => {
+    const unlisten = ipc.onVideoStream((event) => {
+      if (session && event.call_id === session.id) {
+        setHasIncomingVideo(event.has_incoming);
+        setHasOutgoingVideo(event.has_outgoing);
+      }
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, [session]);
 
   const handleToggleMute = useCallback(() => {
     if (!session) return;
@@ -65,37 +82,53 @@ export function VideoCallView() {
         ? "On Hold"
         : "Ringing...";
 
+  const videoActive = videoEnabled && session.state === "connected";
+
   return (
     <div className="flex flex-col h-full bg-base">
-      {/* Video area — placeholder for native rendering */}
-      <div className="flex-1 relative flex items-center justify-center bg-base">
-        {/* Remote video placeholder */}
-        <div className="flex flex-col items-center gap-4">
-          <CallerAvatar name={session.remoteName || session.remoteUri} size="lg" />
-          <h2 className="text-xl font-semibold text-primary">
+      {/* Video area — native video windows overlay this region */}
+      <div className="flex-1 relative flex items-center justify-center bg-black/90">
+        {/* Remote video: when active, PJSIP renders a native overlay here.
+            We show caller info as a fallback/overlay. */}
+        <div className="flex flex-col items-center gap-3">
+          {(!hasIncomingVideo || !videoActive) && (
+            <CallerAvatar name={session.remoteName || session.remoteUri} size="lg" />
+          )}
+          <h2 className="text-xl font-semibold text-white drop-shadow-lg">
             {session.remoteName || "Unknown"}
           </h2>
-          <CallTimer connectTime={session.connectTime} className="text-lg" />
+          <CallTimer connectTime={session.connectTime} className="text-lg text-white/80" />
           <Badge variant={session.state === "connected" ? "success" : "accent"}>
             {stateLabel}
           </Badge>
-          {videoEnabled && session.state === "connected" && (
-            <p className="text-xs text-tertiary">
-              Video is being rendered in a native overlay window
+          {videoActive && hasIncomingVideo && (
+            <p className="text-xs text-white/50">
+              Remote video active
             </p>
+          )}
+          {videoActive && !hasIncomingVideo && (
+            <p className="text-xs text-white/50">
+              Waiting for remote video...
+            </p>
+          )}
+          {screenSharing && (
+            <Badge variant="accent">Screen sharing</Badge>
           )}
         </div>
 
-        {/* Self view (PiP) — placeholder */}
-        {videoEnabled && (
+        {/* Self view indicator */}
+        {videoActive && hasOutgoingVideo && (
           <div
             className={cn(
               "absolute bottom-4 right-4 w-32 h-24 rounded-lg",
-              "bg-surface border border-border-subtle",
+              "bg-black/60 border border-white/20",
               "flex items-center justify-center"
             )}
           >
-            <Video size={20} className="text-tertiary" />
+            <div className="text-center">
+              <Video size={18} className="text-white/60 mx-auto" />
+              <p className="text-[10px] text-white/50 mt-1">Camera on</p>
+            </div>
           </div>
         )}
       </div>

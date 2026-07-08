@@ -904,6 +904,7 @@ fn start_event_bridge(
                             PaleEvent::AudioLevel { .. } => "audio://level",
                             PaleEvent::AudioDevicesChanged => "audio://devices-changed",
                             PaleEvent::RecordingState { .. } => "sip://recording-state",
+                            PaleEvent::VideoStreamState { .. } => "video://stream-state",
                             PaleEvent::Error { .. } => "pale://error",
                         };
 
