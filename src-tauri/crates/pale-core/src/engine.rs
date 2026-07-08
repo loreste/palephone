@@ -20,6 +20,16 @@ static ACTIVE_RECORDERS: std::sync::LazyLock<
     Mutex<std::collections::HashMap<CallId, (pjsip_sys::pjsua_recorder_id, String)>>,
 > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
+/// PJSIP transport instance IDs captured at startup, so accounts can be bound
+/// to a specific signaling transport. Binding a TLS account to the TLS
+/// transport makes its outgoing calls use TLS instead of falling back to
+/// plaintext UDP (which also trips PJSIP's secure-signaling SRTP check,
+/// PJSIP_ESESSIONINSECURE). -1 means "not created / let PJSIP choose".
+static TLS_TRANSPORT_ID: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(-1);
+static TCP_TRANSPORT_ID: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(-1);
+
 /// Send an event from PJSIP callbacks
 fn emit_event(event: PaleEvent) {
     if let Some(tx) = EVENT_TX.get() {
@@ -187,7 +197,8 @@ impl PjsipEngine {
             cfg.cb.on_incoming_call = Some(on_incoming_call);
             cfg.cb.on_call_state = Some(on_call_state);
             cfg.cb.on_call_media_state = Some(on_call_media_state);
-            let (use_srtp, secure_signaling) = srtp_policy(network.srtp_mode, false);
+            cfg.cb.on_call_redirected = Some(on_call_redirected);
+            let (use_srtp, secure_signaling) = srtp_policy(network.srtp_mode);
             cfg.use_srtp = use_srtp;
             cfg.srtp_secure_signaling = secure_signaling;
 
@@ -238,25 +249,29 @@ impl PjsipEngine {
             // Add TCP transport
             pjsip_sys::pjsua_transport_config_default(&mut tp_cfg);
             tp_cfg.port = network.sip_port as u32;
+            let mut tcp_tp_id: pjsip_sys::pjsua_transport_id = -1;
             let status = pjsip_sys::pjsua_transport_create(
                 pjsip_sys::pjsip_transport_type_e_PJSIP_TRANSPORT_TCP,
                 &tp_cfg,
-                std::ptr::null_mut(),
+                &mut tcp_tp_id,
             );
             if status == 0 {
-                log::info!("TCP transport created on port {}", network.sip_port);
+                TCP_TRANSPORT_ID.store(tcp_tp_id, Ordering::Relaxed);
+                log::info!("TCP transport created on port {} (id={})", network.sip_port, tcp_tp_id);
             }
 
             // Add TLS transport (port 5061) for encrypted signaling
             pjsip_sys::pjsua_transport_config_default(&mut tp_cfg);
             tp_cfg.port = network.sip_port.saturating_add(1) as u32;
+            let mut tls_tp_id: pjsip_sys::pjsua_transport_id = -1;
             let status = pjsip_sys::pjsua_transport_create(
                 pjsip_sys::pjsip_transport_type_e_PJSIP_TRANSPORT_TLS,
                 &tp_cfg,
-                std::ptr::null_mut(),
+                &mut tls_tp_id,
             );
             if status == 0 {
-                log::info!("TLS transport created on port 5061");
+                TLS_TRANSPORT_ID.store(tls_tp_id, Ordering::Relaxed);
+                log::info!("TLS transport created on port 5061 (id={})", tls_tp_id);
             } else {
                 log::warn!("TLS transport creation failed (status={}). SIP signaling encryption unavailable.", status);
             }
@@ -412,12 +427,28 @@ impl PjsipEngine {
             acc_cfg.rtp_cfg.port_range = rtp_port_range as u32;
             acc_cfg.rtp_cfg.randomize_port = 1;
 
-            let (use_srtp, secure_signaling) = srtp_policy(
-                network.srtp_mode,
-                matches!(config.transport, Transport::Tls),
-            );
+            let (use_srtp, secure_signaling) = srtp_policy(network.srtp_mode);
             acc_cfg.use_srtp = use_srtp;
             acc_cfg.srtp_secure_signaling = secure_signaling;
+
+            // Bind the account to its signaling transport so outgoing calls use
+            // it (e.g. TLS) instead of defaulting to plaintext UDP based on the
+            // request-URI. This keeps calls encrypted and satisfies PJSIP's
+            // secure-signaling requirement for SRTP without rewriting the
+            // request-URI (which would break the server's digest auth check).
+            let bound_transport_id = match config.transport {
+                Transport::Tls => TLS_TRANSPORT_ID.load(Ordering::Relaxed),
+                Transport::Tcp => TCP_TRANSPORT_ID.load(Ordering::Relaxed),
+                Transport::Udp => -1,
+            };
+            if bound_transport_id >= 0 {
+                acc_cfg.transport_id = bound_transport_id;
+                log::info!(
+                    "Account bound to {:?} transport id={}",
+                    config.transport,
+                    bound_transport_id
+                );
+            }
 
             // Video: auto-show incoming video, auto-transmit when video is
             // negotiated, and use the default capture/render devices.
@@ -931,13 +962,16 @@ impl Drop for PjsipEngine {
     }
 }
 
-fn srtp_policy(mode: SrtpMode, using_tls: bool) -> (pjsip_sys::pjmedia_srtp_use, i32) {
+fn srtp_policy(mode: SrtpMode) -> (pjsip_sys::pjmedia_srtp_use, i32) {
     match mode {
         SrtpMode::Disabled => (pjsip_sys::pjmedia_srtp_use_PJMEDIA_SRTP_DISABLED, 0),
-        SrtpMode::Optional => (
-            pjsip_sys::pjmedia_srtp_use_PJMEDIA_SRTP_OPTIONAL,
-            if using_tls { 1 } else { 0 },
-        ),
+        // Optional: offer SRTP opportunistically but do NOT require secure
+        // signaling. Requiring it (srtp_secure_signaling=1) makes PJSIP refuse
+        // to init media for calls whose request-URI isn't `sips:`/`;transport`,
+        // failing with PJSIP_ESESSIONINSECURE even when the SIP link is TLS.
+        // Signaling stays encrypted via the account's bound TLS transport.
+        SrtpMode::Optional => (pjsip_sys::pjmedia_srtp_use_PJMEDIA_SRTP_OPTIONAL, 0),
+        // Required: mandate SRTP and secure signaling end-to-end.
         SrtpMode::Required => (pjsip_sys::pjmedia_srtp_use_PJMEDIA_SRTP_MANDATORY, 1),
     }
 }
@@ -1119,6 +1153,13 @@ unsafe extern "C" fn on_call_state(
         CallDirection::Outbound
     };
 
+    log::info!(
+        "Call {} state -> {:?} (SIP {} {})",
+        call_id,
+        state,
+        ci.last_status as u32,
+        pj_str_to_string(&ci.last_status_text)
+    );
     emit_event(PaleEvent::CallState {
         call_id,
         state,
@@ -1126,6 +1167,19 @@ unsafe extern "C" fn on_call_state(
         remote_uri: uri,
         remote_name: name,
     });
+}
+
+/// Redirect (3xx) handler. The pale-server routes calls by replying `302 Moved
+/// Temporarily` with the callee's registered contact, expecting the caller to
+/// re-INVITE there. Follow it (replacing the target) instead of disconnecting,
+/// which is PJSIP's default when this callback is absent.
+unsafe extern "C" fn on_call_redirected(
+    call_id: pjsip_sys::pjsua_call_id,
+    _target: *const pjsip_sys::pjsip_uri,
+    _e: *const pjsip_sys::pjsip_event,
+) -> pjsip_sys::pjsip_redirect_op {
+    log::info!("Call {call_id} redirected (3xx) — following new target");
+    pjsip_sys::pjsip_redirect_op_PJSIP_REDIRECT_ACCEPT_REPLACE
 }
 
 /// Call media state callback — connect audio when media is active
@@ -1250,15 +1304,15 @@ mod tests {
     #[test]
     fn maps_srtp_modes() {
         assert_eq!(
-            srtp_policy(SrtpMode::Disabled, false),
+            srtp_policy(SrtpMode::Disabled),
             (pjsip_sys::pjmedia_srtp_use_PJMEDIA_SRTP_DISABLED, 0)
         );
         assert_eq!(
-            srtp_policy(SrtpMode::Optional, true),
-            (pjsip_sys::pjmedia_srtp_use_PJMEDIA_SRTP_OPTIONAL, 1)
+            srtp_policy(SrtpMode::Optional),
+            (pjsip_sys::pjmedia_srtp_use_PJMEDIA_SRTP_OPTIONAL, 0)
         );
         assert_eq!(
-            srtp_policy(SrtpMode::Required, false),
+            srtp_policy(SrtpMode::Required),
             (pjsip_sys::pjmedia_srtp_use_PJMEDIA_SRTP_MANDATORY, 1)
         );
     }
