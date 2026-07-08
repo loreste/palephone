@@ -3,6 +3,7 @@ import { Voicemail, Play, Trash2, Check } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useServerStore } from "@/store/serverStore";
 import { toast } from "@/components/ui/Toast";
+import { paleFetch } from "@/lib/tauri";
 
 interface VoicemailEntry {
   id: string;
@@ -24,7 +25,7 @@ export function VoicemailView() {
   const load = useCallback(async () => {
     if (!baseUrl || !token) { setLoading(false); return; }
     try {
-      const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/voicemail`, {
+      const res = await paleFetch(`${baseUrl.replace(/\/+$/, "")}/v1/voicemail`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error(res.statusText);
@@ -38,7 +39,7 @@ export function VoicemailView() {
   const markListened = async (id: string) => {
     if (!baseUrl || !token) return;
     try {
-      await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/voicemail/${id}/listen`, {
+      await paleFetch(`${baseUrl.replace(/\/+$/, "")}/v1/voicemail/${id}/listen`, {
         method: "PUT",
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -51,7 +52,7 @@ export function VoicemailView() {
   const remove = async (id: string) => {
     if (!baseUrl || !token) return;
     try {
-      await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/voicemail/${id}`, {
+      await paleFetch(`${baseUrl.replace(/\/+$/, "")}/v1/voicemail/${id}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
       });

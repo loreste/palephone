@@ -5,6 +5,26 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { CallDirection, CallState, RegState } from "@/types";
 
+// ─── Pale HTTP Client ───
+
+/** Version injected at build time from package.json */
+const PALE_VERSION = __PALE_VERSION__;
+
+/**
+ * Drop-in replacement for `fetch()` that always sends the Pale User-Agent.
+ * All direct HTTP calls to the Pale server MUST use this instead of `fetch()`.
+ */
+export function paleFetch(
+  input: string | URL | Request,
+  init?: RequestInit,
+): Promise<Response> {
+  const headers = new Headers(init?.headers);
+  if (!headers.has("User-Agent")) {
+    headers.set("User-Agent", `Pale/${PALE_VERSION}`);
+  }
+  return fetch(input, { ...init, headers });
+}
+
 // ─── Command Payloads ───
 
 export interface AccountConfig {
@@ -1595,7 +1615,7 @@ export async function paleServerUploadFile(
   if (options.folderId) {
     headers["X-Pale-Folder-Id"] = options.folderId;
   }
-  const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/files`, {
+  const response = await paleFetch(`${baseUrl.replace(/\/+$/, "")}/v1/files`, {
     method: "POST",
     headers,
     body: buffer,

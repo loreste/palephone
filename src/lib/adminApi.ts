@@ -1,3 +1,5 @@
+import { paleFetch } from "./tauri";
+
 const DEFAULT_BASE_URL = "http://127.0.0.1:8080";
 
 export interface AdminSession {
@@ -509,7 +511,7 @@ function adminPost<T>(baseUrl: string, token: string, path: string, body: unknow
 }
 
 async function request<T>(baseUrl: string, path: string, init: RequestInit): Promise<T> {
-  const response = await fetch(`${baseUrl.replace(/\/+$/, "")}${path}`, {
+  const response = await paleFetch(`${baseUrl.replace(/\/+$/, "")}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",

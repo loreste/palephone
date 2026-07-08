@@ -19,7 +19,7 @@ import { occurrencesForDay, type CalendarMeetingOccurrence } from "@/lib/calenda
 import { joinScheduledMeeting, meetingCanJoin } from "@/lib/meetingJoin";
 import { useMeetingStore, type ScheduledMeeting } from "@/store/meetingStore";
 import { useServerStore } from "@/store/serverStore";
-import { paleServerApi } from "@/lib/tauri";
+import { paleServerApi, paleFetch } from "@/lib/tauri";
 import { toast } from "@/components/ui/Toast";
 
 type CalendarMode = "month" | "week" | "day";
@@ -205,7 +205,7 @@ export function CalendarView() {
   const downloadIcs = async (meeting: ScheduledMeeting) => {
     if (!baseUrl || !token) return;
     try {
-      const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/meetings/${meeting.id}/ics`, {
+      const response = await paleFetch(`${baseUrl.replace(/\/+$/, "")}/v1/meetings/${meeting.id}/ics`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!response.ok) throw new Error("download failed");

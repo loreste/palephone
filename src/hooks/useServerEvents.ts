@@ -5,7 +5,7 @@ import { useChatStore } from "@/store/chatStore";
 import { useAccountStore } from "@/store/accountStore";
 import { useActivityStore } from "@/store/activityStore";
 import { useMeetingStore } from "@/store/meetingStore";
-import { paleServerGetPresence } from "@/lib/tauri";
+import { paleServerGetPresence, paleFetch } from "@/lib/tauri";
 import { adminRefreshToken } from "@/lib/adminApi";
 import { shouldNotify, shouldPlaySound } from "@/lib/notifications";
 import { playNotificationBeep } from "@/lib/notificationSound";
@@ -68,7 +68,7 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
         const queued = useChatStore.getState().flushQueue();
         if (queued.length > 0 && baseUrl && token) {
           for (const msg of queued) {
-            fetch(`${baseUrl.replace(/\/+$/, "")}/v1/rooms/${msg.room_id}/messages`, {
+            paleFetch(`${baseUrl.replace(/\/+$/, "")}/v1/rooms/${msg.room_id}/messages`, {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",

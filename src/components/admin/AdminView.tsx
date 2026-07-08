@@ -50,7 +50,7 @@ import {
 import { toast } from "@/components/ui/Toast";
 import { useServerStore } from "@/store/serverStore";
 import { disconnectServer } from "@/lib/session";
-import { getConfig, getSipPassword, paleLogin, paleServerApi, paleServerUploadFile, saveSettings } from "@/lib/tauri";
+import { getConfig, getSipPassword, paleLogin, paleServerApi, paleServerUploadFile, saveSettings, paleFetch } from "@/lib/tauri";
 import type { ServerCollaborationPolicy } from "@/lib/tauri";
 
 // Helper: all server calls go through Tauri invoke (not webview fetch)
@@ -1359,7 +1359,7 @@ function AuditPanel({ baseUrl, token, snapshot }: { baseUrl: string; token: stri
 
   const downloadCsv = async () => {
     try {
-      const response = await fetch(`${baseUrl.replace(/\/$/, "")}/v1/admin/audit/export.csv${queryString()}`, {
+      const response = await paleFetch(`${baseUrl.replace(/\/$/, "")}/v1/admin/audit/export.csv${queryString()}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!response.ok) throw new Error(`Export failed (${response.status})`);
@@ -3341,7 +3341,7 @@ function CqdPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
 
   const downloadCsv = async () => {
     try {
-      const response = await fetch(`${baseUrl.replace(/\/$/, "")}/v1/call-quality/export.csv${queryString()}`, {
+      const response = await paleFetch(`${baseUrl.replace(/\/$/, "")}/v1/call-quality/export.csv${queryString()}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!response.ok) throw new Error(`Export failed (${response.status})`);
@@ -4260,7 +4260,7 @@ function DlpPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
 
   const exportViolations = async () => {
     try {
-      const response = await fetch(`${baseUrl.replace(/\/$/, "")}/v1/admin/dlp/violations/export.csv${violationQuery()}`, {
+      const response = await paleFetch(`${baseUrl.replace(/\/$/, "")}/v1/admin/dlp/violations/export.csv${violationQuery()}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!response.ok) throw new Error(`Export failed (${response.status})`);
@@ -5095,7 +5095,7 @@ function AnalyticsPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
                 if (!file) return;
                 const text = await file.text();
                 try {
-                  const response = await fetch(`${baseUrl.replace(/\/$/, "")}/v1/admin/users/import`, {
+                  const response = await paleFetch(`${baseUrl.replace(/\/$/, "")}/v1/admin/users/import`, {
                     method: "POST",
                     headers: { Authorization: `Bearer ${token}`, "Content-Type": "text/csv" },
                     body: text,
@@ -5113,7 +5113,7 @@ function AnalyticsPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
             <button
               onClick={async () => {
                 try {
-                  const response = await fetch(`${baseUrl.replace(/\/$/, "")}/v1/admin/users/export`, {
+                  const response = await paleFetch(`${baseUrl.replace(/\/$/, "")}/v1/admin/users/export`, {
                     headers: { Authorization: `Bearer ${token}` },
                   });
                   if (!response.ok) throw new Error(`Export failed (${response.status})`);
@@ -5657,7 +5657,7 @@ function HoldMusicPanel({ baseUrl, token }: { baseUrl: string; token: string }) 
   const upload = async (file: File) => {
     try {
       const buffer = await file.arrayBuffer();
-      const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/admin/hold-music`, {
+      const response = await paleFetch(`${baseUrl.replace(/\/+$/, "")}/v1/admin/hold-music`, {
         method: "POST",
         headers: {
           "Content-Type": file.type || "audio/mpeg",

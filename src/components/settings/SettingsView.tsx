@@ -7,7 +7,7 @@ import { useUiStore } from "@/store/uiStore";
 import { t, getLocale, setLocale, LOCALE_LABELS, type Locale } from "@/lib/i18n";
 import { AudioSettings } from "./AudioSettings";
 import { NetworkSettings } from "./NetworkSettings";
-import { registerAccount, storeSipPassword, getConfig, saveSettings, paleLogin, paleServerApi } from "@/lib/tauri";
+import { registerAccount, storeSipPassword, getConfig, saveSettings, paleLogin, paleServerApi, paleFetch } from "@/lib/tauri";
 import { normalizeProvisionedSipAccount } from "@/lib/sipDefaults";
 import { adminLogout, adminBaseUrl, getMfaStatus, setupMfa, verifyMfa, disableMfa, listSessions, revokeSession, revokeAllSessions } from "@/lib/adminApi";
 import type { MfaSetupResponse, SessionInfo } from "@/lib/adminApi";
@@ -458,7 +458,7 @@ function ChangePasswordSection() {
     }
     setChanging(true);
     try {
-      const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/auth/password`, {
+      const res = await paleFetch(`${baseUrl.replace(/\/+$/, "")}/v1/auth/password`, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
@@ -1028,7 +1028,7 @@ function CallSettingsPanel() {
 
   useEffect(() => {
     if (!connected || !baseUrl || !token) return;
-    fetch(`${baseUrl}/v1/call-settings`, { headers: { Authorization: `Bearer ${token}` } })
+    paleFetch(`${baseUrl}/v1/call-settings`, { headers: { Authorization: `Bearer ${token}` } })
       .then((r) => r.ok ? r.json() : null)
       .then((data) => { if (data) setSettings(data); })
       .catch(() => {});
@@ -1038,7 +1038,7 @@ function CallSettingsPanel() {
     if (!baseUrl || !token || !settings) return;
     setSaving(true);
     try {
-      const res = await fetch(`${baseUrl}/v1/call-settings`, {
+      const res = await paleFetch(`${baseUrl}/v1/call-settings`, {
         method: "PUT",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify(settings),
@@ -1069,7 +1069,7 @@ function CallSettingsPanel() {
     if (!baseUrl || !token) return;
     try {
       const buffer = await file.arrayBuffer();
-      const res = await fetch(`${baseUrl}/v1/files`, {
+      const res = await paleFetch(`${baseUrl}/v1/files`, {
         method: "POST",
         headers: { "Content-Type": file.type || "audio/wav", Authorization: `Bearer ${token}`, "X-Pale-Filename": file.name },
         body: buffer,
@@ -1213,14 +1213,14 @@ function CallAnalyticsPanel() {
     setLoading(true);
     // Get current user's analytics - we need the user id
     // Use the users list to find ourselves
-    fetch(`${baseUrl}/v1/users`, { headers: { Authorization: `Bearer ${token}` } })
+    paleFetch(`${baseUrl}/v1/users`, { headers: { Authorization: `Bearer ${token}` } })
       .then((r) => r.ok ? r.json() : [])
       .then((users: any[]) => {
         // Find own user by checking who we are via account store
         const account = useAccountStore.getState().account;
         const me = users.find((u) => account?.sipUri && u.sip_uri === `sip:${account.sipUri}`);
         if (me) {
-          return fetch(`${baseUrl}/v1/users/${me.id}/call-analytics`, {
+          return paleFetch(`${baseUrl}/v1/users/${me.id}/call-analytics`, {
             headers: { Authorization: `Bearer ${token}` },
           });
         }
@@ -1299,7 +1299,7 @@ function CallGroupsPanel() {
 
   useEffect(() => {
     if (!connected || !baseUrl || !token) return;
-    fetch(`${baseUrl}/v1/call-groups`, { headers: { Authorization: `Bearer ${token}` } })
+    paleFetch(`${baseUrl}/v1/call-groups`, { headers: { Authorization: `Bearer ${token}` } })
       .then((r) => r.ok ? r.json() : [])
       .then(setGroups)
       .catch(() => {});
@@ -1308,7 +1308,7 @@ function CallGroupsPanel() {
   const create = async () => {
     if (!baseUrl || !token || !name) return;
     try {
-      const res = await fetch(`${baseUrl}/v1/call-groups`, {
+      const res = await paleFetch(`${baseUrl}/v1/call-groups`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({
@@ -1332,7 +1332,7 @@ function CallGroupsPanel() {
   const remove = async (id: string) => {
     if (!baseUrl || !token) return;
     try {
-      await fetch(`${baseUrl}/v1/call-groups/${id}`, {
+      await paleFetch(`${baseUrl}/v1/call-groups/${id}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -1421,7 +1421,7 @@ function DelegationPanel() {
 
   useEffect(() => {
     if (!connected || !baseUrl || !token || !ownerUri) return;
-    fetch(`${baseUrl}/v1/users/${encodeURIComponent(ownerUri)}/delegates`, {
+    paleFetch(`${baseUrl}/v1/users/${encodeURIComponent(ownerUri)}/delegates`, {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then((r) => (r.ok ? r.json() : []))
@@ -1432,7 +1432,7 @@ function DelegationPanel() {
   const create = async () => {
     if (!baseUrl || !token || !delegateUri || !ownerUri) return;
     try {
-      const res = await fetch(
+      const res = await paleFetch(
         `${baseUrl}/v1/users/${encodeURIComponent(ownerUri)}/delegates`,
         {
           method: "POST",
@@ -1458,7 +1458,7 @@ function DelegationPanel() {
   const remove = async (id: string) => {
     if (!baseUrl || !token || !ownerUri) return;
     try {
-      await fetch(
+      await paleFetch(
         `${baseUrl}/v1/users/${encodeURIComponent(ownerUri)}/delegates/${id}`,
         { method: "DELETE", headers: { Authorization: `Bearer ${token}` } }
       );

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Mic, Play, Trash2, Download } from "lucide-react";
 import { useServerStore } from "@/store/serverStore";
 import { toast } from "@/components/ui/Toast";
+import { paleFetch } from "@/lib/tauri";
 import { Badge } from "@/components/ui/Badge";
 
 interface RecordingEntry {
@@ -40,7 +41,7 @@ export function RecordingsView() {
   const loadTranscriptionJobs = useCallback(async (recordingId: string) => {
     if (!baseUrl || !token) return;
     try {
-      const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/recordings/${recordingId}/transcription`, {
+      const res = await paleFetch(`${baseUrl.replace(/\/+$/, "")}/v1/recordings/${recordingId}/transcription`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
@@ -53,7 +54,7 @@ export function RecordingsView() {
   const load = useCallback(async () => {
     if (!baseUrl || !token) { setLoading(false); return; }
     try {
-      const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/recordings`, {
+      const res = await paleFetch(`${baseUrl.replace(/\/+$/, "")}/v1/recordings`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
@@ -70,7 +71,7 @@ export function RecordingsView() {
   const remove = async (id: string) => {
     if (!baseUrl || !token) return;
     try {
-      await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/recordings/${id}`, {
+      await paleFetch(`${baseUrl.replace(/\/+$/, "")}/v1/recordings/${id}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -92,7 +93,7 @@ export function RecordingsView() {
   const queueTranscription = async (recordingId: string) => {
     if (!baseUrl || !token) return;
     try {
-      const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/recordings/${recordingId}/transcription`, {
+      const res = await paleFetch(`${baseUrl.replace(/\/+$/, "")}/v1/recordings/${recordingId}/transcription`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ language: "en" }),
