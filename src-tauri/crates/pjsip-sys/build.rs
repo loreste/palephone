@@ -45,7 +45,7 @@ fn main() {
     }
 
     // Step 3: Emit linker directives
-    emit_link_directives(&pj_src_dir, &target_os);
+    emit_link_directives(&pj_src_dir, &target_os, &target_arch);
 
     // Step 4: Generate Rust bindings via bindgen
     generate_bindings(&pj_src_dir, &out_dir, &target_os);
@@ -281,11 +281,12 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         "--disable-sdl".to_string(),
     ];
 
-    // Enable VP8 where libvpx is available (desktop platforms).
-    // Android and iOS use platform video codecs instead.
-    if target_os != "android" && target_os != "ios" {
-        // Let PJSIP auto-detect libvpx via pkg-config
-    } else {
+    // Enable VP8 where libvpx is available (native desktop builds).
+    // Disable on mobile and when cross-compiling (pkg-config gives wrong arch libs).
+    let is_cross = target_os == "android"
+        || target_os == "ios"
+        || (target_os == "macos" && target_arch != std::env::consts::ARCH);
+    if is_cross {
         configure_args.push("--disable-vpx".to_string());
     }
 
@@ -434,7 +435,7 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
     // optional deps like libvpx on macOS (Homebrew) and Linux.
     let mut extra_cflags = String::new();
     let mut extra_ldflags = String::new();
-    if target_os != "android" && target_os != "ios" {
+    if !is_cross {
         for dep in &["vpx"] {
             if let Ok(out) = Command::new("pkg-config").args(["--cflags", dep]).output() {
                 if out.status.success() {
@@ -451,9 +452,25 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         }
     }
 
+    // macOS cross-compilation: when building x86_64 on ARM (or vice versa),
+    // pass --host and -arch to configure so PJSIP builds for the right arch.
+    let macos_cross = target_os == "macos" && target_arch != std::env::consts::ARCH;
+    if macos_cross {
+        let host_triple = match target_arch {
+            "x86_64" => "x86_64-apple-darwin",
+            "aarch64" => "arm-apple-darwin",
+            _ => "x86_64-apple-darwin",
+        };
+        configure_args.push(format!("--host={}", host_triple));
+    }
+
     let cflags = format!(
         "-O2 -fPIC -DPJMEDIA_HAS_SRTP=1 -DPJ_HAS_IPV6=1 {}{}",
         match target_os {
+            "macos" if macos_cross => format!(
+                "-mmacosx-version-min=11.0 -arch {}",
+                if target_arch == "aarch64" { "arm64" } else { target_arch }
+            ),
             "macos" => "-mmacosx-version-min=11.0".to_string(),
             "android" => format!("-DPJ_ANDROID=1 --sysroot={}", android_sysroot),
             _ => String::new(),
@@ -628,7 +645,11 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
         .arg("-c")
         .arg(&configure_args.join(" "))
         .env("CFLAGS", &cflags)
-        .env("LDFLAGS", &extra_ldflags)
+        .env("LDFLAGS", if macos_cross {
+            format!("-arch {} {}", if target_arch == "aarch64" { "arm64" } else { target_arch }, extra_ldflags)
+        } else {
+            extra_ldflags.clone()
+        })
         .env("PKG_CONFIG_PATH", &full_pkg_config_path)
         .current_dir(pj_src_dir);
 
@@ -700,7 +721,7 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
 }
 
 /// Emit cargo:rustc-link-lib and cargo:rustc-link-search directives
-fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
+fn emit_link_directives(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
     let is_msvc = env::var("TARGET").unwrap_or_default().contains("msvc");
 
     // MSVC path: look for .lib files directly (normalized from the msbuild output)
@@ -843,11 +864,13 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
                 println!("cargo:rustc-link-search=native={}/lib", opus_prefix);
                 println!("cargo:rustc-link-lib=opus");
             }
-            // VP8 video codec (libvpx)
-            if let Some(vpx_prefix) = find_lib_prefix("vpx", target_os) {
-                println!("cargo:rustc-link-search=native={}/lib", vpx_prefix);
+            // VP8 video codec (libvpx) — only for native builds, not cross-compiled
+            if target_arch == std::env::consts::ARCH {
+                if let Some(vpx_prefix) = find_lib_prefix("vpx", target_os) {
+                    println!("cargo:rustc-link-search=native={}/lib", vpx_prefix);
+                }
+                println!("cargo:rustc-link-lib=vpx");
             }
-            println!("cargo:rustc-link-lib=vpx");
         }
         "linux" => {
             println!("cargo:rustc-link-lib=asound");
