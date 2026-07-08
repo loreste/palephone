@@ -109,7 +109,7 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "bots", label: "Bots", icon: Router },
   { id: "connectors", label: "Connectors", icon: GitBranch },
   { id: "conditional_access", label: "Conditional Access", icon: Lock },
-  { id: "sip_gateways", label: "SIP Gateways", icon: Router },
+  { id: "sip_gateways", label: "Carriers / Trunks", icon: Router },
   { id: "location_routing", label: "Location Routing", icon: GitBranch },
   { id: "emergency", label: "Emergency", icon: Shield },
   { id: "guests", label: "Guests", icon: UserPlus },
@@ -128,11 +128,11 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
 const adminNavGroups: { label: string; tabs: AdminTab[] }[] = [
   {
     label: "Core",
-    tabs: ["overview", "users", "sip", "extensions", "dids", "routing", "directory"],
+    tabs: ["overview", "users", "sip", "directory"],
   },
   {
     label: "Voice",
-    tabs: ["ring_groups", "queues", "ivr", "hours", "holidays", "paging", "media", "calls", "cdrs"],
+    tabs: ["extensions", "dids", "sip_gateways", "routing", "location_routing", "ring_groups", "queues", "ivr", "hours", "holidays", "paging", "media", "calls", "cdrs"],
   },
   {
     label: "Meetings",
@@ -152,7 +152,7 @@ const adminNavGroups: { label: string; tabs: AdminTab[] }[] = [
   },
   {
     label: "Devices",
-    tabs: ["common_area_phones", "devices", "sip_gateways", "location_routing", "emergency"],
+    tabs: ["common_area_phones", "devices", "emergency"],
   },
   {
     label: "Platform",
