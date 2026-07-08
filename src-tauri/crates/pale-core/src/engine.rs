@@ -67,6 +67,10 @@ pub enum EngineCommand {
         call_id: CallId,
         enabled: bool,
     },
+    ScreenShare {
+        call_id: CallId,
+        enabled: bool,
+    },
     StartRecording {
         call_id: CallId,
         file_path: String,
@@ -313,6 +317,9 @@ impl PjsipEngine {
                     }
                     EngineCommand::ToggleVideo { call_id, enabled } => {
                         Self::handle_toggle_video(call_id, enabled);
+                    }
+                    EngineCommand::ScreenShare { call_id, enabled } => {
+                        Self::handle_screen_share(call_id, enabled);
                     }
                     EngineCommand::StartRecording { call_id, file_path } => {
                         Self::handle_start_recording(call_id, &file_path);
@@ -656,6 +663,101 @@ impl PjsipEngine {
                     call_id,
                     status
                 );
+            }
+        }
+    }
+
+    /// Switch the video capture source between the camera and the screen.
+    ///
+    /// PJSIP exposes screen capture as a video device with the
+    /// `PJMEDIA_VID_DEV_CAP_INPUT_PREVIEW` capability. We iterate over
+    /// devices, find the first screen/desktop capture device, and switch
+    /// the call's video stream to that device (or back to the default
+    /// camera when `enabled` is false).
+    fn handle_screen_share(call_id: CallId, enabled: bool) {
+        unsafe {
+            if pjsip_sys::pjsua_call_is_active(call_id) == 0 {
+                emit_event(PaleEvent::Error {
+                    message: format!("Cannot share screen: call {} is not active", call_id),
+                });
+                return;
+            }
+
+            if enabled {
+                // First ensure video is on
+                let mut opt: pjsip_sys::pjsua_call_setting = std::mem::zeroed();
+                pjsip_sys::pjsua_call_setting_default(&mut opt);
+                opt.vid_cnt = 1;
+                opt.aud_cnt = 1;
+                let status = pjsip_sys::pjsua_call_reinvite2(call_id, &opt, std::ptr::null());
+                if status != 0 {
+                    log::warn!("Failed to enable video for screen share: status={}", status);
+                }
+
+                // Find a screen capture device. PJSIP's Darwin backend exposes
+                // screen capture devices alongside cameras. The device whose
+                // driver name contains "Screen" or "Desktop" is the one we want.
+                let dev_count = pjsip_sys::pjsua_vid_dev_count();
+                let mut screen_dev: pjsip_sys::pjmedia_vid_dev_index = -1;
+                for i in 0..dev_count {
+                    let mut info: pjsip_sys::pjmedia_vid_dev_info = std::mem::zeroed();
+                    if pjsip_sys::pjsua_vid_dev_get_info(i as _, &mut info) == 0 {
+                        let name = std::ffi::CStr::from_ptr(info.name.as_ptr())
+                            .to_string_lossy();
+                        let driver = std::ffi::CStr::from_ptr(info.driver.as_ptr())
+                            .to_string_lossy();
+                        log::info!("Video device {}: {} ({})", i, name, driver);
+                        // On macOS, the screen capture device is "Capture screen 0"
+                        if (name.contains("screen") || name.contains("Screen")
+                            || name.contains("desktop") || name.contains("Desktop"))
+                            && info.dir == 1
+                        // dir=1 is capture
+                        {
+                            screen_dev = i as _;
+                        }
+                    }
+                }
+
+                if screen_dev >= 0 {
+                    let param = pjsip_sys::pjsua_call_vid_strm_op_param {
+                        med_idx: -1, // auto-select
+                        dir: 3,      // PJMEDIA_DIR_ENCODING_DECODING
+                        cap_dev: screen_dev,
+                        ..std::mem::zeroed()
+                    };
+                    let status = pjsip_sys::pjsua_call_set_vid_strm(
+                        call_id,
+                        4, // PJSUA_CALL_VID_STRM_CHANGE_CAP_DEV
+                        &param,
+                    );
+                    if status != 0 {
+                        log::warn!("Failed to switch to screen capture device: status={}", status);
+                        emit_event(PaleEvent::Error {
+                            message: "Screen sharing failed — no screen capture device available".to_string(),
+                        });
+                    }
+                } else {
+                    log::warn!("No screen capture device found among {} video devices", dev_count);
+                    emit_event(PaleEvent::Error {
+                        message: "Screen sharing not available on this platform".to_string(),
+                    });
+                }
+            } else {
+                // Switch back to default camera (device 0 or PJMEDIA_VID_DEFAULT_CAPTURE_DEV)
+                let param = pjsip_sys::pjsua_call_vid_strm_op_param {
+                    med_idx: -1,
+                    dir: 3,
+                    cap_dev: -1, // PJMEDIA_VID_DEFAULT_CAPTURE_DEV
+                    ..std::mem::zeroed()
+                };
+                let status = pjsip_sys::pjsua_call_set_vid_strm(
+                    call_id,
+                    4, // PJSUA_CALL_VID_STRM_CHANGE_CAP_DEV
+                    &param,
+                );
+                if status != 0 {
+                    log::warn!("Failed to switch back to camera: status={}", status);
+                }
             }
         }
     }

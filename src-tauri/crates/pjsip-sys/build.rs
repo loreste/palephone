@@ -271,17 +271,23 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
     let openssl_prefix = find_openssl_prefix(target_os);
 
     // Build configure arguments.
-    // Pin auto-detected optional video deps off so builds don't depend on
-    // whatever happens to be installed on the build machine (e.g. a Homebrew
-    // ffmpeg whose API doesn't match what PJSIP 2.14 expects).
+    // Pin auto-detected optional video deps to what we actually want.
+    // VP8 (libvpx) is enabled for video calls; FFmpeg/SDL are disabled.
     let mut configure_args = vec![
         "./configure".to_string(),
         "--enable-shared=no".to_string(),
         "--disable-ffmpeg".to_string(),
         "--disable-openh264".to_string(),
-        "--disable-vpx".to_string(),
         "--disable-sdl".to_string(),
     ];
+
+    // Enable VP8 where libvpx is available (desktop platforms).
+    // Android and iOS use platform video codecs instead.
+    if target_os != "android" && target_os != "ios" {
+        // Let PJSIP auto-detect libvpx via pkg-config
+    } else {
+        configure_args.push("--disable-vpx".to_string());
+    }
 
     // Windows cross/native compilation
     let is_windows_cross = target_os == "windows" && cfg!(target_os = "linux");
@@ -424,13 +430,35 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
 
     // Set CFLAGS
     let android_sysroot = env::var("PALE_ANDROID_SYSROOT").unwrap_or_default();
+    // Collect extra include/lib paths from pkg-config so configure can find
+    // optional deps like libvpx on macOS (Homebrew) and Linux.
+    let mut extra_cflags = String::new();
+    let mut extra_ldflags = String::new();
+    if target_os != "android" && target_os != "ios" {
+        for dep in &["vpx"] {
+            if let Ok(out) = Command::new("pkg-config").args(["--cflags", dep]).output() {
+                if out.status.success() {
+                    extra_cflags.push(' ');
+                    extra_cflags.push_str(String::from_utf8_lossy(&out.stdout).trim());
+                }
+            }
+            if let Ok(out) = Command::new("pkg-config").args(["--libs", dep]).output() {
+                if out.status.success() {
+                    extra_ldflags.push(' ');
+                    extra_ldflags.push_str(String::from_utf8_lossy(&out.stdout).trim());
+                }
+            }
+        }
+    }
+
     let cflags = format!(
-        "-O2 -fPIC -DPJMEDIA_HAS_SRTP=1 -DPJ_HAS_IPV6=1 {}",
+        "-O2 -fPIC -DPJMEDIA_HAS_SRTP=1 -DPJ_HAS_IPV6=1 {}{}",
         match target_os {
             "macos" => "-mmacosx-version-min=11.0".to_string(),
             "android" => format!("-DPJ_ANDROID=1 --sysroot={}", android_sysroot),
             _ => String::new(),
-        }
+        },
+        extra_cflags,
     );
 
     // For Android, write a wrapper script that sets CC with --sysroot
@@ -583,10 +611,25 @@ fn build_pjsip(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
 
     // Run configure (autotools path for non-MSVC)
     let mut configure_cmd = Command::new(&sh_cmd);
+    // Ensure pkg-config can find Homebrew/system libraries (e.g. libvpx, opus)
+    let pkg_config_path = env::var("PKG_CONFIG_PATH").unwrap_or_default();
+    let extra_pkg_paths = if target_os == "macos" {
+        "/opt/homebrew/lib/pkgconfig:/usr/local/lib/pkgconfig"
+    } else {
+        ""
+    };
+    let full_pkg_config_path = if pkg_config_path.is_empty() {
+        extra_pkg_paths.to_string()
+    } else {
+        format!("{extra_pkg_paths}:{pkg_config_path}")
+    };
+
     configure_cmd
         .arg("-c")
         .arg(&configure_args.join(" "))
         .env("CFLAGS", &cflags)
+        .env("LDFLAGS", &extra_ldflags)
+        .env("PKG_CONFIG_PATH", &full_pkg_config_path)
         .current_dir(pj_src_dir);
 
     // For Android, ensure NDK toolchain is on PATH so configure finds the compiler
@@ -800,12 +843,18 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str) {
                 println!("cargo:rustc-link-search=native={}/lib", opus_prefix);
                 println!("cargo:rustc-link-lib=opus");
             }
+            // VP8 video codec (libvpx)
+            if let Some(vpx_prefix) = find_lib_prefix("vpx", target_os) {
+                println!("cargo:rustc-link-search=native={}/lib", vpx_prefix);
+            }
+            println!("cargo:rustc-link-lib=vpx");
         }
         "linux" => {
             println!("cargo:rustc-link-lib=asound");
             println!("cargo:rustc-link-lib=ssl");
             println!("cargo:rustc-link-lib=crypto");
             println!("cargo:rustc-link-lib=opus");
+            println!("cargo:rustc-link-lib=vpx");
             println!("cargo:rustc-link-lib=uuid");
             println!("cargo:rustc-link-lib=m");
             println!("cargo:rustc-link-lib=rt");
@@ -1066,6 +1115,31 @@ fn find_openssl_prefix(target_os: &str) -> Option<String> {
 }
 
 /// Find Opus install prefix
+fn find_lib_prefix(name: &str, target_os: &str) -> Option<String> {
+    if let Ok(output) = Command::new("pkg-config")
+        .args(["--variable=prefix", name])
+        .output()
+    {
+        if output.status.success() {
+            let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !prefix.is_empty() {
+                return Some(prefix);
+            }
+        }
+    }
+    if target_os == "macos" {
+        for path in &[
+            format!("/opt/homebrew/opt/{name}"),
+            format!("/usr/local/opt/{name}"),
+        ] {
+            if Path::new(path).exists() {
+                return Some(path.clone());
+            }
+        }
+    }
+    None
+}
+
 fn find_opus_prefix(target_os: &str) -> Option<String> {
     // Try pkg-config
     if let Ok(output) = Command::new("pkg-config")
