@@ -2322,6 +2322,12 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Inject `User-Agent: Pale/test` into a raw SIP packet so the
+    /// client-gate in `handle_request` accepts it.
+    fn pale(packet: &str) -> String {
+        packet.replacen("\r\n\r\n", "\r\nUser-Agent: Pale/test\r\n\r\n", 1)
+    }
+
     #[test]
     fn register_packet_updates_registrar() {
         let state = test_state();
@@ -2348,7 +2354,7 @@ Authorization: {}\r\n\r\n",
             auth
         );
 
-        let response = handle_packet(&packet, peer, &state).unwrap();
+        let response = handle_packet(&pale(&packet), peer, &state).unwrap();
 
         assert!(response.starts_with("SIP/2.0 200 OK"));
         assert_eq!(state.registrations().len(), 1);
@@ -2365,7 +2371,7 @@ To: <sip:alice@example.com>\r\n\
 Call-ID: abc\r\n\
 CSeq: 1 REGISTER\r\n\r\n";
 
-        let response = handle_packet(packet, peer, &state).unwrap();
+        let response = handle_packet(&pale(packet), peer, &state).unwrap();
 
         assert!(response.starts_with("SIP/2.0 401 Unauthorized"));
         assert!(response.contains("WWW-Authenticate: Digest"));
@@ -2404,7 +2410,7 @@ Authorization: {}\r\n\r\n",
             auth
         );
 
-        let response = handle_packet(&packet, peer, &state).unwrap();
+        let response = handle_packet(&pale(&packet), peer, &state).unwrap();
 
         assert!(response.starts_with("SIP/2.0 302 Moved Temporarily"));
         assert!(response.contains("Contact: <sip:bob@10.0.0.2:5060>"));
@@ -2533,7 +2539,7 @@ CSeq: 2 CANCEL\r\n\
 Authorization: {}\r\n\r\n",
             auth
         );
-        let response = handle_packet(&cancel, peer, &state).unwrap();
+        let response = handle_packet(&pale(&cancel), peer, &state).unwrap();
 
         assert!(response.starts_with("SIP/2.0 200 OK"));
         assert_eq!(state.sip_dialogs()[0].status, SipDialogStatus::Cancelled);
@@ -2555,7 +2561,7 @@ CSeq: 3 BYE\r\n\
 Authorization: {}\r\n\r\n",
             auth
         );
-        let response = handle_packet(&bye, peer, &state).unwrap();
+        let response = handle_packet(&pale(&bye), peer, &state).unwrap();
 
         assert!(response.starts_with("SIP/2.0 200 OK"));
         assert_eq!(state.sip_dialogs()[0].status, SipDialogStatus::Ended);
@@ -2579,7 +2585,7 @@ From: <sip:alice@example.com>;tag=1\r\n\
 Call-ID: call-1\r\n\
 CSeq: 3 BYE\r\n\r\n";
 
-        let response = handle_packet(bye, peer, &state).unwrap();
+        let response = handle_packet(&pale(bye), peer, &state).unwrap();
 
         assert!(response.starts_with("SIP/2.0 401 Unauthorized"));
         assert_eq!(state.sip_dialogs()[0].status, SipDialogStatus::Ringing);
@@ -2593,7 +2599,7 @@ CSeq: 3 BYE\r\n\r\n";
 Call-ID: options-1\r\n\
 CSeq: 1 OPTIONS\r\n\r\n";
 
-        let response = handle_packet(packet, peer, &state).unwrap();
+        let response = handle_packet(&pale(packet), peer, &state).unwrap();
 
         assert!(response.starts_with("SIP/2.0 200 OK"));
         assert!(response.contains(&format!("Allow: {}", allowed_methods())));
@@ -2616,7 +2622,7 @@ CSeq: 1 {}\r\n\r\n",
                 method.to_ascii_lowercase(),
                 method
             );
-            let response = handle_packet(&packet, peer, &state);
+            let response = handle_packet(&pale(&packet), peer, &state);
 
             if *method == "ACK" {
                 assert!(response.is_none(), "ACK must remain response-less");
@@ -2663,7 +2669,7 @@ Authorization: {}\r\n\r\n",
             auth
         );
 
-        let response = handle_packet(&packet, peer, &state).unwrap();
+        let response = handle_packet(&pale(&packet), peer, &state).unwrap();
 
         assert!(response.starts_with("SIP/2.0 200 OK"));
         assert!(state.registrations().is_empty());
@@ -2694,7 +2700,7 @@ Authorization: {}\r\n\r\nhello ignored",
             auth
         );
 
-        let response = handle_packet(&packet, peer, &state).unwrap();
+        let response = handle_packet(&pale(&packet), peer, &state).unwrap();
 
         assert!(response.starts_with("SIP/2.0 202 Accepted"));
         assert_eq!(state.sip_messages().len(), 1);
@@ -2710,7 +2716,7 @@ Authorization: {}\r\n\r\nhello ignored",
 Call-ID: tx-1\r\n\
 CSeq: 1 OPTIONS\r\n\r\n";
 
-        let response = handle_packet(packet, peer, &state).unwrap();
+        let response = handle_packet(&pale(packet), peer, &state).unwrap();
 
         assert!(response.starts_with("SIP/2.0 200 OK"));
         assert_eq!(state.sip_transactions().len(), 1);
@@ -2746,7 +2752,7 @@ Authorization: {}\r\n\r\n",
             auth
         );
 
-        let response = handle_packet(&packet, peer, &state).unwrap();
+        let response = handle_packet(&pale(&packet), peer, &state).unwrap();
 
         assert!(response.starts_with("SIP/2.0 200 OK"));
         assert!(response.contains("Expires:"));
@@ -2765,7 +2771,7 @@ Call-ID: sub-2\r\n\
 CSeq: 1 SUBSCRIBE\r\n\
 Event: presence\r\n\r\n";
 
-        let response = handle_packet(packet, peer, &state).unwrap();
+        let response = handle_packet(&pale(packet), peer, &state).unwrap();
 
         assert!(response.starts_with("SIP/2.0 401 Unauthorized"));
         assert!(response.contains("WWW-Authenticate: Digest"));
@@ -2795,7 +2801,7 @@ Authorization: {}\r\n\r\n",
             auth
         );
 
-        let response = handle_packet(&packet, peer, &state).unwrap();
+        let response = handle_packet(&pale(&packet), peer, &state).unwrap();
 
         assert!(response.starts_with("SIP/2.0 489 Bad Event"));
     }
@@ -2825,7 +2831,7 @@ Expires: 600\r\n\
 Authorization: {}\r\n\r\n",
             auth
         );
-        handle_packet(&packet, peer, &state);
+        handle_packet(&pale(&packet), peer, &state);
         assert_eq!(state.sip_subscriptions().len(), 1);
 
         // Now unsubscribe
@@ -2848,7 +2854,7 @@ Expires: 0\r\n\
 Authorization: {}\r\n\r\n",
             auth
         );
-        let response = handle_packet(&packet, peer, &state).unwrap();
+        let response = handle_packet(&pale(&packet), peer, &state).unwrap();
 
         assert!(response.starts_with("SIP/2.0 200 OK"));
         assert!(state.sip_subscriptions().is_empty());
@@ -2884,7 +2890,7 @@ Authorization: {}\r\n\r\n{}",
             pidf_body
         );
 
-        let response = handle_packet(&packet, peer, &state).unwrap();
+        let response = handle_packet(&pale(&packet), peer, &state).unwrap();
 
         assert!(response.starts_with("SIP/2.0 200 OK"));
         assert_eq!(state.sip_notifications().len(), 1);
@@ -2912,7 +2918,7 @@ Content-Length: {}\r\n\r\n{}",
             pidf_body
         );
 
-        let response = handle_packet(&unauthenticated, peer, &state).unwrap();
+        let response = handle_packet(&pale(&unauthenticated), peer, &state).unwrap();
         assert!(response.starts_with("SIP/2.0 401 Unauthorized"));
 
         let nonce = state.issue_sip_nonce();
@@ -2939,7 +2945,7 @@ Authorization: {}\r\n\r\n{}",
             pidf_body
         );
 
-        let response = handle_packet(&authenticated, peer, &state).unwrap();
+        let response = handle_packet(&pale(&authenticated), peer, &state).unwrap();
         assert!(response.starts_with("SIP/2.0 202 Accepted"));
         assert_eq!(
             state.presence("sip:alice@example.com").unwrap().status,
@@ -2974,7 +2980,7 @@ Authorization: {}\r\n\r\n",
                 method,
                 auth
             );
-            let response = handle_packet(&packet, peer, &state).unwrap();
+            let response = handle_packet(&pale(&packet), peer, &state).unwrap();
             assert!(
                 response.starts_with("SIP/2.0 481 Call/Transaction Does Not Exist"),
                 "{method} should reject missing dialogs"
@@ -3014,7 +3020,7 @@ Authorization: {}\r\n\r\n{}",
             body
         );
 
-        let response = handle_packet(&update, peer, &state).unwrap();
+        let response = handle_packet(&pale(&update), peer, &state).unwrap();
         assert!(response.starts_with("SIP/2.0 200 OK"));
         assert_eq!(
             state.dialog_for("update-dialog").unwrap().status,
@@ -3080,7 +3086,7 @@ Authorization: {}\r\n\r\nv=0\r\nm=audio 5004 RTP/AVP 0\r\na=sendonly\r\n",
             auth
         );
 
-        let response = handle_packet(&packet, peer, &state).unwrap();
+        let response = handle_packet(&pale(&packet), peer, &state).unwrap();
         assert!(response.starts_with("SIP/2.0 200 OK"));
         assert_eq!(state.sip_dialogs()[0].status, SipDialogStatus::Held);
     }
@@ -3118,7 +3124,7 @@ Authorization: {}\r\n\r\n",
             auth
         );
 
-        let _response = handle_packet(&packet, peer, &state).unwrap();
+        let _response = handle_packet(&pale(&packet), peer, &state).unwrap();
         // Takes the initial-INVITE routing path: the re-INVITE shortcut would
         // have flipped the dialog to Answered/Held — that must not happen for
         // a tag-less INVITE, even when its Call-ID matches a stale dialog.
@@ -3152,7 +3158,7 @@ Authorization: {}\r\n\r\n",
             auth
         );
 
-        let response = handle_packet(&packet, peer, &state).unwrap();
+        let response = handle_packet(&pale(&packet), peer, &state).unwrap();
         assert!(response.starts_with("SIP/2.0 481"));
     }
 
@@ -3189,7 +3195,7 @@ Authorization: {}\r\n\r\n",
             auth
         );
 
-        let response = handle_packet(&packet, peer, &state).unwrap();
+        let response = handle_packet(&pale(&packet), peer, &state).unwrap();
         assert!(response.starts_with("SIP/2.0 202 Accepted"));
         // Subscription-State is only legal on NOTIFY, not on the 202.
         assert!(!response.contains("Subscription-State"));
@@ -3217,7 +3223,7 @@ To: <sip:bob@example.com>\r\n\
 Call-ID: cancel-1\r\n\
 CSeq: 1 CANCEL\r\n\r\n";
 
-        let response = handle_packet(packet, peer, &state).unwrap();
+        let response = handle_packet(&pale(packet), peer, &state).unwrap();
         assert!(response.starts_with("SIP/2.0 200 OK"));
         assert_eq!(state.sip_dialogs()[0].status, SipDialogStatus::Cancelled);
     }
@@ -3245,7 +3251,7 @@ Authorization: {}\r\n\r\n",
             auth
         );
 
-        let response = handle_packet(&packet, peer, &state).unwrap();
+        let response = handle_packet(&pale(&packet), peer, &state).unwrap();
         assert!(response.starts_with("SIP/2.0 481"));
     }
 
@@ -3259,8 +3265,8 @@ From: <sip:alice@example.com>;tag=1\r\n\
 To: <sip:alice@example.com>\r\n\
 Call-ID: tag-test\r\n\
 CSeq: 1 REGISTER\r\n\r\n";
-        let first = handle_packet(packet, peer, &state).unwrap();
-        let second = handle_packet(packet, peer, &state).unwrap();
+        let first = handle_packet(&pale(packet), peer, &state).unwrap();
+        let second = handle_packet(&pale(packet), peer, &state).unwrap();
         let tag_of = |response: &str| {
             response
                 .lines()
@@ -3443,7 +3449,7 @@ Authorization: {}\r\n\r\n",
             conf_uri, conf_uri, auth
         );
 
-        let response = handle_packet(&packet, peer, &state).unwrap();
+        let response = handle_packet(&pale(&packet), peer, &state).unwrap();
         assert!(response.starts_with("SIP/2.0 200 OK"));
     }
 
