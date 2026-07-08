@@ -214,6 +214,15 @@ pub struct AppState {
     registrations: ShardedMap<String, SipRegistration>,
     sip_nonces: ShardedMap<String, DateTime<Utc>>,
     sip_dialogs: ShardedMap<String, SipDialog>,
+    /// Live SIP connections keyed by peer address (e.g. "1.2.3.4:5678"). Each
+    /// value writes raw SIP messages onto that client's open TCP/TLS flow, so
+    /// the server can forward an INVITE to a NAT'd callee over the connection
+    /// it already holds instead of redirecting to an unreachable private
+    /// contact. Populated by the stream handler for the lifetime of the socket.
+    sip_connections: ShardedMap<String, tokio::sync::mpsc::UnboundedSender<String>>,
+    /// Active proxied calls keyed by Call-ID, tracking the two flows so
+    /// responses and in-dialog requests can be relayed between caller and callee.
+    proxy_calls: ShardedMap<String, ProxyCall>,
     /// In-flight proxied INVITEs keyed by the received top-Via branch, so a
     /// CANCEL can be matched to its INVITE transaction and forwarded upstream.
     pending_invites: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
@@ -501,6 +510,8 @@ impl AppState {
             registrations: ShardedMap::new(),
             sip_nonces: ShardedMap::new(),
             sip_dialogs: ShardedMap::new(),
+            sip_connections: ShardedMap::new(),
+            proxy_calls: ShardedMap::new(),
             pending_invites: std::sync::Mutex::new(HashMap::new()),
             sip_messages: RwLock::new(Vec::new()),
             sip_transactions: RwLock::new(Vec::new()),
@@ -2684,6 +2695,40 @@ impl AppState {
         self.registrations
             .get(&aor.to_string())
             .filter(|registration| registration.expires_at > Utc::now())
+    }
+
+    /// Register a live SIP flow so the server can push messages to this client.
+    pub fn add_sip_connection(
+        &self,
+        peer: String,
+        tx: tokio::sync::mpsc::UnboundedSender<String>,
+    ) {
+        self.sip_connections.insert(peer, tx);
+    }
+
+    /// Drop a SIP flow when its socket closes.
+    pub fn remove_sip_connection(&self, peer: &str) {
+        self.sip_connections.remove(&peer.to_string());
+    }
+
+    /// Sender for the live flow at `peer`, if the socket is still open.
+    pub fn sip_connection(
+        &self,
+        peer: &str,
+    ) -> Option<tokio::sync::mpsc::UnboundedSender<String>> {
+        self.sip_connections.get(&peer.to_string())
+    }
+
+    pub fn upsert_proxy_call(&self, call: ProxyCall) {
+        self.proxy_calls.insert(call.call_id.clone(), call);
+    }
+
+    pub fn proxy_call(&self, call_id: &str) -> Option<ProxyCall> {
+        self.proxy_calls.get(&call_id.to_string())
+    }
+
+    pub fn remove_proxy_call(&self, call_id: &str) {
+        self.proxy_calls.remove(&call_id.to_string());
     }
 
     pub fn upsert_sip_dialog(&self, input: UpsertSipDialog) -> SipDialog {
@@ -12015,6 +12060,18 @@ pub struct CreateSipAccountRequest {
     pub domain: String,
     pub password_ha1: String,
     pub display_name: Option<String>,
+}
+
+/// A call the server is proxying between two locally-registered flows. Tracks
+/// both peer addresses (the sockets to write to) and both AORs so responses and
+/// in-dialog requests can be relayed to the opposite party.
+#[derive(Debug, Clone)]
+pub struct ProxyCall {
+    pub call_id: String,
+    pub caller_peer: String,
+    pub callee_peer: String,
+    pub caller_aor: String,
+    pub callee_aor: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

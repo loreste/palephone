@@ -18,7 +18,7 @@ use tokio_rustls::TlsAcceptor;
 use uuid::Uuid;
 
 use crate::{
-    md5_hex, AppState, MediaKind, PresenceStatus, SipDialogStatus, SipHeaderAction,
+    md5_hex, AppState, MediaKind, PresenceStatus, ProxyCall, SipDialogStatus, SipHeaderAction,
     SipHeaderActionKind, SipRegistration, StoreSipMessage, StoreSipNotification,
     StoreSipTransaction, UpsertSipDialog, UpsertSipSubscription,
 };
@@ -93,27 +93,65 @@ pub async fn serve_tls(
 }
 
 async fn serve_stream<S>(
-    mut stream: S,
+    stream: S,
     peer: SocketAddr,
     state: Arc<AppState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    // Split the socket so a dedicated writer task can push messages onto it
+    // from anywhere (this connection's own responses AND messages the proxy
+    // forwards from the other party's flow). All writes go through `tx`.
+    let (mut read_half, mut write_half) = tokio::io::split(stream);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let writer = tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if write_half.write_all(msg.as_bytes()).await.is_err() {
+                break;
+            }
+            let _ = write_half.flush().await;
+        }
+    });
+
+    let peer_key = peer.to_string();
+    state.add_sip_connection(peer_key.clone(), tx.clone());
+
     let mut read_buf = [0_u8; 4096];
     let mut pending = Vec::<u8>::new();
-    loop {
-        let len = stream.read(&mut read_buf).await?;
+    let result = loop {
+        let len = match read_half.read(&mut read_buf).await {
+            Ok(len) => len,
+            Err(err) => break Err(Box::new(err) as Box<dyn std::error::Error + Send + Sync>),
+        };
         if len == 0 {
-            return Ok(());
+            break Ok(());
         }
         pending.extend_from_slice(&read_buf[..len]);
         while let Some(packet) = drain_sip_message(&mut pending) {
-            if let Some(response) = handle_packet(&packet, peer, &state) {
-                stream.write_all(response.as_bytes()).await?;
+            if let Some(response) = handle_stream_packet(&packet, peer, &state) {
+                if tx.send(response).is_err() {
+                    break;
+                }
             }
         }
+    };
+
+    state.remove_sip_connection(&peer_key);
+    drop(tx);
+    let _ = writer.await;
+    result
+}
+
+/// Entry point for a packet read off a connection-oriented flow. Responses
+/// (SIP/2.0 …) belong to a proxied call and are relayed to the opposite party;
+/// requests go through the normal handler, which may itself forward to a flow.
+fn handle_stream_packet(packet: &str, peer: SocketAddr, state: &AppState) -> Option<String> {
+    if packet.starts_with("SIP/2.0") {
+        route_proxy_response(packet, peer, state);
+        return None;
     }
+    handle_packet(packet, peer, state)
 }
 
 fn drain_sip_message(buffer: &mut Vec<u8>) -> Option<String> {
@@ -286,6 +324,205 @@ pub fn handle_packet(packet: &str, peer: SocketAddr, state: &AppState) -> Option
     response
 }
 
+// ─────────────────────────── SIP proxy relay ───────────────────────────
+//
+// NAT'd clients register a private contact reachable only over the TLS flow
+// they hold open to the server. Instead of redirecting a caller to that
+// unreachable address, the server forwards the INVITE over the callee's flow
+// and relays responses / in-dialog requests between the two connections. Media
+// still travels client-to-client via ICE/TURN — only signaling is proxied.
+
+/// Read a single header value out of raw SIP text (case-insensitive, supports
+/// the common compact form for Call-ID and CSeq).
+fn raw_header(packet: &str, name: &str) -> Option<String> {
+    let name = name.to_ascii_lowercase();
+    for line in packet.lines() {
+        if line.is_empty() {
+            break; // end of headers
+        }
+        let Some((raw_name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let lname = raw_name.trim().to_ascii_lowercase();
+        let matches = lname == name
+            || (name == "call-id" && lname == "i")
+            || (name == "cseq" && lname == "cseq");
+        if matches {
+            return Some(value.trim().to_string());
+        }
+    }
+    None
+}
+
+/// Insert a header line immediately after the request/status line.
+fn insert_header_after_start_line(packet: &str, header_line: &str) -> String {
+    match packet.split_once("\r\n") {
+        Some((start, rest)) => format!("{start}\r\n{header_line}\r\n{rest}"),
+        None => packet.to_string(),
+    }
+}
+
+/// Decrement Max-Forwards (adding one if absent), touching only the header
+/// section so the SDP body and its Content-Length are preserved byte-for-byte.
+fn decrement_max_forwards(packet: &str) -> String {
+    // Preserve the body (and the blank-line separator) exactly.
+    let (headers, body_with_sep) = match packet.split_once("\r\n\r\n") {
+        Some((h, b)) => (h, Some(b)),
+        None => (packet.trim_end_matches("\r\n"), None),
+    };
+
+    let mut seen = false;
+    let rewritten_headers = headers
+        .split("\r\n")
+        .map(|line| match line.split_once(':') {
+            Some((name, value)) if name.trim().eq_ignore_ascii_case("max-forwards") => {
+                seen = true;
+                let n = value.trim().parse::<i32>().unwrap_or(70).saturating_sub(1).max(0);
+                format!("Max-Forwards: {n}")
+            }
+            _ => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n");
+
+    let headers_out = if seen {
+        rewritten_headers
+    } else {
+        insert_header_after_start_line(&rewritten_headers, "Max-Forwards: 70")
+    };
+
+    match body_with_sep {
+        Some(body) => format!("{headers_out}\r\n\r\n{body}"),
+        None => format!("{headers_out}\r\n\r\n"),
+    }
+}
+
+/// Build the INVITE to forward to the callee: add a loose-routing Record-Route
+/// so both parties send in-dialog requests back through the server, and
+/// decrement Max-Forwards.
+fn build_forwarded_invite(raw: &str, realm: &str) -> String {
+    let record_route = format!("Record-Route: <sip:{realm}:5061;transport=tls;lr>");
+    let with_rr = insert_header_after_start_line(raw, &record_route);
+    decrement_max_forwards(&with_rr)
+}
+
+/// Attempt to proxy an INVITE to a locally-registered, currently-connected
+/// callee. Returns `Some(100 Trying)` when the call was forwarded, or `None`
+/// to let the caller fall back to a 302 redirect.
+fn try_proxy_invite(
+    request: &SipRequest,
+    caller_peer: SocketAddr,
+    target_aor: &str,
+    realm: &str,
+    state: &AppState,
+) -> Option<String> {
+    let call_id = request.call_id()?;
+    let from_aor = request.header("from").and_then(extract_sip_uri)?;
+    let reg = state.registration_for(target_aor)?;
+    let callee_tx = state.sip_connection(&reg.source)?;
+    // The caller must also be on a live flow so we can relay responses back.
+    state.sip_connection(&caller_peer.to_string())?;
+
+    let forwarded = build_forwarded_invite(&request.raw, realm);
+    state.upsert_proxy_call(ProxyCall {
+        call_id: call_id.to_string(),
+        caller_peer: caller_peer.to_string(),
+        callee_peer: reg.source.clone(),
+        caller_aor: from_aor,
+        callee_aor: target_aor.to_string(),
+    });
+    if callee_tx.send(forwarded).is_err() {
+        state.remove_proxy_call(call_id);
+        return None;
+    }
+    tracing::info!(call_id, %caller_peer, callee = %reg.source, "proxying INVITE over callee flow");
+    Some(request.response(100, "Trying", &[]))
+}
+
+/// Relay a response received on one flow to the opposite party of its call.
+fn route_proxy_response(packet: &str, peer: SocketAddr, state: &AppState) {
+    let Some(call_id) = raw_header(packet, "call-id") else {
+        return;
+    };
+    let Some(call) = state.proxy_call(&call_id) else {
+        return;
+    };
+    let from_peer = peer.to_string();
+    let dest_peer = if from_peer == call.caller_peer {
+        call.callee_peer.clone()
+    } else {
+        // Responses normally travel callee → caller; default there.
+        call.caller_peer.clone()
+    };
+    if let Some(tx) = state.sip_connection(&dest_peer) {
+        let _ = tx.send(packet.to_string());
+    }
+    // Tear down the call once a final response to its BYE is relayed.
+    let cseq = raw_header(packet, "cseq").unwrap_or_default().to_ascii_uppercase();
+    if cseq.contains("BYE") && packet.starts_with("SIP/2.0 2") {
+        state.remove_proxy_call(&call_id);
+    }
+}
+
+/// If this request belongs to a proxied call, relay it to the opposite party.
+/// Returns `Some(response)` when handled (`response` may be `None` for requests
+/// that need no local reply, like ACK); returns `None` to fall through to
+/// normal handling.
+fn maybe_proxy_in_dialog(
+    request: &SipRequest,
+    peer: SocketAddr,
+    state: &AppState,
+) -> Option<Option<String>> {
+    let call_id = request.call_id()?;
+    let call = state.proxy_call(call_id)?;
+    let method = request.method();
+    // Only relay in-dialog / call-control methods; leave others (e.g. a fresh
+    // INVITE reusing a Call-ID, MESSAGE) to normal handling.
+    let relay = matches!(
+        method.as_str(),
+        "ACK" | "BYE" | "CANCEL" | "INFO" | "UPDATE" | "PRACK" | "NOTIFY" | "REFER"
+    ) || (method == "INVITE"
+        && request
+            .header("to")
+            .map(|to| to.contains("tag="))
+            .unwrap_or(false));
+    if !relay {
+        return None;
+    }
+
+    let from_peer = peer.to_string();
+    let dest_peer = if from_peer == call.caller_peer {
+        call.callee_peer.clone()
+    } else if from_peer == call.callee_peer {
+        call.caller_peer.clone()
+    } else {
+        // In-dialog request arrived on a new flow; route by From identity.
+        let from_is_caller = request
+            .header("from")
+            .and_then(extract_sip_uri)
+            .map(|f| f == call.caller_aor)
+            .unwrap_or(false);
+        if from_is_caller {
+            call.callee_peer.clone()
+        } else {
+            call.caller_peer.clone()
+        }
+    };
+
+    if let Some(tx) = state.sip_connection(&dest_peer) {
+        let _ = tx.send(decrement_max_forwards(&request.raw));
+    }
+
+    match method.as_str() {
+        // CANCEL is hop-by-hop: ack it to the sender; the forwarded CANCEL makes
+        // the callee send 487 for the INVITE, which relays back to the caller.
+        "CANCEL" => Some(Some(request.response(200, "OK", &[]))),
+        // BYE ends the call; its 200 OK relays back via route_proxy_response,
+        // which then drops the call mapping.
+        _ => Some(None),
+    }
+}
+
 /// Returns true if the string looks like a phone number (digits, +, at least 3 chars).
 fn looks_like_phone_number(s: &str) -> bool {
     let stripped = s.trim_start_matches('+');
@@ -320,9 +557,15 @@ fn handle_request(request: &SipRequest, peer: SocketAddr, state: &AppState) -> O
         return Some(request.response(403, "Forbidden", &[]));
     }
 
+    // If this request belongs to a call the server is proxying, relay it to the
+    // opposite party's flow instead of handling it locally.
+    if let Some(handled) = maybe_proxy_in_dialog(request, peer, state) {
+        return handled;
+    }
+
     match request.method().as_str() {
         "REGISTER" => handle_register(&request, peer, state),
-        "INVITE" => handle_invite(&request, state),
+        "INVITE" => handle_invite(&request, peer, state),
         "ACK" => handle_ack(&request, state),
         "BYE" => handle_bye(&request, state),
         "CANCEL" => handle_cancel(&request, state),
@@ -380,7 +623,7 @@ fn handle_register(request: &SipRequest, peer: SocketAddr, state: &AppState) -> 
     Some(request.response(200, "OK", &[("Expires", expires.to_string())]))
 }
 
-fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
+fn handle_invite(request: &SipRequest, peer: SocketAddr, state: &AppState) -> Option<String> {
     let Some(from_aor) = request.header("from").and_then(extract_sip_uri) else {
         return Some(request.response(400, "Bad Request", &[]));
     };
@@ -450,7 +693,9 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
     // Look up caller name from CNAM cache to enrich caller ID
     let _enriched_name = state.cnam_enrich_caller_id(crate::sip_user_part(&from_aor));
 
-    // Helper: create dialog and redirect to a target URI
+    // Helper: create dialog and route to a target URI. Prefers proxying the
+    // INVITE over the callee's live flow (works across NAT); falls back to a
+    // 302 redirect when the target isn't a currently-connected local client.
     let make_redirect = |target: &str| -> Option<String> {
         state.upsert_sip_dialog(UpsertSipDialog {
             call_id: call_id_str.clone(),
@@ -461,6 +706,9 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
             media_types: media.clone(),
             peer: Default::default(),
         });
+        if let Some(trying) = try_proxy_invite(request, peer, target, &realm, state) {
+            return Some(trying);
+        }
         if let Some(reg) = state.registration_for(target) {
             Some(request.response(
                 302,
@@ -780,6 +1028,11 @@ fn handle_invite(request: &SipRequest, state: &AppState) -> Option<String> {
             media_types: media.clone(),
             peer: Default::default(),
         });
+        // Proxy over the callee's live flow (NAT-friendly); fall back to a 302
+        // redirect (used for same-LAN reachable contacts / SIP forking).
+        if let Some(trying) = try_proxy_invite(request, peer, &routed_uri, &realm, state) {
+            return Some(trying);
+        }
         return Some(request.response(
             302,
             "Moved Temporarily",
@@ -2034,11 +2287,17 @@ fn record_transaction(
 #[derive(Debug)]
 struct SipRequest {
     inner: Request,
+    /// The original, unmodified packet text — used when proxying so the
+    /// forwarded message preserves headers and SDP body exactly.
+    raw: String,
 }
 
 impl SipRequest {
     fn parse(packet: &str) -> Option<Self> {
-        Request::try_from(packet).ok().map(|inner| Self { inner })
+        Request::try_from(packet).ok().map(|inner| Self {
+            inner,
+            raw: packet.to_string(),
+        })
     }
 
     fn header(&self, name: &str) -> Option<&str> {
@@ -2424,6 +2683,41 @@ mod tests {
     }
 
     #[test]
+    fn forwarding_preserves_sdp_body_and_content_length() {
+        let sdp = "v=0\r\no=- 1 1 IN IP4 1.2.3.4\r\ns=-\r\nc=IN IP4 1.2.3.4\r\nt=0 0\r\nm=audio 5000 RTP/AVP 0\r\n";
+        let invite = format!(
+            "INVITE sip:b@drcpbx.com SIP/2.0\r\nVia: SIP/2.0/TLS 1.2.3.4:5061;branch=z9hG4bKabc\r\nMax-Forwards: 70\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{}",
+            sdp.len(),
+            sdp
+        );
+        let forwarded = build_forwarded_invite(&invite, "drcpbx.com");
+        // Body is byte-for-byte identical.
+        let (_, body) = forwarded.split_once("\r\n\r\n").unwrap();
+        assert_eq!(body, sdp, "SDP body must be preserved exactly");
+        // Record-Route added, Max-Forwards decremented, original headers intact.
+        assert!(forwarded.contains("Record-Route: <sip:drcpbx.com:5061;transport=tls;lr>"));
+        assert!(forwarded.contains("Max-Forwards: 69"));
+        // Content-Length is untouched by forwarding.
+        assert!(forwarded.contains(&format!("Content-Length: {}", sdp.len())));
+        assert!(forwarded.starts_with("INVITE sip:b@drcpbx.com SIP/2.0\r\n"));
+    }
+
+    #[test]
+    fn max_forwards_added_when_absent() {
+        let msg = "BYE sip:b@drcpbx.com SIP/2.0\r\nVia: SIP/2.0/TLS 1.2.3.4:5061\r\nContent-Length: 0\r\n\r\n";
+        let out = decrement_max_forwards(msg);
+        assert!(out.contains("Max-Forwards: 70"));
+        assert!(out.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn raw_header_reads_call_id_and_cseq() {
+        let msg = "SIP/2.0 200 OK\r\nCall-ID: abc@host\r\nCSeq: 2 BYE\r\n\r\n";
+        assert_eq!(raw_header(msg, "call-id").as_deref(), Some("abc@host"));
+        assert_eq!(raw_header(msg, "cseq").as_deref(), Some("2 BYE"));
+    }
+
+    #[test]
     fn register_packet_updates_registrar() {
         let state = test_state();
         let peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
@@ -2511,6 +2805,98 @@ Authorization: {}\r\n\r\n",
         assert!(response.contains("Contact: <sip:bob@10.0.0.2:5060>"));
         assert_eq!(state.sip_dialogs().len(), 1);
         assert_eq!(state.sip_dialogs()[0].status, SipDialogStatus::Ringing);
+    }
+
+    #[test]
+    fn invite_is_proxied_over_callee_flow_when_both_connected() {
+        let state = test_state();
+
+        // Callee bob is registered AND has a live flow (mpsc stands in for the
+        // socket). Caller alice likewise has a live flow.
+        let callee_peer = "10.0.0.2:5060";
+        let (callee_tx, mut callee_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.add_sip_connection(callee_peer.to_string(), callee_tx);
+        state.upsert_registration(SipRegistration {
+            aor: "sip:bob@example.com".to_string(),
+            contact: "sip:bob@10.0.0.2:5060".to_string(),
+            source: callee_peer.to_string(),
+            user_agent: None,
+            expires_at: Utc::now() + Duration::minutes(10),
+            updated_at: Utc::now(),
+        });
+        let caller_peer: SocketAddr = "127.0.0.1:5062".parse().unwrap();
+        let (caller_tx, mut caller_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.add_sip_connection(caller_peer.to_string(), caller_tx);
+
+        let nonce = state.issue_sip_nonce();
+        let auth = authorization(
+            "alice",
+            "example.com",
+            "secret",
+            "INVITE",
+            "sip:bob@example.com",
+            &nonce,
+        );
+        let invite = format!(
+            "INVITE sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/TLS 127.0.0.1:5062;branch=z9hG4bKcaller\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: proxy-call-1\r\n\
+CSeq: 1 INVITE\r\n\
+Max-Forwards: 70\r\n\
+Authorization: {}\r\n\r\n",
+            auth
+        );
+
+        // Caller INVITE → 100 Trying to caller, forwarded INVITE to callee flow.
+        let response = handle_packet(&pale(&invite), caller_peer, &state).unwrap();
+        assert!(response.starts_with("SIP/2.0 100 Trying"));
+        let forwarded = callee_rx.try_recv().expect("callee flow receives INVITE");
+        assert!(forwarded.starts_with("INVITE sip:bob@example.com SIP/2.0"));
+        assert!(forwarded.contains("Record-Route: <sip:example.com:5061;transport=tls;lr>"));
+        assert!(forwarded.contains("Max-Forwards: 69"));
+        assert!(state.proxy_call("proxy-call-1").is_some());
+
+        // Callee 200 OK → relayed to caller flow.
+        let ok = "SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/TLS 127.0.0.1:5062;branch=z9hG4bKcaller\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>;tag=2\r\n\
+Call-ID: proxy-call-1\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n";
+        assert!(handle_stream_packet(ok, callee_peer.parse().unwrap(), &state).is_none());
+        let relayed = caller_rx.try_recv().expect("caller flow receives 200 OK");
+        assert!(relayed.starts_with("SIP/2.0 200 OK"));
+
+        // Caller BYE → relayed to callee; no local response.
+        let bye = "BYE sip:bob@10.0.0.2:5060 SIP/2.0\r\n\
+Via: SIP/2.0/TLS 127.0.0.1:5062;branch=z9hG4bKbye\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>;tag=2\r\n\
+Call-ID: proxy-call-1\r\n\
+CSeq: 2 BYE\r\n\
+Max-Forwards: 70\r\n\
+Content-Length: 0\r\n\r\n";
+        assert!(handle_packet(bye, caller_peer, &state).is_none());
+        let relayed_bye = callee_rx.try_recv().expect("callee flow receives BYE");
+        assert!(relayed_bye.starts_with("BYE"));
+
+        // Callee 200 OK to the BYE → relayed to caller and call torn down.
+        let bye_ok = "SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/TLS 127.0.0.1:5062;branch=z9hG4bKbye\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>;tag=2\r\n\
+Call-ID: proxy-call-1\r\n\
+CSeq: 2 BYE\r\n\
+Content-Length: 0\r\n\r\n";
+        handle_stream_packet(bye_ok, callee_peer.parse().unwrap(), &state);
+        assert!(caller_rx.try_recv().is_ok(), "caller flow receives 200 to BYE");
+        assert!(
+            state.proxy_call("proxy-call-1").is_none(),
+            "call mapping torn down after BYE completes"
+        );
     }
 
     #[tokio::test]
