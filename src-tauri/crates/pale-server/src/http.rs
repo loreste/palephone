@@ -1007,8 +1007,12 @@ fn apply_cors_headers(headers: &mut HeaderMap, origin: Option<&str>) {
 async fn require_pale_client(request: Request<axum::body::Body>, next: Next) -> Response {
     let path = request.uri().path();
 
-    // Always allow health-checks, metrics, root page, and OPTIONS preflight
-    if matches!(path, "/" | "/health" | "/metrics") || request.method() == Method::OPTIONS {
+    // Always allow health-checks, metrics, root page, SSE events, and OPTIONS preflight.
+    // SSE uses browser EventSource which cannot set custom headers; it authenticates
+    // via a query-string token instead.
+    if matches!(path, "/" | "/health" | "/metrics" | "/v1/events")
+        || request.method() == Method::OPTIONS
+    {
         return next.run(request).await;
     }
 

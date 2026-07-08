@@ -368,12 +368,14 @@ struct PaleLoginRequest {
 #[tauri::command]
 async fn pale_server_login(input: PaleLoginRequest) -> Result<serde_json::Value, String> {
     let url = format!("{}/v1/auth/login", input.base_url.trim_end_matches('/'));
+    log::info!("pale_server_login -> {}", url);
     let body = serde_json::json!({
         "sip_uri": input.sip_uri,
         "password": input.password,
     });
 
     let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
     let response = client
@@ -384,6 +386,7 @@ async fn pale_server_login(input: PaleLoginRequest) -> Result<serde_json::Value,
         .send()
         .await
         .map_err(|e| format!("Network error: {}", e))?;
+    log::info!("pale_server_login <- {}", response.status());
 
     if !response.status().is_success() {
         let status = response.status();
