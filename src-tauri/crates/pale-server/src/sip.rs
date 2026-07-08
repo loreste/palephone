@@ -300,12 +300,20 @@ fn is_pale_sip_client(request: &SipRequest) -> bool {
 }
 
 fn handle_request(request: &SipRequest, peer: SocketAddr, state: &AppState) -> Option<String> {
-    // Allow OPTIONS (keep-alive probes) from any client; reject everything
-    // else that does not identify as a Pale client.
-    if request.method() != "OPTIONS" && !is_pale_sip_client(request) {
+    // Allow OPTIONS (keep-alive) and in-dialog requests (ACK, BYE, CANCEL,
+    // INFO, UPDATE, PRACK, NOTIFY) from any client. In-dialog requests are
+    // tied to an already-authenticated INVITE and may not carry the User-Agent
+    // header on every hop. Only gate initial requests (REGISTER, INVITE,
+    // SUBSCRIBE, MESSAGE, PUBLISH, REFER).
+    let method = request.method();
+    let needs_gate = matches!(
+        method.as_str(),
+        "REGISTER" | "INVITE" | "SUBSCRIBE" | "MESSAGE" | "PUBLISH" | "REFER"
+    );
+    if needs_gate && !is_pale_sip_client(request) {
         tracing::warn!(
             peer = %peer,
-            method = %request.method(),
+            method = %method,
             ua = ?request.header("user-agent"),
             "SIP request rejected: not a Pale client",
         );
