@@ -9,18 +9,8 @@ import { paleServerGetPresence, paleFetch } from "@/lib/tauri";
 import { adminRefreshToken } from "@/lib/adminApi";
 import { shouldNotify, shouldPlaySound } from "@/lib/notifications";
 import { playNotificationBeep } from "@/lib/notificationSound";
+import { notify, isWindowFocused } from "@/lib/nativeNotify";
 import { toast } from "@/components/ui/Toast";
-
-function desktopNotify(title: string, body?: string) {
-  if (typeof Notification === "undefined") return;
-  if (Notification.permission === "granted") {
-    new Notification(title, { body });
-  } else if (Notification.permission !== "denied") {
-    Notification.requestPermission().then((perm) => {
-      if (perm === "granted") new Notification(title, { body });
-    });
-  }
-}
 
 const RECONNECT_DELAY_MS = 3000;
 // Don't show the "offline" banner the instant the SSE stream errors — brief
@@ -223,14 +213,22 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
               });
             }
 
-            shouldNotify(msg.room_id).then((ok) => {
-              if (ok) {
-                toast({ type: msg.priority === "urgent" ? "warning" : "info", title: `${priorityPrefix}${senderLabel}`, description: preview });
-                desktopNotify(`${priorityPrefix}${senderLabel}`, preview);
-              }
+            shouldNotify(msg.room_id).then(async (ok) => {
+              if (!ok) return;
+              const focused = await isWindowFocused();
+              const isActiveRoom = msg.room_id === useChatStore.getState().activeRoomId;
+              // You're already reading this chat — no banner needed.
+              if (focused && isActiveRoom) return;
+              const title = `${priorityPrefix}${senderLabel}`;
+              toast({ type: msg.priority === "urgent" ? "warning" : "info", title, description: preview });
+              // Native OS banner when the app isn't in the foreground.
+              if (!focused) notify(title, preview);
             });
-            shouldPlaySound().then((ok) => {
-              if (ok) playNotificationBeep();
+            shouldPlaySound().then(async (ok) => {
+              if (!ok) return;
+              const focused = await isWindowFocused();
+              if (focused && msg.room_id === useChatStore.getState().activeRoomId) return;
+              playNotificationBeep();
             });
           }
         } catch { /* ignore */ }

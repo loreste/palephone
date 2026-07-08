@@ -25,6 +25,7 @@ import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { useServerEvents } from "@/hooks/useServerEvents";
 import { useAutoAway } from "@/hooks/useAutoAway";
 import { useMeetingReminders } from "@/hooks/useMeetingReminders";
+import { useUnreadBadge } from "@/hooks/useUnreadBadge";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
 import { getConfig, getSipPassword, openPopoutWindow, paleLogin, registerAccount, saveSettings, storeSipPassword } from "@/lib/tauri";
@@ -87,6 +88,7 @@ export function AppShell() {
   useServerEvents(serverBaseUrl, serverToken);
   useAutoAway();
   useMeetingReminders();
+  useUnreadBadge();
 
   const setAccount = useAccountStore((s) => s.setAccount);
   const setRegState = useAccountStore((s) => s.setRegState);

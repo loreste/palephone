@@ -6,23 +6,13 @@ import { expandMeetingOccurrences, type CalendarMeetingOccurrence } from "@/lib/
 import { paleServerApi } from "@/lib/tauri";
 import { shouldNotify, shouldPlaySound } from "@/lib/notifications";
 import { playNotificationBeep } from "@/lib/notificationSound";
+import { notify as desktopNotify } from "@/lib/nativeNotify";
 import { toast } from "@/components/ui/Toast";
 
 const REMINDER_LOOKAHEAD_MS = 15 * 60 * 1000;
 const STARTING_WINDOW_MS = 60 * 1000;
 const CHECK_INTERVAL_MS = 30 * 1000;
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
-
-function desktopNotify(title: string, body?: string) {
-  if (typeof Notification === "undefined") return;
-  if (Notification.permission === "granted") {
-    new Notification(title, { body });
-  } else if (Notification.permission !== "denied") {
-    Notification.requestPermission().then((perm) => {
-      if (perm === "granted") new Notification(title, { body });
-    });
-  }
-}
 
 export function shouldSendMeetingReminder(
   occurrence: CalendarMeetingOccurrence,
