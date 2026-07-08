@@ -58,7 +58,8 @@ jobs:
             libopus-dev \
             libvpx-dev \
             autoconf \
-            automake
+            automake \
+            rpm
 
       # macOS dependencies
       - name: Install macOS dependencies

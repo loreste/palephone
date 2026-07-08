@@ -86,7 +86,7 @@ jobs:
       - name: Initialize Tauri Android
         run: npm run tauri android init
 
-      - name: Add Android permissions for background calling
+      - name: Add Android permissions and foreground service
         run: |
           MANIFEST="src-tauri/gen/android/app/src/main/AndroidManifest.xml"
           if [ -f "$MANIFEST" ]; then
@@ -103,7 +103,19 @@ jobs:
                 <uses-permission android:name="android.permission.VIBRATE" />\
                 <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\
                 <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />' "$MANIFEST"
-            echo "Android permissions injected"
+
+            # Register the foreground service in the manifest (inside <application>)
+            sed -i '/<\/application>/i \
+                <service android:name="com.pale.softphone.SipForegroundService"\
+                    android:foregroundServiceType="phoneCall"\
+                    android:exported="false" />' "$MANIFEST"
+
+            # Copy the Kotlin service source into the Android project
+            JAVA_DIR="src-tauri/gen/android/app/src/main/java/com/pale/softphone"
+            mkdir -p "$JAVA_DIR"
+            cp src-tauri/android/SipForegroundService.kt "$JAVA_DIR/"
+
+            echo "Android permissions and foreground service injected"
           fi
 
       - name: Build Android APK
