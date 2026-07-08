@@ -53,6 +53,11 @@ export function openPopoutWindow(
 }
 
 async function requestMediaForNativeCall(video = false): Promise<void> {
+  // In Tauri desktop/mobile, PJSIP opens audio/video devices directly via
+  // the OS (CoreAudio, ALSA, OpenSL ES). The WebView's getUserMedia is not
+  // available or needed — skip the check entirely in Tauri.
+  if ((window as any).__TAURI_INTERNALS__) return;
+
   const mediaDevices = globalThis.navigator?.mediaDevices;
   if (!mediaDevices?.getUserMedia) return;
 

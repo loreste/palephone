@@ -1090,6 +1090,7 @@ function ChatRoom({
   const typingTimeoutRef = useRef<number | null>(null);
   const typingSentRef = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const { baseUrl, token, connected } = useServerStore();
   const account = useAccountStore((s) => s.account);
   const currentSipUri = account?.sipUri;
@@ -1380,6 +1381,38 @@ function ChatRoom({
         toast({ type: "error", title: "Upload failed", description: String(err) });
       }
     }
+  };
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!connected || !baseUrl || !token) return;
+    const files = Array.from(e.target.files ?? []);
+    for (const file of files) {
+      try {
+        const uploaded = await paleServerUploadFile(baseUrl, token, file, { roomId: room.room_id });
+        const fileUrl = `${baseUrl.replace(/\/+$/, "")}/v1/files/${uploaded.id}`;
+        const body = `[File: ${uploaded.filename}](${fileUrl})`;
+        const msg = await paleServerSendRoomMessage(baseUrl, token, room.room_id, body);
+        addMessage({
+          event_id: msg.id,
+          room_id: room.room_id,
+          sender: msg.sender_uri,
+          sender_name: null,
+          body: msg.body,
+          msg_type: "text",
+          timestamp: Math.floor(new Date(msg.created_at).getTime() / 1000),
+          is_encrypted: false,
+          is_own: true,
+          priority: msg.priority ?? "normal",
+          saved_by: msg.saved_by ?? [],
+          mentions: msg.mentions ?? [],
+          mentioned_user_uris: msg.mentioned_user_uris ?? [],
+        });
+      } catch (err) {
+        toast({ type: "error", title: "Upload failed", description: String(err) });
+      }
+    }
+    // Reset input so the same file can be selected again
+    if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   const handleSend = async () => {
@@ -2246,11 +2279,19 @@ function ChatRoom({
       <div className="px-3 py-2 border-t border-border-subtle shrink-0 bg-base/95">
         <div className="flex items-center gap-1.5 pb-2">
           <button
+            onClick={() => fileInputRef.current?.click()}
             className="p-2 text-tertiary hover:text-secondary rounded-md hover:bg-elevated"
             aria-label="Attach file"
           >
             <Paperclip size={18} />
           </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={handleFileSelect}
+          />
           {isServerRoom && !editingMessage && (
             <button
               onClick={() => setShowLoopInsert(!showLoopInsert)}
