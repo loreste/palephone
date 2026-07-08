@@ -157,15 +157,18 @@ The admin console covers PBX, collaboration, compliance, security, devices, apps
 - System tray with status indicators
 - Command palette (Cmd+K) and keyboard shortcuts
 - Native OS notifications for calls and messages
+- Web Push notifications for incoming calls and chat mentions (VAPID)
 - OS keychain for credential storage (macOS Keychain, Windows Credential Manager)
-- Android via Tauri 2.x with adaptive UI
+- Builds for macOS (ARM + Intel), Windows, Linux (.deb, .AppImage), and Android
+- Client-only gate: server rejects HTTP and SIP requests from non-Pale clients
+- Security headers: HSTS, X-Frame-Options, CSP, Referrer-Policy on all responses
 
 ## Encryption
 
 | Layer | What | How |
 |-------|------|-----|
 | SIP signaling | Call setup, registration | SIP TLS by default when certificate paths are configured; TCP fallback; UDP only when explicitly enabled |
-| Voice/video media | RTP audio and video streams | SRTP with DTLS key exchange |
+| Voice/video media | RTP audio and video streams | SRTP with DTLS key exchange; VP8 video codec via libvpx |
 | Chat messages | Matrix-backed 1:1 and group conversations | Olm / Megolm |
 | File attachments | Uploaded files | AES-256-CTR with per-file key |
 | Server storage | SQLite fallback encryption | ChaCha20-Poly1305 |
@@ -244,11 +247,11 @@ When an INVITE arrives, pale-server evaluates in order:
 
 ```bash
 # macOS
-brew install openssl@3 opus autoconf automake
+brew install openssl@3 opus libvpx autoconf automake
 
 # Ubuntu/Debian
 sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libasound2-dev \
-  libpulse-dev libssl-dev libopus-dev autoconf automake
+  libpulse-dev libssl-dev libopus-dev libvpx-dev autoconf automake
 ```
 
 ### Install Pale Server

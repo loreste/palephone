@@ -21,6 +21,20 @@ Recent enterprise readiness work added:
 - DLP, eDiscovery, retention, labels, barriers, data residency, and ATP
   quarantine records
 
+Recent client and security work completed:
+
+- VP8 video codec (libvpx) enabled for video calls on all desktop platforms
+- screen sharing via PJSIP video device switching
+- video stream detection and native window rendering
+- push notifications (VAPID Web Push) for incoming calls and chat mentions
+- client-only gate: server rejects non-Pale HTTP and SIP requests
+- security headers (HSTS, X-Frame-Options, X-Content-Type-Options,
+  Referrer-Policy, Permissions-Policy) on all HTTP responses
+- HMAC-SHA256 integrity signing on audit log entries
+- media permission checks before answering incoming calls
+- builds for macOS (ARM + Intel), Windows, Linux, and Android
+- emoji picker in the chat compose bar
+
 Those features make the gaps visible and manageable. They do not remove the
 need for real external systems where the feature depends on one.
 
@@ -78,26 +92,22 @@ demo.
 
 ### 4. Client and Runtime Hardening
 
-Desktop and Android paths exist. Full enterprise client parity still needs more
-work:
+Desktop (macOS ARM + Intel, Windows, Linux) and Android paths are working.
+Push notifications, VP8 video, screen sharing, and media permission checks
+are implemented. Remaining work:
 
-- packaged mobile app readiness for Android and iOS
-- push notifications
-- background calling and meeting behavior
-- microphone, camera, screen-share, and notification permission checks
-- browser deployment hardening
+- iOS packaging
+- background calling and meeting behavior on mobile
 - pop-out and multi-window lifecycle polish
 - media runtime certification across supported platforms
 
 ### 5. Security Hardening
 
-Security coverage is broad, but the enterprise bar is higher than "feature
-exists." Remaining hardening should focus on:
+Security headers (HSTS, X-Frame-Options, CSP, Referrer-Policy, Permissions-Policy)
+and HMAC-signed audit log entries are in place. Remaining hardening:
 
-- deeper OIDC and SSO validation
-- signed audit exports and tamper-evident audit storage
+- deeper OIDC and SSO validation (certificate pinning for provider calls)
 - secret rotation workflows
-- provider TLS verification and certificate pinning options
 - stricter review for high-risk admin actions
 - backup, restore, and disaster recovery evidence
 - vulnerability scanning for server images and release artifacts
@@ -127,8 +137,8 @@ has provider-specific validation, load results, or deployment evidence.
 | Meetings and webinars | conferences, scheduled meetings, lobby, polls, Q&A, attendance, webinar registration, captions, presentation records, town hall configuration | Media provider adapters, 10,000-viewer load proof, PowerPoint-style rendering integration, and production streaming validation |
 | Chat and collaboration | rooms, messages, reactions, read receipts, teams, channels, tags, guests, federation records, tabs, apps, connectors, bots, wiki, tasks, approvals | Tenant-level workflow validation and provider setup guides for any external collaboration services |
 | Files | upload, download, versioning, folders, locks, governance metadata, storage readiness | Real storage adapters and co-authoring/rendering providers |
-| Security and compliance | retention, eDiscovery, DLP, ATP quarantine records, security score, compliance reviews, labels, barriers, data residency, SSO records, MFA/session APIs | Malware scanner adapters, CASB adapters, signed audit exports, secret rotation, and stricter admin action review |
+| Security and compliance | retention, eDiscovery, DLP, ATP quarantine records, security score, compliance reviews, labels, barriers, data residency, SSO records, MFA/session APIs, security headers, HMAC-signed audit entries | Malware scanner adapters, CASB adapters, secret rotation, and stricter admin action review |
 | AI and speech | LLM, STT, and TTS provider APIs, transcription jobs, speech IVR contracts, meeting assistant report structures | Real provider execution, provider-native health checks, and tenant-level validation reports |
 | Devices and rooms | room/device records, common area phone records, scheduling panels, hot desking, provisioning paths | Device certification, installer/runtime testing, and operational guides |
 | Platform integration | OAuth/API clients, bots, app catalog, message extensions, automations, federation, calendar/contact sync records | Production connectors, external provider tests, and operator runbooks |
-| Clients | desktop app, Android build path, admin UI, enterprise readiness UI | iOS packaging, browser hardening, push notifications, device permissions, background modes, and multi-window lifecycle polish |
+| Clients | desktop app (macOS ARM+Intel, Windows, Linux), Android build, admin UI, enterprise readiness UI, push notifications, VP8 video, screen sharing, media permissions, client-only gate | iOS packaging, background modes, and multi-window lifecycle polish |
