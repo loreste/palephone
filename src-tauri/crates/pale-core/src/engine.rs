@@ -500,6 +500,32 @@ impl PjsipEngine {
                 &mut call_id,
             );
 
+            // 420006 = PJSIP_ESESSIONINSECURE — PJSIP thinks the signaling
+            // is not secure enough for the SRTP policy. This happens when the
+            // request-URI uses sip: instead of sips: even though the actual
+            // transport is TLS. Retry with a sips: URI so PJSIP is satisfied.
+            if status == 420006 {
+                let sips_uri = if uri.starts_with("sip:") {
+                    uri.replacen("sip:", "sips:", 1)
+                } else {
+                    format!("sips:{}", uri.trim_start_matches("sips:"))
+                };
+                log::warn!(
+                    "Call to {uri} rejected as insecure (420006); retrying as {sips_uri}"
+                );
+                let dest_sips = CString::new(sips_uri).unwrap();
+                let mut dest_sips_pj = pj_str_from_cstring(&dest_sips);
+                call_id = -1;
+                status = pjsip_sys::pjsua_call_make_call(
+                    acc_id,
+                    &mut dest_sips_pj,
+                    &opt,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    &mut call_id,
+                );
+            }
+
             if status == 70004 {
                 log::warn!(
                     "Audio call setup returned PJ_EINVAL for {uri}; retrying with null sound device"
