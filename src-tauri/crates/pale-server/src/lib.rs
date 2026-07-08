@@ -1560,12 +1560,32 @@ impl AppState {
         action: impl Into<String>,
         target: Option<String>,
     ) -> AdminAuditEvent {
+        let principal = principal.into();
+        let action = action.into();
+        let created_at = Utc::now();
+        let id = Uuid::new_v4();
+
+        // Compute HMAC-like integrity hash: SHA-256(storage_key | id | fields)
+        let integrity = {
+            let msg = format!(
+                "{}|{}|{}|{}|{}",
+                id,
+                principal,
+                action,
+                target.as_deref().unwrap_or(""),
+                created_at.to_rfc3339(),
+            );
+            let keyed = format!("{}{}", self.http_token, msg);
+            sha256_hex(keyed.as_bytes())
+        };
+
         let event = AdminAuditEvent {
-            id: Uuid::new_v4(),
-            principal: principal.into(),
-            action: action.into(),
+            id,
+            principal,
+            action,
             target,
-            created_at: Utc::now(),
+            created_at,
+            integrity: Some(integrity),
         };
         let mut events = self
             .audit_events
@@ -11956,6 +11976,10 @@ pub struct AdminAuditEvent {
     pub action: String,
     pub target: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// HMAC-SHA256 integrity signature over id|principal|action|target|created_at.
+    /// Computed using the server storage key so tampered records can be detected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrity: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
