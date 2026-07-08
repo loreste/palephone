@@ -23,6 +23,10 @@ function desktopNotify(title: string, body?: string) {
 }
 
 const RECONNECT_DELAY_MS = 3000;
+// Don't show the "offline" banner the instant the SSE stream errors — brief
+// network hiccups (WiFi, VPN, sleep/wake) recover well within a couple seconds.
+// Only surface offline if the connection is still down after this grace period.
+const OFFLINE_DEBOUNCE_MS = 2500;
 const TOKEN_REFRESH_BUFFER_MS = 30 * 60 * 1000; // Refresh 30 min before expiry
 
 /**
@@ -45,6 +49,7 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
   const disconnect = useServerStore((s) => s.disconnect);
   const sourceRef = useRef<EventSource | null>(null);
   const reconnectRef = useRef<number | null>(null);
+  const offlineTimerRef = useRef<number | null>(null);
   const refreshRef = useRef<number | null>(null);
   const typingTimeoutsRef = useRef<Map<string, number>>(new Map());
 
@@ -63,6 +68,11 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
       sourceRef.current = es;
 
       es.onopen = () => {
+        // Connection is up — cancel any pending "offline" transition and clear the banner.
+        if (offlineTimerRef.current) {
+          window.clearTimeout(offlineTimerRef.current);
+          offlineTimerRef.current = null;
+        }
         setOffline(false);
         // Flush any queued messages on reconnect
         const queued = useChatStore.getState().flushQueue();
@@ -503,7 +513,14 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
       es.onerror = () => {
         es.close();
         sourceRef.current = null;
-        setOffline(true);
+        // Debounce the offline banner: only show it if we're still not
+        // reconnected after the grace period. A successful onopen cancels this.
+        if (!useChatStore.getState().isOffline && offlineTimerRef.current === null) {
+          offlineTimerRef.current = window.setTimeout(() => {
+            offlineTimerRef.current = null;
+            setOffline(true);
+          }, OFFLINE_DEBOUNCE_MS);
+        }
         reconnectRef.current = window.setTimeout(connect, RECONNECT_DELAY_MS);
       };
     };
@@ -518,6 +535,10 @@ export function useServerEvents(baseUrl: string | null, token: string | null) {
       if (reconnectRef.current) {
         window.clearTimeout(reconnectRef.current);
         reconnectRef.current = null;
+      }
+      if (offlineTimerRef.current) {
+        window.clearTimeout(offlineTimerRef.current);
+        offlineTimerRef.current = null;
       }
       for (const timeout of typingTimeouts.values()) {
         window.clearTimeout(timeout);
