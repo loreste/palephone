@@ -997,7 +997,7 @@ fn apply_cors_headers(headers: &mut HeaderMap, origin: Option<&str>) {
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("Authorization, Content-Type, X-Pale-Filename"),
+        HeaderValue::from_static("Authorization, Content-Type, X-Pale-Client, X-Pale-Filename"),
     );
 }
 
@@ -1021,7 +1021,13 @@ async fn require_pale_client(request: Request<axum::body::Body>, next: Next) -> 
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .map(|ua| ua.starts_with("Pale/"))
-        .unwrap_or(false);
+        .unwrap_or(false)
+        || request
+            .headers()
+            .get("x-pale-client")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.starts_with("Pale/"))
+            .unwrap_or(false);
 
     if !is_pale {
         return (

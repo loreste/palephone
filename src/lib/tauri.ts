@@ -19,8 +19,10 @@ export function paleFetch(
   init?: RequestInit,
 ): Promise<Response> {
   const headers = new Headers(init?.headers);
-  if (!headers.has("User-Agent")) {
-    headers.set("User-Agent", `Pale/${PALE_VERSION}`);
+  // Browsers forbid setting User-Agent in fetch(), so we use a custom header
+  // that the server also accepts as proof of a Pale client.
+  if (!headers.has("X-Pale-Client")) {
+    headers.set("X-Pale-Client", `Pale/${PALE_VERSION}`);
   }
   return fetch(input, { ...init, headers });
 }
