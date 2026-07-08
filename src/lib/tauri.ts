@@ -72,7 +72,8 @@ export async function makeCall(uri: string): Promise<void> {
   return invoke("make_call", { uri });
 }
 
-export function answerCall(callId: number): Promise<void> {
+export async function answerCall(callId: number): Promise<void> {
+  await requestMediaForNativeCall(false);
   return invoke("answer_call", { callId });
 }
 

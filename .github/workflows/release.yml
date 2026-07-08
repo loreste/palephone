@@ -56,6 +56,7 @@ jobs:
             libpulse-dev \
             libssl-dev \
             libopus-dev \
+            libvpx-dev \
             autoconf \
             automake
 
@@ -63,7 +64,7 @@ jobs:
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
         run: |
-          brew install openssl@3 opus autoconf automake
+          brew install openssl@3 opus libvpx autoconf automake
 
       # Windows dependencies — OpenSSL and Opus from vcpkg (MSVC-native static libs)
       - name: Cache vcpkg packages
