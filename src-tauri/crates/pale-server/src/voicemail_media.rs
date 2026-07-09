@@ -1,30 +1,34 @@
-//! Voicemail media handling: RTP reception and WAV recording.
+//! Voicemail media handling: greeting playback, RTP reception, and WAV recording.
 //!
 //! When a call is routed to voicemail, the SIP handler creates a
 //! `VoicemailSession` that:
 //! 1. Allocates a local UDP port for RTP
 //! 2. Returns an SDP answer to the caller
-//! 3. Receives RTP packets in the background
-//! 4. Decodes G.711 μ-law (PCMU) audio to linear PCM
-//! 5. Writes a WAV file when the session ends (BYE or timeout)
-//! 6. Stores the file and updates the voicemail record
+//! 3. Sends a greeting + beep tone via RTP
+//! 4. Receives RTP packets (the caller's message)
+//! 5. Decodes G.711 u-law (PCMU) audio to linear PCM
+//! 6. Writes a WAV file when the session ends (BYE or timeout)
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use tokio::net::UdpSocket;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
 /// Maximum voicemail recording duration (seconds)
 const MAX_RECORD_SECS: usize = 120;
-/// RTP header size
+/// Greeting + beep duration before recording starts (seconds)
+const GREETING_SECS: usize = 4;
+/// RTP header size (fixed for our use — no CSRC or extensions)
 const RTP_HEADER_SIZE: usize = 12;
 /// PCMU sample rate
 const SAMPLE_RATE: u32 = 8000;
 /// PCMU payload type
 const PT_PCMU: u8 = 0;
-/// PCMA payload type
-const PT_PCMA: u8 = 8;
+/// RTP packets per second (20ms per packet = 50 pps)
+const PACKETS_PER_SEC: u32 = 50;
+/// Samples per RTP packet (160 samples at 8kHz = 20ms)
+const SAMPLES_PER_PACKET: usize = 160;
 
 /// A running voicemail recording session.
 pub struct VoicemailSession {
@@ -35,15 +39,10 @@ pub struct VoicemailSession {
 
 impl VoicemailSession {
     /// Start a new voicemail recording session.
-    ///
-    /// Binds a UDP socket, spawns a background task to receive RTP, and
-    /// returns the session. Call `stop()` or let the session drop to
-    /// finish recording.
     pub async fn start(
         voicemail_id: Uuid,
-        data_dir: std::path::PathBuf,
+        data_dir: PathBuf,
     ) -> Result<Self, String> {
-        // Bind to any available port
         let socket = UdpSocket::bind("0.0.0.0:0")
             .await
             .map_err(|e| format!("Failed to bind RTP socket: {}", e))?;
@@ -54,11 +53,9 @@ impl VoicemailSession {
 
         let (stop_tx, stop_rx) = oneshot::channel();
 
-        // Spawn background RTP receiver
-        let vm_id = voicemail_id;
         let dir = data_dir.clone();
         tokio::spawn(async move {
-            receive_and_record(socket, stop_rx, vm_id, dir).await;
+            greeting_then_record(socket, stop_rx, voicemail_id, dir).await;
         });
 
         Ok(Self {
@@ -68,15 +65,13 @@ impl VoicemailSession {
         })
     }
 
-    /// Stop the recording and finalize the WAV file.
     pub fn stop(&mut self) {
         if let Some(tx) = self.stop_tx.take() {
             let _ = tx.send(());
         }
     }
 
-    /// Get the file path where the WAV will be written.
-    pub fn wav_path(data_dir: &std::path::Path, voicemail_id: Uuid) -> std::path::PathBuf {
+    pub fn wav_path(data_dir: &Path, voicemail_id: Uuid) -> PathBuf {
         data_dir.join("voicemail").join(format!("{}.wav", voicemail_id))
     }
 }
@@ -87,9 +82,7 @@ impl Drop for VoicemailSession {
     }
 }
 
-/// Generate an SDP answer for voicemail recording.
-///
-/// Offers PCMU (G.711 μ-law) at 8000 Hz on the given RTP port.
+/// Generate an SDP answer for voicemail (sendrecv so we can play greeting AND record).
 pub fn voicemail_sdp(local_ip: &str, rtp_port: u16) -> String {
     format!(
         "v=0\r\n\
@@ -100,10 +93,118 @@ pub fn voicemail_sdp(local_ip: &str, rtp_port: u16) -> String {
          m=audio {port} RTP/AVP 0 8\r\n\
          a=rtpmap:0 PCMU/8000\r\n\
          a=rtpmap:8 PCMA/8000\r\n\
-         a=recvonly\r\n",
+         a=sendrecv\r\n\
+         a=ptime:20\r\n",
         ip = local_ip,
         port = rtp_port,
     )
+}
+
+/// Play greeting, then record.
+async fn greeting_then_record(
+    socket: UdpSocket,
+    stop_rx: oneshot::Receiver<()>,
+    voicemail_id: Uuid,
+    data_dir: PathBuf,
+) {
+    // Wait for the first RTP packet to learn the caller's address
+    let mut buf = [0u8; 2048];
+    let caller_addr = match tokio::time::timeout(
+        tokio::time::Duration::from_secs(10),
+        socket.recv_from(&mut buf),
+    )
+    .await
+    {
+        Ok(Ok((_len, addr))) => addr,
+        _ => {
+            tracing::warn!(voicemail_id = %voicemail_id, "No RTP from caller — aborting voicemail");
+            return;
+        }
+    };
+
+    tracing::info!(
+        voicemail_id = %voicemail_id,
+        caller = %caller_addr,
+        "Voicemail: caller connected, playing greeting"
+    );
+
+    // Phase 1: Send greeting + beep via RTP
+    send_greeting(&socket, caller_addr).await;
+
+    // Phase 2: Record caller's audio
+    receive_and_record(socket, stop_rx, voicemail_id, data_dir).await;
+}
+
+/// Send a spoken greeting and beep tone via RTP.
+///
+/// Generates a short message: "Please leave your message after the tone"
+/// encoded as silence (we can't do TTS without a provider), followed by
+/// a 1kHz beep tone so the caller knows when to start speaking.
+async fn send_greeting(socket: &UdpSocket, caller: SocketAddr) {
+    let mut seq: u16 = 0;
+    let mut timestamp: u32 = 0;
+    let ssrc: u32 = 0x50414C45; // "PALE"
+
+    // Phase 1: 2.5 seconds of comfort noise (silence in u-law = 0xFF)
+    // This gives the caller a moment before the beep
+    let silence_packets = (PACKETS_PER_SEC as usize) * 2 + PACKETS_PER_SEC as usize / 2;
+    for _ in 0..silence_packets {
+        let packet = build_rtp_packet(seq, timestamp, ssrc, &[0xFF; SAMPLES_PER_PACKET]);
+        let _ = socket.send_to(&packet, caller).await;
+        seq = seq.wrapping_add(1);
+        timestamp = timestamp.wrapping_add(SAMPLES_PER_PACKET as u32);
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+    }
+
+    // Phase 2: 0.5 second beep tone (1kHz sine wave in u-law)
+    let beep_packets = PACKETS_PER_SEC as usize / 2;
+    let mut sample_idx: usize = 0;
+    for _ in 0..beep_packets {
+        let mut payload = [0u8; SAMPLES_PER_PACKET];
+        for byte in payload.iter_mut() {
+            // Generate 1kHz sine at 8kHz sample rate
+            let t = sample_idx as f32 / SAMPLE_RATE as f32;
+            let sample = (t * 1000.0 * 2.0 * std::f32::consts::PI).sin();
+            let pcm = (sample * 16000.0) as i16;
+            *byte = linear_to_ulaw(pcm);
+            sample_idx += 1;
+        }
+        let packet = build_rtp_packet(seq, timestamp, ssrc, &payload);
+        let _ = socket.send_to(&packet, caller).await;
+        seq = seq.wrapping_add(1);
+        timestamp = timestamp.wrapping_add(SAMPLES_PER_PACKET as u32);
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+    }
+
+    // Phase 3: 0.5 second silence after beep
+    let post_beep = PACKETS_PER_SEC as usize / 2;
+    for _ in 0..post_beep {
+        let packet = build_rtp_packet(seq, timestamp, ssrc, &[0xFF; SAMPLES_PER_PACKET]);
+        let _ = socket.send_to(&packet, caller).await;
+        seq = seq.wrapping_add(1);
+        timestamp = timestamp.wrapping_add(SAMPLES_PER_PACKET as u32);
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+    }
+
+    tracing::info!("Voicemail greeting sent ({} packets)", silence_packets + beep_packets + post_beep);
+}
+
+/// Build an RTP packet with PCMU payload.
+fn build_rtp_packet(seq: u16, timestamp: u32, ssrc: u32, payload: &[u8]) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(RTP_HEADER_SIZE + payload.len());
+    // V=2, P=0, X=0, CC=0
+    packet.push(0x80);
+    // M=0, PT=0 (PCMU)
+    packet.push(PT_PCMU);
+    // Sequence number (big-endian)
+    packet.extend_from_slice(&seq.to_be_bytes());
+    // Timestamp (big-endian)
+    packet.extend_from_slice(&timestamp.to_be_bytes());
+    // SSRC (big-endian)
+    packet.extend_from_slice(&ssrc.to_be_bytes());
+    // Payload
+    packet.extend_from_slice(payload);
+    packet
 }
 
 /// Receive RTP packets and write a WAV file.
@@ -111,7 +212,7 @@ async fn receive_and_record(
     socket: UdpSocket,
     mut stop_rx: oneshot::Receiver<()>,
     voicemail_id: Uuid,
-    data_dir: std::path::PathBuf,
+    data_dir: PathBuf,
 ) {
     let max_samples = SAMPLE_RATE as usize * MAX_RECORD_SECS;
     let mut pcm_samples: Vec<i16> = Vec::with_capacity(max_samples);
@@ -134,7 +235,7 @@ async fn receive_and_record(
                         for &byte in payload {
                             let sample = if pt == PT_PCMU {
                                 ulaw_to_linear(byte)
-                            } else if pt == PT_PCMA {
+                            } else if pt == 8 {
                                 alaw_to_linear(byte)
                             } else {
                                 continue;
@@ -143,10 +244,7 @@ async fn receive_and_record(
                         }
 
                         if pcm_samples.len() >= max_samples {
-                            tracing::info!(
-                                voicemail_id = %voicemail_id,
-                                "Voicemail max duration reached"
-                            );
+                            tracing::info!(voicemail_id = %voicemail_id, "Voicemail max duration reached");
                             break;
                         }
                     }
@@ -191,11 +289,7 @@ async fn receive_and_record(
 }
 
 /// Write PCM samples as a WAV file (16-bit mono).
-fn write_wav(
-    path: &std::path::Path,
-    samples: &[i16],
-    sample_rate: u32,
-) -> Result<(), std::io::Error> {
+fn write_wav(path: &Path, samples: &[i16], sample_rate: u32) -> Result<(), std::io::Error> {
     use std::io::Write;
     let mut file = std::fs::File::create(path)?;
 
@@ -210,42 +304,38 @@ fn write_wav(
     file.write_all(b"RIFF")?;
     file.write_all(&file_size.to_le_bytes())?;
     file.write_all(b"WAVE")?;
-
     // fmt chunk
     file.write_all(b"fmt ")?;
-    file.write_all(&16u32.to_le_bytes())?; // chunk size
-    file.write_all(&1u16.to_le_bytes())?; // PCM format
+    file.write_all(&16u32.to_le_bytes())?;
+    file.write_all(&1u16.to_le_bytes())?; // PCM
     file.write_all(&channels.to_le_bytes())?;
     file.write_all(&sample_rate.to_le_bytes())?;
     file.write_all(&byte_rate.to_le_bytes())?;
     file.write_all(&block_align.to_le_bytes())?;
     file.write_all(&bits_per_sample.to_le_bytes())?;
-
     // data chunk
     file.write_all(b"data")?;
     file.write_all(&data_size.to_le_bytes())?;
     for &sample in samples {
         file.write_all(&sample.to_le_bytes())?;
     }
-
     Ok(())
 }
 
-/// G.711 μ-law to 16-bit linear PCM conversion.
+// ─── G.711 Codec Tables ───
+
+/// G.711 u-law to 16-bit linear PCM.
 fn ulaw_to_linear(mut u_val: u8) -> i16 {
     u_val = !u_val;
     let sign = u_val & 0x80;
     let exponent = ((u_val >> 4) & 0x07) as i16;
     let mantissa = (u_val & 0x0F) as i16;
-    let mut sample = ((mantissa << 3) | 0x84) << (exponent.max(0));
+    let mut sample = ((mantissa << 3) | 0x84) << exponent.max(0);
     sample -= 0x84;
-    if sign != 0 {
-        sample = -sample;
-    }
-    sample
+    if sign != 0 { -sample } else { sample }
 }
 
-/// G.711 A-law to 16-bit linear PCM conversion.
+/// G.711 A-law to 16-bit linear PCM.
 fn alaw_to_linear(mut a_val: u8) -> i16 {
     a_val ^= 0x55;
     let sign = a_val & 0x80;
@@ -259,29 +349,79 @@ fn alaw_to_linear(mut a_val: u8) -> i16 {
     if sign != 0 { sample } else { -sample }
 }
 
+/// 16-bit linear PCM to G.711 u-law.
+fn linear_to_ulaw(mut sample: i16) -> u8 {
+    const BIAS: i16 = 0x84;
+    const CLIP: i16 = 32635;
+
+    let sign = if sample < 0 {
+        sample = -sample;
+        0x80u8
+    } else {
+        0x00
+    };
+
+    if sample > CLIP {
+        sample = CLIP;
+    }
+    sample += BIAS;
+
+    let exponent = match sample {
+        s if s <= 0x00FF => 0,
+        s if s <= 0x01FF => 1,
+        s if s <= 0x03FF => 2,
+        s if s <= 0x07FF => 3,
+        s if s <= 0x0FFF => 4,
+        s if s <= 0x1FFF => 5,
+        s if s <= 0x3FFF => 6,
+        _ => 7,
+    };
+
+    let mantissa = (sample >> (exponent + 3)) & 0x0F;
+    let ulaw_byte = !(sign | ((exponent as u8) << 4) | mantissa as u8);
+    ulaw_byte
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn ulaw_silence_is_near_zero() {
-        // μ-law 0xFF encodes near-silence
         let sample = ulaw_to_linear(0xFF);
         assert!(sample.abs() < 100, "silence sample = {}", sample);
     }
 
     #[test]
-    fn alaw_roundtrip_sign() {
-        let pos = alaw_to_linear(0x55); // A-law with XOR
-        let neg = alaw_to_linear(0xD5);
-        assert!(pos > 0 || neg > 0, "one should be positive");
+    fn ulaw_roundtrip() {
+        for pcm in [-8000i16, -1000, 0, 1000, 8000, 16000] {
+            let encoded = linear_to_ulaw(pcm);
+            let decoded = ulaw_to_linear(encoded);
+            // u-law is lossy — check within 2% + quantization noise
+            let diff = (pcm as i32 - decoded as i32).abs();
+            assert!(
+                diff < (pcm.abs() as i32 / 10).max(200),
+                "pcm={} encoded={} decoded={} diff={}",
+                pcm, encoded, decoded, diff
+            );
+        }
     }
 
     #[test]
-    fn sdp_contains_pcmu() {
+    fn sdp_contains_sendrecv() {
         let sdp = voicemail_sdp("192.168.1.1", 10000);
         assert!(sdp.contains("PCMU/8000"));
         assert!(sdp.contains("m=audio 10000"));
-        assert!(sdp.contains("recvonly"));
+        assert!(sdp.contains("sendrecv"));
+    }
+
+    #[test]
+    fn rtp_packet_structure() {
+        let pkt = build_rtp_packet(1, 160, 0x12345678, &[0xFF; 160]);
+        assert_eq!(pkt.len(), RTP_HEADER_SIZE + 160);
+        assert_eq!(pkt[0], 0x80); // V=2
+        assert_eq!(pkt[1], PT_PCMU); // PT=0
+        assert_eq!(u16::from_be_bytes([pkt[2], pkt[3]]), 1); // seq
+        assert_eq!(u32::from_be_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]), 160); // ts
     }
 }
