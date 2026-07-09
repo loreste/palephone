@@ -587,6 +587,19 @@ pub fn router(state: SharedState) -> Router {
             "/v1/admin/hold-music/{id}",
             delete(delete_hold_music_handler),
         )
+        // Voicemail admin
+        .route(
+            "/v1/admin/voicemail/config",
+            get(get_voicemail_config).put(update_voicemail_config),
+        )
+        .route(
+            "/v1/admin/voicemail",
+            get(list_all_voicemails),
+        )
+        .route(
+            "/v1/admin/voicemail/{id}",
+            delete(admin_delete_voicemail),
+        )
         // Call groups
         .route(
             "/v1/call-groups",
@@ -6606,6 +6619,49 @@ async fn delete_voicemail(
     state.delete_voicemail(id).ok_or(ApiError::NotFound)?;
     state.record_audit_event(&principal, "voicemail.deleted", Some(id.to_string()));
     Ok(Json(json!({ "ok": true })))
+}
+
+// ─── Admin Voicemail ───
+
+async fn get_voicemail_config(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::VoicemailConfig>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.voicemail_config()))
+}
+
+async fn update_voicemail_config(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::VoicemailConfig>,
+) -> Result<Json<crate::VoicemailConfig>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let config = state.update_voicemail_config(input);
+    state.record_audit_event(&principal, "voicemail.config_updated", None);
+    Ok(Json(config))
+}
+
+async fn list_all_voicemails(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::Voicemail>>, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    Ok(Json(state.all_voicemails()))
+}
+
+async fn admin_delete_voicemail(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    if state.delete_voicemail_admin(id) {
+        state.record_audit_event(&principal, "voicemail.deleted", Some(id.to_string()));
+        Ok(Json(json!({ "ok": true })))
+    } else {
+        Err(ApiError::NotFound)
+    }
 }
 
 // ─── Call Recordings ───

@@ -316,6 +316,8 @@ pub struct AppState {
     // Recording policies & hold music
     recording_policies: ShardedMap<Uuid, RecordingPolicy>,
     hold_music: ShardedMap<Uuid, HoldMusic>,
+    // Global voicemail configuration
+    voicemail_config: std::sync::RwLock<VoicemailConfig>,
     // Personal call groups
     personal_call_groups: ShardedMap<Uuid, PersonalCallGroup>,
     // SSO providers
@@ -587,6 +589,7 @@ impl AppState {
             approval_requests: ShardedMap::new(),
             recording_policies: ShardedMap::new(),
             hold_music: ShardedMap::new(),
+            voicemail_config: std::sync::RwLock::new(VoicemailConfig::default()),
             personal_call_groups: ShardedMap::new(),
             sso_providers: ShardedMap::new(),
             sso_pending_states: ShardedMap::new(),
@@ -7895,6 +7898,26 @@ impl AppState {
         vm
     }
 
+    // ─── Global Voicemail Config ───
+
+    pub fn voicemail_config(&self) -> VoicemailConfig {
+        self.voicemail_config.read().unwrap().clone()
+    }
+
+    pub fn update_voicemail_config(&self, config: VoicemailConfig) -> VoicemailConfig {
+        let mut current = self.voicemail_config.write().unwrap();
+        *current = config;
+        current.clone()
+    }
+
+    pub fn all_voicemails(&self) -> Vec<Voicemail> {
+        self.voicemails.values()
+    }
+
+    pub fn delete_voicemail_admin(&self, id: Uuid) -> bool {
+        self.voicemails.remove(&id).is_some()
+    }
+
     // ─── Call Park ───
 
     pub fn park_call(
@@ -12279,6 +12302,32 @@ pub struct Voicemail {
     pub file_id: Option<Uuid>,
     pub listened: bool,
     pub created_at: DateTime<Utc>,
+}
+
+/// Global voicemail configuration managed by admins.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoicemailConfig {
+    pub enabled: bool,
+    pub max_duration_secs: i32,
+    pub max_greeting_secs: i32,
+    pub default_greeting_text: String,
+    pub transcription_enabled: bool,
+    pub notify_email_enabled: bool,
+    pub retention_days: i32,
+}
+
+impl Default for VoicemailConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_duration_secs: 120,
+            max_greeting_secs: 30,
+            default_greeting_text: "Please leave your message after the tone.".to_string(),
+            transcription_enabled: false,
+            notify_email_enabled: false,
+            retention_days: 90,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

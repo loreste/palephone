@@ -58,7 +58,7 @@ async function api<T = any>(baseUrl: string, token: string, path: string, opts?:
   return paleServerApi<T>(baseUrl, token, path, opts);
 }
 
-type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "security_score" | "retention" | "ediscovery" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music" | "sso" | "encryption" | "pam" | "common_area_phones" | "meeting_rooms_admin" | "devices" | "custom_emojis" | "api_clients" | "bots" | "connectors" | "conditional_access" | "sip_gateways" | "location_routing" | "emergency" | "guests" | "scheduling_panels" | "automations" | "federation" | "compliance" | "data_residency" | "enterprise_integrations" | "message_extensions" | "app_store" | "bandwidth" | "signage";
+type AdminTab = "overview" | "users" | "sip" | "routing" | "ring_groups" | "ivr" | "queues" | "extensions" | "dids" | "hours" | "holidays" | "paging" | "media" | "calls" | "cdrs" | "voicemail_admin" | "agents" | "wallboard" | "qa" | "vip" | "conferences" | "files" | "directory" | "audit" | "cqd" | "policy" | "security_score" | "retention" | "ediscovery" | "dlp" | "barriers" | "labels" | "roles" | "packages" | "analytics" | "meeting_templates" | "recording_policies" | "hold_music" | "sso" | "encryption" | "pam" | "common_area_phones" | "meeting_rooms_admin" | "devices" | "custom_emojis" | "api_clients" | "bots" | "connectors" | "conditional_access" | "sip_gateways" | "location_routing" | "emergency" | "guests" | "scheduling_panels" | "automations" | "federation" | "compliance" | "data_residency" | "enterprise_integrations" | "message_extensions" | "app_store" | "bandwidth" | "signage";
 
 const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -70,6 +70,7 @@ const adminTabs: { id: AdminTab; label: string; icon: LucideIcon }[] = [
   { id: "ring_groups", label: "Ring Groups", icon: Users },
   { id: "queues", label: "Queues", icon: Users },
   { id: "ivr", label: "IVR", icon: Router },
+  { id: "voicemail_admin", label: "Voicemail", icon: Mic },
   { id: "hours", label: "Hours", icon: Activity },
   { id: "holidays", label: "Holidays", icon: Activity },
   { id: "paging", label: "Paging", icon: RadioTower },
@@ -132,7 +133,7 @@ const adminNavGroups: { label: string; tabs: AdminTab[] }[] = [
   },
   {
     label: "Voice",
-    tabs: ["extensions", "dids", "sip_gateways", "routing", "location_routing", "ring_groups", "queues", "ivr", "hours", "holidays", "paging", "media", "calls", "cdrs"],
+    tabs: ["extensions", "dids", "sip_gateways", "routing", "location_routing", "ring_groups", "queues", "ivr", "voicemail_admin", "hours", "holidays", "paging", "media", "calls", "cdrs"],
   },
   {
     label: "Meetings",
@@ -489,6 +490,7 @@ export function AdminView() {
         {activeTab === "ring_groups" && <RingGroupsPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "queues" && <QueuesPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "ivr" && <IvrPanel baseUrl={baseUrl} token={token} />}
+        {activeTab === "voicemail_admin" && <VoicemailAdminPanel baseUrl={baseUrl} token={token} />}
         {activeTab === "hours" && <CrudPanel baseUrl={baseUrl} token={token} endpoint="business-hours" title="Business Hours" icon={Activity} columns={["Name", "Timezone", "After Hours"]} rowFn={(h: any) => [h.name, h.timezone, h.after_hours_destination || "voicemail"]} fields={[["Name", "name"], ["Timezone", "timezone", "America/New_York"], ["After Hours Destination", "after_hours_destination"]]} extraJson={{ schedule: { mon: { open: "09:00", close: "17:00" }, tue: { open: "09:00", close: "17:00" }, wed: { open: "09:00", close: "17:00" }, thu: { open: "09:00", close: "17:00" }, fri: { open: "09:00", close: "17:00" } } }} />}
         {activeTab === "holidays" && <CrudPanel baseUrl={baseUrl} token={token} endpoint="holidays" title="Holidays" icon={Activity} columns={["Name", "Date", "Recurring", "Destination"]} rowFn={(h: any) => [h.name, h.date, h.recurring ? "Yes" : "No", h.destination || "-"]} fields={[["Name", "name"], ["Date (YYYY-MM-DD)", "date"], ["Destination", "destination"]]} extraJson={{ recurring: false }} />}
         {activeTab === "paging" && <CrudPanel baseUrl={baseUrl} token={token} endpoint="paging-groups" title="Paging Groups" icon={RadioTower} columns={["Name", "Extension", "Members"]} rowFn={(p: any) => [p.name, p.extension, (p.members || []).join(", ")]} fields={[["Name", "name"], ["Extension", "extension"], ["Members (comma-separated)", "members_csv"]]} transformSubmit={(d: any) => ({ ...d, members: (d.members_csv || "").split(",").map((m: string) => m.trim()).filter(Boolean), members_csv: undefined })} />}
@@ -9143,6 +9145,159 @@ function SignagePanel({ baseUrl, token }: { baseUrl: string; token: string }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// ─── Voicemail Admin Panel ───
+
+interface VoicemailConfigData {
+  enabled: boolean;
+  max_duration_secs: number;
+  max_greeting_secs: number;
+  default_greeting_text: string;
+  transcription_enabled: boolean;
+  notify_email_enabled: boolean;
+  retention_days: number;
+}
+
+interface VoicemailEntry {
+  id: string;
+  callee_uri: string;
+  caller_uri: string;
+  caller_name: string;
+  duration_secs: number;
+  file_id: string | null;
+  listened: boolean;
+  created_at: string;
+}
+
+function VoicemailAdminPanel({ baseUrl, token }: { baseUrl: string; token: string }) {
+  const [config, setConfig] = useState<VoicemailConfigData | null>(null);
+  const [voicemails, setVoicemails] = useState<VoicemailEntry[]>([]);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    paleFetch(`${baseUrl.replace(/\/+$/, "")}/v1/admin/voicemail/config`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => { if (data) setConfig(data); })
+      .catch(() => {});
+
+    paleFetch(`${baseUrl.replace(/\/+$/, "")}/v1/admin/voicemail`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => r.ok ? r.json() : [])
+      .then(setVoicemails)
+      .catch(() => {});
+  }, [baseUrl, token]);
+
+  const saveConfig = async () => {
+    if (!config) return;
+    setSaving(true);
+    try {
+      const res = await paleFetch(`${baseUrl.replace(/\/+$/, "")}/v1/admin/voicemail/config`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify(config),
+      });
+      if (res.ok) toast({ type: "success", title: "Voicemail config saved" });
+    } catch {
+      toast({ type: "error", title: "Failed to save config" });
+    }
+    setSaving(false);
+  };
+
+  const deleteVoicemail = async (id: string) => {
+    try {
+      await paleFetch(`${baseUrl.replace(/\/+$/, "")}/v1/admin/voicemail/${id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setVoicemails(voicemails.filter((v) => v.id !== id));
+      toast({ type: "success", title: "Voicemail deleted" });
+    } catch {
+      toast({ type: "error", title: "Failed to delete" });
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <h3 className="text-lg font-semibold text-primary">Voicemail Configuration</h3>
+      {config && (
+        <div className="grid grid-cols-2 gap-4 max-w-2xl">
+          <label className="flex items-center gap-2 col-span-2">
+            <input type="checkbox" checked={config.enabled} onChange={(e) => setConfig({ ...config, enabled: e.target.checked })} className="rounded" />
+            <span className="text-sm text-primary">Voicemail enabled globally</span>
+          </label>
+          <div>
+            <label className="text-xs text-tertiary block mb-1">Max recording (seconds)</label>
+            <input type="number" value={config.max_duration_secs} onChange={(e) => setConfig({ ...config, max_duration_secs: parseInt(e.target.value) || 120 })} className="w-full h-9 rounded-lg bg-surface border border-border-default px-3 text-sm text-primary" />
+          </div>
+          <div>
+            <label className="text-xs text-tertiary block mb-1">Max greeting (seconds)</label>
+            <input type="number" value={config.max_greeting_secs} onChange={(e) => setConfig({ ...config, max_greeting_secs: parseInt(e.target.value) || 30 })} className="w-full h-9 rounded-lg bg-surface border border-border-default px-3 text-sm text-primary" />
+          </div>
+          <div>
+            <label className="text-xs text-tertiary block mb-1">Retention (days)</label>
+            <input type="number" value={config.retention_days} onChange={(e) => setConfig({ ...config, retention_days: parseInt(e.target.value) || 90 })} className="w-full h-9 rounded-lg bg-surface border border-border-default px-3 text-sm text-primary" />
+          </div>
+          <div>
+            <label className="text-xs text-tertiary block mb-1">Default greeting text</label>
+            <input type="text" value={config.default_greeting_text} onChange={(e) => setConfig({ ...config, default_greeting_text: e.target.value })} className="w-full h-9 rounded-lg bg-surface border border-border-default px-3 text-sm text-primary" />
+          </div>
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={config.transcription_enabled} onChange={(e) => setConfig({ ...config, transcription_enabled: e.target.checked })} className="rounded" />
+            <span className="text-sm text-primary">Enable transcription</span>
+          </label>
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={config.notify_email_enabled} onChange={(e) => setConfig({ ...config, notify_email_enabled: e.target.checked })} className="rounded" />
+            <span className="text-sm text-primary">Email notifications</span>
+          </label>
+          <div className="col-span-2">
+            <button onClick={saveConfig} disabled={saving} className="px-4 py-2 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accent-hover disabled:opacity-50">
+              {saving ? "Saving..." : "Save Configuration"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      <h3 className="text-lg font-semibold text-primary mt-8">All Voicemails ({voicemails.length})</h3>
+      {voicemails.length === 0 ? (
+        <p className="text-sm text-tertiary">No voicemails</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-tertiary border-b border-border-subtle">
+                <th className="py-2 px-3">To</th>
+                <th className="py-2 px-3">From</th>
+                <th className="py-2 px-3">Duration</th>
+                <th className="py-2 px-3">Status</th>
+                <th className="py-2 px-3">Date</th>
+                <th className="py-2 px-3"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {voicemails.map((vm) => (
+                <tr key={vm.id} className="border-b border-border-subtle hover:bg-elevated/50">
+                  <td className="py-2 px-3 text-primary">{vm.callee_uri.replace(/^sips?:/, "")}</td>
+                  <td className="py-2 px-3 text-primary">{vm.caller_name || vm.caller_uri.replace(/^sips?:/, "")}</td>
+                  <td className="py-2 px-3 text-secondary">{vm.duration_secs}s</td>
+                  <td className="py-2 px-3">
+                    <span className={vm.listened ? "text-tertiary" : "text-accent font-medium"}>{vm.listened ? "Listened" : "New"}</span>
+                  </td>
+                  <td className="py-2 px-3 text-secondary">{new Date(vm.created_at).toLocaleString()}</td>
+                  <td className="py-2 px-3">
+                    <button onClick={() => deleteVoicemail(vm.id)} className="text-xs text-destructive hover:underline">Delete</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
