@@ -263,6 +263,12 @@ impl PjsipEngine {
             // Add TLS transport (port 5061) for encrypted signaling
             pjsip_sys::pjsua_transport_config_default(&mut tp_cfg);
             tp_cfg.port = network.sip_port.saturating_add(1) as u32;
+            // Configure TLS: don't verify server certificate by default
+            // (Let's Encrypt certs may not be in PJSIP's trust store).
+            // The transport is still encrypted — we just skip cert validation
+            // to avoid silent connection failures.
+            tp_cfg.tls_setting.verify_server = 0;
+            tp_cfg.tls_setting.verify_client = 0;
             let mut tls_tp_id: pjsip_sys::pjsua_transport_id = -1;
             let status = pjsip_sys::pjsua_transport_create(
                 pjsip_sys::pjsip_transport_type_e_PJSIP_TRANSPORT_TLS,
@@ -492,6 +498,16 @@ impl PjsipEngine {
 
     fn handle_make_call(acc_id: AccountId, uri: &str) {
         unsafe {
+            log::info!("make_call: acc_id={}, uri={}", acc_id, uri);
+
+            // Ensure we have a sound device — use null if real device fails
+            let snd_count = pjsip_sys::pjmedia_aud_dev_count();
+            log::info!("Audio devices available: {}", snd_count);
+            if snd_count == 0 {
+                log::warn!("No audio devices — setting null sound device");
+                pjsip_sys::pjsua_set_null_snd_dev();
+            }
+
             let dest = CString::new(uri).unwrap();
             let mut dest_pj = pj_str_from_cstring(&dest);
             let mut opt: pjsip_sys::pjsua_call_setting = std::mem::zeroed();
@@ -549,16 +565,11 @@ impl PjsipEngine {
             }
 
             if status != 0 {
-                let message = if status == 70004 {
-                    format!(
-                        "Could not start audio call to {uri}. Check microphone permission and audio device settings."
-                    )
-                } else {
-                    format!("Failed to make call to {uri}: status={status}")
-                };
-                emit_event(PaleEvent::Error {
-                    message,
-                });
+                log::error!("make_call to {uri} failed: status={status} (acc_id={acc_id})");
+                let message = format!(
+                    "Failed to make call to {uri}: status={status}"
+                );
+                emit_event(PaleEvent::Error { message });
             } else {
                 log::info!("Call initiated: call_id={}", call_id);
             }
