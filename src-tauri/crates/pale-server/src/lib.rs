@@ -7854,17 +7854,39 @@ impl AppState {
         duration_secs: i32,
         file_id: Option<Uuid>,
     ) -> Voicemail {
+        // Extract a readable caller name from the URI if not provided
+        let name = if caller_name.is_empty() {
+            sip_user_part(caller_uri).to_string()
+        } else {
+            caller_name.to_string()
+        };
+
         let vm = Voicemail {
             id: Uuid::new_v4(),
             callee_uri: callee_uri.to_string(),
             caller_uri: caller_uri.to_string(),
-            caller_name: caller_name.to_string(),
+            caller_name: name.clone(),
             duration_secs,
             file_id,
             listened: false,
             created_at: Utc::now(),
         };
         self.store_voicemail(vm.clone());
+
+        // Send push notification for new voicemail
+        self.notify_user_push(
+            callee_uri,
+            &format!("Voicemail from {}", name),
+            "You have a new voicemail message",
+            Some(format!("voicemail-{}", vm.id)),
+        );
+
+        // Broadcast SSE event so the client shows the voicemail immediately
+        self.broadcast_sse(SseEvent {
+            event_type: "voicemail".to_string(),
+            payload: serde_json::to_value(&vm).unwrap_or_default(),
+        });
+
         vm
     }
 

@@ -977,8 +977,18 @@ fn handle_invite(request: &SipRequest, peer: SocketAddr, state: &AppState) -> Op
         return Some(request.response(200, "OK", &[]));
     }
 
-    // ── Extension resolution ──
+    // ── Voicemail access code (*97) ──
+    // Callers dial *97 to retrieve their own voicemail. The server responds
+    // with 200 OK; the client shows the voicemail list in the UI.
     let user_part = crate::sip_user_part(&requested_uri);
+    if user_part == "*97" {
+        tracing::info!(caller = %from_aor, "Voicemail access via *97");
+        state.record_cdr_end(&call_id_str, "voicemail_access");
+        // The client handles voicemail playback — just confirm the call
+        return Some(request.response(200, "OK", &[]));
+    }
+
+    // ── Extension resolution ──
     if let Some(ext) = state.resolve_extension(user_part) {
         match ext.destination_type.as_str() {
             "voicemail" => {
