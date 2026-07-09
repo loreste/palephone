@@ -15,6 +15,10 @@ use tokio::net::UdpSocket;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+/// Pre-recorded greeting: "Please leave your message after the tone."
+/// Embedded at compile time — 8kHz 16-bit mono PCM WAV.
+static GREETING_WAV: &[u8] = include_bytes!("../assets/voicemail_greeting.wav");
+
 /// Maximum voicemail recording duration (seconds)
 const MAX_RECORD_SECS: usize = 120;
 /// Greeting + beep duration before recording starts (seconds)
@@ -135,34 +139,64 @@ async fn greeting_then_record(
     receive_and_record(socket, stop_rx, voicemail_id, data_dir).await;
 }
 
-/// Send a spoken greeting and beep tone via RTP.
+/// Parse the embedded WAV file and return 16-bit PCM samples.
+fn parse_greeting_wav() -> Vec<i16> {
+    let data = GREETING_WAV;
+    // Find "data" chunk — skip RIFF header (12 bytes) and fmt chunk
+    let mut pos = 12;
+    while pos + 8 < data.len() {
+        let chunk_id = &data[pos..pos + 4];
+        let chunk_size = u32::from_le_bytes([
+            data[pos + 4],
+            data[pos + 5],
+            data[pos + 6],
+            data[pos + 7],
+        ]) as usize;
+        if chunk_id == b"data" {
+            let pcm_data = &data[pos + 8..pos + 8 + chunk_size.min(data.len() - pos - 8)];
+            return pcm_data
+                .chunks_exact(2)
+                .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                .collect();
+        }
+        pos += 8 + chunk_size;
+        // WAV chunks are word-aligned
+        if chunk_size % 2 != 0 {
+            pos += 1;
+        }
+    }
+    Vec::new()
+}
+
+/// Send the spoken greeting + beep tone via RTP.
 ///
-/// Generates a short message: "Please leave your message after the tone"
-/// encoded as silence (we can't do TTS without a provider), followed by
-/// a 1kHz beep tone so the caller knows when to start speaking.
+/// Plays the embedded "Please leave your message after the tone" WAV,
+/// then a 1kHz beep, then a short silence before recording starts.
 async fn send_greeting(socket: &UdpSocket, caller: SocketAddr) {
     let mut seq: u16 = 0;
     let mut timestamp: u32 = 0;
     let ssrc: u32 = 0x50414C45; // "PALE"
 
-    // Phase 1: 2.5 seconds of comfort noise (silence in u-law = 0xFF)
-    // This gives the caller a moment before the beep
-    let silence_packets = (PACKETS_PER_SEC as usize) * 2 + PACKETS_PER_SEC as usize / 2;
-    for _ in 0..silence_packets {
-        let packet = build_rtp_packet(seq, timestamp, ssrc, &[0xFF; SAMPLES_PER_PACKET]);
+    // Phase 1: Play the spoken greeting from the embedded WAV
+    let greeting_pcm = parse_greeting_wav();
+    for chunk in greeting_pcm.chunks(SAMPLES_PER_PACKET) {
+        let mut payload = [0xFFu8; SAMPLES_PER_PACKET]; // silence-pad short chunks
+        for (i, &sample) in chunk.iter().enumerate() {
+            payload[i] = linear_to_ulaw(sample);
+        }
+        let packet = build_rtp_packet(seq, timestamp, ssrc, &payload);
         let _ = socket.send_to(&packet, caller).await;
         seq = seq.wrapping_add(1);
         timestamp = timestamp.wrapping_add(SAMPLES_PER_PACKET as u32);
         tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
     }
 
-    // Phase 2: 0.5 second beep tone (1kHz sine wave in u-law)
+    // Phase 2: 0.5 second beep tone (1kHz sine wave)
     let beep_packets = PACKETS_PER_SEC as usize / 2;
     let mut sample_idx: usize = 0;
     for _ in 0..beep_packets {
         let mut payload = [0u8; SAMPLES_PER_PACKET];
         for byte in payload.iter_mut() {
-            // Generate 1kHz sine at 8kHz sample rate
             let t = sample_idx as f32 / SAMPLE_RATE as f32;
             let sample = (t * 1000.0 * 2.0 * std::f32::consts::PI).sin();
             let pcm = (sample * 16000.0) as i16;
@@ -176,8 +210,8 @@ async fn send_greeting(socket: &UdpSocket, caller: SocketAddr) {
         tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
     }
 
-    // Phase 3: 0.5 second silence after beep
-    let post_beep = PACKETS_PER_SEC as usize / 2;
+    // Phase 3: 0.3 second silence after beep
+    let post_beep = (PACKETS_PER_SEC as usize * 3) / 10;
     for _ in 0..post_beep {
         let packet = build_rtp_packet(seq, timestamp, ssrc, &[0xFF; SAMPLES_PER_PACKET]);
         let _ = socket.send_to(&packet, caller).await;
@@ -186,7 +220,11 @@ async fn send_greeting(socket: &UdpSocket, caller: SocketAddr) {
         tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
     }
 
-    tracing::info!("Voicemail greeting sent ({} packets)", silence_packets + beep_packets + post_beep);
+    let greeting_packets = (greeting_pcm.len() + SAMPLES_PER_PACKET - 1) / SAMPLES_PER_PACKET;
+    tracing::info!(
+        "Voicemail greeting sent: {} spoken + {} beep + {} silence packets",
+        greeting_packets, beep_packets, post_beep
+    );
 }
 
 /// Build an RTP packet with PCMU payload.
