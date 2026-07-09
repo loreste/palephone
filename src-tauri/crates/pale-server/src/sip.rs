@@ -524,6 +524,83 @@ fn maybe_proxy_in_dialog(
 }
 
 /// Returns true if the string looks like a phone number (digits, +, at least 3 chars).
+/// Start a voicemail recording session and return a 200 OK with SDP.
+///
+/// The response includes an SDP body that tells the caller to send RTP
+/// to our recording port. The background task receives audio and writes
+/// a WAV file when the session ends.
+/// Start a voicemail recording session and return a 200 OK with SDP.
+///
+/// Spawns an async RTP receiver that writes a WAV file. The SDP in the
+/// response tells the caller to send audio to the recording port.
+fn start_voicemail_recording(
+    request: &SipRequest,
+    callee_uri: &str,
+    caller_uri: &str,
+    call_id_str: &str,
+    state: &AppState,
+) -> Option<String> {
+    let data_dir = state.data_dir().to_path_buf();
+    let vm = state.create_voicemail_for_user(callee_uri, caller_uri, "", 0, None);
+    state.record_cdr_end(call_id_str, "voicemail");
+
+    // Spawn async voicemail recording via the tokio runtime.
+    // We need to bind the UDP socket first to get the port, then build the
+    // SDP response. Use a blocking channel to get the port back synchronously.
+    let vm_id = vm.id;
+    let (port_tx, port_rx) = std::sync::mpsc::channel::<u16>();
+
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let dir = data_dir.clone();
+        handle.spawn(async move {
+            match crate::voicemail_media::VoicemailSession::start(vm_id, dir).await {
+                Ok(session) => {
+                    let port = session.rtp_port;
+                    let _ = port_tx.send(port);
+                    tracing::info!(voicemail_id = %vm_id, rtp_port = port, "Voicemail recording started");
+                    // Keep session alive for max duration
+                    tokio::time::sleep(tokio::time::Duration::from_secs(125)).await;
+                    drop(session);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to start voicemail recording: {}", e);
+                    let _ = port_tx.send(0);
+                }
+            }
+        });
+    }
+
+    // Wait briefly for the port (up to 500ms)
+    let rtp_port = port_rx
+        .recv_timeout(std::time::Duration::from_millis(500))
+        .unwrap_or(0);
+
+    if rtp_port == 0 {
+        // Fallback: just return 200 OK without SDP
+        return Some(request.response(200, "OK", &[]));
+    }
+
+    // Determine our external IP from the SIP listening address
+    let local_ip = std::env::var("PALE_SIP_EXTERNAL_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0".to_string());
+    // Strip port if present (e.g. "drcpbx.com:5061" -> "drcpbx.com")
+    let local_ip = local_ip.split(':').next().unwrap_or("0.0.0.0");
+
+    let sdp = crate::voicemail_media::voicemail_sdp(local_ip, rtp_port);
+
+    // Build SIP response with SDP body manually since the response()
+    // helper always sets Content-Length: 0
+    let base = request.response(200, "OK", &[
+        ("Content-Type", "application/sdp".to_string()),
+    ]);
+    // Replace "Content-Length: 0" with the actual SDP length
+    let response = base.replace(
+        "Content-Length: 0\r\n\r\n",
+        &format!("Content-Length: {}\r\n\r\n{}", sdp.len(), sdp),
+    );
+    Some(response)
+}
+
 fn looks_like_phone_number(s: &str) -> bool {
     let stripped = s.trim_start_matches('+');
     stripped.len() >= 3 && stripped.chars().all(|c| c.is_ascii_digit())
@@ -743,9 +820,9 @@ fn handle_invite(request: &SipRequest, peer: SocketAddr, state: &AppState) -> Op
                 return Some(resp);
             }
             // DID destination unavailable — voicemail fallback
-            state.create_voicemail_for_user(&ext.destination, &from_aor, "", 0, None);
-            state.record_cdr_end(&call_id_str, "voicemail");
-            return Some(request.response(200, "OK", &[]));
+            return start_voicemail_recording(
+                request, &ext.destination, &from_aor, &call_id_str, state,
+            );
         }
     }
 
@@ -992,9 +1069,9 @@ fn handle_invite(request: &SipRequest, peer: SocketAddr, state: &AppState) -> Op
     if let Some(ext) = state.resolve_extension(user_part) {
         match ext.destination_type.as_str() {
             "voicemail" => {
-                state.create_voicemail_for_user(&ext.destination, &from_aor, "", 0, None);
-                state.record_cdr_end(&call_id_str, "voicemail");
-                return Some(request.response(200, "OK", &[]));
+                return start_voicemail_recording(
+                    request, &ext.destination, &from_aor, &call_id_str, state,
+                );
             }
             _ => {
                 // user, external, or other — redirect to destination
@@ -1074,9 +1151,9 @@ fn handle_invite(request: &SipRequest, peer: SocketAddr, state: &AppState) -> Op
         // Follow-me final action
         match settings.followme_final.as_str() {
             "voicemail" => {
-                state.create_voicemail_for_user(&requested_uri, &from_aor, "", 0, None);
-                state.record_cdr_end(&call_id_str, "voicemail");
-                return Some(request.response(200, "OK", &[]));
+                return start_voicemail_recording(
+                    request, &requested_uri, &from_aor, &call_id_str, state,
+                );
             }
             "hangup" => {
                 state.record_cdr_end(&call_id_str, "no_answer");
@@ -1098,9 +1175,9 @@ fn handle_invite(request: &SipRequest, peer: SocketAddr, state: &AppState) -> Op
         }
     }
     if settings.voicemail_enabled {
-        state.create_voicemail_for_user(&requested_uri, &from_aor, "", 0, None);
-        state.record_cdr_end(&call_id_str, "voicemail");
-        return Some(request.response(200, "OK", &[]));
+        return start_voicemail_recording(
+            request, &requested_uri, &from_aor, &call_id_str, state,
+        );
     }
 
     // ── Forward to external if routing rules resolved a different URI ──

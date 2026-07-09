@@ -23,6 +23,7 @@ pub mod pjsip_runtime;
 pub mod sip;
 mod storage;
 pub mod storage_backend;
+pub mod voicemail_media;
 pub mod web_push;
 
 pub use pg_store::PgStore;
@@ -1148,6 +1149,10 @@ impl AppState {
 
     pub fn max_upload_bytes(&self) -> u64 {
         self.max_upload_bytes
+    }
+
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
     }
 
     pub fn media_config(&self) -> MediaConfig {
