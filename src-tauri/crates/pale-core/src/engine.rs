@@ -205,8 +205,8 @@ impl PjsipEngine {
             // Logging config — reduce verbosity
             let mut log_cfg: pjsip_sys::pjsua_logging_config = std::mem::zeroed();
             pjsip_sys::pjsua_logging_config_default(&mut log_cfg);
-            log_cfg.console_level = 3;
-            log_cfg.level = 4;
+            log_cfg.console_level = 5;
+            log_cfg.level = 5;
 
             // Media config
             let mut media_cfg: pjsip_sys::pjsua_media_config = std::mem::zeroed();
@@ -263,10 +263,18 @@ impl PjsipEngine {
             // Add TLS transport (port 5061) for encrypted signaling
             pjsip_sys::pjsua_transport_config_default(&mut tp_cfg);
             tp_cfg.port = network.sip_port.saturating_add(1) as u32;
-            // Configure TLS: don't verify server certificate by default
-            // (Let's Encrypt certs may not be in PJSIP's trust store).
-            // The transport is still encrypted — we just skip cert validation
-            // to avoid silent connection failures.
+            // TLS settings: load system CA bundle so PJSIP can verify
+            // server certificates (Let's Encrypt, etc.)
+            #[cfg(target_os = "macos")]
+            let ca_path_str = CString::new("/etc/ssl/cert.pem").unwrap();
+            #[cfg(target_os = "linux")]
+            let ca_path_str = CString::new("/etc/ssl/certs/ca-certificates.crt").unwrap();
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            let ca_path_str = CString::new("").unwrap();
+
+            if !ca_path_str.as_bytes().is_empty() {
+                tp_cfg.tls_setting.ca_list_file = pj_str_from_cstring(&ca_path_str);
+            }
             tp_cfg.tls_setting.verify_server = 0;
             tp_cfg.tls_setting.verify_client = 0;
             let mut tls_tp_id: pjsip_sys::pjsua_transport_id = -1;
