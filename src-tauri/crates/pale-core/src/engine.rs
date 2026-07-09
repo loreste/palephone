@@ -301,6 +301,28 @@ impl PjsipEngine {
             }
 
             log::info!("PJSIP initialized and started successfully.");
+
+            // Check if there's a usable audio input device. If not, switch
+            // to null sound device so calls can still connect (no mic = no
+            // outgoing audio, but incoming audio works).
+            let dev_count = pjsip_sys::pjmedia_aud_dev_count();
+            let mut has_input = false;
+            for i in 0..dev_count as i32 {
+                let mut info: pjsip_sys::pjmedia_aud_dev_info = std::mem::zeroed();
+                if pjsip_sys::pjmedia_aud_dev_get_info(i, &mut info) == 0
+                    && info.input_count > 0
+                {
+                    has_input = true;
+                    break;
+                }
+            }
+            if !has_input {
+                log::warn!(
+                    "No audio input device found ({} devices, all output-only). Using null sound device.",
+                    dev_count
+                );
+                pjsip_sys::pjsua_set_null_snd_dev();
+            }
         }
 
         // Command loop
@@ -1036,7 +1058,11 @@ unsafe fn apply_stun_config(
     network: &NetworkPersist,
 ) -> Result<Vec<CString>, String> {
     let mut stun_servers = Vec::new();
-    let stun_server = network.stun_server.trim();
+    // Strip stun:/stuns: URI prefix — PJSIP expects plain host:port
+    let stun_server = network.stun_server.trim()
+        .strip_prefix("stun:")
+        .or_else(|| network.stun_server.trim().strip_prefix("stuns:"))
+        .unwrap_or(network.stun_server.trim());
     if !stun_server.is_empty() {
         let value = CString::new(stun_server)
             .map_err(|_| "STUN server contains an interior NUL byte".to_string())?;
