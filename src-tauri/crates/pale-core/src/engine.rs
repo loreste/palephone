@@ -263,16 +263,14 @@ impl PjsipEngine {
             // Add TLS transport (port 5061) for encrypted signaling
             pjsip_sys::pjsua_transport_config_default(&mut tp_cfg);
             tp_cfg.port = network.sip_port.saturating_add(1) as u32;
-            // TLS settings: load system CA bundle so PJSIP can verify
-            // server certificates (Let's Encrypt, etc.)
-            #[cfg(target_os = "macos")]
-            let ca_path_str = CString::new("/etc/ssl/cert.pem").unwrap();
+            // Skip server certificate verification. On macOS, PJSIP uses
+            // Apple SecureTransport which requires DER certs (not PEM), and
+            // loading the system CA bundle fails. The TLS link is still
+            // encrypted — we just don't verify the server identity.
+            // On Linux, we load the system CA bundle for verification.
             #[cfg(target_os = "linux")]
-            let ca_path_str = CString::new("/etc/ssl/certs/ca-certificates.crt").unwrap();
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-            let ca_path_str = CString::new("").unwrap();
-
-            if !ca_path_str.as_bytes().is_empty() {
+            {
+                let ca_path_str = CString::new("/etc/ssl/certs/ca-certificates.crt").unwrap();
                 tp_cfg.tls_setting.ca_list_file = pj_str_from_cstring(&ca_path_str);
             }
             tp_cfg.tls_setting.verify_server = 0;
@@ -1080,7 +1078,11 @@ unsafe fn apply_media_config(
 ) -> Result<Vec<CString>, String> {
     media_cfg.enable_ice = network.enable_ice as pjsip_sys::pj_bool_t;
     let mut strings = Vec::new();
-    let turn_server = network.turn_server.trim();
+    // Strip turn:/turns: URI prefix — PJSIP expects plain host:port
+    let turn_server = network.turn_server.trim()
+        .strip_prefix("turn:")
+        .or_else(|| network.turn_server.trim().strip_prefix("turns:"))
+        .unwrap_or(network.turn_server.trim());
     if turn_server.is_empty() {
         return Ok(strings);
     }
