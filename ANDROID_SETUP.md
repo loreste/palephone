@@ -59,6 +59,17 @@ The APK is written under:
 src-tauri/gen/android/app/build/outputs/apk/
 ```
 
+### Video / camera wiring
+
+Android video depends on:
+
+1. PJSIP Java classes under `org.pjsip` (shipped in `packaging/android/java/`)
+2. `PaleJni.prepare(activity)` on the main thread (injected into MainActivity by CI)
+3. Native `JNI_OnLoad` + ClassLoader-safe FindClass (`pjsip-sys/android/pale_android_jni.c`)
+4. Linked system libs: `mediandk`, `EGL`, `GLESv2`, `OpenSLES`
+
+Without those, the app either crashes in `and_factory_init` or has no camera devices.
+
 ### Sign for install (required on modern Android)
 
 Gradle may emit an **unsigned** release APK. Android will refuse to install it

@@ -10,6 +10,7 @@ const PJSIP_URL: &str = "https://github.com/pjsip/pjproject/archive/refs/tags/2.
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=wrapper.h");
+    println!("cargo:rerun-if-changed=android/pale_android_jni.c");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let pj_src_dir = out_dir.join(format!("pjproject-{}", PJSIP_VERSION));
@@ -22,17 +23,32 @@ fn main() {
         download_pjsip(&out_dir);
     }
 
+    // Android: ClassLoader-safe FindClass for org.pjsip.* from worker threads.
+    if target_os == "android" {
+        patch_android_video_jni(&pj_src_dir);
+        compile_pale_android_jni();
+    }
+
     // Step 2: Build PJSIP if not already built
     // Check for the existence of the core libpj to avoid expensive rebuilds
     let pj_lib_dir = pj_src_dir.join("pjlib/lib");
+    let android_patch_stamp = pj_src_dir.join(".pale_android_video_jni_patched");
     let already_built = pj_lib_dir.exists()
         && fs::read_dir(&pj_lib_dir)
             .map(|entries| entries.count() > 0)
-            .unwrap_or(false);
+            .unwrap_or(false)
+        && (target_os != "android" || android_patch_stamp.exists());
 
     if !already_built {
         write_config_site(&pj_src_dir, &target_os);
+        if target_os == "android" {
+            // Ensure patch is present before compile (config_site rewrite may reset trees).
+            patch_android_video_jni(&pj_src_dir);
+        }
         build_pjsip(&pj_src_dir, &target_os, &target_arch);
+        if target_os == "android" {
+            let _ = fs::write(&android_patch_stamp, b"1");
+        }
     } else {
         println!("cargo:warning=PJSIP already built, skipping compilation.");
     }
@@ -73,6 +89,62 @@ fn download_pjsip(out_dir: &Path) {
     assert!(status.success(), "Failed to extract PJSIP tarball");
 }
 
+/// Patch PJSIP android_dev.c so FindClass for org.pjsip.* works from the
+/// PJSIP worker thread (uses ClassLoader cached in pale_android_jni.c).
+fn patch_android_video_jni(pj_src_dir: &Path) {
+    let path = pj_src_dir.join("pjmedia/src/pjmedia-videodev/android_dev.c");
+    if !path.exists() {
+        println!(
+            "cargo:warning=android_dev.c missing at {}, skip patch",
+            path.display()
+        );
+        return;
+    }
+    let mut src = fs::read_to_string(&path).expect("read android_dev.c");
+    if src.contains("pale_android_find_class") {
+        return;
+    }
+    if !src.contains("(*jni_env)->FindClass(jni_env, class_path)") {
+        println!("cargo:warning=android_dev.c FindClass pattern not found; video JNI patch skipped");
+        return;
+    }
+    src = src.replace(
+        "#include <jni.h>",
+        "#include <jni.h>\n/* Pale: ClassLoader-safe FindClass (worker thread) */\nextern jclass pale_android_find_class(JNIEnv *env, const char *slash_name);",
+    );
+    src = src.replace(
+        "cls = (*jni_env)->FindClass(jni_env, class_path);",
+        "cls = pale_android_find_class(jni_env, class_path);",
+    );
+    fs::write(&path, src).expect("write patched android_dev.c");
+    println!("cargo:warning=Patched android_dev.c for ClassLoader-safe FindClass");
+}
+
+/// Compile Pale's Android JNI_OnLoad + ClassLoader helper into the link unit.
+fn compile_pale_android_jni() {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let c_file = manifest_dir.join("android/pale_android_jni.c");
+    if !c_file.exists() {
+        panic!("missing {}", c_file.display());
+    }
+
+    let mut build = cc::Build::new();
+    build.file(&c_file);
+    build.flag_if_supported("-fPIC");
+
+    // NDK sysroot for jni.h / android/log.h
+    if let Ok(sysroot) = env::var("PALE_ANDROID_SYSROOT") {
+        build.flag(&format!("--sysroot={sysroot}"));
+        build.include(format!("{sysroot}/usr/include"));
+    }
+    if let Ok(cc_path) = env::var("PALE_ANDROID_CC") {
+        build.compiler(cc_path);
+    }
+    build.compile("pale_android_jni");
+    println!("cargo:rustc-link-lib=static=pale_android_jni");
+    println!("cargo:rustc-link-lib=log");
+}
+
 /// Write config_site.h with platform-appropriate defines
 fn write_config_site(pj_src_dir: &Path, target_os: &str) {
     let config_path = pj_src_dir.join("pjlib/include/pj/config_site.h");
@@ -111,10 +183,13 @@ fn write_config_site(pj_src_dir: &Path, target_os: &str) {
         "android" => {
             config.push_str("#define PJMEDIA_AUDIO_DEV_HAS_OPENSL 1\n");
             config.push_str("#define PJMEDIA_AUDIO_DEV_HAS_ANDROID 1\n");
-            // The Android OpenGL video factory (and_factory_init) segfaults during
-            // pjsua_init when no Activity/Surface is ready. Ship audio-first;
-            // re-enable once capture/render surfaces are wired to the Tauri activity.
-            config.push_str("#define PJMEDIA_VIDEO_DEV_HAS_ANDROID 0\n");
+            // Camera capture (JNI org.pjsip.PjCamera*) + OpenGL renderer.
+            // Requires: packaged Java classes, JVM via pale_android_jni.c, and
+            // ClassLoader-safe FindClass patch (applied after extract).
+            config.push_str("#define PJMEDIA_VIDEO_DEV_HAS_ANDROID 1\n");
+            config.push_str("#define PJMEDIA_VIDEO_DEV_HAS_ANDROID_OPENGL 1\n");
+            // We own JNI_OnLoad in pale_android_jni.c (Tauri + PJSIP cannot both).
+            config.push_str("#define PJ_JNI_HAS_JNI_ONLOAD 0\n");
             config.push_str("#define PJ_ANDROID 1\n");
         }
         "ios" => {

@@ -6,6 +6,9 @@ pub mod error;
 pub mod events;
 pub mod types;
 
+#[cfg(target_os = "android")]
+pub mod android_jni;
+
 pub use call_history::{CallHistoryDb, CallRecord};
 pub use config::{
     load_config, save_config, AccountPersist, AppConfig, AudioPersist, MatrixPersist,

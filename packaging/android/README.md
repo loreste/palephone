@@ -1,5 +1,18 @@
 # Android packaging
 
+## PJSIP video (camera + OpenGL)
+
+| Path | Role |
+|------|------|
+| `packaging/android/java/org/pjsip/*.java` | PJSIP camera JNI classes (`PjCamera2`, etc.) |
+| `src-tauri/android/PaleJni.kt` | Early `JNI_OnLoad` companion + `prepare()` |
+| `src-tauri/android/PaleVideoOverlay.kt` | SurfaceView overlays for remote/local video |
+| `src-tauri/crates/pjsip-sys/android/pale_android_jni.c` | `JNI_OnLoad`, ClassLoader cache, `pale_android_find_class` |
+
+CI (`.github/workflows/android.yml`) copies Java/Kotlin into `src-tauri/gen/android` after `tauri android init` and hooks `PaleJni.prepare(this)` into `MainActivity.onCreate`.
+
+Native side re-enables `PJMEDIA_VIDEO_DEV_HAS_ANDROID` + OpenGL renderer, disables PJSIP's own `JNI_OnLoad` (Pale owns it), and patches `android_dev.c` so `FindClass` uses the app ClassLoader from the PJSIP worker thread.
+
 ## Sideload signing certificate
 
 `pale-sideload.jks` is a **public sideload** signing key for CI and website

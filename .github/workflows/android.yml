@@ -115,8 +115,14 @@ jobs:
             JAVA_DIR="src-tauri/gen/android/app/src/main/java/com/pale/softphone"
             mkdir -p "$JAVA_DIR"
             cp src-tauri/android/SipForegroundService.kt "$JAVA_DIR/"
+            cp src-tauri/android/PaleJni.kt "$JAVA_DIR/"
+            cp src-tauri/android/PaleVideoOverlay.kt "$JAVA_DIR/"
 
-            echo "Android permissions and foreground service injected"
+            # Shared inject script (Java camera classes + MainActivity hook)
+            chmod +x scripts/android-inject-media.sh
+            ./scripts/android-inject-media.sh
+
+            echo "Android permissions, PJSIP camera classes, and video overlay injected"
           fi
 
       - name: Build Android APK

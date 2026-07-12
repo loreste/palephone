@@ -169,6 +169,18 @@ impl PjsipEngine {
     ) {
         log::info!("PJSIP worker thread starting...");
 
+        // Android: register JavaVM for camera/OpenGL video factories before
+        // pjsua_init. JNI_OnLoad in pale_android_jni.c also does this; this is
+        // a belt-and-suspenders path if OnLoad ordering differs.
+        #[cfg(target_os = "android")]
+        {
+            if !crate::android_jni::ensure_pjsip_jvm() {
+                log::warn!(
+                    "Android JavaVM not ready yet — video devices may be unavailable until JNI_OnLoad"
+                );
+            }
+        }
+
         // Initialize PJSIP
         unsafe {
             let status = pjsip_sys::pjsua_create();
