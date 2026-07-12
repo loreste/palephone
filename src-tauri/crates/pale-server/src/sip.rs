@@ -1204,7 +1204,31 @@ fn handle_invite(request: &SipRequest, peer: SocketAddr, state: &AppState) -> Op
     let user_part = crate::sip_user_part(&routed_uri);
     let normalized = crate::normalize_dialed_number(user_part);
     if looks_like_phone_number(&normalized) {
-        if let Some(gw) = state.resolve_gateway(&normalized) {
+        // Emergency numbers fail closed until location + E911/PSTN providers are ready.
+        let emergency = state.emergency_call_plan(&from_aor, &normalized);
+        if emergency.emergency && !emergency.allowed {
+            tracing::warn!(
+                caller = %from_aor,
+                number = %normalized,
+                reason = %emergency.reason,
+                "Blocking emergency call — plan not ready",
+            );
+            state.record_cdr_end(&call_id_str, "failed");
+            return Some(request.response(
+                403,
+                "Forbidden",
+                &[(
+                    "Warning",
+                    format!("399 pale \"emergency_not_ready:{}\"", emergency.reason),
+                )],
+            ));
+        }
+
+        if let Some(gw) = emergency
+            .gateway
+            .filter(|_| emergency.emergency && emergency.allowed)
+            .or_else(|| state.resolve_gateway(&normalized))
+        {
             let transport_param = match gw.transport.as_str() {
                 "tls" | "TLS" => ";transport=tls",
                 "tcp" | "TCP" => ";transport=tcp",
@@ -1233,6 +1257,7 @@ fn handle_invite(request: &SipRequest, peer: SocketAddr, state: &AppState) -> Op
                 number = %normalized,
                 gateway = %gw.name,
                 pai = %pai,
+                emergency = emergency.emergency,
                 "Routing outbound call via PSTN gateway",
             );
             state.upsert_sip_dialog(UpsertSipDialog {

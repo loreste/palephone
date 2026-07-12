@@ -19307,6 +19307,250 @@ impl AppState {
             });
         }
 
+        // Live tenant workflow checks (in-process, no external network).
+        let dlp_enabled = self
+            .list_dlp_policies()
+            .iter()
+            .any(|policy| policy.enabled);
+        push_validation_check(
+            &mut checks,
+            "workflow.dlp_chat",
+            "Compliance",
+            dlp_enabled,
+            "At least one enabled DLP policy should protect chat and file content.",
+            vec![format!(
+                "enabled_dlp_policies:{}",
+                self.list_dlp_policies()
+                    .iter()
+                    .filter(|p| p.enabled)
+                    .count()
+            )],
+            if dlp_enabled {
+                Vec::new()
+            } else {
+                vec!["no_enabled_dlp_policy".to_string()]
+            },
+        );
+
+        let mfa_policy = self.org_requires_mfa();
+        push_validation_check(
+            &mut checks,
+            "workflow.mfa_enforced",
+            "Identity",
+            mfa_policy,
+            "Conditional access should require MFA for enterprise tenants.",
+            vec![format!("ca_require_mfa:{mfa_policy}")],
+            if mfa_policy {
+                Vec::new()
+            } else {
+                vec!["conditional_access_mfa_not_required".to_string()]
+            },
+        );
+
+        let sip_backend_ready = self.sip_registration_available();
+        push_validation_check(
+            &mut checks,
+            "workflow.sip_registrar",
+            "Calling",
+            true,
+            if sip_backend_ready {
+                "SIP registrar is configured for client registration."
+            } else {
+                "SIP registrar not bound in this process (set PALE_SIP_BACKEND=udp-parser and transports)."
+            },
+            vec![format!(
+                "registrar:{}",
+                self.sip_registrar_uri().unwrap_or_else(|| "none".to_string())
+            )],
+            if sip_backend_ready {
+                Vec::new()
+            } else {
+                vec!["sip_registrar_not_bound".to_string()]
+            },
+        );
+        if !sip_backend_ready {
+            if let Some(check) = checks.iter_mut().find(|c| c.id == "workflow.sip_registrar") {
+                check.status = "warning".to_string();
+            }
+        }
+
+        let livekit_ready = self.livekit_config().is_some();
+        let livekit_required = std::env::var("PALE_LIVEKIT_REQUIRED")
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
+        let meetings_ok = livekit_ready || !livekit_required;
+        push_validation_check(
+            &mut checks,
+            "workflow.meetings_media",
+            "Meetings",
+            meetings_ok,
+            if livekit_ready {
+                "LiveKit SFU is configured for multi-party media."
+            } else if livekit_required {
+                "LiveKit is required but not configured."
+            } else {
+                "LiveKit not configured; multi-party meetings are signaling-only."
+            },
+            vec![
+                format!("livekit_configured:{livekit_ready}"),
+                format!("livekit_required:{livekit_required}"),
+            ],
+            if meetings_ok {
+                if livekit_ready {
+                    Vec::new()
+                } else {
+                    vec!["livekit_optional_signaling_only".to_string()]
+                }
+            } else {
+                vec!["livekit_required_but_missing".to_string()]
+            },
+        );
+        // Soft warning when LiveKit is optional but missing
+        if meetings_ok && !livekit_ready {
+            if let Some(check) = checks.iter_mut().find(|c| c.id == "workflow.meetings_media") {
+                check.status = "warning".to_string();
+            }
+        }
+
+        let clamav = std::env::var("PALE_CLAMAV_HOST")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+        let atp_required = std::env::var("PALE_ATP_REQUIRED")
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
+        let atp_ok = clamav || self.advanced_threat_protection_available() || !atp_required;
+        push_validation_check(
+            &mut checks,
+            "workflow.atp_scanner",
+            "Security",
+            atp_ok && (clamav || !atp_required),
+            if clamav {
+                "ClamAV host is configured for upload scanning."
+            } else if atp_required {
+                "ATP is required but PALE_CLAMAV_HOST is not set."
+            } else {
+                "ClamAV not configured; local malware patterns only."
+            },
+            vec![
+                format!("clamav_configured:{clamav}"),
+                format!("atp_required:{atp_required}"),
+            ],
+            if clamav {
+                Vec::new()
+            } else if atp_required {
+                vec!["clamav_required_but_missing".to_string()]
+            } else {
+                vec!["clamav_optional_local_patterns_only".to_string()]
+            },
+        );
+        if atp_ok && !clamav && !atp_required {
+            if let Some(check) = checks.iter_mut().find(|c| c.id == "workflow.atp_scanner") {
+                check.status = "warning".to_string();
+            }
+        }
+
+        let s3_active = matches!(
+            self.storage_client().backend_kind(),
+            storage_backend::StorageBackendKind::S3
+        );
+        push_validation_check(
+            &mut checks,
+            "workflow.object_storage",
+            "Files",
+            true,
+            if s3_active {
+                "S3/MinIO object storage is active."
+            } else {
+                "Using local disk file storage (fine for small tenants)."
+            },
+            vec![format!(
+                "backend:{}",
+                if s3_active { "s3" } else { "local" }
+            )],
+            if s3_active {
+                Vec::new()
+            } else {
+                vec!["local_disk_storage".to_string()]
+            },
+        );
+        if !s3_active {
+            if let Some(check) = checks.iter_mut().find(|c| c.id == "workflow.object_storage") {
+                check.status = "warning".to_string();
+            }
+        }
+
+        let pstn = self.pstn_operator_connect_status();
+        push_validation_check(
+            &mut checks,
+            "workflow.pstn_gateways",
+            "Calling",
+            pstn.enabled_gateway_count > 0,
+            if pstn.enabled_gateway_count > 0 {
+                "At least one SIP gateway is enabled for outbound PSTN routing."
+            } else {
+                "No enabled SIP gateways — outbound PSTN dialing will fail."
+            },
+            vec![
+                format!("enabled_gateways:{}", pstn.enabled_gateway_count),
+                format!("tls_gateways:{}", pstn.tls_gateway_count),
+                format!("routable:{}", pstn.routable),
+            ],
+            if pstn.enabled_gateway_count > 0 {
+                if pstn.routable {
+                    Vec::new()
+                } else {
+                    pstn.blockers.clone()
+                }
+            } else {
+                vec!["no_enabled_sip_gateway".to_string()]
+            },
+        );
+        if pstn.enabled_gateway_count > 0 && !pstn.routable {
+            if let Some(check) = checks.iter_mut().find(|c| c.id == "workflow.pstn_gateways") {
+                check.status = "warning".to_string();
+            }
+        }
+
+        let rooms = self.rooms.len();
+        let messages = self
+            .room_messages
+            .read()
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let user_count = self.users.len();
+        push_validation_check(
+            &mut checks,
+            "workflow.chat_activity",
+            "Chat",
+            true,
+            "Native chat APIs are available; create users and rooms to exercise them.",
+            vec![
+                format!("users:{user_count}"),
+                format!("rooms:{rooms}"),
+                format!("messages_in_memory:{messages}"),
+            ],
+            if user_count == 0 {
+                vec!["no_users_yet".to_string()]
+            } else {
+                Vec::new()
+            },
+        );
+        if user_count == 0 {
+            if let Some(check) = checks.iter_mut().find(|c| c.id == "workflow.chat_activity") {
+                check.status = "warning".to_string();
+            }
+        }
+
         let passed = checks.iter().filter(|check| check.status == "pass").count();
         let warning = checks
             .iter()
@@ -19315,7 +19559,8 @@ impl AppState {
         let failed = checks.iter().filter(|check| check.status == "fail").count();
         let total = checks.len().max(1);
         let score = ((passed * 100) / total).min(100) as u8;
-        let ready = failed == 0 && warning == 0;
+        // Ready only when no hard fails; warnings are allowed for optional services.
+        let ready = failed == 0;
         let next_actions = checks
             .iter()
             .filter(|check| check.status != "pass")
@@ -19334,6 +19579,7 @@ impl AppState {
                 "A configured integration must be enabled and backed by provider details.".to_string(),
                 "Network-reachable providers are stronger evidence than readiness toggles.".to_string(),
                 "Provider-specific schemes such as S3, RTMP, and carrier services still require deeper adapters or certification before enterprise parity is declared.".to_string(),
+                "Workflow checks (DLP, MFA policy, registrar, ClamAV, LiveKit) reflect live tenant config, not only product surface area.".to_string(),
             ],
             next_actions,
         }
@@ -24971,13 +25217,26 @@ mod tests {
         );
         let eicar = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
 
-        let before = state
+        // Local EICAR/test patterns always run (fail closed for known malware samples).
+        let eicar_block = state
             .file_governance_for_upload("sip:alice@example.com", "eicar.txt", "text/plain", eicar)
             .await;
-        assert!(before.allowed);
-        assert_eq!(before.dlp_status, "clean");
-        assert!(!state.advanced_threat_protection_available());
+        assert!(!eicar_block.allowed);
+        assert_eq!(eicar_block.dlp_status, "malware_blocked");
 
+        let clean = state
+            .file_governance_for_upload(
+                "sip:alice@example.com",
+                "notes.txt",
+                "text/plain",
+                b"ordinary business document",
+            )
+            .await;
+        assert!(clean.allowed);
+        assert_eq!(clean.dlp_status, "clean");
+
+        // Marking the ATP integration available still reports readiness for admins.
+        assert!(!state.advanced_threat_protection_available());
         state
             .update_enterprise_integration(
                 "advanced_threat_protection",

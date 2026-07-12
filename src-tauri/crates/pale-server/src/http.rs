@@ -55,6 +55,7 @@ pub fn router(state: SharedState) -> Router {
     Router::new()
         .route("/", get(root))
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .route("/v1/auth/login", post(user_login))
         .route("/v1/admin/login", post(admin_login))
         .route("/v1/admin/logout", post(admin_logout))
@@ -1046,6 +1047,13 @@ fn apply_cors_headers(headers: &mut HeaderMap, origin: Option<&str>) {
         HeaderName::from_static("permissions-policy"),
         HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
     );
+    // CSP: lock down API responses (HTML is minimal; no inline scripts needed).
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(
+            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+        ),
+    );
     // HSTS: enforce TLS for 1 year when served over HTTPS
     headers.insert(
         header::STRICT_TRANSPORT_SECURITY,
@@ -1062,7 +1070,7 @@ async fn require_pale_client(request: Request<axum::body::Body>, next: Next) -> 
     // Always allow health-checks, metrics, root page, SSE events, and OPTIONS preflight.
     // SSE uses browser EventSource which cannot set custom headers; it authenticates
     // via a query-string token instead.
-    if matches!(path, "/" | "/health" | "/metrics" | "/v1/events")
+    if matches!(path, "/" | "/health" | "/ready" | "/metrics" | "/v1/events")
         || request.method() == Method::OPTIONS
     {
         return next.run(request).await;
@@ -1152,6 +1160,35 @@ async fn health(State(state): State<SharedState>) -> Json<serde_json::Value> {
         "service": "pale-server",
         "status": if pg_healthy { "healthy" } else { "degraded" },
     }))
+}
+
+/// Kubernetes-style readiness: process is up and Postgres circuit is healthy when PG is used.
+async fn ready(State(state): State<SharedState>) -> impl IntoResponse {
+    let pg_healthy = state.pg_healthy();
+    let ready = pg_healthy;
+    let body = json!({
+        "ok": ready,
+        "service": "pale-server",
+        "ready": ready,
+        "postgres": if state.pg_store().is_some() {
+            if pg_healthy { "up" } else { "degraded" }
+        } else {
+            "not_configured"
+        },
+        "livekit": state.livekit_config().is_some(),
+        "s3": matches!(
+            state.storage_client().backend_kind(),
+            crate::storage_backend::StorageBackendKind::S3
+        ),
+        "clamav_configured": std::env::var("PALE_CLAMAV_HOST")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false),
+    });
+    if ready {
+        (StatusCode::OK, Json(body)).into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response()
+    }
 }
 
 async fn admin_login(

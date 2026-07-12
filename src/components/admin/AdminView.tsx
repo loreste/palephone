@@ -7179,6 +7179,8 @@ function SipGatewaysPanel({ baseUrl, token }: { baseUrl: string; token: string }
   const [prefix, setPrefix] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [probing, setProbing] = useState<string | null>(null);
+  const [probeResults, setProbeResults] = useState<Record<string, { reachable: boolean; detail: string; latency_ms?: number }>>({});
 
   const load = useCallback(async () => {
     try {
@@ -7209,6 +7211,28 @@ function SipGatewaysPanel({ baseUrl, token }: { baseUrl: string; token: string }
       await api(baseUrl, token, `/v1/admin/sip-gateways/${id}`, { method: "DELETE" });
       load();
     } catch { toast({ type: "error", title: "Failed to delete" }); }
+  };
+
+  const handleProbe = async (id: string) => {
+    setProbing(id);
+    try {
+      const result = await api<{ reachable: boolean; detail: string; latency_ms?: number }>(
+        baseUrl,
+        token,
+        `/v1/admin/sip-gateways/${id}/probe`,
+        { method: "POST" },
+      );
+      setProbeResults((prev) => ({ ...prev, [id]: result }));
+      toast({
+        type: result.reachable ? "success" : "error",
+        title: result.reachable ? "Gateway reachable" : "Gateway unreachable",
+        description: `${result.detail}${result.latency_ms != null ? ` (${result.latency_ms} ms)` : ""}`,
+      });
+    } catch {
+      toast({ type: "error", title: "Probe failed" });
+    } finally {
+      setProbing(null);
+    }
   };
 
   return (
@@ -7246,17 +7270,35 @@ function SipGatewaysPanel({ baseUrl, token }: { baseUrl: string; token: string }
         <Plus size={14} /> Add Gateway
       </button>
       <div className="space-y-1">
-        {gateways.map((gw) => (
-          <div key={gw.id} className="flex items-center justify-between py-2 px-3 bg-hover rounded text-sm">
-            <div>
-              <span className="font-medium">{gw.name}</span>
-              <span className="text-secondary ml-2">{gw.host}:{gw.port} ({gw.transport})</span>
-              {gw.prefix && <span className="text-accent ml-2">prefix: {gw.prefix}</span>}
-              <span className={cn("ml-2 text-xs", gw.enabled ? "text-green-400" : "text-red-400")}>{gw.enabled ? "enabled" : "disabled"}</span>
+        {gateways.map((gw) => {
+          const probe = probeResults[gw.id];
+          return (
+            <div key={gw.id} className="flex items-center justify-between py-2 px-3 bg-hover rounded text-sm gap-2">
+              <div className="min-w-0">
+                <span className="font-medium">{gw.name}</span>
+                <span className="text-secondary ml-2">{gw.host}:{gw.port} ({gw.transport})</span>
+                {gw.prefix && <span className="text-accent ml-2">prefix: {gw.prefix}</span>}
+                <span className={cn("ml-2 text-xs", gw.enabled ? "text-green-400" : "text-red-400")}>{gw.enabled ? "enabled" : "disabled"}</span>
+                {probe && (
+                  <span className={cn("ml-2 text-xs", probe.reachable ? "text-green-400" : "text-red-400")}>
+                    {probe.reachable ? "reachable" : "unreachable"}
+                    {probe.latency_ms != null ? ` · ${probe.latency_ms}ms` : ""}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => handleProbe(gw.id)}
+                  disabled={probing === gw.id}
+                  className="text-xs px-2 py-1 rounded bg-elevated hover:bg-overlay text-secondary disabled:opacity-50"
+                >
+                  {probing === gw.id ? "Probing…" : "Probe"}
+                </button>
+                <button onClick={() => handleDelete(gw.id)} className="text-red-400 hover:text-red-300"><Trash2 size={14} /></button>
+              </div>
             </div>
-            <button onClick={() => handleDelete(gw.id)} className="text-red-400 hover:text-red-300"><Trash2 size={14} /></button>
-          </div>
-        ))}
+          );
+        })}
         {gateways.length === 0 && <p className="text-sm text-secondary text-center py-4">No SIP gateways configured</p>}
       </div>
     </div>

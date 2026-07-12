@@ -21,6 +21,10 @@ Recent enforcement work (not just readiness records):
 - ClamAV path with fail-closed `PALE_ATP_REQUIRED`; MinIO/S3 compose profile
 - Client MFA enrollment/login UI (setup wizard + server settings)
 - Smoke/load scripts under `scripts/`; PSTN lab guide + gateway TCP probe API
+- E911 fail-closed on SIP INVITE for emergency numbers without a ready plan
+- Enterprise validation report includes live workflow checks (DLP, MFA, LiveKit, ATP, storage, PSTN)
+- `/ready` probe endpoint and Content-Security-Policy on API responses
+- Admin SIP gateway Probe button
 
 Recent enterprise readiness work added:
 
