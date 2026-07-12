@@ -12,6 +12,16 @@ Pale exists for teams that want to own that layer. To speak freely here means yo
 
 We are also not pretending the hard parts are magic. Speech, AI, malware scanning, storage, broadcast media, PSTN, E911, and policy enforcement all need real systems behind them. Pale makes those dependencies visible, lets administrators check whether they are ready, and keeps the core communications stack under your control.
 
+## Who Pale is for
+
+Pale is built for teams that want to **own** calling, chat, and meetings — not rent them from a hyperscaler:
+
+- **Regulated / sovereignty-sensitive mid-market** (roughly 50–2,000 seats) that needs SIP/PBX, SSO/MFA, DLP/retention, and self-hosted data
+- **Operators who accept provider boundaries** — ClamAV, LiveKit, OIDC, S3/MinIO, carriers — as explicit deploy choices, not magic
+- **Not a drop-in global Microsoft Teams cloud clone** — no claim of 10k town halls, Operator Connect marketplace, or full M365 app ecosystem parity
+
+Execution plan for closing the deal-winning gaps: [docs/MILESTONES.md](docs/MILESTONES.md). Broader honesty map: [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md). Procurement status matrix: [docs/procurement/TEAMS_PARITY.md](docs/procurement/TEAMS_PARITY.md). Production go-live: [docs/deploy/PRODUCTION.md](docs/deploy/PRODUCTION.md).
+
 ## Why Pale?
 
 - **Built to own the phone layer.** Pale includes SIP account records, PBX routing, emergency calling models, PSTN gateway readiness, and call center workflows. The built-in parser backend provides the current registrar/PBX path over SIP TLS/TCP; UDP is an explicit fallback, not the production default.
@@ -394,14 +404,20 @@ Admin users see an **Admin** tab in the bottom navigation for full PBX managemen
 
 ### Android
 
+**Sideload (signed APK):** https://drcpbx.com/downloads/Pale.apk  
+Checksums: https://drcpbx.com/downloads/pale-android-SHA256SUMS.txt  
+Video path release: https://github.com/loreste/palephone/releases/tag/android-video-full-0.1.6
+
 ```bash
 rustup target add aarch64-linux-android
 npm run tauri android init
 npm run tauri android dev     # USB debugging
 npm run tauri android build   # Release APK
+./scripts/sign-android-apk.sh path/to/app-*-unsigned.apk dist/Pale.apk
 ```
 
-See [ANDROID_SETUP.md](ANDROID_SETUP.md) for detailed environment setup.
+See [ANDROID_SETUP.md](ANDROID_SETUP.md) and [packaging/android/README.md](packaging/android/README.md)
+for environment setup, PJSIP video wiring, and install notes.
 
 ## Docker Compose Services
 

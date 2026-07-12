@@ -16,6 +16,18 @@ users outside a lab network.
 Product honesty: many enterprise admin screens are **readiness records**. Do not
 market features that still need external providers. See [NEXT_STEPS.md](../NEXT_STEPS.md).
 
+**Regulated mid-market profile:** env knobs in
+[regulated-midmarket.env.example](regulated-midmarket.env.example), SSO lab
+[sso-oidc.md](sso-oidc.md), DLP lab [dlp-lab.md](dlp-lab.md), evidence export
+`scripts/export-evidence-pack.sh`, functional smoke `scripts/smoke-test.sh`.
+Milestone plan: [MILESTONES.md](../MILESTONES.md). Procurement matrix:
+[../procurement/TEAMS_PARITY.md](../procurement/TEAMS_PARITY.md).
+
+**Android client (sideload):** signed APK at
+https://drcpbx.com/downloads/Pale.apk — full SIP video path is in tree and
+emulator-validated; treat physical fleet certification as open until issue #1
+is closed by device validation. See [ANDROID_SETUP.md](../../ANDROID_SETUP.md).
+
 ---
 
 ## Architecture (target)

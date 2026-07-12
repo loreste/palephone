@@ -54,3 +54,17 @@ are installable on modern Android (signature schemes v2/v3).
 3. If an older Pale build used a different certificate, uninstall the old app first.
 4. On some OEM devices (Honor, Xiaomi, etc.) also disable extra “pure mode”
    / “external sources” restrictions for the installer.
+5. Grant **Camera** and **Microphone** when placing or answering a video call.
+
+## Published builds
+
+| Channel | URL |
+|---------|-----|
+| Stable sideload | https://drcpbx.com/downloads/Pale.apk |
+| Versioned | https://drcpbx.com/downloads/current/Pale_0.1.6_android.apk |
+| Checksums | https://drcpbx.com/downloads/pale-android-SHA256SUMS.txt |
+| Release (video path) | https://github.com/loreste/palephone/releases/tag/android-video-full-0.1.6 |
+
+Latest video-path release tag: `android-video-full-0.1.6` (commit series through
+`655cb0d`). Emulator API 34 validated for launch + camera; physical two-party
+video still needs human confirmation (GitHub issue #1).

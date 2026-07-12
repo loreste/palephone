@@ -5,6 +5,10 @@ and a Microsoft Teams Enterprise-style deployment. It is intentionally honest:
 some work is product code, some work is provider integration, and some work is
 proof that the system holds up under real tenant load.
 
+**Vertical execution plan:** for a sequenced, deal-focused path (regulated
+mid-market: SIP + DLP + SSO), see [MILESTONES.md](MILESTONES.md). Prefer that
+plan over spreading effort across every remaining row in the coverage snapshot.
+
 ## What Has Landed
 
 The current codebase already includes broad coverage across calling, PBX,
@@ -50,10 +54,18 @@ Recent client and security work completed:
 - client-only gate: server rejects non-Pale HTTP and SIP requests
 - security headers (HSTS, X-Frame-Options, X-Content-Type-Options,
   Referrer-Policy, Permissions-Policy) on all HTTP responses
-- HMAC-SHA256 integrity signing on audit log entries
+- Keyed SHA-256 integrity hashes on audit log entries (not cryptographic HMAC-SHA256)
 - media permission checks before answering incoming calls
 - builds for macOS (ARM + Intel), Windows, Linux, and Android
 - emoji picker in the chat compose bar
+- **Android full video path** (2026-07-12): signed sideload APK, PJSIP
+  `PjCamera2` + CameraManager, SurfaceView overlays, bind on media state,
+  answer/outbound with `vid_cnt=1`, MediaCodec H.264/VP8/VP9; emulator API 34
+  validated (launch + camera enum). Download: https://drcpbx.com/downloads/Pale.apk
+  (release `android-video-full-0.1.6`). Physical two-party call still human-validated.
+- **M1 certifiable deploy tooling** (2026-07-12): compose CI smoke
+  (`.github/workflows/compose-smoke.yml`), regulated env template, SSO/DLP labs,
+  `scripts/export-evidence-pack.sh`, smoke-test DLP/room fixes
 
 Those features make the gaps visible and manageable. They do not remove the
 need for real external systems where the feature depends on one.
@@ -82,8 +94,8 @@ LiveKit, ClamAV ping, storage, PSTN) and CSV export at
 `/v1/admin/enterprise-integrations/validation.csv`. Pale Server CI runs a
 local binary smoke (`/health`, `/ready`, validation CSV). Still useful:
 
-- full `scripts/smoke-test.sh` against docker-compose in CI
-- PDF packaging for auditors
+- ~~full `scripts/smoke-test.sh` against docker-compose in CI~~ (see `.github/workflows/compose-smoke.yml`)
+- PDF packaging for auditors (CSV evidence pack is available via `scripts/export-evidence-pack.sh`)
 
 ### 3. Real-Time Scale Proof
 
@@ -95,8 +107,11 @@ burst). Still needed for large-event claims:
 
 ### 4. Client and Runtime Hardening
 
+- Android: signed APK + full SIP video path in tree (see
+  [packaging/android/README.md](../packaging/android/README.md)); still open:
+  physical-device two-party video confirmation, background calling polish, push
+  reliability under OEM battery optimizers
 - iOS path documented (`IOS_SETUP.md`); signed App Store / CallKit / APNs still open
-- background calling polish on mobile
 - multi-window lifecycle polish
 
 ### 5. Security Hardening
@@ -126,8 +141,8 @@ has provider-specific validation, load results, or deployment evidence.
 | Meetings and webinars | conferences, scheduled meetings, lobby, polls, Q&A, attendance, webinar registration, captions, presentation records, town hall configuration | Media provider adapters, 10,000-viewer load proof, PowerPoint-style rendering integration, and production streaming validation |
 | Chat and collaboration | rooms, messages, reactions, read receipts, teams, channels, tags, guests, federation records, tabs, apps, connectors, bots, wiki, tasks, approvals | Tenant-level workflow validation and provider setup guides for any external collaboration services |
 | Files | upload, download, versioning, folders, locks, governance metadata, storage readiness | Real storage adapters and co-authoring/rendering providers |
-| Security and compliance | retention, eDiscovery, DLP, ATP quarantine records, security score, compliance reviews, labels, barriers, data residency, SSO records, MFA/session APIs, security headers, HMAC-signed audit entries | Malware scanner adapters, CASB adapters, secret rotation, and stricter admin action review |
+| Security and compliance | retention, eDiscovery, DLP, ATP quarantine records, security score, compliance reviews, labels, barriers, data residency, SSO records, MFA/session APIs, security headers, keyed audit integrity hashes | Malware scanner adapters, CASB adapters, secret rotation, and stricter admin action review |
 | AI and speech | LLM, STT, and TTS provider APIs, transcription jobs, speech IVR contracts, meeting assistant report structures | Real provider execution, provider-native health checks, and tenant-level validation reports |
 | Devices and rooms | room/device records, common area phone records, scheduling panels, hot desking, provisioning paths | Device certification, installer/runtime testing, and operational guides |
 | Platform integration | OAuth/API clients, bots, app catalog, message extensions, automations, federation, calendar/contact sync records | Production connectors, external provider tests, and operator runbooks |
-| Clients | desktop app (macOS ARM+Intel, Windows, Linux), Android build, admin UI, enterprise readiness UI, push notifications, VP8 video, screen sharing, media permissions, client-only gate | iOS packaging, background modes, and multi-window lifecycle polish |
+| Clients | desktop app (macOS ARM+Intel, Windows, Linux), Android signed sideload + video path (emulator-validated), admin UI, enterprise readiness UI, push notifications, VP8 video, screen sharing, media permissions, client-only gate | iOS packaging, Android background calling polish, multi-window lifecycle polish |

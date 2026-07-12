@@ -65,10 +65,18 @@ Android video depends on:
 
 1. PJSIP Java classes under `org.pjsip` (shipped in `packaging/android/java/`)
 2. `PaleJni.prepare(activity)` on the main thread (injected into MainActivity by CI)
-3. Native `JNI_OnLoad` + ClassLoader-safe FindClass (`pjsip-sys/android/pale_android_jni.c`)
-4. Linked system libs: `mediandk`, `EGL`, `GLESv2`, `OpenSLES`
+   — registers `CameraManager` with `PjCameraInfo2` and attaches `PaleVideoOverlay`
+3. Rust `JNI_OnLoad` + ClassLoader-safe FindClass
+   (`src-tauri/crates/pale-core/src/android_jni.rs`); PJSIP worker threads use
+   the app ClassLoader via `pale_android_find_class`
+4. Surface bind on media state (`android_video.rs`): remote `ANativeWindow` +
+   local preview (`pjsua_vid_preview_start`); answer/outbound use `vid_cnt = 1`
+5. Linked system libs: `mediandk`, `EGL`, `GLESv2`, `OpenSLES`
+6. R8 keep rules for `org.pjsip.*` so release minification does not strip camera classes
 
 Without those, the app either crashes in `and_factory_init` or has no camera devices.
+
+Details: [packaging/android/README.md](packaging/android/README.md).
 
 ### Sign for install (required on modern Android)
 
@@ -91,11 +99,17 @@ Details: [packaging/android/README.md](packaging/android/README.md).
 4. Honor / Magic / Xiaomi: turn off pure-mode / external-source blocks if install is blocked.
 5. Optional: `adb install -r Pale.apk` with USB debugging.
 
-Public download (when published):
+Public download (signed sideload):
 
-- Website (preferred stable name): `https://drcpbx.com/downloads/Pale.apk`
-- Versioned CI mirror: `https://drcpbx.com/downloads/current/Pale_*_android.apk` (must be signed)
-- GitHub Actions artifact `pale-android-apk` on each green Android workflow run
+- Website (stable name): https://drcpbx.com/downloads/Pale.apk
+- Versioned mirror: https://drcpbx.com/downloads/current/Pale_0.1.6_android.apk
+- Checksums: https://drcpbx.com/downloads/pale-android-SHA256SUMS.txt
+- GitHub release (video path): https://github.com/loreste/palephone/releases/tag/android-video-full-0.1.6
+- CI artifact `pale-android-apk` on each green Android workflow run
+
+**Emulator-validated** (API 34): install + launch, camera enum (“Back camera”),
+video codecs (H.264/VP8/VP9). Confirm on a physical phone with CAMERA + MIC
+and a live SIP peer before calling the fleet certified.
 
 ## Run on a phone
 

@@ -1,0 +1,117 @@
+name: Compose smoke
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src-tauri/crates/pale-server/**"
+      - "Dockerfile.pale-server"
+      - "docker-compose.yml"
+      - "docker-compose.ci.yml"
+      - "scripts/smoke-test.sh"
+      - "scripts/export-evidence-pack.sh"
+      - ".github/workflows/compose-smoke.yml"
+  pull_request:
+    paths:
+      - "src-tauri/crates/pale-server/**"
+      - "Dockerfile.pale-server"
+      - "docker-compose.yml"
+      - "docker-compose.ci.yml"
+      - "scripts/smoke-test.sh"
+      - "scripts/export-evidence-pack.sh"
+      - ".github/workflows/compose-smoke.yml"
+  workflow_dispatch:
+
+env:
+  PALE_SERVER_IMAGE: pale-server:ci
+  POSTGRES_PASSWORD: ci-postgres-password-32chars-hexhex
+  TURN_SECRET: ci-turn-secret-at-least-32-characters
+  PALE_SERVER_TOKEN: ci-server-token-at-least-24chars
+  PALE_ADMIN_PASSWORD: ci-admin-password-24chars-min
+  PALE_STORAGE_KEY: ci-storage-key-24chars-xxxx
+  PALE_REQUIRE_DUAL_ADMIN: "false"
+
+jobs:
+  compose-smoke:
+    name: Docker Compose smoke + evidence pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build pale-server image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.pale-server
+          push: false
+          load: true
+          tags: pale-server:ci
+          cache-from: type=gha,scope=pale-server-ci
+          cache-to: type=gha,mode=max,scope=pale-server-ci
+
+      - name: Start postgres, nats, pale-server
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+            up -d --wait postgres nats pale-server
+
+      - name: Wait for /health and /ready
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf -H "User-Agent: Pale/ci" http://127.0.0.1:8090/health \
+              && curl -sf -H "User-Agent: Pale/ci" http://127.0.0.1:8090/ready; then
+              echo "ready after ${i}s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "pale-server did not become ready"
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml logs pale-server | tail -100
+          exit 1
+
+      - name: Run smoke-test.sh
+        env:
+          PALE_BASE_URL: http://127.0.0.1:8090
+          PALE_ADMIN_TOKEN: ${{ env.PALE_SERVER_TOKEN }}
+          PALE_SKIP_MEETING: "0"
+          PALE_SMOKE_DLP: "1"
+          PALE_SMOKE_VALIDATION: "1"
+        run: |
+          chmod +x scripts/smoke-test.sh
+          ./scripts/smoke-test.sh
+
+      - name: Export evidence pack
+        env:
+          PALE_BASE_URL: http://127.0.0.1:8090
+          PALE_ADMIN_TOKEN: ${{ env.PALE_SERVER_TOKEN }}
+          PALE_EVIDENCE_DIR: evidence/ci
+        run: |
+          chmod +x scripts/export-evidence-pack.sh
+          ./scripts/export-evidence-pack.sh
+          test -f evidence/ci/enterprise-validation.csv
+          test -f evidence/ci/security-score.json
+          test -s evidence/ci/SHA256SUMS.txt
+          head -20 evidence/ci/enterprise-validation.csv
+
+      - name: Upload evidence pack artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pale-evidence-pack
+          path: evidence/ci/
+          if-no-files-found: ignore
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml ps -a
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml logs --tail=200 pale-server postgres nats
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v || true

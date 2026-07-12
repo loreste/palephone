@@ -1,0 +1,28 @@
+# CI / lab override for docker-compose.yml
+#
+# Skips host-network coturn (flaky in GitHub Actions) and uses a pre-built
+# image tag when PALE_SERVER_IMAGE is set.
+#
+# Usage:
+#   export POSTGRES_PASSWORD=... TURN_SECRET=... PALE_SERVER_TOKEN=... \
+#          PALE_ADMIN_PASSWORD=... PALE_STORAGE_KEY=...
+#   docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+#     up -d --wait postgres nats pale-server
+#
+# Optional: build first with
+#   docker build -f Dockerfile.pale-server -t pale-server:ci .
+
+services:
+  coturn:
+    # Do not start coturn in CI; pale-server does not depend on it for smoke.
+    profiles: ["turn"]
+
+  pale-server:
+    # Prefer a pre-built CI image (workflow sets PALE_SERVER_IMAGE=pale-server:ci).
+    image: ${PALE_SERVER_IMAGE:-pale-server:ci}
+    pull_policy: never
+    environment:
+      # CI defaults: dual-admin off so evidence/smoke scripts stay simple
+      PALE_REQUIRE_DUAL_ADMIN: "${PALE_REQUIRE_DUAL_ADMIN:-false}"
+      PALE_STUN_IGNORE_FAILURE: "true"
+      RUST_LOG: "${RUST_LOG:-warn}"

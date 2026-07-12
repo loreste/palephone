@@ -7,11 +7,15 @@ on:
       - "src-tauri/crates/pale-server/**"
       - "Dockerfile.pale-server"
       - "docker-compose.yml"
+      - "scripts/smoke-test.sh"
+      - "scripts/export-evidence-pack.sh"
       - "packaging/windows/server/**"
       - ".github/workflows/pale-server.yml"
   pull_request:
     paths:
       - "src-tauri/crates/pale-server/**"
+      - "scripts/smoke-test.sh"
+      - "scripts/export-evidence-pack.sh"
       - "packaging/windows/server/**"
       - ".github/workflows/pale-server.yml"
 
@@ -90,16 +94,15 @@ jobs:
             sleep 1
           done
           export PALE_BASE_URL="http://127.0.0.1:18080"
-          export PALE_SIP_URI="sip:admin@local"
-          # Admin login is separate; create a user session via admin token first
           export PALE_ADMIN_TOKEN="$PALE_SERVER_TOKEN"
-          # Smoke script expects user login — use server token path for API checks
-          # Health + metrics at minimum:
-          curl -sf -H "User-Agent: Pale/ci" "$PALE_BASE_URL/health"
-          curl -sf -H "User-Agent: Pale/ci" "$PALE_BASE_URL/ready"
-          curl -sf -H "User-Agent: Pale/ci" -H "Authorization: Bearer $PALE_SERVER_TOKEN" \
-            "$PALE_BASE_URL/v1/admin/enterprise-integrations/validation.csv" | head -5
-          echo "smoke ok"
+          export PALE_SKIP_MEETING=0
+          export PALE_SMOKE_DLP=1
+          export PALE_SMOKE_VALIDATION=1
+          chmod +x scripts/smoke-test.sh scripts/export-evidence-pack.sh
+          ./scripts/smoke-test.sh
+          export PALE_EVIDENCE_DIR=/tmp/pale-ci-evidence
+          ./scripts/export-evidence-pack.sh
+          test -s /tmp/pale-ci-evidence/enterprise-validation.csv
 
       - name: Run clippy
         working-directory: src-tauri

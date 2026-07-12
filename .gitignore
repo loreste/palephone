@@ -54,6 +54,9 @@ Thumbs.db
 *.aab
 *.keystore
 local.properties
+
+# Generated auditor evidence packs (re-create with scripts/export-evidence-pack.sh)
+evidence/
 CLAUDE.md
 UI_UX_SPEC.md
 DBA_REVIEW.md

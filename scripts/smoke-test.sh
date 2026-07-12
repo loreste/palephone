@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pale Server smoke tests: health, login, chat, meeting join (signaling).
+# Pale Server smoke tests: health, ready, login/token, chat, DLP, meeting, validation.
 #
 # Usage:
 #   export PALE_BASE_URL=http://127.0.0.1:8090
@@ -8,8 +8,10 @@
 #   ./scripts/smoke-test.sh
 #
 # Optional:
-#   PALE_ADMIN_TOKEN=...  skip login and use a bearer token
-#   PALE_SKIP_MEETING=1   skip conference create/join
+#   PALE_ADMIN_TOKEN=...     skip login and use a bearer token (server token or session)
+#   PALE_SKIP_MEETING=1      skip conference create/join
+#   PALE_SMOKE_DLP=1         create a temp DLP policy and assert blocked send
+#   PALE_SMOKE_VALIDATION=1  fetch enterprise validation CSV (requires admin token)
 set -euo pipefail
 
 BASE_URL="${PALE_BASE_URL:-http://127.0.0.1:8090}"
@@ -18,6 +20,8 @@ SIP_URI="${PALE_SIP_URI:-}"
 PASSWORD="${PALE_PASSWORD:-}"
 TOKEN="${PALE_ADMIN_TOKEN:-}"
 SKIP_MEETING="${PALE_SKIP_MEETING:-0}"
+SMOKE_DLP="${PALE_SMOKE_DLP:-0}"
+SMOKE_VALIDATION="${PALE_SMOKE_VALIDATION:-0}"
 
 UA="Pale/smoke-test"
 pass=0
@@ -44,14 +48,6 @@ req() {
   curl "${args[@]}" "${BASE_URL}${path}"
 }
 
-split_body_code() {
-  # stdin: body\ncode -> sets BODY and CODE
-  local raw
-  raw="$(cat)"
-  CODE="${raw##*$'\n'}"
-  BODY="${raw%$'\n'*}"
-}
-
 log "=== Pale smoke test against $BASE_URL ==="
 
 # 1. Health
@@ -62,6 +58,16 @@ if [ "$CODE" = "200" ] && echo "$BODY" | grep -q '"ok"'; then
   ok "GET /health ($CODE)"
 else
   bad "GET /health ($CODE) $BODY"
+fi
+
+# 1b. Ready
+raw="$(curl -sS -w "\n%{http_code}" -H "User-Agent: $UA" "${BASE_URL}/ready" || true)"
+CODE="${raw##*$'\n'}"
+BODY="${raw%$'\n'*}"
+if [ "$CODE" = "200" ]; then
+  ok "GET /ready ($CODE)"
+else
+  bad "GET /ready ($CODE) $BODY"
 fi
 
 # 2. Login (unless token provided)
@@ -94,6 +100,8 @@ if [ -z "$TOKEN" ]; then
     exit 1
   fi
   ok "POST /v1/auth/login"
+else
+  ok "using PALE_ADMIN_TOKEN (skip login)"
 fi
 
 # 3. Create room + send message
@@ -122,24 +130,60 @@ if [ -n "$ROOM_ID" ]; then
   fi
 fi
 
+# 3b. Optional DLP block check
+if [ "$SMOKE_DLP" = "1" ] && [ -n "$ROOM_ID" ]; then
+  DLP_MARKER="SMOKE-DLP-$(date +%s)-ZZZZ"
+  # Build JSON with python so the pattern is safely escaped
+  DLP_JSON="$(python3 -c 'import json,sys; print(json.dumps({
+    "name": "smoke-dlp-" + sys.argv[1],
+    "description": "ephemeral smoke policy",
+    "pattern": sys.argv[1],
+    "action": "block",
+    "enabled": True,
+  }))' "$DLP_MARKER")"
+  POL_BODY="$(req POST /v1/admin/dlp/policies "$DLP_JSON")"
+  CODE="${POL_BODY##*$'\n'}"
+  BODY="${POL_BODY%$'\n'*}"
+  POL_ID="$(json_field "$BODY" id)"
+  if [ -n "$POL_ID" ] && { [ "$CODE" = "200" ] || [ "$CODE" = "201" ]; }; then
+    ok "POST /v1/admin/dlp/policies -> $POL_ID"
+    BLOCK_JSON="$(python3 -c 'import json,sys; print(json.dumps({"body": "blocked content " + sys.argv[1]}))' "$DLP_MARKER")"
+    BLOCK_BODY="$(req POST "/v1/rooms/${ROOM_ID}/messages" "$BLOCK_JSON")"
+    CODE="${BLOCK_BODY##*$'\n'}"
+    BODY="${BLOCK_BODY%$'\n'*}"
+    if [ "$CODE" = "200" ] || [ "$CODE" = "201" ]; then
+      bad "DLP did not block matching message (HTTP $CODE)"
+    else
+      ok "DLP blocked matching message (HTTP $CODE)"
+    fi
+    DEL_BODY="$(req DELETE "/v1/admin/dlp/policies/${POL_ID}")"
+    DEL_CODE="${DEL_BODY##*$'\n'}"
+    if [ "$DEL_CODE" = "200" ] || [ "$DEL_CODE" = "204" ]; then
+      ok "DELETE ephemeral DLP policy"
+    else
+      log "  WARN could not delete DLP policy $POL_ID ($DEL_CODE)"
+    fi
+  else
+    bad "POST /v1/admin/dlp/policies ($CODE) $BODY"
+  fi
+fi
+
 # 4. Conference create + join (signaling; LiveKit optional)
 if [ "$SKIP_MEETING" != "1" ]; then
-  CONF_BODY="$(req POST /v1/conferences '{"name":"smoke-meet","description":"smoke"}')"
+  CONF_BODY="$(req POST /v1/conferences '{"title":"smoke-meet","mode":"audio"}')"
   CODE="${CONF_BODY##*$'\n'}"
   BODY="${CONF_BODY%$'\n'*}"
   CONF_ID="$(json_field "$BODY" id)"
   if [ -n "$CONF_ID" ] && { [ "$CODE" = "200" ] || [ "$CODE" = "201" ]; }; then
     ok "POST /v1/conferences -> $CONF_ID"
-    USER_ID="$(json_field "$(req GET /v1/users | sed '$d')" id)"
-    # Best-effort join with SIP URI from login
     JOIN_BODY="$(req POST "/v1/conferences/${CONF_ID}/participants" \
       "{\"user_id\":\"00000000-0000-0000-0000-000000000001\",\"sip_uri\":\"${SIP_URI:-sip:smoke@local}\"}")"
     CODE="${JOIN_BODY##*$'\n'}"
     BODY="${JOIN_BODY%$'\n'*}"
-    if [ "$CODE" = "200" ]; then
+    if [ "$CODE" = "200" ] || [ "$CODE" = "201" ]; then
       ok "POST /v1/conferences/{id}/participants"
     else
-      # Join may fail without matching user; still useful signal
+      # Join may fail without a matching user record; still useful signal
       log "  WARN conference join ($CODE) — $BODY"
     fi
   else
@@ -153,6 +197,20 @@ if [ "$METRICS" = "200" ]; then
   ok "GET /metrics"
 else
   bad "GET /metrics ($METRICS)"
+fi
+
+# 6. Enterprise validation CSV (admin)
+if [ "$SMOKE_VALIDATION" = "1" ]; then
+  VAL="$(curl -sS -w "\n%{http_code}" -H "User-Agent: $UA" -H "X-Pale-Client: Pale/smoke" \
+    -H "Authorization: Bearer $TOKEN" \
+    "${BASE_URL}/v1/admin/enterprise-integrations/validation.csv" || true)"
+  CODE="${VAL##*$'\n'}"
+  BODY="${VAL%$'\n'*}"
+  if [ "$CODE" = "200" ] && [ -n "$BODY" ]; then
+    ok "GET enterprise-integrations/validation.csv ($(echo "$BODY" | wc -l | tr -d ' ') lines)"
+  else
+    bad "GET validation.csv ($CODE)"
+  fi
 fi
 
 log ""

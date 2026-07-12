@@ -8735,7 +8735,9 @@ impl AppState {
         let is_direct = input.is_direct.unwrap_or(false);
         let mut members = input.members.clone();
         members.push(creator.to_string());
-        let members = normalized_room_members(members);
+        // SIP-normalize peers, but always keep the creator principal (break-glass
+        // admin is "admin", not a sip: URI — still must be a room member).
+        let members = room_member_uris_preserving_creator(creator, members);
 
         if is_direct {
             if let Some(existing) = self.rooms.values().into_iter().find(|room| {
@@ -8754,18 +8756,23 @@ impl AppState {
             }
         }
 
+        let mut owners = normalized_room_members(
+            input
+                .channel_owners
+                .into_iter()
+                .chain(std::iter::once(creator.to_string()))
+                .collect(),
+        );
+        if !owners.iter().any(|uri| uri == creator) {
+            owners.push(creator.to_string());
+        }
+
         let room = Room {
             id: Uuid::new_v4(),
             team_id: input.team_id,
             channel_name: input.channel_name,
             channel_type: normalize_channel_type(input.channel_type.as_deref()),
-            channel_owners: normalized_room_members(
-                input
-                    .channel_owners
-                    .into_iter()
-                    .chain(std::iter::once(creator.to_string()))
-                    .collect(),
-            ),
+            channel_owners: owners,
             posting_policy: normalize_posting_policy(input.posting_policy.as_deref()),
             name: input.name,
             description: input.description.unwrap_or_default(),
@@ -12302,8 +12309,9 @@ pub struct AdminAuditEvent {
     pub action: String,
     pub target: Option<String>,
     pub created_at: DateTime<Utc>,
-    /// HMAC-SHA256 integrity signature over id|principal|action|target|created_at.
-    /// Computed using the server storage key so tampered records can be detected.
+    /// Keyed SHA-256 integrity hash over id|principal|action|target|created_at
+    /// (prefix with the server HTTP token). Not cryptographic HMAC-SHA256;
+    /// detects casual tampering of audit records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integrity: Option<String>,
 }
@@ -21372,6 +21380,17 @@ fn normalized_room_members(members: Vec<String>) -> Vec<String> {
     members
 }
 
+/// Like [`normalized_room_members`], but always retains `creator` even when it
+/// is not a SIP AOR (e.g. break-glass admin principal `"admin"`).
+fn room_member_uris_preserving_creator(creator: &str, members: Vec<String>) -> Vec<String> {
+    let mut members = normalized_room_members(members);
+    if !members.iter().any(|uri| uri == creator) {
+        members.push(creator.to_string());
+        members.sort();
+    }
+    members
+}
+
 fn matches_room_call_mode(conference_mode: &ConferenceMode, room_mode: &RoomCallMode) -> bool {
     matches!(
         (conference_mode, room_mode),
@@ -22368,6 +22387,44 @@ mod tests {
         });
         assert!(duplicate.is_err());
         assert_eq!(state.users().len(), 1);
+    }
+
+    #[test]
+    fn break_glass_admin_principal_is_room_member() {
+        // Server token maps to principal "admin" (not a SIP AOR). Room creation
+        // must still add that principal so chat send is not 403.
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-test-admin-room"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let room = state.create_room(
+            "admin",
+            CreateRoomRequest {
+                name: "admin-room".to_string(),
+                description: None,
+                members: vec![],
+                is_direct: Some(false),
+                team_id: None,
+                channel_name: None,
+                channel_type: None,
+                channel_owners: Vec::new(),
+                posting_policy: None,
+            },
+        );
+        assert!(
+            room.members
+                .iter()
+                .any(|m| m.user_sip_uri == "admin"),
+            "expected admin principal in members, got {:?}",
+            room.members
+        );
+        assert!(room.channel_owners.iter().any(|o| o == "admin"));
+        assert!(
+            state
+                .send_room_message(room.id, "admin", "hello from admin", None, None)
+                .is_ok()
+        );
     }
 
     #[test]
