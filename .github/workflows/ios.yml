@@ -1,0 +1,52 @@
+name: iOS Build (preview)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - "package.json"
+      - ".github/workflows/ios.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - ".github/workflows/ios.yml"
+
+# Preview only: compiles when Xcode tools are available. Signing secrets are
+# optional; unsigned simulator builds may still fail without full init.
+jobs:
+  ios-preview:
+    runs-on: macos-14
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Install macOS build deps
+        run: brew install openssl@3 opus libvpx autoconf automake cocoapods || true
+
+      - name: Initialize Tauri iOS project
+        run: npm run tauri ios init || true
+
+      - name: Typecheck frontend
+        run: npx tsc --noEmit
+
+      - name: Note
+        run: |
+          echo "iOS packaging path is documented in IOS_SETUP.md."
+          echo "Full signed device builds require Apple Developer secrets and Xcode project review."

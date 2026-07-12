@@ -275,6 +275,13 @@ Do not sell these as complete without extra systems and evidence:
 
 - [linux.md](linux.md) — bare-metal
 - [windows.md](windows.md) — Windows Server
+- [ha.md](ha.md) — high availability topology
+- [storage-atp.md](storage-atp.md) — MinIO/S3 and ClamAV
+- [pstn-lab.md](pstn-lab.md) / [e911-lab.md](e911-lab.md) — carrier lab
+- [secrets-rotation.md](secrets-rotation.md) — secret rotation
+- [scripts/restore-drill.sh](../../scripts/restore-drill.sh) — backup restore drill
+- [scripts/load/README.md](../../scripts/load/README.md) — load scripts
 - [deploy/k8s/README.md](../../deploy/k8s/README.md) — Kubernetes
+- [IOS_SETUP.md](../../IOS_SETUP.md) — iOS packaging path
 - [NEXT_STEPS.md](../NEXT_STEPS.md) — product roadmap beyond P0
 - [README.md](../../README.md) — product overview

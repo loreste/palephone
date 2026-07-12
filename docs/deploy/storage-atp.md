@@ -57,4 +57,13 @@ use a long `start_period`.
 | `PALE_ATP_REQUIRED=true` | Block upload if ClamAV is missing or unreachable |
 | No ClamAV, ATP not required | Local patterns only (lab) |
 
+Native health check (clamd `zPING`):
+
+```bash
+curl -sS "$BASE/v1/admin/atp/clamav/probe" \
+  -H "Authorization: Bearer $TOKEN" -H "User-Agent: Pale/admin"
+```
+
+Enterprise validation includes the same probe under `workflow.atp_scanner`.
+
 Admin cloud storage status reports S3 when `PALE_S3_*` is active.

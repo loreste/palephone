@@ -1,0 +1,44 @@
+name: Image vulnerability scan
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile.pale-server"
+      - "docker-compose*.yml"
+      - ".github/workflows/image-scan.yml"
+  pull_request:
+    paths:
+      - "Dockerfile.pale-server"
+      - ".github/workflows/image-scan.yml"
+  schedule:
+    - cron: "0 6 * * 1"
+
+jobs:
+  trivy-dockerfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy filesystem scan (Dockerfile context)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+          format: table
+
+      - name: Build pale-server image
+        run: docker build -f Dockerfile.pale-server -t pale-server:scan .
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: pale-server:scan
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+          format: table

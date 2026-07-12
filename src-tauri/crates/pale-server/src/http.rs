@@ -952,6 +952,7 @@ pub fn router(state: SharedState) -> Router {
             "/v1/admin/enterprise-integrations/validation",
             get(enterprise_validation_report),
         )
+        .route("/v1/admin/atp/clamav/probe", get(probe_clamav))
         .route(
             "/v1/admin/enterprise-integrations/deployment-plan",
             get(enterprise_deployment_plan),
@@ -10568,6 +10569,23 @@ async fn enterprise_validation_report(
 ) -> Result<Json<crate::EnterpriseValidationReport>, ApiError> {
     authenticated_admin(&headers, &state)?;
     Ok(Json(state.enterprise_validation_report().await))
+}
+
+async fn probe_clamav(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::ClamAvProbeResult>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let result = state.probe_clamav().await;
+    state.record_audit_event(
+        &principal,
+        "atp.clamav_probed",
+        Some(format!(
+            "reachable={}:{}",
+            result.reachable, result.detail
+        )),
+    );
+    Ok(Json(result))
 }
 
 async fn enterprise_deployment_plan(

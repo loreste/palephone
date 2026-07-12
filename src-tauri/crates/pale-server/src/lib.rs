@@ -5535,6 +5535,36 @@ impl AppState {
             })
     }
 
+    /// Native ClamAV clamd PING probe (or reports not configured).
+    pub async fn probe_clamav(&self) -> ClamAvProbeResult {
+        let required = atp_required();
+        match clamav_host() {
+            None => ClamAvProbeResult {
+                configured: false,
+                host: None,
+                reachable: false,
+                detail: "PALE_CLAMAV_HOST is not set".to_string(),
+                required,
+            },
+            Some(host) => match clamav_ping(&host).await {
+                Ok(detail) => ClamAvProbeResult {
+                    configured: true,
+                    host: Some(host),
+                    reachable: true,
+                    detail,
+                    required,
+                },
+                Err(e) => ClamAvProbeResult {
+                    configured: true,
+                    host: Some(host),
+                    reachable: false,
+                    detail: e,
+                    required,
+                },
+            },
+        }
+    }
+
     pub fn quarantine_malware_upload(
         &self,
         owner: &str,
@@ -18587,6 +18617,44 @@ fn env_flag_true(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Probe ClamAV clamd with zPING (native health check).
+async fn clamav_ping(host: &str) -> Result<String, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt as TokioAsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let started = std::time::Instant::now();
+    let mut stream =
+        tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(host))
+            .await
+            .map_err(|_| format!("ClamAV connect to {host} timed out"))?
+            .map_err(|e| format!("ClamAV connect to {host} failed: {e}"))?;
+
+    stream
+        .write_all(b"zPING\0")
+        .await
+        .map_err(|e| format!("ClamAV write PING failed: {e}"))?;
+
+    let mut response = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.read_to_end(&mut response),
+    )
+    .await
+    .map_err(|_| "ClamAV PING response timed out".to_string())?
+    .map_err(|e| format!("ClamAV PING read failed: {e}"))?;
+
+    let response_str = String::from_utf8_lossy(&response);
+    let response_str = response_str.trim().trim_end_matches('\0');
+    if response_str.to_ascii_uppercase().contains("PONG") {
+        Ok(format!(
+            "pong latency_ms={}",
+            started.elapsed().as_millis()
+        ))
+    } else {
+        Err(format!("ClamAV unexpected PING response: {response_str}"))
+    }
+}
+
 /// Scan file content via ClamAV clamd TCP protocol (INSTREAM command).
 /// Returns Ok(true) if malware was found, Ok(false) if clean, Err on communication failure.
 async fn clamav_scan(host: &str, body: &[u8]) -> Result<bool, String> {
@@ -18646,6 +18714,16 @@ async fn clamav_scan(host: &str, body: &[u8]) -> Result<bool, String> {
     } else {
         Err(format!("ClamAV unexpected response: {response_str}"))
     }
+}
+
+/// Result of a native ClamAV health probe.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClamAvProbeResult {
+    pub configured: bool,
+    pub host: Option<String>,
+    pub reachable: bool,
+    pub detail: String,
+    pub required: bool,
 }
 
 fn malware_signature_detected(filename: &str, content_type: &str, body: &[u8]) -> bool {
@@ -19417,45 +19495,57 @@ impl AppState {
             }
         }
 
-        let clamav = std::env::var("PALE_CLAMAV_HOST")
-            .map(|v| !v.trim().is_empty())
-            .unwrap_or(false);
-        let atp_required = std::env::var("PALE_ATP_REQUIRED")
-            .map(|v| {
-                matches!(
-                    v.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            })
-            .unwrap_or(false);
-        let atp_ok = clamav || self.advanced_threat_protection_available() || !atp_required;
+        let clamav_probe = self.probe_clamav().await;
+        let clamav = clamav_probe.configured;
+        let atp_required_flag = clamav_probe.required;
+        let clamav_live = clamav_probe.reachable;
+        let atp_ok = if atp_required_flag {
+            clamav_live
+        } else {
+            clamav_live || !clamav || self.advanced_threat_protection_available()
+        };
         push_validation_check(
             &mut checks,
             "workflow.atp_scanner",
             "Security",
-            atp_ok && (clamav || !atp_required),
-            if clamav {
-                "ClamAV host is configured for upload scanning."
-            } else if atp_required {
+            if atp_required_flag {
+                clamav_live
+            } else {
+                true
+            },
+            if clamav_live {
+                "ClamAV responded to zPING (native health check)."
+            } else if clamav {
+                "ClamAV host is set but zPING failed."
+            } else if atp_required_flag {
                 "ATP is required but PALE_CLAMAV_HOST is not set."
             } else {
                 "ClamAV not configured; local malware patterns only."
             },
             vec![
                 format!("clamav_configured:{clamav}"),
-                format!("atp_required:{atp_required}"),
+                format!("clamav_reachable:{clamav_live}"),
+                format!("atp_required:{atp_required_flag}"),
+                format!("detail:{}", clamav_probe.detail),
             ],
-            if clamav {
+            if clamav_live {
                 Vec::new()
-            } else if atp_required {
-                vec!["clamav_required_but_missing".to_string()]
+            } else if atp_required_flag {
+                vec!["clamav_unreachable_or_missing".to_string()]
+            } else if clamav {
+                vec!["clamav_ping_failed".to_string()]
             } else {
                 vec!["clamav_optional_local_patterns_only".to_string()]
             },
         );
-        if atp_ok && !clamav && !atp_required {
+        if atp_ok && !clamav_live {
             if let Some(check) = checks.iter_mut().find(|c| c.id == "workflow.atp_scanner") {
                 check.status = "warning".to_string();
+            }
+        }
+        if atp_required_flag && !clamav_live {
+            if let Some(check) = checks.iter_mut().find(|c| c.id == "workflow.atp_scanner") {
+                check.status = "fail".to_string();
             }
         }
 
@@ -24972,6 +25062,21 @@ mod tests {
         assert_eq!(updated.id, case.id);
         assert_eq!(updated.last_export_count, 2);
         assert_eq!(updated.last_exported_by.as_deref(), Some("admin"));
+    }
+
+    #[tokio::test]
+    async fn clamav_probe_reports_not_configured() {
+        std::env::remove_var("PALE_CLAMAV_HOST");
+        std::env::remove_var("PALE_ATP_REQUIRED");
+        let state = AppState::new(
+            PathBuf::from(format!("/tmp/pale-clamav-probe-{}", Uuid::new_v4())),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let probe = state.probe_clamav().await;
+        assert!(!probe.configured);
+        assert!(!probe.reachable);
+        assert!(!probe.required);
     }
 
     #[tokio::test]

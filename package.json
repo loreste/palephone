@@ -12,6 +12,9 @@
     "android:init": "tauri android init",
     "android:dev": "tauri android dev",
     "android:build": "tauri android build",
+    "ios:init": "tauri ios init",
+    "ios:dev": "tauri ios dev",
+    "ios:build": "tauri ios build",
     "lint": "eslint src/",
     "test": "vitest run",
     "test:watch": "vitest"

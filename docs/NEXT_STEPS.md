@@ -25,6 +25,11 @@ Recent enforcement work (not just readiness records):
 - Enterprise validation report includes live workflow checks (DLP, MFA, LiveKit, ATP, storage, PSTN)
 - `/ready` probe endpoint and Content-Security-Policy on API responses
 - Admin SIP gateway Probe button
+- Native ClamAV zPING probe (`GET /v1/admin/atp/clamav/probe`) in validation
+- Load scripts: SSE fanout, meeting join storm (`scripts/load/`)
+- HA topology guide, E911 lab guide, secrets rotation, restore drill
+- iOS packaging path (`IOS_SETUP.md`, `ios.yml` preview workflow)
+- Trivy image/fs scan workflow (`.github/workflows/image-scan.yml`)
 
 Recent enterprise readiness work added:
 
@@ -55,95 +60,56 @@ need for real external systems where the feature depends on one.
 
 ## Remaining Work
 
+Much of the earlier operator packaging and enforcement work has landed (see
+“Recent enforcement work” above). What remains is mostly **provider depth**,
+**scale evidence**, and **mobile certification**.
+
 ### 1. Provider-Specific Adapters
 
-Generic readiness records and HTTP/TCP probes are in place. The next step is
-deep provider adapters that can prove each system is actually usable:
+ClamAV now has a native zPING probe and fail-closed upload mode. S3/MinIO is
+wired via env. Still deeper adapters needed for:
 
-- ClamAV and YARA for malware scanning
-- Whisper and Vosk for speech-to-text
-- Piper, Coqui, or compatible engines for text-to-speech
-- Ollama, vLLM, LocalAI, or compatible engines for LLM workflows
-- Nextcloud, S3, and WebDAV for external storage
-- LiveKit, SRS, Janus, or mediasoup for broadcast/media paths
-- Collabora or LibreOffice services for document presentation/rendering
+- YARA rulesets alongside ClamAV
+- Whisper/Vosk, Piper/Coqui, Ollama/vLLM provider-native health
+- Collabora/LibreOffice presentation rendering
 - OPA-style policy engines and CASB providers
-- certified carrier, SBC, E911, and PSTN providers
-
-The test for being done is not "a URL exists." The adapter should authenticate,
-run a provider-native health check, and return evidence that an admin can trust.
+- certified carrier, SBC, E911 providers (beyond lab docs)
 
 ### 2. End-to-End Enterprise Validation
 
-The admin validation report exists, but it is still mostly a readiness report.
-The next version should run a tenant-level validation pass that exercises the
-actual workflows:
+Validation now includes live workflow checks (DLP, MFA policy, registrar,
+LiveKit, ClamAV ping, storage, PSTN). Still useful:
 
-- chat and channels
-- meetings and scheduled meetings
-- calling, PBX, queues, voicemail, and recordings
-- files, versioning, folders, and external storage
-- retention, DLP, eDiscovery, ATP, CASB, and compliance review
-- transcription, meeting assistant, LLM, STT, and TTS providers
-- PSTN, E911, SIP gateways, and location routing
-- town hall and broadcast paths
-
-The output should be a single exportable certification-style report for admins.
+- exportable certification PDF/CSV package for auditors
+- automated E2E job that runs `scripts/smoke-test.sh` in CI against compose
 
 ### 3. Real-Time Scale Proof
 
-Town hall configuration and broadcast readiness are modeled. Pale still needs
-repeatable load proof for large deployments:
+Load scripts exist under `scripts/load/` (SSE fanout, meeting join storm, chat
+burst). Still needed for large-event claims:
 
-- 10,000-viewer town hall fanout
-- meeting signaling under load
-- SSE fanout under load
-- media gateway and broadcast path capacity
-- database and cache pressure during large events
-- reconnect behavior during network churn
-
-The target is a repeatable load test suite with capacity reports, not a manual
-demo.
+- 10,000-viewer town hall fanout with LiveKit capacity reports
+- published p95 latency numbers under DB pressure
 
 ### 4. Client and Runtime Hardening
 
-Desktop (macOS ARM + Intel, Windows, Linux) and Android paths are working.
-Push notifications, VP8 video, screen sharing, and media permission checks
-are implemented. Remaining work:
-
-- iOS packaging
-- background calling and meeting behavior on mobile
-- pop-out and multi-window lifecycle polish
-- media runtime certification across supported platforms
+- iOS path documented (`IOS_SETUP.md`); signed App Store / CallKit / APNs still open
+- background calling polish on mobile
+- multi-window lifecycle polish
 
 ### 5. Security Hardening
 
-Security headers (HSTS, X-Frame-Options, CSP, Referrer-Policy, Permissions-Policy)
-and HMAC-signed audit log entries are in place. Remaining hardening:
+CSP, `/ready`, Trivy workflow, secret rotation docs, restore drill script are
+in place. Still open:
 
-- deeper OIDC and SSO validation (certificate pinning for provider calls)
-- secret rotation workflows
-- stricter review for high-risk admin actions
-- backup, restore, and disaster recovery evidence
-- vulnerability scanning for server images and release artifacts
+- OIDC certificate pinning for provider calls
+- stricter multi-approver workflows for high-risk admin actions
+- shared session store for multi-API-node HA
 
 ### 6. Documentation and Operator Guides
 
-Phase 0 operator packaging is in place:
-
-- [docs/deploy/PRODUCTION.md](deploy/PRODUCTION.md) — production runbook
-- [docs/deploy/linux.md](deploy/linux.md) / [windows.md](deploy/windows.md)
-- [deploy/k8s/](../deploy/k8s/) — Kubernetes lab manifests
-- `docker-compose.prod.yml` — production Docker stack (TLS, private PG/NATS, TURN external-ip)
-
-Still to deepen:
-
-- keep README feature claims tied to real code paths
-- keep API.md aligned with the server route table
-- keep ARCHITECTURE.md focused on the current system, not old design notes
-- provider setup guides for AI, speech, storage, ATP, CASB, PSTN, E911, and
-  broadcast media
-- restore-drill automation and capacity reports under `docs/perf/`
+See `docs/deploy/` (PRODUCTION, HA, storage-atp, pstn-lab, e911-lab,
+secrets-rotation) and `scripts/load/README.md`.
 
 ## Coverage Snapshot
 
