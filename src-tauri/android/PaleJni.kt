@@ -28,6 +28,14 @@ object PaleJni {
     @JvmStatic
     fun prepare(activity: Activity) {
         try {
+            // Force org.pjsip.* onto the compile/runtime classpath so R8 cannot
+            // strip camera classes that are only invoked via JNI.
+            try {
+                Class.forName("org.pjsip.PjCamera2")
+                Class.forName("org.pjsip.PjCameraInfo2")
+            } catch (_: Throwable) {
+                Log.w(TAG, "org.pjsip camera classes not on classpath yet")
+            }
             nativePrepareVideoBackend()
             PaleVideoOverlay.ensureAttached(activity)
             Log.i(TAG, "PJSIP video backend prepared")
