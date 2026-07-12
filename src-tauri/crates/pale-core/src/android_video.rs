@@ -5,7 +5,7 @@
 #![cfg(target_os = "android")]
 
 use std::os::raw::c_void;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use jni::objects::{JObject, JValue};
 use jni::sys::{jobject, JNIEnv as SysJNIEnv};
@@ -13,9 +13,11 @@ use jni::JNIEnv;
 
 use crate::android_jni;
 
-static REMOTE_WINDOW: Mutex<Option<*mut c_void>> = Mutex::new(None);
-static LOCAL_WINDOW: Mutex<Option<*mut c_void>> = Mutex::new(None);
-static PREVIEW_ACTIVE: Mutex<bool> = Mutex::new(false);
+// ANativeWindow* owned here; accessed only under careful single-writer patterns
+// from the PJSIP worker after UI surfaces are shown.
+static REMOTE_WINDOW: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static LOCAL_WINDOW: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static PREVIEW_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 extern "C" {
     fn ANativeWindow_fromSurface(env: *mut SysJNIEnv, surface: jobject) -> *mut c_void;
@@ -95,22 +97,21 @@ pub fn set_overlays_visible(remote: bool, local: bool) {
     });
 }
 
+fn store_window(slot: &AtomicPtr<c_void>, new: Option<*mut c_void>) {
+    let prev = slot.swap(
+        new.unwrap_or(std::ptr::null_mut()),
+        Ordering::SeqCst,
+    );
+    if !prev.is_null() && Some(prev) != new {
+        unsafe { ANativeWindow_release(prev) };
+    }
+}
+
 fn refresh_windows() {
     let remote = with_env(|env| get_overlay_surface(env, "getRemoteSurface"));
     let local = with_env(|env| get_overlay_surface(env, "getLocalSurface"));
-
-    if let Ok(mut slot) = REMOTE_WINDOW.lock() {
-        if let Some(old) = slot.take() {
-            unsafe { ANativeWindow_release(old) };
-        }
-        *slot = remote;
-    }
-    if let Ok(mut slot) = LOCAL_WINDOW.lock() {
-        if let Some(old) = slot.take() {
-            unsafe { ANativeWindow_release(old) };
-        }
-        *slot = local;
-    }
+    store_window(&REMOTE_WINDOW, remote);
+    store_window(&LOCAL_WINDOW, local);
 }
 
 fn hwnd_from_window(win: *mut c_void) -> pjsip_sys::pjmedia_vid_dev_hwnd {
@@ -140,8 +141,8 @@ pub unsafe fn bind_call_video(
         if pjsip_sys::pjsua_call_get_info(call_id, &mut ci) != 0 {
             return;
         }
-        let remote_win = REMOTE_WINDOW.lock().ok().and_then(|g| *g);
-        if let Some(win) = remote_win {
+        let remote_win = REMOTE_WINDOW.load(Ordering::SeqCst);
+        if !remote_win.is_null() {
             for i in 0..ci.media_cnt as usize {
                 let media = &ci.media[i];
                 if media.type_ != 2 {
@@ -151,7 +152,7 @@ pub unsafe fn bind_call_video(
                 if win_id < 0 {
                     continue;
                 }
-                let hwnd = hwnd_from_window(win);
+                let hwnd = hwnd_from_window(remote_win);
                 let st = pjsip_sys::pjsua_vid_win_set_win(win_id, &hwnd);
                 let _ = pjsip_sys::pjsua_vid_win_set_show(win_id, 1);
                 log::info!(
@@ -170,39 +171,42 @@ pub unsafe fn bind_call_video(
     }
 }
 
-pub unsafe fn start_local_preview() {
-    if *PREVIEW_ACTIVE.lock().unwrap() {
+pub fn start_local_preview() {
+    if PREVIEW_ACTIVE.load(Ordering::SeqCst) {
         return;
     }
     refresh_windows();
-    let local_win = LOCAL_WINDOW.lock().ok().and_then(|g| *g);
-    let Some(win) = local_win else {
+    let win = LOCAL_WINDOW.load(Ordering::SeqCst);
+    if win.is_null() {
         log::warn!("android_video: local Surface not ready for preview");
         return;
+    }
+
+    let st = unsafe {
+        let mut param = pjsip_sys::pjsua_vid_preview_param::default();
+        pjsip_sys::pjsua_vid_preview_param_default(&mut param);
+        param.show = 1;
+        param.wnd = hwnd_from_window(win);
+        // Device 0 is typically first capture device (Back camera after enum).
+        let cap_dev: pjsip_sys::pjmedia_vid_dev_index = 0;
+        pjsip_sys::pjsua_vid_preview_start(cap_dev, &param)
     };
-
-    let mut param = pjsip_sys::pjsua_vid_preview_param::default();
-    pjsip_sys::pjsua_vid_preview_param_default(&mut param);
-    param.show = 1;
-    param.wnd = hwnd_from_window(win);
-
-    // Device 0 is typically first capture device (Back camera after enum).
-    let cap_dev: pjsip_sys::pjmedia_vid_dev_index = 0;
-    let st = pjsip_sys::pjsua_vid_preview_start(cap_dev, &param);
     if st == 0 {
-        *PREVIEW_ACTIVE.lock().unwrap() = true;
+        PREVIEW_ACTIVE.store(true, Ordering::SeqCst);
         log::info!("android_video: local preview started");
     } else {
         log::warn!("android_video: pjsua_vid_preview_start failed status={st}");
     }
 }
 
-pub unsafe fn stop_local_preview() {
-    if !*PREVIEW_ACTIVE.lock().unwrap() {
+pub fn stop_local_preview() {
+    if !PREVIEW_ACTIVE.load(Ordering::SeqCst) {
         return;
     }
     let cap_dev: pjsip_sys::pjmedia_vid_dev_index = 0;
-    let _ = pjsip_sys::pjsua_vid_preview_stop(cap_dev);
-    *PREVIEW_ACTIVE.lock().unwrap() = false;
+    unsafe {
+        let _ = pjsip_sys::pjsua_vid_preview_stop(cap_dev);
+    }
+    PREVIEW_ACTIVE.store(false, Ordering::SeqCst);
     log::info!("android_video: local preview stopped");
 }

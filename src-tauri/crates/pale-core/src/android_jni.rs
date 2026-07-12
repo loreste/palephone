@@ -12,7 +12,7 @@ use std::os::raw::c_int;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::Mutex;
 
-use jni::objects::{GlobalRef, JClass, JObject, JValue};
+use jni::objects::{GlobalRef, JClass};
 use jni::sys::{jclass, jint, jvalue, JNI_VERSION_1_6, JNIEnv as SysJNIEnv, JavaVM as SysJavaVM};
 use jni::{JNIEnv, JavaVM};
 
@@ -92,13 +92,6 @@ pub unsafe extern "C" fn pale_android_find_class(
         return std::ptr::null_mut();
     };
     let dotted = name.replace('/', ".");
-
-    if let Some(cache) = CLASS_LOADER.lock().ok().and_then(|g| {
-        // Clone GlobalRef is not available; re-lock pattern:
-        None::<()>
-    }) {
-        let _ = cache;
-    }
 
     if let Ok(guard) = CLASS_LOADER.lock() {
         if let Some(cache) = guard.as_ref() {

@@ -795,9 +795,7 @@ impl PjsipEngine {
                 {
                     // Show local preview ASAP while the call is connecting.
                     crate::android_video::set_overlays_visible(false, true);
-                    unsafe {
-                        crate::android_video::start_local_preview();
-                    }
+                    crate::android_video::start_local_preview();
                 }
             }
         }
