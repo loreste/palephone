@@ -11,6 +11,14 @@ The current codebase already includes broad coverage across calling, PBX,
 messaging, meetings, files, compliance, security, admin governance, devices,
 apps, federation, AI provider contracts, and enterprise integration readiness.
 
+Recent enforcement work (not just readiness records):
+
+- DLP policies block chat message send (not only file upload)
+- Conditional access `require_mfa` is enforced on password and SSO login
+- LiveKit join fails closed when SFU is configured (or `PALE_LIVEKIT_REQUIRED`)
+- Message threads persist to Postgres with `thread_id`
+- TOTP secrets stored encrypted; MFA disable blocked when CA requires MFA
+
 Recent enterprise readiness work added:
 
 - provider inventory for external systems required by enterprise deployments

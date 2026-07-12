@@ -1389,18 +1389,65 @@ impl PgStore {
             .as_ref()
             .map(|c| serde_json::to_value(c).unwrap_or_default());
         client.execute(
-            "INSERT INTO room_messages (id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned, mentions, mentioned_user_uris, priority, saved_by, scheduled_at, delivered, delivery_status, card_payload)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-             ON CONFLICT (id) DO UPDATE SET body = $4, edited_at = $8, pinned = $9, mentions = $10, mentioned_user_uris = $11, priority = $12, saved_by = $13, scheduled_at = $14, delivered = $15, delivery_status = $16, card_payload = $17",
-            &[&msg.id, &msg.room_id, &msg.sender_uri, &msg.body, &msg.content_type, &msg.created_at, &msg.reply_to, &msg.edited_at, &msg.pinned, &Json(mentions), &Json(mentioned_user_uris), &msg.priority, &msg.saved_by, &msg.scheduled_at, &msg.delivered, &msg.delivery_status, &card_json],
+            "INSERT INTO room_messages (id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned, mentions, mentioned_user_uris, priority, saved_by, scheduled_at, delivered, delivery_status, card_payload, thread_id)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+             ON CONFLICT (id) DO UPDATE SET body = $4, edited_at = $8, pinned = $9, mentions = $10, mentioned_user_uris = $11, priority = $12, saved_by = $13, scheduled_at = $14, delivered = $15, delivery_status = $16, card_payload = $17, thread_id = $18",
+            &[&msg.id, &msg.room_id, &msg.sender_uri, &msg.body, &msg.content_type, &msg.created_at, &msg.reply_to, &msg.edited_at, &msg.pinned, &Json(mentions), &Json(mentioned_user_uris), &msg.priority, &msg.saved_by, &msg.scheduled_at, &msg.delivered, &msg.delivery_status, &card_json, &msg.thread_id],
         ).await?;
         Ok(())
+    }
+
+    pub async fn upsert_message_thread(&self, thread: &crate::MessageThread) -> Result<(), PgError> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "INSERT INTO message_threads (id, room_id, root_message_id, reply_count, last_reply_at, participants, created_at)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7)
+                 ON CONFLICT (id) DO UPDATE SET
+                   reply_count = $4,
+                   last_reply_at = $5,
+                   participants = $6",
+                &[
+                    &thread.id,
+                    &thread.room_id,
+                    &thread.root_message_id,
+                    &(thread.reply_count as i32),
+                    &thread.last_reply_at,
+                    &thread.participants,
+                    &thread.created_at,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn load_message_threads(&self) -> Result<Vec<crate::MessageThread>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT id, room_id, root_message_id, reply_count, last_reply_at, participants, created_at
+                 FROM message_threads ORDER BY created_at",
+                &[],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|r| crate::MessageThread {
+                id: r.get("id"),
+                room_id: r.get("room_id"),
+                root_message_id: r.get("root_message_id"),
+                reply_count: r.get::<_, i32>("reply_count"),
+                last_reply_at: r.get("last_reply_at"),
+                participants: r.get("participants"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
     }
 
     pub async fn load_room_messages(&self) -> Result<Vec<RoomMessage>, PgError> {
         let client = self.pool.get().await?;
         let rows = client.query(
-            "SELECT id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned, mentions, mentioned_user_uris, priority, saved_by, scheduled_at, delivered, delivery_status, card_payload FROM room_messages ORDER BY created_at",
+            "SELECT id, room_id, sender_uri, body, content_type, created_at, reply_to, edited_at, pinned, mentions, mentioned_user_uris, priority, saved_by, scheduled_at, delivered, delivery_status, card_payload, thread_id FROM room_messages ORDER BY created_at",
             &[],
         ).await?;
         Ok(rows

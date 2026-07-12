@@ -143,6 +143,8 @@ services:
       PALE_LIVEKIT_URL: "${PALE_LIVEKIT_URL:-}"
       PALE_LIVEKIT_API_KEY: "${PALE_LIVEKIT_API_KEY:-}"
       PALE_LIVEKIT_API_SECRET: "${PALE_LIVEKIT_API_SECRET:-}"
+      # When true, conference join fails if LiveKit is missing (no silent signaling-only).
+      PALE_LIVEKIT_REQUIRED: "${PALE_LIVEKIT_REQUIRED:-false}"
       RUST_LOG: "${RUST_LOG:-info}"
     volumes:
       - pale-data:/data

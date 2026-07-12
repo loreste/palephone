@@ -973,6 +973,14 @@ impl AppState {
             }
             Err(e) => log::warn!("Failed to load room messages from Postgres: {}", e),
         }
+        match pg.load_message_threads().await {
+            Ok(threads) => {
+                for thread in threads {
+                    self.message_threads.insert(thread.id, thread);
+                }
+            }
+            Err(e) => log::warn!("Failed to load message threads from Postgres: {}", e),
+        }
         match pg.load_message_reads().await {
             Ok(reads) => {
                 *self
@@ -2040,17 +2048,6 @@ impl AppState {
             return Err(AuthError::Unauthorized);
         }
 
-        // Create session carrying the user's role (consulted by admin-only endpoints)
-        let session = AdminSession {
-            token: Uuid::new_v4().to_string(),
-            principal: user.sip_uri.clone(),
-            role: user.role.clone(),
-            expires_at: Utc::now() + Duration::hours(12),
-        };
-        self.admin_sessions
-            .insert(session.token.clone(), session.clone());
-        self.admin_sessions.trim_to_len(MAX_ADMIN_SESSIONS);
-
         // Get or create SIP credentials
         let sip_creds = split_sip_aor_simple(&user.sip_uri).map(|(username, domain)| {
             // Auto-create SIP account if it doesn't exist
@@ -2077,21 +2074,22 @@ impl AppState {
             }
         });
 
-        // Check if MFA is enabled for this user
-        let mfa_required = self.is_mfa_enabled(user.id);
+        // MFA: user enrollment and/or conditional-access require_mfa.
+        let mfa_enrolled = self.is_mfa_enabled(user.id);
+        let mfa_required = mfa_enrolled || ca_result.require_mfa;
 
         if mfa_required {
-            // Return a limited MFA token — the user must validate the TOTP code
-            // before getting full access. Mark the session role as "mfa_pending"
-            // so it cannot pass authenticated_principal checks.
+            // Limited MFA token — user must enroll (if needed) and validate TOTP
+            // before full access. Role mfa_pending cannot pass normal auth checks.
             let mfa_session = AdminSession {
                 token: Uuid::new_v4().to_string(),
                 principal: user.sip_uri.clone(),
                 role: "mfa_pending".to_string(),
-                expires_at: Utc::now() + Duration::minutes(5),
+                expires_at: Utc::now() + Duration::minutes(10),
             };
             self.admin_sessions
                 .insert(mfa_session.token.clone(), mfa_session.clone());
+            self.admin_sessions.trim_to_len(MAX_ADMIN_SESSIONS);
             return Ok(UserLoginResponse {
                 token: mfa_session.token,
                 user,
@@ -2100,6 +2098,17 @@ impl AppState {
                 mfa_required: true,
             });
         }
+
+        // Create session carrying the user's role (consulted by admin-only endpoints)
+        let session = AdminSession {
+            token: Uuid::new_v4().to_string(),
+            principal: user.sip_uri.clone(),
+            role: user.role.clone(),
+            expires_at: Utc::now() + Duration::hours(12),
+        };
+        self.admin_sessions
+            .insert(session.token.clone(), session.clone());
+        self.admin_sessions.trim_to_len(MAX_ADMIN_SESSIONS);
 
         // Set presence to online
         self.update_presence(&user.sip_uri, PresenceStatus::Online, None);
@@ -2166,8 +2175,8 @@ impl AppState {
             backup_codes.push(code);
         }
 
-        // Store encrypted secret (not yet enabled)
-        let encrypted = secret_base32.clone(); // Will be stored encrypted in PG
+        // Store secret encrypted at rest (not yet enabled)
+        let encrypted = self.encrypt_field(&secret_base32);
         let codes_json = serde_json::to_string(&backup_codes).unwrap_or_default();
         if let Some(pg) = &self.pg {
             let pg = pg.clone();
@@ -2191,7 +2200,7 @@ impl AppState {
     pub fn mfa_verify_enable(&self, user_id: Uuid, code: &str) -> Result<(), String> {
         use totp_rs::{Algorithm, Secret, TOTP};
 
-        let (secret_b32, _enabled, backup_codes_json) = self
+        let (secret_b32, _enabled, backup_codes_json, stored_secret) = self
             .get_totp_data(user_id)
             .ok_or_else(|| "MFA not set up".to_string())?;
 
@@ -2205,14 +2214,14 @@ impl AppState {
             return Err("Invalid TOTP code".to_string());
         }
 
-        // Enable MFA
+        // Enable MFA (keep ciphertext form in storage)
         if let Some(pg) = &self.pg {
             let pg = pg.clone();
-            let secret_b32 = secret_b32.clone();
+            let stored_secret = stored_secret.clone();
             let backup_codes_json = backup_codes_json.clone();
             tokio::spawn(async move {
                 let _ = pg
-                    .upsert_totp_secret(user_id, &secret_b32, true, &backup_codes_json)
+                    .upsert_totp_secret(user_id, &stored_secret, true, &backup_codes_json)
                     .await;
             });
         }
@@ -2224,7 +2233,7 @@ impl AppState {
     pub fn mfa_validate(&self, user_id: Uuid, code: &str) -> Result<bool, String> {
         use totp_rs::{Algorithm, Secret, TOTP};
 
-        let (secret_b32, enabled, backup_codes_json) = self
+        let (secret_b32, enabled, backup_codes_json, stored_secret) = self
             .get_totp_data(user_id)
             .ok_or_else(|| "MFA not configured".to_string())?;
 
@@ -2239,10 +2248,10 @@ impl AppState {
                 let new_codes_json = serde_json::to_string(&backup_codes).unwrap_or_default();
                 if let Some(pg) = &self.pg {
                     let pg = pg.clone();
-                    let secret_b32 = secret_b32.clone();
+                    let stored_secret = stored_secret.clone();
                     tokio::spawn(async move {
                         let _ = pg
-                            .upsert_totp_secret(user_id, &secret_b32, true, &new_codes_json)
+                            .upsert_totp_secret(user_id, &stored_secret, true, &new_codes_json)
                             .await;
                     });
                 }
@@ -2260,25 +2269,40 @@ impl AppState {
         totp.check_current(code).map_err(|e| e.to_string())
     }
 
-    /// Disable MFA for a user.
-    pub fn mfa_disable(&self, user_id: Uuid) {
+    /// Disable MFA for a user. Blocked when conditional access requires MFA.
+    pub fn mfa_disable(&self, user_id: Uuid) -> Result<(), String> {
+        if self.org_requires_mfa() {
+            return Err(
+                "MFA cannot be disabled while required by conditional access policy".to_string(),
+            );
+        }
         if let Some(pg) = &self.pg {
             let pg = pg.clone();
             tokio::spawn(async move {
                 let _ = pg.delete_totp_secret(user_id).await;
             });
         }
+        Ok(())
     }
 
-    fn get_totp_data(&self, user_id: Uuid) -> Option<(String, bool, String)> {
+    /// True when any enabled conditional-access policy requires MFA (org-wide or matching).
+    pub fn org_requires_mfa(&self) -> bool {
+        self.list_conditional_access_policies()
+            .iter()
+            .any(|p| p.enabled && p.actions.require_mfa)
+    }
+
+    /// Returns (plaintext_secret, enabled, backup_codes_json, stored_secret_as_in_db).
+    fn get_totp_data(&self, user_id: Uuid) -> Option<(String, bool, String, String)> {
         if let Some(pg) = &self.pg {
             let pg = pg.clone();
             let rt = tokio::runtime::Handle::try_current();
             if let Ok(handle) = rt {
-                if let Ok(data) =
+                if let Ok(Some((stored, enabled, codes))) =
                     std::thread::scope(|_| handle.block_on(pg.get_totp_secret(user_id)))
                 {
-                    return data;
+                    let plaintext = self.decrypt_field(&stored);
+                    return Some((plaintext, enabled, codes, stored));
                 }
             }
         }
@@ -6139,13 +6163,40 @@ impl AppState {
             return Err("User account is deactivated".into());
         }
 
-        // 9. Evaluate conditional access
+        // 9. Evaluate conditional access (including require_mfa)
         let ca_result = self.evaluate_conditional_access(client_ip, "desktop", &[]);
         if ca_result.block {
             return Err("Blocked by conditional access policy".into());
         }
 
-        // 10. Create session
+        let mfa_enrolled = self.is_mfa_enabled(user.id);
+        let mfa_required = mfa_enrolled || ca_result.require_mfa;
+
+        if mfa_required {
+            let mfa_session = AdminSession {
+                token: Uuid::new_v4().to_string(),
+                principal: user.sip_uri.clone(),
+                role: "mfa_pending".to_string(),
+                expires_at: Utc::now() + Duration::minutes(10),
+            };
+            self.admin_sessions
+                .insert(mfa_session.token.clone(), mfa_session.clone());
+            self.admin_sessions.trim_to_len(MAX_ADMIN_SESSIONS);
+            self.record_audit_event(
+                &user.sip_uri,
+                "user.sso_login_mfa_pending",
+                Some(provider.name.clone()),
+            );
+            return Ok(UserLoginResponse {
+                token: mfa_session.token,
+                user,
+                sip_credentials: None,
+                expires_at: mfa_session.expires_at,
+                mfa_required: true,
+            });
+        }
+
+        // 10. Create full session
         let session = AdminSession {
             token: Uuid::new_v4().to_string(),
             principal: user.sip_uri.clone(),
@@ -9589,6 +9640,20 @@ impl AppState {
         Some(updated)
     }
 
+    /// Run DLP against chat content and block when a Block policy matches.
+    fn enforce_message_dlp(&self, sender_uri: &str, body: &str) -> Result<(), String> {
+        let scan = self.scan_content_dlp(sender_uri, body);
+        if !scan.allowed {
+            let policy = scan
+                .violations
+                .first()
+                .map(|v| v.policy_name.as_str())
+                .unwrap_or("policy");
+            return Err(format!("message blocked by DLP policy: {policy}"));
+        }
+        Ok(())
+    }
+
     pub fn send_room_message(
         &self,
         room_id: Uuid,
@@ -9597,6 +9662,7 @@ impl AppState {
         reply_to: Option<Uuid>,
         priority: Option<String>,
     ) -> Result<RoomMessage, String> {
+        self.enforce_message_dlp(sender_uri, body)?;
         let room = self.room(room_id);
         let (mentions, mentioned_user_uris) = room
             .as_ref()
@@ -9735,6 +9801,7 @@ impl AppState {
         reply_to: Option<Uuid>,
         priority: Option<String>,
     ) -> Result<RoomMessage, String> {
+        self.enforce_message_dlp(sender_uri, body)?;
         let room = self.room(room_id);
         let (mentions, mentioned_user_uris) = room
             .as_ref()
@@ -11351,6 +11418,10 @@ impl AppState {
                     created_at: Utc::now(),
                 };
                 self.message_threads.insert(tid, thread.clone());
+                let thread_for_pg = thread.clone();
+                self.pg_spawn(move |pg| {
+                    Box::pin(async move { pg.upsert_message_thread(&thread_for_pg).await })
+                });
                 self.broadcast_sse(SseEvent {
                     event_type: "thread_created".to_string(),
                     payload: serde_json::to_value(&thread).unwrap_or_default(),
@@ -11363,7 +11434,7 @@ impl AppState {
         let mut msg =
             self.send_room_message(room_id, sender_uri, body, Some(root_message_id), priority)?;
 
-        // Stamp thread_id on the reply
+        // Stamp thread_id on the reply and re-persist
         msg.thread_id = Some(thread_id);
         {
             let mut messages = self
@@ -11374,6 +11445,10 @@ impl AppState {
                 existing.thread_id = Some(thread_id);
             }
         }
+        let msg_for_pg = msg.clone();
+        self.pg_spawn(move |pg| {
+            Box::pin(async move { pg.insert_room_message(&msg_for_pg).await })
+        });
 
         // Update thread metadata
         let now = Utc::now();
@@ -11389,6 +11464,10 @@ impl AppState {
 
         let thread =
             updated_thread.unwrap_or_else(|| self.message_threads.get(&thread_id).unwrap());
+        let thread_for_pg = thread.clone();
+        self.pg_spawn(move |pg| {
+            Box::pin(async move { pg.upsert_message_thread(&thread_for_pg).await })
+        });
 
         self.broadcast_sse(SseEvent {
             event_type: "thread_reply".to_string(),
@@ -24511,6 +24590,78 @@ mod tests {
         assert_eq!(updated.id, case.id);
         assert_eq!(updated.last_export_count, 2);
         assert_eq!(updated.last_exported_by.as_deref(), Some("admin"));
+    }
+
+    #[tokio::test]
+    async fn dlp_blocks_chat_message_send() {
+        let data_dir = std::env::temp_dir().join(format!("pale-chat-dlp-{}", Uuid::new_v4()));
+        let token = "012345678901234567890123".to_string();
+        let admin_hash = sha256_hex("admin-password".as_bytes());
+        let storage_key = "dlp-chat-storage-key".to_string();
+        let state = AppState::persistent(
+            data_dir.clone(),
+            token.clone(),
+            "admin".to_string(),
+            admin_hash.clone(),
+            storage_key.clone(),
+            DEFAULT_MAX_UPLOAD_BYTES,
+            MediaConfig::default(),
+        )
+        .unwrap();
+        let _ = state.create_user(CreateUserRequest {
+            display_name: "Alice".to_string(),
+            sip_uri: "sip:alice@example.com".to_string(),
+            matrix_user_id: None,
+            password: Some("password-password-password".to_string()),
+            role: Some("user".to_string()),
+        });
+        let room = state.create_room(
+            "sip:alice@example.com",
+            CreateRoomRequest {
+                name: "chat".to_string(),
+                description: None,
+                members: vec!["sip:alice@example.com".to_string()],
+                is_direct: Some(false),
+                team_id: None,
+                channel_name: None,
+                channel_type: None,
+                channel_owners: Vec::new(),
+                posting_policy: None,
+            },
+        );
+        state
+            .create_dlp_policy(
+                "admin",
+                CreateDlpPolicyRequest {
+                    name: "Chat secrets".to_string(),
+                    description: None,
+                    pattern: "SECRET-[0-9]+".to_string(),
+                    action: DlpAction::Block,
+                    enabled: true,
+                },
+            )
+            .unwrap();
+        let blocked = state.send_room_message(
+            room.id,
+            "sip:alice@example.com",
+            "leaking SECRET-999",
+            None,
+            None,
+        );
+        assert!(blocked.is_err());
+        assert!(blocked.unwrap_err().contains("DLP"));
+        assert_eq!(state.list_dlp_violations().len(), 1);
+        let ok = state
+            .send_room_message(
+                room.id,
+                "sip:alice@example.com",
+                "hello team",
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(ok.body, "hello team");
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]

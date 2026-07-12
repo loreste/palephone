@@ -1620,29 +1620,32 @@ async fn join_conference(
         })?;
 
     // -- LiveKit integration: ensure room exists and generate a token --
-    let (livekit_url, livekit_token) = if state.livekit_config().is_some() {
-        // Ensure the room name is assigned on the conference
-        if let Some(room_name) = state.ensure_livekit_room_name(id) {
-            // Create the LiveKit room (idempotent – OK if already exists)
-            if let Err(e) =
-                crate::livekit::create_room(state.livekit_config().unwrap(), &room_name).await
-            {
-                log::warn!("Failed to create LiveKit room {room_name}: {e}");
-                // Fall back to signaling-only mode
-                (None, None)
-            } else {
-                // Generate an access token for this participant
-                match state.generate_livekit_token(id, &sip_uri, &sip_uri) {
-                    Ok((url, token)) => (Some(url), Some(token)),
-                    Err(e) => {
-                        log::warn!("Failed to generate LiveKit token: {e}");
-                        (None, None)
-                    }
-                }
-            }
-        } else {
-            (None, None)
+    // When LiveKit is configured (or PALE_LIVEKIT_REQUIRED is set), fail closed
+    // instead of silently returning a signaling-only join with no media.
+    let livekit_required = env_flag_true("PALE_LIVEKIT_REQUIRED");
+    let (livekit_url, livekit_token) = if let Some(config) = state.livekit_config() {
+        let room_name = state.ensure_livekit_room_name(id).ok_or_else(|| {
+            ApiError::Conflict("failed to assign LiveKit room for conference".to_string())
+        })?;
+        if let Err(e) = crate::livekit::create_room(config, &room_name).await {
+            log::error!("Failed to create LiveKit room {room_name}: {e}");
+            return Err(ApiError::Conflict(format!(
+                "LiveKit room unavailable: {e}"
+            )));
         }
+        match state.generate_livekit_token(id, &sip_uri, &sip_uri) {
+            Ok((url, token)) => (Some(url), Some(token)),
+            Err(e) => {
+                log::error!("Failed to generate LiveKit token: {e}");
+                return Err(ApiError::Conflict(format!(
+                    "LiveKit token unavailable: {e}"
+                )));
+            }
+        }
+    } else if livekit_required {
+        return Err(ApiError::Conflict(
+            "LiveKit is required for meetings but is not configured".to_string(),
+        ));
     } else {
         (None, None)
     };
@@ -1657,6 +1660,17 @@ async fn join_conference(
         livekit_url,
         livekit_token,
     }))
+}
+
+fn env_flag_true(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 async fn set_conference_lock(
@@ -2989,7 +3003,8 @@ async fn mfa_setup(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<Json<crate::MfaSetupResponse>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    // Allow mfa_pending tokens so users forced by conditional access can enroll.
+    let principal = principal_allowing_mfa_pending(&headers, &state)?;
     let user = state
         .user_by_sip_uri(&principal)
         .ok_or(ApiError::NotFound)?;
@@ -3005,7 +3020,8 @@ async fn mfa_verify(
     headers: HeaderMap,
     Json(input): Json<crate::MfaVerifyRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let principal = authenticated_principal(&headers, &state)?;
+    // Allow mfa_pending tokens so enrollment can complete before full login.
+    let principal = principal_allowing_mfa_pending(&headers, &state)?;
     let user = state
         .user_by_sip_uri(&principal)
         .ok_or(ApiError::NotFound)?;
@@ -3097,7 +3113,9 @@ async fn mfa_disable(
     let user = state
         .user_by_sip_uri(&principal)
         .ok_or(ApiError::NotFound)?;
-    state.mfa_disable(user.id);
+    state
+        .mfa_disable(user.id)
+        .map_err(ApiError::Conflict)?;
     state.record_audit_event(&principal, "mfa.disabled", None);
     Ok(Json(json!({ "ok": true, "mfa_enabled": false })))
 }
@@ -8787,6 +8805,20 @@ fn extract_client_ip(headers: &HeaderMap) -> String {
 
 fn authenticated_principal(headers: &HeaderMap, state: &AppState) -> Result<String, ApiError> {
     authenticated_principal_role(headers, state).map(|(principal, _)| principal)
+}
+
+/// Like authenticated_principal, but allows mfa_pending tokens (MFA enroll flow).
+fn principal_allowing_mfa_pending(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<String, ApiError> {
+    let (principal, _role) = state
+        .principal_role_for_bearer(bearer_token(headers))
+        .ok_or(ApiError::Unauthorized)?;
+    if !state.check_rate_limit(&principal) {
+        return Err(ApiError::TooManyRequests);
+    }
+    Ok(principal)
 }
 
 /// Authenticate the request and return `(principal, role)`.

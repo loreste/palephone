@@ -231,7 +231,11 @@ Postgres connection failures.
 - [ ] Postgres and NATS not on public interfaces; NATS has auth
 - [ ] HTTP API behind TLS proxy or `PALE_HTTP_TLS_*`
 - [ ] `PALE_SERVER_TOKEN` treated as break-glass only
-- [ ] Admin password ≥ 24 chars; plan MFA for admins (Phase 2)
+- [ ] Admin password ≥ 24 chars
+- [ ] Conditional access policy with `require_mfa` if org policy needs MFA (enforced on password + SSO login)
+- [ ] DLP policies for chat and files (chat send is blocked when action is Block)
+- [ ] LiveKit configured for multi-party meetings; set `PALE_LIVEKIT_REQUIRED=true` to refuse joins without SFU
+- [ ] ClamAV (`PALE_CLAMAV_HOST`) for real malware scanning on uploads
 - [ ] `/metrics` private
 - [ ] Automated backups + restore drill
 - [ ] Firewall allows only required ports
