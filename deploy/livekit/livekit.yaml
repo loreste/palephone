@@ -1,0 +1,16 @@
+# LiveKit SFU config for Pale multi-party meetings
+# Enable with: docker compose -f docker-compose.prod.yml --profile meetings up -d
+#
+# Keys are injected via LIVEKIT_KEYS env (API_KEY:API_SECRET).
+# Point pale-server at the SFU with:
+#   PALE_LIVEKIT_URL=ws://livekit:7880   (in-compose)
+#   or wss://meet.example.com            (via external TLS proxy)
+
+port: 7880
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 60000
+  use_external_ip: true
+logging:
+  level: info

@@ -1,0 +1,21 @@
+# Pale production reverse proxy (optional --profile proxy)
+#
+# Expects PALE_PUBLIC_HOSTNAME in the environment (docker compose).
+# Uses Let's Encrypt by default when the hostname is public DNS.
+# To use mounted certs instead, replace the site block with:
+#
+#   {$PALE_PUBLIC_HOSTNAME} {
+#       tls /certs/fullchain.pem /certs/privkey.pem
+#       reverse_proxy pale-server:8080
+#   }
+
+{$PALE_PUBLIC_HOSTNAME} {
+	encode gzip
+
+	# Health and metrics stay reachable for internal probes through the proxy;
+	# restrict metrics at the network edge if this host is internet-facing.
+	reverse_proxy pale-server:8080 {
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+	}
+}

@@ -17,9 +17,12 @@ The installer is branded as **Pale Server** and uses the Pale icon from
 - keeps local secrets out of the repository and out of public release metadata.
 
 Default behavior is intentionally conservative: the HTTP API binds to
-`127.0.0.1:8080`, the no-native server build does not start a SIP listener until
-the admin selects the `udp-parser` backend, and no firewall rule is opened unless
-the admin chooses a non-loopback bind address.
+`127.0.0.1:8080`, and no firewall rule is opened unless the admin chooses a
+non-loopback bind address. `Configure-PaleServer.ps1` defaults to the
+`udp-parser` SIP backend (built-in REGISTER/PBX). Pass `-SipBackend off` to
+disable the registrar. For production TLS, TURN, and Postgres, see
+[docs/deploy/windows.md](../../../docs/deploy/windows.md) and
+[docs/deploy/PRODUCTION.md](../../../docs/deploy/PRODUCTION.md).
 
 ## Build Locally on Windows
 

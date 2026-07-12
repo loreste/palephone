@@ -1,0 +1,30 @@
+# HTTP(S) ingress for the Pale API. Requires an ingress controller.
+# Adjust hosts, className, and TLS secret for your cluster.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pale-server
+  namespace: pale
+  annotations:
+    # nginx example — change for your controller
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # SSE: disable buffering if supported
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - pale.example.com
+      secretName: pale-tls
+  rules:
+    - host: pale.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pale-server
+                port:
+                  number: 8080

@@ -77,8 +77,10 @@ events, admin API, SIP/PBX records, file records, meeting records, compliance
 records, provider integration registry, and Prometheus metrics.
 
 The server uses PostgreSQL for persistent data when configured, with in-memory
-state for fast runtime lookups. Docker Compose runs PostgreSQL, pale-server,
-and coturn as the default local server stack.
+state for fast runtime lookups (one active SIP registrar instance). Docker
+Compose local stack: PostgreSQL, pale-server, coturn, and NATS. Production
+compose (`docker-compose.prod.yml`) adds private networking, required TLS/TURN
+hostnames, optional Caddy, and optional LiveKit.
 
 The process default for `PALE_HTTP_ADDR` is `127.0.0.1:8080`. The Docker Compose
 deployment maps that internal port to `localhost:8090` on the host, which is
@@ -93,12 +95,16 @@ records, routing rules, extensions, ring groups, queues, IVR, business hours,
 holidays, call park, voicemail, call groups, delegates, SIP gateways, location
 routing, and emergency call plans.
 
-The default server backend is `pjsip`, which provides SIP transport/runtime
-telemetry but does not advertise itself as a client registrar. The current
-built-in REGISTER/PBX parser path is selected with `PALE_SIP_BACKEND=udp-parser`.
-Production deployments may also put a dedicated SIP registrar/proxy in front of
-Pale and use pale-server for provisioning, records, routing data, governance,
-and admin workflows.
+Production and Docker deploys should set `PALE_SIP_BACKEND=udp-parser`, the
+built-in REGISTER/PBX parser path over SIP TLS/TCP (UDP is off unless
+explicitly enabled). The optional `pjsip` backend requires a
+`native-pjsip` build and does not replace the registrar path on standard
+server images. Deployments may also put OpenSIPS, Kamailio, or another SIP edge
+in front of Pale and use pale-server for provisioning, records, routing data,
+governance, and admin workflows.
+
+Operator runbooks: `docs/deploy/PRODUCTION.md`, Linux/Windows guides under
+`docs/deploy/`, and Kubernetes manifests under `deploy/k8s/`.
 
 The server has models and APIs for PSTN and E911 readiness. Production PSTN and
 emergency calling still require configured carrier/SBC/E911 providers. Pale

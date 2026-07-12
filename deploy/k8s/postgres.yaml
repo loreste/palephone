@@ -1,0 +1,76 @@
+# Lab PostgreSQL only. Prefer a managed database in real production.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pale-postgres-pvc
+  namespace: pale
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pale-postgres
+  namespace: pale
+  labels:
+    app: pale-postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pale-postgres
+  template:
+    metadata:
+      labels:
+        app: pale-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_DB
+              value: pale
+            - name: POSTGRES_USER
+              value: pale
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pale-server-secrets
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "pale"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: pale-postgres-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pale-postgres
+  namespace: pale
+spec:
+  selector:
+    app: pale-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres

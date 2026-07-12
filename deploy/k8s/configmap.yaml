@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pale-server-config
+  namespace: pale
+data:
+  PALE_HTTP_ADDR: "0.0.0.0:8080"
+  PALE_SIP_ADDR: "0.0.0.0:5060"
+  PALE_DATA_DIR: "/data"
+  PALE_ADMIN_USERNAME: "admin"
+  PALE_SIP_BACKEND: "udp-parser"
+  PALE_SIP_TCP: "true"
+  PALE_SIP_UDP: "false"
+  PALE_SIP_SRTP: "true"
+  PALE_SIP_TLS: "true"
+  PALE_SIP_TLS_PORT: "5061"
+  PALE_ICE: "true"
+  PALE_STUN_IGNORE_FAILURE: "false"
+  PALE_LOG_JSON: "true"
+  PALE_RETENTION_ENFORCEMENT_INTERVAL_SECS: "86400"
+  PALE_PG_MAX_CONNECTIONS: "20"
+  RUST_LOG: "info"
+  # Operators must set these to public client-facing values:
+  # PALE_SIP_EXTERNAL_ADDR: "pale.example.com:5060"
+  # PALE_SIP_TLS_EXTERNAL_ADDR: "pale.example.com:5061"
+  # PALE_TURN_SERVER: "turn:pale.example.com:3478"

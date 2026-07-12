@@ -1,0 +1,213 @@
+# Pale Server — production Docker Compose stack
+#
+# Prerequisites:
+#   1. ./scripts/generate-secrets.sh
+#   2. Edit .env with public hostnames (all required below):
+#        PALE_PUBLIC_HOSTNAME=pale.example.com
+#        PALE_SIP_EXTERNAL_ADDR=pale.example.com:5060
+#        PALE_SIP_TLS_EXTERNAL_ADDR=pale.example.com:5061
+#        PALE_TURN_SERVER=turn:pale.example.com:3478
+#        TURN_EXTERNAL_IP=<public IPv4>
+#        NATS_TOKEN=<from generate-secrets or openssl rand -hex 32>
+#   3. Place TLS certs under ./certs/ (fullchain.pem + privkey.pem)
+#      or set CERTS_DIR to an absolute path with those filenames.
+#
+# Start:
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Optional profiles:
+#   --profile proxy     Caddy reverse proxy on 80/443
+#   --profile meetings  LiveKit SFU for multi-party A/V
+#
+# See docs/deploy/PRODUCTION.md
+
+name: pale-prod
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pale-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: pale
+      POSTGRES_USER: pale
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}"
+    volumes:
+      - pale-pgdata:/var/lib/postgresql/data
+    # Not published on the host — reach only via the pale-internal network.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pale"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pale-internal
+
+  nats:
+    image: nats:2-alpine
+    container_name: pale-nats
+    restart: always
+    command:
+      - "-js"
+      - "-m"
+      - "8222"
+      - "--auth"
+      - "${NATS_TOKEN:?Set NATS_TOKEN (openssl rand -hex 32)}"
+    # Not published on the host.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pale-internal
+
+  coturn:
+    image: coturn/coturn:latest
+    container_name: pale-coturn
+    restart: always
+    network_mode: host
+    volumes:
+      - ./turnserver.conf:/etc/turnserver.conf:ro
+    command:
+      - "-c"
+      - "/etc/turnserver.conf"
+      - "--static-auth-secret=${TURN_SECRET:?Set TURN_SECRET}"
+      - "--realm=${PALE_TURN_REALM:-pale.local}"
+      - "--external-ip=${TURN_EXTERNAL_IP:?Set TURN_EXTERNAL_IP to the public IPv4 of this host}"
+      - "--listening-ip=0.0.0.0"
+      - "--relay-ip=0.0.0.0"
+      - "--fingerprint"
+      - "--no-multicast-peers"
+      - "--no-cli"
+      - "--no-tlsv1"
+      - "--no-tlsv1_1"
+    healthcheck:
+      test: ["CMD", "turnadmin", "-l"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  pale-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.pale-server
+    container_name: pale-server
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    ports:
+      - "8090:8080"
+      - "5060:5060/tcp"
+      - "5061:5061/tcp"
+    environment:
+      PALE_HTTP_ADDR: "0.0.0.0:8080"
+      PALE_SIP_ADDR: "0.0.0.0:5060"
+      PALE_DATA_DIR: "/data"
+      PALE_DATABASE_URL: "host=postgres user=pale password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD} dbname=pale"
+      PALE_PG_MAX_CONNECTIONS: "20"
+      PALE_SERVER_TOKEN: "${PALE_SERVER_TOKEN:?Set PALE_SERVER_TOKEN (min 24 chars)}"
+      PALE_ADMIN_PASSWORD: "${PALE_ADMIN_PASSWORD:?Set PALE_ADMIN_PASSWORD (min 24 chars)}"
+      PALE_STORAGE_KEY: "${PALE_STORAGE_KEY:?Set PALE_STORAGE_KEY (min 24 chars)}"
+      PALE_ADMIN_USERNAME: "${PALE_ADMIN_USERNAME:-admin}"
+      PALE_SIP_BACKEND: "udp-parser"
+      PALE_SIP_TCP: "true"
+      PALE_SIP_UDP: "false"
+      PALE_SIP_SRTP: "true"
+      PALE_SIP_TLS: "true"
+      PALE_SIP_TLS_CERT: "/certs/fullchain.pem"
+      PALE_SIP_TLS_KEY: "/certs/privkey.pem"
+      PALE_SIP_TLS_PORT: "5061"
+      PALE_SIP_EXTERNAL_ADDR: "${PALE_SIP_EXTERNAL_ADDR:?Set PALE_SIP_EXTERNAL_ADDR (host:5060)}"
+      PALE_SIP_TLS_EXTERNAL_ADDR: "${PALE_SIP_TLS_EXTERNAL_ADDR:?Set PALE_SIP_TLS_EXTERNAL_ADDR (host:5061)}"
+      # Prefer TLS at Caddy/Ingress (profile proxy). Set these only if pale-server
+      # should terminate HTTPS itself (then healthcheck must use https).
+      PALE_HTTP_TLS_CERT: "${PALE_HTTP_TLS_CERT:-}"
+      PALE_HTTP_TLS_KEY: "${PALE_HTTP_TLS_KEY:-}"
+      PALE_ICE: "true"
+      PALE_STUN_SERVERS: "${PALE_STUN_SERVERS:-}"
+      PALE_STUN_IGNORE_FAILURE: "false"
+      PALE_TURN_SERVER: "${PALE_TURN_SERVER:?Set PALE_TURN_SERVER (e.g. turn:pale.example.com:3478)}"
+      PALE_TURN_TRANSPORT: "udp"
+      PALE_TURN_USERNAME: "pale"
+      PALE_TURN_PASSWORD: "${TURN_SECRET:?Set TURN_SECRET}"
+      PALE_TURN_REALM: "${PALE_TURN_REALM:-pale.local}"
+      PALE_MAX_UPLOAD_BYTES: "${PALE_MAX_UPLOAD_BYTES:-104857600}"
+      PALE_RETENTION_ENFORCEMENT_INTERVAL_SECS: "${PALE_RETENTION_ENFORCEMENT_INTERVAL_SECS:-86400}"
+      PALE_RETENTION_ENFORCEMENT_RUN_ON_STARTUP: "${PALE_RETENTION_ENFORCEMENT_RUN_ON_STARTUP:-false}"
+      PALE_LOG_JSON: "true"
+      NATS_URL: "nats://:${NATS_TOKEN:?Set NATS_TOKEN}@nats:4222"
+      PALE_LIVEKIT_URL: "${PALE_LIVEKIT_URL:-}"
+      PALE_LIVEKIT_API_KEY: "${PALE_LIVEKIT_API_KEY:-}"
+      PALE_LIVEKIT_API_SECRET: "${PALE_LIVEKIT_API_SECRET:-}"
+      RUST_LOG: "${RUST_LOG:-info}"
+    volumes:
+      - pale-data:/data
+      - "${CERTS_DIR:-./certs}:/certs:ro"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - pale-internal
+      - pale-edge
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: pale-caddy
+    restart: always
+    profiles: ["proxy"]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PALE_PUBLIC_HOSTNAME: "${PALE_PUBLIC_HOSTNAME:?Set PALE_PUBLIC_HOSTNAME for Caddy}"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+      - "${CERTS_DIR:-./certs}:/certs:ro"
+    depends_on:
+      - pale-server
+    networks:
+      - pale-edge
+
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: pale-livekit
+    restart: always
+    profiles: ["meetings"]
+    command: ["--config", "/etc/livekit.yaml"]
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
+    volumes:
+      - ./deploy/livekit/livekit.yaml:/etc/livekit.yaml:ro
+    environment:
+      # Required when using --profile meetings (set both in .env).
+      LIVEKIT_KEYS: "${PALE_LIVEKIT_API_KEY:-devkey}:${PALE_LIVEKIT_API_SECRET:-secret-change-me-in-production-32chars}"
+    networks:
+      - pale-internal
+      - pale-edge
+
+networks:
+  pale-internal:
+    driver: bridge
+  pale-edge:
+    driver: bridge
+
+volumes:
+  pale-pgdata:
+    driver: local
+  pale-data:
+    driver: local
+  caddy-data:
+    driver: local
+  caddy-config:
+    driver: local

@@ -1,0 +1,144 @@
+# Pale Server — single replica (SIP registrar state is process-local).
+# Do not scale replicas > 1 for the registrar without an external SIP edge.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pale-server-data
+  namespace: pale
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pale-server
+  namespace: pale
+  labels:
+    app: pale-server
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: pale-server
+  template:
+    metadata:
+      labels:
+        app: pale-server
+    spec:
+      containers:
+        - name: pale-server
+          image: pale-server:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 5060
+              name: sip-tcp
+              protocol: TCP
+            - containerPort: 5061
+              name: sip-tls
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: pale-server-config
+            - secretRef:
+                name: pale-server-secrets
+          env:
+            # K8s expands $(POSTGRES_PASSWORD) from the secret key loaded via envFrom.
+            - name: PALE_DATABASE_URL
+              value: "host=pale-postgres user=pale password=$(POSTGRES_PASSWORD) dbname=pale"
+            - name: PALE_SIP_TLS_CERT
+              value: /certs/tls.crt
+            - name: PALE_SIP_TLS_KEY
+              value: /certs/tls.key
+            - name: PALE_TURN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pale-server-secrets
+                  key: TURN_SECRET
+            - name: PALE_TURN_USERNAME
+              value: pale
+            - name: PALE_TURN_TRANSPORT
+              value: udp
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tls
+              mountPath: /certs
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: pale-server-data
+        - name: tls
+          secret:
+            secretName: pale-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pale-server
+  namespace: pale
+  labels:
+    app: pale-server
+spec:
+  type: ClusterIP
+  selector:
+    app: pale-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+    - name: sip-tcp
+      port: 5060
+      targetPort: 5060
+      protocol: TCP
+    - name: sip-tls
+      port: 5061
+      targetPort: 5061
+      protocol: TCP
+---
+# Optional LoadBalancer for SIP when not using an external SBC.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pale-server-sip
+  namespace: pale
+  labels:
+    app: pale-server
+spec:
+  type: LoadBalancer
+  selector:
+    app: pale-server
+  ports:
+    - name: sip-tcp
+      port: 5060
+      targetPort: 5060
+      protocol: TCP
+    - name: sip-tls
+      port: 5061
+      targetPort: 5061
+      protocol: TCP

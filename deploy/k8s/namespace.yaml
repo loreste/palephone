@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pale
+  labels:
+    app.kubernetes.io/name: pale
+    app.kubernetes.io/part-of: pale-server

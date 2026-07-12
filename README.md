@@ -278,22 +278,38 @@ The installer:
   and uninstall.
 
 By default the Windows installer binds the HTTP API to `127.0.0.1:8080` and
-does not expose SIP until an admin configures a SIP backend. Use TLS termination
-in front of the service before exposing it to users over a network.
+configures `udp-parser` for the built-in SIP registrar. Use TLS termination in
+front of the service before exposing it to users over a network. See
+[docs/deploy/windows.md](docs/deploy/windows.md).
 
-#### Docker Compose
+#### Docker Compose (local lab)
 
 ```bash
 # Generate secrets (writes .env, which docker compose reads automatically)
 ./scripts/generate-secrets.sh
 
-# Start server stack (PostgreSQL + pale-server + TURN relay)
+# Start server stack (PostgreSQL + pale-server + TURN + NATS)
 docker compose up -d
 
 # Verify
 curl http://localhost:8090/health
 # {"ok":true,"service":"pale-server","status":"healthy"}
 ```
+
+The lab stack defaults to `PALE_SIP_BACKEND=udp-parser` (built-in registrar) and
+`PALE_SIP_SRTP=true`. For remote clients set `PALE_SIP_EXTERNAL_ADDR` and a
+reachable `PALE_TURN_SERVER` (not `127.0.0.1`).
+
+#### Docker Compose (production)
+
+```bash
+./scripts/generate-secrets.sh
+# Edit .env: public hostnames, TURN_EXTERNAL_IP, place certs in ./certs/
+docker compose -f docker-compose.prod.yml up -d --build
+# Optional: --profile proxy (Caddy)  --profile meetings (LiveKit)
+```
+
+Full checklist: [docs/deploy/PRODUCTION.md](docs/deploy/PRODUCTION.md).
 
 #### Bare-Metal Linux
 
@@ -345,9 +361,9 @@ for the full annotated list. Two you will almost certainly want in production:
   Without it, remote clients may be given a loopback registrar address.
 - `PALE_SIP_TLS_EXTERNAL_ADDR` — optional public SIP TLS hostname and port. If
   omitted, Pale derives it from `PALE_SIP_EXTERNAL_ADDR` and `PALE_SIP_TLS_PORT`.
-- `PALE_SIP_BACKEND` — defaults to `udp-parser`, which now means the built-in
-  parser registrar over TLS/TCP first. Use a dedicated SIP registrar/proxy in
-  front of Pale if you need a deeper SIP edge.
+- `PALE_SIP_BACKEND` — use `udp-parser` for the built-in parser registrar over
+  TLS/TCP (Docker and installers default here). Use a dedicated SIP
+  registrar/proxy in front of Pale if you need a deeper SIP edge.
 - `PALE_SIP_TLS_CERT` / `PALE_SIP_TLS_KEY` — providing both enables SIP over
   TLS automatically. UDP remains disabled unless explicitly enabled.
 - `NATS_URL` — optional NATS server URL, for example `nats://nats:4222`.
@@ -391,9 +407,14 @@ See [ANDROID_SETUP.md](ANDROID_SETUP.md) for detailed environment setup.
 
 | Service | Image | Purpose |
 |---------|-------|---------|
-| `pale-server` | Built from source | SIP registrar, HTTP API, PBX, call center |
+| `pale-server` | Built from source | SIP registrar (`udp-parser`), HTTP API, PBX, call center |
 | `postgres` | postgres:16-alpine | User data, CDR, voicemail, call settings |
 | `coturn` | coturn/coturn | TURN relay for NAT traversal |
+| `nats` | nats:2-alpine | Optional event bus for automations |
+
+Production file `docker-compose.prod.yml` keeps Postgres/NATS off the host
+network, requires SIP TLS + TURN external IP, and optionally adds Caddy and
+LiveKit. See [docs/deploy/PRODUCTION.md](docs/deploy/PRODUCTION.md).
 
 ### Environment Variables
 

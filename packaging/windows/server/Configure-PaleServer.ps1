@@ -5,7 +5,9 @@ param(
     [string]$AdminPassword,
     [string]$DatabaseUrl = "",
     [ValidateSet("off", "udp-parser", "pjsip")]
-    [string]$SipBackend = "off",
+    [string]$SipBackend = "udp-parser",
+    [string]$SipExternalAddr = "",
+    [string]$TurnServer = "",
     [switch]$SkipServiceStart
 )
 
@@ -123,6 +125,7 @@ if ([string]::IsNullOrWhiteSpace($AdminPassword) -or $AdminPassword.Length -lt 2
     throw "Admin password must be at least 24 characters."
 }
 
+# "off" maps to pjsip on no-native builds (no registrar). Prefer udp-parser for production calling.
 $sipBackendValue = if ($SipBackend -eq "off") { "pjsip" } else { $SipBackend }
 
 $values = @{
@@ -133,12 +136,23 @@ $values = @{
     "PALE_LOG_JSON" = "true"
     "PALE_SERVER_TOKEN" = New-PaleSecret
     "PALE_SIP_BACKEND" = $sipBackendValue
+    "PALE_SIP_TCP" = "true"
+    "PALE_SIP_UDP" = "false"
+    "PALE_SIP_SRTP" = "true"
     "PALE_STORAGE_KEY" = New-PaleSecret
     "RUST_LOG" = "info"
 }
 
 if (-not [string]::IsNullOrWhiteSpace($DatabaseUrl)) {
     $values["PALE_DATABASE_URL"] = $DatabaseUrl
+}
+
+if (-not [string]::IsNullOrWhiteSpace($SipExternalAddr)) {
+    $values["PALE_SIP_EXTERNAL_ADDR"] = $SipExternalAddr
+}
+
+if (-not [string]::IsNullOrWhiteSpace($TurnServer)) {
+    $values["PALE_TURN_SERVER"] = $TurnServer
 }
 
 Write-PaleEnvFile -Path $envPath -Values $values
@@ -169,3 +183,5 @@ if (-not $SkipServiceStart) {
 
 Write-Host "Configuration written to $envPath"
 Write-Host "Service name: PaleServer"
+Write-Host "SIP backend: $sipBackendValue (use udp-parser for built-in registrar)"
+Write-Host "Production: terminate TLS in front of $HttpAddr; set SIP TLS certs and TURN. See docs/deploy/windows.md"

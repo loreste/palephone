@@ -1,12 +1,14 @@
-# Pale Server — Docker Compose with PostgreSQL + TURN + NATS
+# Pale Server — Docker Compose (development / local)
 #
-# Quick start:
-#   ./scripts/generate-secrets.sh   # writes .env with all required secrets
+# Quick start (local lab):
+#   ./scripts/generate-secrets.sh
 #   docker compose up -d
 #   curl http://localhost:8090/health
 #
-# All required variables fail loudly if unset — see .env.example for the
-# full list and optional settings.
+# Production: use docker-compose.prod.yml instead.
+#   See docs/deploy/PRODUCTION.md
+#
+# All required variables fail loudly if unset — see .env.example.
 
 services:
   postgres:
@@ -19,6 +21,7 @@ services:
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD (try: openssl rand -base64 32)}"
     volumes:
       - pale-pgdata:/var/lib/postgresql/data
+    # Dev convenience only — production compose does not publish this port.
     ports:
       - "5433:5432"
     healthcheck:
@@ -34,7 +37,13 @@ services:
     network_mode: host
     volumes:
       - ./turnserver.conf:/etc/turnserver.conf:ro
-    command: ["-c", "/etc/turnserver.conf", "--static-auth-secret=${TURN_SECRET:?Set TURN_SECRET (try: openssl rand -base64 32)}"]
+    # For remote clients set TURN_EXTERNAL_IP and PALE_TURN_SERVER in .env.
+    # Without external-ip, TURN only works for clients that can reach this host's LAN address.
+    command:
+      - "-c"
+      - "/etc/turnserver.conf"
+      - "--static-auth-secret=${TURN_SECRET:?Set TURN_SECRET (try: openssl rand -base64 32)}"
+      - "--realm=${PALE_TURN_REALM:-pale.local}"
     healthcheck:
       test: ["CMD", "turnadmin", "-l"]
       interval: 30s
@@ -46,6 +55,7 @@ services:
     container_name: pale-nats
     restart: unless-stopped
     command: ["-js", "-m", "8222"]
+    # Dev convenience only — production compose does not publish these ports.
     ports:
       - "4222:4222"
       - "8222:8222"
@@ -68,8 +78,9 @@ services:
         condition: service_healthy
     ports:
       - "8090:8080"       # HTTP API
-      - "5060:5060/udp"   # SIP UDP
-      - "5061:5061"       # SIP TLS
+      - "5060:5060"       # SIP TCP (default registrar transport)
+      - "5060:5060/udp"   # SIP UDP (disabled in-process unless explicitly enabled)
+      - "5061:5061"       # SIP TLS (when certs are mounted)
     environment:
       PALE_HTTP_ADDR: "0.0.0.0:8080"
       PALE_SIP_ADDR: "0.0.0.0:5060"
@@ -80,20 +91,35 @@ services:
       PALE_ADMIN_PASSWORD: "${PALE_ADMIN_PASSWORD:?Set PALE_ADMIN_PASSWORD (min 24 chars)}"
       PALE_STORAGE_KEY: "${PALE_STORAGE_KEY:?Set PALE_STORAGE_KEY (min 24 chars)}"
       PALE_ADMIN_USERNAME: "${PALE_ADMIN_USERNAME:-admin}"
-      PALE_SIP_BACKEND: "${PALE_SIP_BACKEND:-pjsip}"
+      # udp-parser is the built-in REGISTER/PBX path. Docker images are not
+      # built with native-pjsip; pjsip backend would leave SIP disabled.
+      PALE_SIP_BACKEND: "${PALE_SIP_BACKEND:-udp-parser}"
+      PALE_SIP_TCP: "${PALE_SIP_TCP:-true}"
+      PALE_SIP_UDP: "${PALE_SIP_UDP:-false}"
+      # SRTP on by default (matches server code default). Override only for lab debugging.
+      PALE_SIP_SRTP: "${PALE_SIP_SRTP:-true}"
+      # SIP TLS enables when both cert and key are set (or force with PALE_SIP_TLS=true).
+      PALE_SIP_TLS: "${PALE_SIP_TLS:-}"
+      PALE_SIP_TLS_CERT: "${PALE_SIP_TLS_CERT:-}"
+      PALE_SIP_TLS_KEY: "${PALE_SIP_TLS_KEY:-}"
+      PALE_SIP_TLS_PORT: "${PALE_SIP_TLS_PORT:-5061}"
+      PALE_SIP_EXTERNAL_ADDR: "${PALE_SIP_EXTERNAL_ADDR:-}"
+      PALE_SIP_TLS_EXTERNAL_ADDR: "${PALE_SIP_TLS_EXTERNAL_ADDR:-}"
       PALE_ICE: "true"
       PALE_STUN_SERVERS: "${PALE_STUN_SERVERS:-stun:stun.l.google.com:19302}"
-      PALE_STUN_IGNORE_FAILURE: "true"
-      PALE_TURN_SERVER: "${PALE_TURN_SERVER:-turn:127.0.0.1:3478}"
-      PALE_TURN_TRANSPORT: "udp"
+      PALE_STUN_IGNORE_FAILURE: "${PALE_STUN_IGNORE_FAILURE:-true}"
+      # For remote clients set PALE_TURN_SERVER to a reachable host, not 127.0.0.1.
+      PALE_TURN_SERVER: "${PALE_TURN_SERVER:-}"
+      PALE_TURN_TRANSPORT: "${PALE_TURN_TRANSPORT:-udp}"
       PALE_TURN_USERNAME: "pale"
       PALE_TURN_PASSWORD: "${TURN_SECRET:?Set TURN_SECRET (try: openssl rand -base64 32)}"
       PALE_TURN_REALM: "${PALE_TURN_REALM:-pale.local}"
-      PALE_SIP_TLS: "${PALE_SIP_TLS:-false}"
-      PALE_SIP_SRTP: "${PALE_SIP_SRTP:-false}"
       PALE_MAX_UPLOAD_BYTES: "${PALE_MAX_UPLOAD_BYTES:-104857600}"
       PALE_RETENTION_ENFORCEMENT_INTERVAL_SECS: "${PALE_RETENTION_ENFORCEMENT_INTERVAL_SECS:-0}"
       PALE_RETENTION_ENFORCEMENT_RUN_ON_STARTUP: "${PALE_RETENTION_ENFORCEMENT_RUN_ON_STARTUP:-false}"
+      PALE_LIVEKIT_URL: "${PALE_LIVEKIT_URL:-}"
+      PALE_LIVEKIT_API_KEY: "${PALE_LIVEKIT_API_KEY:-}"
+      PALE_LIVEKIT_API_SECRET: "${PALE_LIVEKIT_API_SECRET:-}"
       NATS_URL: "${NATS_URL:-nats://nats:4222}"
       RUST_LOG: "${RUST_LOG:-info}"
     volumes:

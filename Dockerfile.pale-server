@@ -1,30 +1,33 @@
 # ─── Pale Server ───
 # Multi-stage build for the standalone backend server.
 #
+# The image is built WITHOUT the native-pjsip feature. Production and Docker
+# deploys must use PALE_SIP_BACKEND=udp-parser for the built-in REGISTER/PBX path.
+#
 # Required env vars at runtime:
-#   PALE_SERVER_TOKEN      (min 24 chars) — HTTP bearer token
+#   PALE_SERVER_TOKEN      (min 24 chars) — break-glass HTTP bearer token
 #   PALE_ADMIN_PASSWORD    (min 24 chars) — admin login password
-#   PALE_STORAGE_KEY       (min 24 chars) — encryption key for SQLite
+#   PALE_STORAGE_KEY       (min 24 chars) — encryption key for local storage
 #
 # Optional env vars:
 #   PALE_HTTP_ADDR         (default 0.0.0.0:8080)
 #   PALE_SIP_ADDR          (default 0.0.0.0:5060)
 #   PALE_DATA_DIR          (default /data)
 #   PALE_ADMIN_USERNAME    (default admin)
-#   PALE_SIP_BACKEND       (pjsip | udp-parser, default pjsip)
+#   PALE_SIP_BACKEND       (udp-parser | pjsip; use udp-parser for registrar)
 #   PALE_HTTP_TLS_CERT / PALE_HTTP_TLS_KEY
 #   PALE_SIP_TLS_CERT / PALE_SIP_TLS_KEY
 #   PALE_STUN_SERVERS      (comma-separated)
 #   PALE_TURN_SERVER / PALE_TURN_USERNAME / PALE_TURN_PASSWORD
+#   PALE_LIVEKIT_URL / PALE_LIVEKIT_API_KEY / PALE_LIVEKIT_API_SECRET
 #
 # Build:
 #   docker build -f Dockerfile.pale-server -t pale-server .
 #
-# Run:
-#   docker run -p 8080:8080 -p 5060:5060/udp \
-#     -e PALE_SERVER_TOKEN=your-token-at-least-24-chars \
-#     -e PALE_ADMIN_PASSWORD=your-password-at-least-24 \
-#     -e PALE_STORAGE_KEY=your-storage-key-24-chars \
+# Run (lab):
+#   docker run -p 8080:8080 -p 5060:5060 -p 5061:5061 \
+#     -e PALE_SERVER_TOKEN=... -e PALE_ADMIN_PASSWORD=... -e PALE_STORAGE_KEY=... \
+#     -e PALE_SIP_BACKEND=udp-parser \
 #     -v pale-data:/data \
 #     pale-server
 
@@ -66,12 +69,14 @@ COPY --from=builder /build/crates/pale-server/target/release/pale-server /usr/lo
 ENV PALE_HTTP_ADDR=0.0.0.0:8080
 ENV PALE_SIP_ADDR=0.0.0.0:5060
 ENV PALE_DATA_DIR=/data
+ENV PALE_SIP_BACKEND=udp-parser
 
 VOLUME /data
 
 EXPOSE 8080
+EXPOSE 5060/tcp
 EXPOSE 5060/udp
-EXPOSE 5061
+EXPOSE 5061/tcp
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -sf http://localhost:8080/health || exit 1

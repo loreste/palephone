@@ -1,0 +1,42 @@
+# Restrict database access to pale-server only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pale-postgres-allow-server
+  namespace: pale
+spec:
+  podSelector:
+    matchLabels:
+      app: pale-postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: pale-server
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+# Allow ingress controller + same-namespace traffic to pale-server HTTP.
+# SIP may require additional policies depending on your CNI and LoadBalancer.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pale-server-ingress
+  namespace: pale
+spec:
+  podSelector:
+    matchLabels:
+      app: pale-server
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 5060
+        - protocol: TCP
+          port: 5061

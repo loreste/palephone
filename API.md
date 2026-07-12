@@ -611,7 +611,7 @@ All errors return JSON:
 | `PALE_RATE_LIMIT_RPS` | No | `100` | Requests per second per user |
 | `PALE_MAX_UPLOAD_BYTES` | No | `104857600` | Max file upload size |
 | `PALE_LOG_JSON` | No | `false` | Enable JSON structured logging |
-| `PALE_SIP_BACKEND` | No | `pjsip` | SIP backend. `pjsip` is the default transport/runtime path; `udp-parser` enables the current built-in REGISTER/PBX parser path |
+| `PALE_SIP_BACKEND` | No | process-dependent | Use `udp-parser` for the built-in REGISTER/PBX registrar (required for Docker/no-native builds). `pjsip` is a native transport path and does not provide a client registrar on images built without `native-pjsip` |
 | `PALE_SIP_SRTP` | No | `true` | Require SRTP encryption |
 | `PALE_ICE` | No | `true` | Enable ICE |
 | `PALE_STUN_SERVERS` | No | — | Comma-separated STUN servers |

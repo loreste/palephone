@@ -114,15 +114,21 @@ and HMAC-signed audit log entries are in place. Remaining hardening:
 
 ### 6. Documentation and Operator Guides
 
-The public docs should stay accurate as the product moves:
+Phase 0 operator packaging is in place:
+
+- [docs/deploy/PRODUCTION.md](deploy/PRODUCTION.md) — production runbook
+- [docs/deploy/linux.md](deploy/linux.md) / [windows.md](deploy/windows.md)
+- [deploy/k8s/](../deploy/k8s/) — Kubernetes lab manifests
+- `docker-compose.prod.yml` — production Docker stack (TLS, private PG/NATS, TURN external-ip)
+
+Still to deepen:
 
 - keep README feature claims tied to real code paths
 - keep API.md aligned with the server route table
 - keep ARCHITECTURE.md focused on the current system, not old design notes
-- add deployment guides for the open-source foundation services Pale expects a
-  tenant to install separately
-- add provider setup guides for AI, speech, storage, ATP, CASB, PSTN, E911, and
+- provider setup guides for AI, speech, storage, ATP, CASB, PSTN, E911, and
   broadcast media
+- restore-drill automation and capacity reports under `docs/perf/`
 
 ## Coverage Snapshot
 
