@@ -1,0 +1,4 @@
+# Transitive via aws-sdk-s3 / aws-config (rustls 0.21) and ldap3 until those
+# crates move off rustls 0.21. Tracked: GHSA-82j2-j2ch-gfr8 (DoS on malformed CRL).
+# Pale does not parse untrusted CRLs on the client path; re-evaluate on AWS SDK bumps.
+GHSA-82j2-j2ch-gfr8

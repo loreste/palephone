@@ -32,10 +32,11 @@ jobs:
           scan-type: fs
           scan-ref: .
           severity: CRITICAL,HIGH
-          # Fail on unfixed critical/high in scanned trees only after ignore
+          # Fail the job on remaining CRITICAL findings (HIGH may be ignored via .trivyignore)
           exit-code: "1"
           ignore-unfixed: true
           format: table
+          trivyignores: .trivyignore
           # Skip huge/vendor trees; focus on product and container definition
           skip-dirs: node_modules,src-tauri/target,dist,dist/clients,.git
 
@@ -62,3 +63,4 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           format: table
+          trivyignores: .trivyignore
