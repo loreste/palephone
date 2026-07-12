@@ -111,7 +111,10 @@ fn write_config_site(pj_src_dir: &Path, target_os: &str) {
         "android" => {
             config.push_str("#define PJMEDIA_AUDIO_DEV_HAS_OPENSL 1\n");
             config.push_str("#define PJMEDIA_AUDIO_DEV_HAS_ANDROID 1\n");
-            config.push_str("#define PJMEDIA_VIDEO_DEV_HAS_ANDROID 1\n");
+            // The Android OpenGL video factory (and_factory_init) segfaults during
+            // pjsua_init when no Activity/Surface is ready. Ship audio-first;
+            // re-enable once capture/render surfaces are wired to the Tauri activity.
+            config.push_str("#define PJMEDIA_VIDEO_DEV_HAS_ANDROID 0\n");
             config.push_str("#define PJ_ANDROID 1\n");
         }
         "ios" => {
@@ -948,10 +951,17 @@ fn emit_link_directives(pj_src_dir: &Path, target_os: &str, target_arch: &str) {
             println!("cargo:rustc-link-lib=crypt32");
         }
         "android" => {
+            // OpenSL ES audio + Android binder helpers
             println!("cargo:rustc-link-lib=OpenSLES");
             println!("cargo:rustc-link-lib=log");
             println!("cargo:rustc-link-lib=android");
             println!("cargo:rustc-link-lib=m");
+            // PJSIP video uses Android MediaCodec NDK APIs (AMediaCodec_*).
+            // Without DT_NEEDED, loadLibrary crashes with UnsatisfiedLinkError.
+            println!("cargo:rustc-link-lib=mediandk");
+            // Softphone UI / video path also references EGL + GLES entry points.
+            println!("cargo:rustc-link-lib=EGL");
+            println!("cargo:rustc-link-lib=GLESv2");
         }
         "ios" => {
             println!("cargo:rustc-link-lib=framework=AudioToolbox");
