@@ -59,6 +59,33 @@ The APK is written under:
 src-tauri/gen/android/app/build/outputs/apk/
 ```
 
+### Sign for install (required on modern Android)
+
+Gradle may emit an **unsigned** release APK. Android will refuse to install it
+until it is signed (v2/v3). Sign with the repo sideload cert (or your own):
+
+```bash
+./scripts/sign-android-apk.sh \
+  src-tauri/gen/android/app/build/outputs/apk/**/app-*-unsigned.apk \
+  dist/android/Pale.apk
+```
+
+Details: [packaging/android/README.md](packaging/android/README.md).
+
+### Install on a phone (sideload)
+
+1. Use a **signed** APK named `Pale.apk` / `*-signed.apk` — not `*-unsigned.apk`.
+2. Enable **Install unknown apps** for the browser or Files app.
+3. If an older Pale build used a different certificate, **uninstall** it first.
+4. Honor / Magic / Xiaomi: turn off pure-mode / external-source blocks if install is blocked.
+5. Optional: `adb install -r Pale.apk` with USB debugging.
+
+Public download (when published):
+
+- Website (preferred stable name): `https://drcpbx.com/downloads/Pale.apk`
+- Versioned CI mirror: `https://drcpbx.com/downloads/current/Pale_*_android.apk` (must be signed)
+- GitHub Actions artifact `pale-android-apk` on each green Android workflow run
+
 ## Run on a phone
 
 Enable USB debugging on the phone, connect it, then run:

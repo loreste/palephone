@@ -128,17 +128,53 @@ jobs:
           PALE_ANDROID_SYSROOT: ${{ env.NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot
           PALE_ANDROID_TOOLCHAIN: ${{ env.NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64
 
-      # Upload APK as artifact
+      - name: Sign APK for sideload (v2/v3)
+        run: |
+          set -euo pipefail
+          # Prefer a private keystore from secrets when present; otherwise use
+          # the public sideload cert in packaging/android/pale-sideload.jks.
+          if [ -n "${{ secrets.PALE_ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.PALE_ANDROID_KEYSTORE_BASE64 }}" | base64 -d > /tmp/pale-release.jks
+            export PALE_ANDROID_KEYSTORE=/tmp/pale-release.jks
+            export PALE_ANDROID_KEY_ALIAS="${{ secrets.PALE_ANDROID_KEY_ALIAS }}"
+            export PALE_ANDROID_KEYSTORE_PASSWORD="${{ secrets.PALE_ANDROID_KEYSTORE_PASSWORD }}"
+            export PALE_ANDROID_KEY_PASSWORD="${{ secrets.PALE_ANDROID_KEY_PASSWORD }}"
+          fi
+          mkdir -p dist/android
+          mapfile -t APKS < <(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' -type f)
+          if [ "${#APKS[@]}" -eq 0 ]; then
+            echo "No APK produced by build" >&2
+            exit 1
+          fi
+          for apk in "${APKS[@]}"; do
+            base="$(basename "$apk" .apk)"
+            ./scripts/sign-android-apk.sh "$apk" "dist/android/${base}-signed.apk"
+          done
+          # Stable name for download pages and issue links
+          PRIMARY="$(ls dist/android/*-signed.apk | head -1)"
+          cp "$PRIMARY" dist/android/Pale.apk
+          cp "$PRIMARY" dist/android/Pale_android-signed.apk
+          (cd dist/android && sha256sum Pale.apk Pale_android-signed.apk *-signed.apk > SHA256SUMS.txt)
+          ls -lh dist/android/
+
+      # Upload signed APKs (installable on modern Android)
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: pale-android-apk
-          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          path: |
+            dist/android/Pale.apk
+            dist/android/Pale_android-signed.apk
+            dist/android/*-signed.apk
+            dist/android/SHA256SUMS.txt
 
       # On tag push, attach to release
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          files: |
+            dist/android/Pale.apk
+            dist/android/Pale_android-signed.apk
+            dist/android/SHA256SUMS.txt
           draft: true
