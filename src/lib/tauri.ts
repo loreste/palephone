@@ -1594,6 +1594,8 @@ export interface UserLoginResponse {
     domain: string;
   } | null;
   expires_at: string;
+  /** When true, `token` is a short-lived mfa_pending token — complete MFA before using APIs. */
+  mfa_required?: boolean;
 }
 
 export async function paleLogin(

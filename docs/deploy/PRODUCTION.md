@@ -235,7 +235,10 @@ Postgres connection failures.
 - [ ] Conditional access policy with `require_mfa` if org policy needs MFA (enforced on password + SSO login)
 - [ ] DLP policies for chat and files (chat send is blocked when action is Block)
 - [ ] LiveKit configured for multi-party meetings; set `PALE_LIVEKIT_REQUIRED=true` to refuse joins without SFU
-- [ ] ClamAV (`PALE_CLAMAV_HOST`) for real malware scanning on uploads
+- [ ] ClamAV (`PALE_CLAMAV_HOST`) + optional `PALE_ATP_REQUIRED=true` (see [storage-atp.md](storage-atp.md))
+- [ ] S3/MinIO for file scale (`PALE_S3_*`, `--profile storage`)
+- [ ] PSTN lab gateway when dialing the public phone network ([pstn-lab.md](pstn-lab.md))
+- [ ] Smoke tests: `./scripts/smoke-test.sh` after deploy
 - [ ] `/metrics` private
 - [ ] Automated backups + restore drill
 - [ ] Firewall allows only required ports

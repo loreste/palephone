@@ -18,6 +18,9 @@ Recent enforcement work (not just readiness records):
 - LiveKit join fails closed when SFU is configured (or `PALE_LIVEKIT_REQUIRED`)
 - Message threads persist to Postgres with `thread_id`
 - TOTP secrets stored encrypted; MFA disable blocked when CA requires MFA
+- ClamAV path with fail-closed `PALE_ATP_REQUIRED`; MinIO/S3 compose profile
+- Client MFA enrollment/login UI (setup wizard + server settings)
+- Smoke/load scripts under `scripts/`; PSTN lab guide + gateway TCP probe API
 
 Recent enterprise readiness work added:
 

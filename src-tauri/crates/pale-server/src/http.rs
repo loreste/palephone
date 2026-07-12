@@ -820,6 +820,10 @@ pub fn router(state: SharedState) -> Router {
             "/v1/admin/sip-gateways/{id}",
             put(update_sip_gateway).delete(delete_sip_gateway),
         )
+        .route(
+            "/v1/admin/sip-gateways/{id}/probe",
+            post(probe_sip_gateway),
+        )
         // Location routing
         .route(
             "/v1/admin/location-routing",
@@ -9442,6 +9446,24 @@ async fn update_sip_gateway(
         .ok_or(ApiError::NotFound)?;
     state.record_audit_event(&principal, "sip_gateway.updated", Some(id.to_string()));
     Ok(Json(gw))
+}
+
+async fn probe_sip_gateway(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::SipGatewayProbeResult>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let result = state
+        .probe_sip_gateway(id)
+        .await
+        .map_err(ApiError::Conflict)?;
+    state.record_audit_event(
+        &principal,
+        "sip_gateway.probed",
+        Some(format!("{id}:{}", result.detail)),
+    );
+    Ok(Json(result))
 }
 
 async fn delete_sip_gateway(

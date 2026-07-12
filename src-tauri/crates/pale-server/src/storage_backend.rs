@@ -95,11 +95,25 @@ impl std::fmt::Debug for StorageClient {
     }
 }
 
+/// Lightweight enum for reporting which backend is active without cloning clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageBackendKind {
+    Local,
+    S3,
+}
+
 impl StorageClient {
     /// Create a local-only storage client.
     pub fn local(files_dir: PathBuf) -> Self {
         Self {
             inner: StorageInner::Local { files_dir },
+        }
+    }
+
+    pub fn backend_kind(&self) -> StorageBackendKind {
+        match &self.inner {
+            StorageInner::Local { .. } => StorageBackendKind::Local,
+            StorageInner::S3 { .. } => StorageBackendKind::S3,
         }
     }
 

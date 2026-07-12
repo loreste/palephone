@@ -467,6 +467,25 @@ export function verifyMfa(baseUrl: string, token: string, code: string) {
   return adminPost<{ ok: boolean; mfa_enabled: boolean }>(baseUrl, token, "/v1/mfa/verify", { code });
 }
 
+/** Complete login after password/SSO when the server returned mfa_required. */
+export function validateMfa(baseUrl: string, mfaPendingToken: string, code: string) {
+  return adminPost<{
+    token: string;
+    user: { id: string; display_name: string; sip_uri: string; role: string };
+    sip_credentials: {
+      sip_uri: string;
+      registrar_uri: string | null;
+      registration_available: boolean;
+      username: string;
+      password: string;
+      transport: string;
+      domain: string;
+    } | null;
+    expires_at: string;
+    mfa_required: boolean;
+  }>(baseUrl, mfaPendingToken, "/v1/mfa/validate", { code });
+}
+
 export function disableMfa(baseUrl: string, token: string) {
   return adminPost<{ ok: boolean; mfa_enabled: boolean }>(baseUrl, token, "/v1/mfa/disable", {});
 }

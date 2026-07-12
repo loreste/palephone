@@ -5388,7 +5388,14 @@ impl AppState {
             .list_enterprise_integrations()
             .into_iter()
             .find(|integration| integration.id == "cloud_storage");
-        let provider_configured = self.enterprise_capability_available("cloud_storage");
+        let s3_env = storage_backend::S3Config::from_env();
+        let s3_active = s3_env.is_some()
+            || matches!(
+                self.storage_client().backend_kind(),
+                storage_backend::StorageBackendKind::S3
+            );
+        let provider_configured =
+            s3_active || self.enterprise_capability_available("cloud_storage");
         let files = self.file_records();
         let total_storage_bytes = files.iter().map(|file| file.size).sum();
         let mut warnings = Vec::new();
@@ -5398,10 +5405,11 @@ impl AppState {
                     .to_string(),
             );
         }
-        if integration
-            .as_ref()
-            .and_then(|item| item.endpoint_url.as_ref())
-            .is_none()
+        if !s3_active
+            && integration
+                .as_ref()
+                .and_then(|item| item.endpoint_url.as_ref())
+                .is_none()
         {
             warnings.push(
                 "configure a WebDAV or S3-compatible endpoint such as Nextcloud, ownCloud, or MinIO"
@@ -5410,9 +5418,10 @@ impl AppState {
         }
         CloudStorageStatus {
             provider_configured,
-            provider_name: integration
+            provider_name: s3_env
                 .as_ref()
-                .map(|item| item.default_provider.clone())
+                .map(|_| "S3/MinIO".to_string())
+                .or_else(|| integration.as_ref().map(|item| item.default_provider.clone()))
                 .unwrap_or_else(|| "WebDAV/S3-compatible storage".to_string()),
             open_source_options: integration
                 .as_ref()
@@ -5430,11 +5439,14 @@ impl AppState {
                         "MinIO".to_string(),
                     ]
                 }),
-            endpoint_url: integration
+            endpoint_url: s3_env
                 .as_ref()
-                .and_then(|item| item.endpoint_url.clone()),
+                .and_then(|c| c.endpoint.clone())
+                .or_else(|| integration.as_ref().and_then(|item| item.endpoint_url.clone())),
             admin_url: integration.as_ref().and_then(|item| item.admin_url.clone()),
-            sync_mode: if provider_configured {
+            sync_mode: if s3_active {
+                "s3_object_storage".to_string()
+            } else if provider_configured {
                 "external_provider_ready".to_string()
             } else {
                 "local_server_storage".to_string()
@@ -5479,27 +5491,42 @@ impl AppState {
             filename.to_string()
         };
         let dlp = self.scan_content_dlp(owner, &scan_content);
-        let malware_detected = if self.advanced_threat_protection_available() {
-            malware_scan_async(filename, content_type, body).await
-        } else {
-            false
+        // Always scan uploads. Fail closed when ATP is required and the scanner is down.
+        let malware = malware_scan_async(filename, content_type, body).await;
+        let malware_detected = matches!(malware, MalwareScanOutcome::Infected);
+        let scanner_unavailable = match &malware {
+            MalwareScanOutcome::ScannerUnavailable(reason) => {
+                log::warn!("malware scanner unavailable for {filename}: {reason}");
+                true
+            }
+            _ => false,
         };
+        let blocked_by_policy = malware_detected
+            || (scanner_unavailable && atp_required())
+            || !dlp.allowed;
         FileGovernanceDecision {
-            allowed: dlp.allowed && !malware_detected,
+            allowed: !blocked_by_policy,
             dlp_status: if malware_detected {
                 "malware_blocked"
+            } else if scanner_unavailable && atp_required() {
+                "scanner_unavailable"
             } else if dlp.allowed {
                 "clean"
             } else {
                 "blocked"
             }
             .to_string(),
-            dlp_violation_count: dlp.violations.len() + usize::from(malware_detected),
+            dlp_violation_count: dlp.violations.len()
+                + usize::from(malware_detected)
+                + usize::from(scanner_unavailable && atp_required()),
             legal_hold: self.file_on_legal_hold(),
         }
     }
 
     pub fn advanced_threat_protection_available(&self) -> bool {
+        if clamav_host().is_some() {
+            return true;
+        }
         self.enterprise_capability_report()
             .capabilities
             .into_iter()
@@ -15993,14 +16020,66 @@ impl AppState {
     /// Find a gateway matching a dialed number by prefix (longest prefix wins).
     pub fn resolve_gateway(&self, dialed_number: &str) -> Option<SipGateway> {
         let mut best: Option<SipGateway> = None;
-        let mut best_len = 0;
+        let mut best_len = -1i32;
         for gw in self.sip_gateways.values() {
-            if gw.enabled && dialed_number.starts_with(&gw.prefix) && gw.prefix.len() >= best_len {
-                best_len = gw.prefix.len();
-                best = Some(gw);
+            if !gw.enabled {
+                continue;
+            }
+            // Empty prefix is a catch-all (priority 0). Prefer longer prefixes.
+            if dialed_number.starts_with(&gw.prefix) {
+                let len = gw.prefix.len() as i32;
+                if len > best_len {
+                    best_len = len;
+                    best = Some(gw);
+                }
             }
         }
         best
+    }
+
+    /// Probe whether a SIP gateway host:port accepts TCP (lab connectivity check).
+    pub async fn probe_sip_gateway(&self, id: Uuid) -> Result<SipGatewayProbeResult, String> {
+        let gw = self
+            .sip_gateways
+            .get(&id)
+            .ok_or_else(|| "gateway not found".to_string())?;
+        let addr = format!("{}:{}", gw.host, gw.port);
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::net::TcpStream::connect(&addr),
+        )
+        .await;
+        let latency_ms = started.elapsed().as_millis() as u64;
+        match result {
+            Ok(Ok(_stream)) => Ok(SipGatewayProbeResult {
+                gateway_id: id,
+                host: gw.host,
+                port: gw.port,
+                transport: gw.transport,
+                reachable: true,
+                latency_ms: Some(latency_ms),
+                detail: "tcp_connect_ok".to_string(),
+            }),
+            Ok(Err(e)) => Ok(SipGatewayProbeResult {
+                gateway_id: id,
+                host: gw.host,
+                port: gw.port,
+                transport: gw.transport,
+                reachable: false,
+                latency_ms: Some(latency_ms),
+                detail: format!("tcp_connect_failed: {e}"),
+            }),
+            Err(_) => Ok(SipGatewayProbeResult {
+                gateway_id: id,
+                host: gw.host,
+                port: gw.port,
+                transport: gw.transport,
+                reachable: false,
+                latency_ms: Some(latency_ms),
+                detail: "tcp_connect_timeout".to_string(),
+            }),
+        }
     }
 
     // ─── Location Routing Rules ───
@@ -16503,6 +16582,17 @@ pub struct SipGateway {
     pub prefix: String,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SipGatewayProbeResult {
+    pub gateway_id: Uuid,
+    pub host: String,
+    pub port: i32,
+    pub transport: String,
+    pub reachable: bool,
+    pub latency_ms: Option<u64>,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18467,6 +18557,36 @@ fn parse_ics_datetime(s: &str) -> Option<DateTime<Utc>> {
 
 // ─── ClamAV Integration ───
 
+/// Outcome of malware scanning for an upload.
+#[derive(Debug, Clone)]
+enum MalwareScanOutcome {
+    Clean,
+    Infected,
+    ScannerUnavailable(String),
+}
+
+fn clamav_host() -> Option<String> {
+    std::env::var("PALE_CLAMAV_HOST")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn atp_required() -> bool {
+    env_flag_true("PALE_ATP_REQUIRED") || env_flag_true("PALE_CLAMAV_REQUIRED")
+}
+
+fn env_flag_true(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 /// Scan file content via ClamAV clamd TCP protocol (INSTREAM command).
 /// Returns Ok(true) if malware was found, Ok(false) if clean, Err on communication failure.
 async fn clamav_scan(host: &str, body: &[u8]) -> Result<bool, String> {
@@ -18547,19 +18667,35 @@ fn malware_signature_detected(filename: &str, content_type: &str, body: &[u8]) -
     false
 }
 
-/// Async malware scan: tries ClamAV first if configured, falls back to local pattern matching.
-async fn malware_scan_async(filename: &str, content_type: &str, body: &[u8]) -> bool {
-    // Try ClamAV if configured
-    if let Ok(host) = std::env::var("PALE_CLAMAV_HOST") {
+/// Async malware scan: prefer ClamAV; fall back to local patterns unless ATP is required.
+async fn malware_scan_async(filename: &str, content_type: &str, body: &[u8]) -> MalwareScanOutcome {
+    // Local EICAR / test patterns always run first (cheap and deterministic).
+    if malware_signature_detected(filename, content_type, body) {
+        return MalwareScanOutcome::Infected;
+    }
+
+    if let Some(host) = clamav_host() {
         match clamav_scan(&host, body).await {
-            Ok(found) => return found,
+            Ok(true) => return MalwareScanOutcome::Infected,
+            Ok(false) => return MalwareScanOutcome::Clean,
             Err(e) => {
-                log::error!("ClamAV scan failed, falling back to local patterns: {e}");
+                log::error!("ClamAV scan failed: {e}");
+                if atp_required() {
+                    return MalwareScanOutcome::ScannerUnavailable(e);
+                }
+                // Soft mode: allow when ClamAV is down unless local patterns hit.
+                return MalwareScanOutcome::Clean;
             }
         }
     }
-    // Fallback to local pattern matching
-    malware_signature_detected(filename, content_type, body)
+
+    if atp_required() {
+        return MalwareScanOutcome::ScannerUnavailable(
+            "ATP required but PALE_CLAMAV_HOST is not set".to_string(),
+        );
+    }
+
+    MalwareScanOutcome::Clean
 }
 
 // ─── AI Service Adapters ───
@@ -24590,6 +24726,39 @@ mod tests {
         assert_eq!(updated.id, case.id);
         assert_eq!(updated.last_export_count, 2);
         assert_eq!(updated.last_exported_by.as_deref(), Some("admin"));
+    }
+
+    #[tokio::test]
+    async fn atp_required_blocks_upload_without_clamav() {
+        let data_dir = std::env::temp_dir().join(format!("pale-atp-{}", Uuid::new_v4()));
+        let token = "012345678901234567890123".to_string();
+        let admin_hash = sha256_hex("admin-password".as_bytes());
+        let storage_key = "atp-storage-key-24chars-xx".to_string();
+        let state = AppState::persistent(
+            data_dir.clone(),
+            token,
+            "admin".to_string(),
+            admin_hash,
+            storage_key,
+            DEFAULT_MAX_UPLOAD_BYTES,
+            MediaConfig::default(),
+        )
+        .unwrap();
+        // SAFETY: process-local test env for ATP requirement
+        std::env::set_var("PALE_ATP_REQUIRED", "true");
+        std::env::remove_var("PALE_CLAMAV_HOST");
+        let decision = state
+            .file_governance_for_upload(
+                "sip:alice@example.com",
+                "notes.txt",
+                "text/plain",
+                b"hello clean file",
+            )
+            .await;
+        std::env::remove_var("PALE_ATP_REQUIRED");
+        assert!(!decision.allowed);
+        assert_eq!(decision.dlp_status, "scanner_unavailable");
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]

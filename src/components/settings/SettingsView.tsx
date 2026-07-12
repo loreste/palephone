@@ -7,10 +7,16 @@ import { useUiStore } from "@/store/uiStore";
 import { t, getLocale, setLocale, LOCALE_LABELS, type Locale } from "@/lib/i18n";
 import { AudioSettings } from "./AudioSettings";
 import { NetworkSettings } from "./NetworkSettings";
-import { registerAccount, storeSipPassword, getConfig, saveSettings, paleLogin, paleServerApi, paleFetch } from "@/lib/tauri";
+import { registerAccount, storeSipPassword, getConfig, saveSettings, paleServerApi, paleFetch } from "@/lib/tauri";
 import { normalizeProvisionedSipAccount } from "@/lib/sipDefaults";
 import { adminLogout, adminBaseUrl, getMfaStatus, setupMfa, verifyMfa, disableMfa, listSessions, revokeSession, revokeAllSessions } from "@/lib/adminApi";
 import type { MfaSetupResponse, SessionInfo } from "@/lib/adminApi";
+import {
+  beginMfaEnrollment,
+  completeMfaLogin,
+  enrollAndValidateMfa,
+  loginWithPossibleMfa,
+} from "@/lib/mfaLogin";
 import { disconnectServer, signOut } from "@/lib/session";
 import { toast } from "@/components/ui/Toast";
 import type { SipAccount } from "@/types";
@@ -251,6 +257,9 @@ function ServerSettingsPanel() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [testing, setTesting] = useState(false);
+  const [mfaPending, setMfaPending] = useState<{ token: string } | null>(null);
+  const [mfaCode, setMfaCode] = useState("");
+  const [mfaSetup, setMfaSetup] = useState<MfaSetupResponse | null>(null);
 
   useEffect(() => {
     getConfig()
@@ -261,69 +270,120 @@ function ServerSettingsPanel() {
       .catch(() => {});
   }, []);
 
-  const handleConnect = async () => {
-    if (!url || !password) return;
-    setTesting(true);
-    try {
-      const session = await paleLogin(url, username, password);
-      if (session.user.role !== "admin") {
-        throw new Error("This Pale account is not an administrator.");
-      }
-      sessionStorage.setItem("pale.admin.token", session.token);
-      setConnection(url, session.token, session.expires_at, session.user.role, session.user.display_name);
-      await storeSipPassword("pale-server-login", password).catch(() => {});
+  const applySession = async (session: {
+    token: string;
+    expires_at: string;
+    user: { role: string; display_name: string; sip_uri: string };
+    sip_credentials: {
+      sip_uri: string;
+      registrar_uri: string | null;
+      username: string;
+      password: string;
+      transport: string;
+    } | null;
+  }) => {
+    if (session.user.role !== "admin") {
+      throw new Error("This Pale account is not an administrator.");
+    }
+    sessionStorage.setItem("pale.admin.token", session.token);
+    setConnection(url, session.token, session.expires_at, session.user.role, session.user.display_name);
+    await storeSipPassword("pale-server-login", password).catch(() => {});
 
-      let provisionedAccount: SipAccount | null = null;
-      const registrarUri = session.sip_credentials?.registrar_uri ?? null;
-      if (session.sip_credentials && registrarUri) {
-        const creds = session.sip_credentials;
-        await storeSipPassword(creds.sip_uri, creds.password).catch(() => {});
-        provisionedAccount = normalizeProvisionedSipAccount({
-          displayName: session.user.display_name,
-          sipUri: creds.sip_uri,
-          registrarUri,
-          authUsername: creds.username,
-          transport: creds.transport,
-        });
-        setAccount(provisionedAccount);
-        setRegState("registering");
-        await registerAccount({
+    let provisionedAccount: SipAccount | null = null;
+    const registrarUri = session.sip_credentials?.registrar_uri ?? null;
+    if (session.sip_credentials && registrarUri) {
+      const creds = session.sip_credentials;
+      const sipPassword = creds.password || password;
+      await storeSipPassword(creds.sip_uri, sipPassword).catch(() => {});
+      provisionedAccount = normalizeProvisionedSipAccount({
+        displayName: session.user.display_name,
+        sipUri: creds.sip_uri,
+        registrarUri,
+        authUsername: creds.username,
+        transport: creds.transport,
+      });
+      setAccount(provisionedAccount);
+      setRegState("registering");
+      await registerAccount({
+        display_name: provisionedAccount.displayName,
+        sip_uri: provisionedAccount.sipUri,
+        registrar_uri: provisionedAccount.registrarUri,
+        auth_username: provisionedAccount.authUsername,
+        auth_password: sipPassword,
+        transport: provisionedAccount.transport,
+      });
+    }
+    setPassword("");
+    setMfaPending(null);
+    setMfaCode("");
+    setMfaSetup(null);
+
+    const config = await getConfig().catch(() => null);
+    if (config) {
+      config.server = {
+        url,
+        username,
+        auto_connect: true,
+        role: session.user.role,
+        display_name: session.user.display_name,
+      };
+      if (provisionedAccount) {
+        config.account = {
           display_name: provisionedAccount.displayName,
           sip_uri: provisionedAccount.sipUri,
           registrar_uri: provisionedAccount.registrarUri,
           auth_username: provisionedAccount.authUsername,
-          auth_password: creds.password,
           transport: provisionedAccount.transport,
-        });
-      }
-      setPassword("");
-
-      // Persist server URL in app config
-      const config = await getConfig().catch(() => null);
-      if (config) {
-        config.server = {
-          url,
-          username,
-          auto_connect: true,
-          role: session.user.role,
-          display_name: session.user.display_name,
+          reg_expiry: 3600,
         };
-        if (provisionedAccount) {
-          config.account = {
-            display_name: provisionedAccount.displayName,
-            sip_uri: provisionedAccount.sipUri,
-            registrar_uri: provisionedAccount.registrarUri,
-            auth_username: provisionedAccount.authUsername,
-            transport: provisionedAccount.transport,
-            reg_expiry: 3600,
-          };
-        }
-        await saveSettings(config).catch(() => {});
       }
+      await saveSettings(config).catch(() => {});
+    }
+    toast({ type: "success", title: "Connected to server" });
+  };
 
-      toast({ type: "success", title: "Connected to server" });
+  const handleConnect = async () => {
+    if (!url || !password) return;
+    setTesting(true);
+    try {
+      const phase = await loginWithPossibleMfa(url, username, password);
+      if (phase.kind === "mfa_pending") {
+        setMfaPending({ token: phase.pendingToken });
+        toast({ type: "info", title: "Enter your MFA code to finish signing in" });
+        return;
+      }
+      await applySession(phase.session);
     } catch (err) {
       toast({ type: "error", title: err instanceof Error ? err.message : "Connection failed" });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const handleMfaSubmit = async () => {
+    if (!mfaPending || !mfaCode.trim()) return;
+    setTesting(true);
+    try {
+      let session;
+      if (mfaSetup) {
+        session = await enrollAndValidateMfa(url, mfaPending.token, mfaCode.trim());
+      } else {
+        try {
+          session = await completeMfaLogin(url, mfaPending.token, mfaCode.trim());
+        } catch (err) {
+          const msg = String(err);
+          if (msg.includes("not enabled") || msg.includes("not configured") || msg.includes("not set up")) {
+            const setup = await beginMfaEnrollment(url, mfaPending.token);
+            setMfaSetup(setup);
+            toast({ type: "info", title: "Set up authenticator, then enter a new code" });
+            return;
+          }
+          throw err;
+        }
+      }
+      await applySession(session);
+    } catch (err) {
+      toast({ type: "error", title: err instanceof Error ? err.message : "MFA failed" });
     } finally {
       setTesting(false);
     }
@@ -394,6 +454,38 @@ function ServerSettingsPanel() {
             placeholder="password"
             type="password"
           />
+          {mfaPending && (
+            <>
+              {mfaSetup && (
+                <div className="p-3 rounded-md bg-elevated border border-border-subtle text-xs text-secondary space-y-1">
+                  <p className="font-medium text-primary">Authenticator setup</p>
+                  <p className="break-all font-mono">{mfaSetup.secret_base32}</p>
+                  <p className="text-tertiary">Enter a code from the app after adding this secret.</p>
+                </div>
+              )}
+              <FormField
+                label="MFA code"
+                value={mfaCode}
+                onChange={setMfaCode}
+                placeholder="123456"
+              />
+              <button
+                type="button"
+                className="text-xs text-accent hover:underline"
+                onClick={async () => {
+                  if (!mfaPending) return;
+                  try {
+                    const setup = await beginMfaEnrollment(url, mfaPending.token);
+                    setMfaSetup(setup);
+                  } catch (err) {
+                    toast({ type: "error", title: String(err) });
+                  }
+                }}
+              >
+                Set up authenticator
+              </button>
+            </>
+          )}
         </>
       )}
 
@@ -418,6 +510,18 @@ function ServerSettingsPanel() {
             )}
           >
             Disconnect
+          </button>
+        ) : mfaPending ? (
+          <button
+            onClick={handleMfaSubmit}
+            disabled={testing || !mfaCode.trim()}
+            className={cn(
+              "flex-1 px-4 py-2 rounded-md text-sm font-medium",
+              "bg-accent text-inverse hover:bg-accent-hover transition-colors",
+              "disabled:opacity-60"
+            )}
+          >
+            {testing ? "Verifying..." : "Verify MFA"}
           </button>
         ) : (
           <button

@@ -28,7 +28,8 @@ import { useMeetingReminders } from "@/hooks/useMeetingReminders";
 import { useUnreadBadge } from "@/hooks/useUnreadBadge";
 import { useServerStore } from "@/store/serverStore";
 import { useAccountStore } from "@/store/accountStore";
-import { getConfig, getSipPassword, openPopoutWindow, paleLogin, registerAccount, saveSettings, storeSipPassword } from "@/lib/tauri";
+import { getConfig, getSipPassword, openPopoutWindow, registerAccount, saveSettings, storeSipPassword } from "@/lib/tauri";
+import { loginWithPossibleMfa } from "@/lib/mfaLogin";
 import { normalizeProvisionedSipAccount } from "@/lib/sipDefaults";
 
 /**
@@ -148,7 +149,19 @@ export function AppShell() {
       return false;
     }
 
-    const response = await paleLogin(config.server.url, config.server.username, savedPassword);
+    const phase = await loginWithPossibleMfa(
+      config.server.url,
+      config.server.username,
+      savedPassword,
+    );
+    if (phase.kind === "mfa_pending") {
+      // Auto-login cannot complete MFA without a code. Clear silent reconnect and prompt.
+      setConnectionIssue(
+        "Multi-factor authentication is required. Open Settings → Server and sign in with your MFA code.",
+      );
+      return false;
+    }
+    const response = phase.session;
     sessionStorage.setItem("pale.admin.token", response.token);
     setServerConnection(config.server.url, response.token, response.expires_at, response.user.role, response.user.display_name);
     config.server = {
@@ -162,7 +175,8 @@ export function AppShell() {
     const registrarUri = response.sip_credentials?.registrar_uri ?? null;
     if (response.sip_credentials && registrarUri) {
       const creds = response.sip_credentials;
-      await storeSipPassword(creds.sip_uri, creds.password).catch(() => {});
+      const sipPassword = creds.password || savedPassword;
+      await storeSipPassword(creds.sip_uri, sipPassword).catch(() => {});
       const account = normalizeProvisionedSipAccount({
         displayName: response.user.display_name,
         sipUri: creds.sip_uri,
@@ -178,7 +192,7 @@ export function AppShell() {
           sip_uri: account.sipUri,
           registrar_uri: account.registrarUri,
           auth_username: account.authUsername,
-          auth_password: creds.password,
+          auth_password: sipPassword,
           transport: account.transport,
         });
         config.account = {
