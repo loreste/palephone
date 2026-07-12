@@ -1,7 +1,10 @@
 package com.pale.softphone
 
 import android.app.Activity
+import android.content.Context
+import android.hardware.camera2.CameraManager
 import android.util.Log
+import org.pjsip.PjCameraInfo2
 
 /**
  * JNI entry points for PJSIP Android media.
@@ -36,6 +39,12 @@ object PaleJni {
             } catch (_: Throwable) {
                 Log.w(TAG, "org.pjsip camera classes not on classpath yet")
             }
+
+            // PJSIP camera2 backend requires a CameraManager before device enum.
+            val cm = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            PjCameraInfo2.SetCameraManager(cm)
+            Log.i(TAG, "CameraManager registered with PjCameraInfo2")
+
             nativePrepareVideoBackend()
             PaleVideoOverlay.ensureAttached(activity)
             Log.i(TAG, "PJSIP video backend prepared")
