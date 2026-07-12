@@ -11,10 +11,17 @@ static JVM_READY: AtomicBool = AtomicBool::new(false);
 
 extern "C" {
     fn pale_android_jvm_ready() -> i32;
+    /// Ensures the pale_android_jni object file is linked into libpale_lib.so.
+    fn pale_android_force_link();
 }
 
 /// True when Pale's JNI_OnLoad (or prepare) has stored a JavaVM for PJSIP.
 pub fn ensure_pjsip_jvm() -> bool {
+    // Pull JNI_OnLoad / Java_* into the final .so (static archive GC otherwise drops them).
+    unsafe {
+        pale_android_force_link();
+    }
+
     if JVM_READY.load(Ordering::Acquire) {
         return true;
     }

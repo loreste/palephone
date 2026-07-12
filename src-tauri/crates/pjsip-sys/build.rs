@@ -141,7 +141,10 @@ fn compile_pale_android_jni() {
         build.compiler(cc_path);
     }
     build.compile("pale_android_jni");
+    // Keep the whole archive so JNI_OnLoad / Java_* are not GC'd as unreferenced.
+    println!("cargo:rustc-link-arg=-Wl,--whole-archive");
     println!("cargo:rustc-link-lib=static=pale_android_jni");
+    println!("cargo:rustc-link-arg=-Wl,--no-whole-archive");
     println!("cargo:rustc-link-lib=log");
 }
 

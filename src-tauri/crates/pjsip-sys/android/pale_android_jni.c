@@ -145,3 +145,10 @@ int pale_android_jvm_ready(void)
 {
     return g_vm != NULL ? 1 : 0;
 }
+
+/*
+ * Anchor symbol referenced from Rust so the static archive object containing
+ * JNI_OnLoad / Java_* is not dropped by --gc-sections / archive member GC.
+ */
+void pale_android_force_link(void) {}
+
