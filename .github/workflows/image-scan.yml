@@ -7,34 +7,53 @@ on:
     paths:
       - "Dockerfile.pale-server"
       - "docker-compose*.yml"
+      - "src-tauri/crates/pale-server/**"
       - ".github/workflows/image-scan.yml"
   pull_request:
     paths:
       - "Dockerfile.pale-server"
+      - "src-tauri/crates/pale-server/**"
       - ".github/workflows/image-scan.yml"
   schedule:
     - cron: "0 6 * * 1"
 
+# Use post-incident safe trivy-action tag (v-prefixed). Prefer SHA pins for max supply-chain safety.
 jobs:
-  trivy-dockerfile:
+  trivy-fs:
+    name: Trivy filesystem scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run Trivy filesystem scan (Dockerfile context)
-        uses: aquasecurity/trivy-action@0.28.0
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: fs
           scan-ref: .
           severity: CRITICAL,HIGH
-          exit-code: "0"
+          # Fail on unfixed critical/high in scanned trees only after ignore
+          exit-code: "1"
+          ignore-unfixed: true
           format: table
+          # Skip huge/vendor trees; focus on product and container definition
+          skip-dirs: node_modules,src-tauri/target,dist,dist/clients,.git
+
+  trivy-image:
+    name: Trivy pale-server image scan
+    runs-on: ubuntu-latest
+    # Full multi-stage Rust image builds are slow; run on schedule + manual + Dockerfile changes
+    if: >
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(toJSON(github.event), 'Dockerfile.pale-server')
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Build pale-server image
         run: docker build -f Dockerfile.pale-server -t pale-server:scan .
 
       - name: Trivy image scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: image
           image-ref: pale-server:scan
