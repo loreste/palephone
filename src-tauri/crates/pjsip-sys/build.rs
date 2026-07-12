@@ -24,9 +24,10 @@ fn main() {
     }
 
     // Android: ClassLoader-safe FindClass for org.pjsip.* from worker threads.
+    // JNI_OnLoad / pale_android_find_class live in pale-core (Rust) so they
+    // export from libpale_lib.so; we only patch PJSIP C here.
     if target_os == "android" {
         patch_android_video_jni(&pj_src_dir);
-        compile_pale_android_jni();
     }
 
     // Step 2: Build PJSIP if not already built
@@ -120,34 +121,6 @@ fn patch_android_video_jni(pj_src_dir: &Path) {
     println!("cargo:warning=Patched android_dev.c for ClassLoader-safe FindClass");
 }
 
-/// Compile Pale's Android JNI_OnLoad + ClassLoader helper into the link unit.
-fn compile_pale_android_jni() {
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let c_file = manifest_dir.join("android/pale_android_jni.c");
-    if !c_file.exists() {
-        panic!("missing {}", c_file.display());
-    }
-
-    let mut build = cc::Build::new();
-    build.file(&c_file);
-    build.flag_if_supported("-fPIC");
-
-    // NDK sysroot for jni.h / android/log.h
-    if let Ok(sysroot) = env::var("PALE_ANDROID_SYSROOT") {
-        build.flag(&format!("--sysroot={sysroot}"));
-        build.include(format!("{sysroot}/usr/include"));
-    }
-    if let Ok(cc_path) = env::var("PALE_ANDROID_CC") {
-        build.compiler(cc_path);
-    }
-    build.compile("pale_android_jni");
-    // Keep the whole archive so JNI_OnLoad / Java_* are not GC'd as unreferenced.
-    println!("cargo:rustc-link-arg=-Wl,--whole-archive");
-    println!("cargo:rustc-link-lib=static=pale_android_jni");
-    println!("cargo:rustc-link-arg=-Wl,--no-whole-archive");
-    println!("cargo:rustc-link-lib=log");
-}
-
 /// Write config_site.h with platform-appropriate defines
 fn write_config_site(pj_src_dir: &Path, target_os: &str) {
     let config_path = pj_src_dir.join("pjlib/include/pj/config_site.h");
@@ -187,11 +160,11 @@ fn write_config_site(pj_src_dir: &Path, target_os: &str) {
             config.push_str("#define PJMEDIA_AUDIO_DEV_HAS_OPENSL 1\n");
             config.push_str("#define PJMEDIA_AUDIO_DEV_HAS_ANDROID 1\n");
             // Camera capture (JNI org.pjsip.PjCamera*) + OpenGL renderer.
-            // Requires: packaged Java classes, JVM via pale_android_jni.c, and
-            // ClassLoader-safe FindClass patch (applied after extract).
+            // Requires: packaged Java classes, JVM via pale-core android_jni.rs
+            // (Rust JNI_OnLoad), and ClassLoader-safe FindClass patch.
             config.push_str("#define PJMEDIA_VIDEO_DEV_HAS_ANDROID 1\n");
             config.push_str("#define PJMEDIA_VIDEO_DEV_HAS_ANDROID_OPENGL 1\n");
-            // We own JNI_OnLoad in pale_android_jni.c (Tauri + PJSIP cannot both).
+            // Pale owns JNI_OnLoad in pale-core (Tauri + PJSIP cannot both define it).
             config.push_str("#define PJ_JNI_HAS_JNI_ONLOAD 0\n");
             config.push_str("#define PJ_ANDROID 1\n");
         }

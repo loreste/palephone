@@ -7,7 +7,7 @@
 | `packaging/android/java/org/pjsip/*.java` | PJSIP camera JNI classes (`PjCamera2`, etc.) |
 | `src-tauri/android/PaleJni.kt` | Early `JNI_OnLoad` companion + `prepare()` |
 | `src-tauri/android/PaleVideoOverlay.kt` | SurfaceView overlays for remote/local video |
-| `src-tauri/crates/pjsip-sys/android/pale_android_jni.c` | `JNI_OnLoad`, ClassLoader cache, `pale_android_find_class` |
+| `src-tauri/crates/pale-core/src/android_jni.rs` | Rust `JNI_OnLoad`, ClassLoader cache, `pale_android_find_class` |
 
 CI (`.github/workflows/android.yml`) copies Java/Kotlin into `src-tauri/gen/android` after `tauri android init` and hooks `PaleJni.prepare(this)` into `MainActivity.onCreate`.
 

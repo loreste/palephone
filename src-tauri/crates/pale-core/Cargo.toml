@@ -17,3 +17,6 @@ chrono = { version = "0.4", features = ["serde"] }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
