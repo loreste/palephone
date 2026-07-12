@@ -5565,6 +5565,86 @@ impl AppState {
         }
     }
 
+    /// Probe YARA rules path and host `yara` binary availability.
+    pub async fn probe_yara(&self) -> YaraProbeResult {
+        match yara_rules_path() {
+            None => YaraProbeResult {
+                configured: false,
+                rules_path: None,
+                binary_available: false,
+                rules_readable: false,
+                detail: "PALE_YARA_RULES is not set".to_string(),
+            },
+            Some(path) => {
+                let rules_readable = path.is_file();
+                let binary_available = tokio::process::Command::new("yara")
+                    .arg("--version")
+                    .output()
+                    .await
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                let detail = match (rules_readable, binary_available) {
+                    (true, true) => format!("ready rules={}", path.display()),
+                    (false, true) => format!("yara binary ok but rules missing: {}", path.display()),
+                    (true, false) => "rules present but `yara` binary not found on PATH".to_string(),
+                    (false, false) => "rules missing and `yara` binary not found".to_string(),
+                };
+                YaraProbeResult {
+                    configured: true,
+                    rules_path: Some(path.display().to_string()),
+                    binary_available,
+                    rules_readable,
+                    detail,
+                }
+            }
+        }
+    }
+
+    /// Export enterprise validation checks as CSV for auditors.
+    pub async fn enterprise_validation_csv(&self) -> String {
+        let report = self.enterprise_validation_report().await;
+        let mut out = String::from("id,area,status,summary,blockers,evidence\n");
+        for check in &report.checks {
+            let blockers = check.blockers.join("|").replace(',', ";");
+            let evidence = check.evidence.join("|").replace(',', ";");
+            let summary = check.summary.replace(',', ";").replace('\n', " ");
+            out.push_str(&format!(
+                "{},{},{},{},{},{}\n",
+                check.id, check.area, check.status, summary, blockers, evidence
+            ));
+        }
+        out.push_str(&format!(
+            "# ready={},score={},passed={},warning={},failed={}\n",
+            report.ready, report.score, report.passed, report.warning, report.failed
+        ));
+        out
+    }
+
+    /// Require a second distinct admin principal (bearer token) for high-risk actions.
+    pub fn require_second_admin(
+        &self,
+        primary_principal: &str,
+        confirm_token: Option<&str>,
+    ) -> Result<String, String> {
+        let token = confirm_token
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| {
+                "second admin confirmation required (confirm_token of another admin session)"
+                    .to_string()
+            })?;
+        let (confirm_principal, role) = self
+            .principal_role_for_bearer(token)
+            .ok_or_else(|| "confirm_token is invalid or expired".to_string())?;
+        if role != ROLE_ADMIN && role != "admin" {
+            return Err("confirm_token must belong to an admin".to_string());
+        }
+        if confirm_principal == primary_principal {
+            return Err("confirm_token must be a different admin principal".to_string());
+        }
+        Ok(confirm_principal)
+    }
+
     pub fn quarantine_malware_upload(
         &self,
         owner: &str,
@@ -5996,6 +6076,30 @@ impl AppState {
         Some(pending)
     }
 
+    /// HTTP client for OIDC/JWKS. Optionally pins a custom CA bundle via
+    /// `PALE_OIDC_CA_BUNDLE` (PEM path) for enterprise IdP TLS trust.
+    fn oidc_http_client() -> reqwest::Client {
+        let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
+        if let Ok(path) = std::env::var("PALE_OIDC_CA_BUNDLE") {
+            let path = path.trim();
+            if !path.is_empty() {
+                match std::fs::read(path) {
+                    Ok(pem) => match reqwest::Certificate::from_pem(&pem) {
+                        Ok(cert) => {
+                            builder = builder
+                                .add_root_certificate(cert)
+                                .tls_built_in_root_certs(true);
+                            log::info!("OIDC TLS: using custom CA bundle {path}");
+                        }
+                        Err(e) => log::warn!("OIDC CA bundle parse failed ({path}): {e}"),
+                    },
+                    Err(e) => log::warn!("OIDC CA bundle read failed ({path}): {e}"),
+                }
+            }
+        }
+        builder.build().unwrap_or_else(|_| reqwest::Client::new())
+    }
+
     /// Fetch and cache OIDC discovery document from the provider's well-known endpoint.
     pub async fn discover_oidc_config(&self, issuer_url: &str) -> Result<OidcDiscovery, String> {
         // Return cached if fresh (< 1 hour)
@@ -6010,10 +6114,7 @@ impl AppState {
             "{}/.well-known/openid-configuration",
             issuer_url.trim_end_matches('/')
         );
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = Self::oidc_http_client();
         let resp = client
             .get(&well_known_url)
             .send()
@@ -6057,10 +6158,7 @@ impl AppState {
         jwks_uri: &str,
         kid: &str,
     ) -> Result<(jsonwebtoken::DecodingKey, jsonwebtoken::Algorithm), String> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = Self::oidc_http_client();
         let resp = client
             .get(jwks_uri)
             .send()
@@ -6137,10 +6235,7 @@ impl AppState {
         let discovery = self.discover_oidc_config(&provider.issuer_url).await?;
 
         // 3. Exchange the authorization code for tokens
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = Self::oidc_http_client();
         let token_resp = client
             .post(&discovery.token_endpoint)
             .form(&[
@@ -18726,6 +18821,16 @@ pub struct ClamAvProbeResult {
     pub required: bool,
 }
 
+/// Result of a YARA rules / binary readiness probe.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YaraProbeResult {
+    pub configured: bool,
+    pub rules_path: Option<String>,
+    pub binary_available: bool,
+    pub rules_readable: bool,
+    pub detail: String,
+}
+
 fn malware_signature_detected(filename: &str, content_type: &str, body: &[u8]) -> bool {
     // Local EICAR / test pattern check (always runs as a baseline)
     const EICAR: &[u8] = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
@@ -18745,7 +18850,44 @@ fn malware_signature_detected(filename: &str, content_type: &str, body: &[u8]) -
     false
 }
 
-/// Async malware scan: prefer ClamAV; fall back to local patterns unless ATP is required.
+/// Optional YARA rules file path (`PALE_YARA_RULES`). Uses system `yara` CLI when present.
+fn yara_rules_path() -> Option<std::path::PathBuf> {
+    std::env::var("PALE_YARA_RULES")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// Scan bytes with the host `yara` binary against `PALE_YARA_RULES`.
+/// Returns Ok(true) if any rule matched.
+async fn yara_scan(body: &[u8]) -> Result<bool, String> {
+    let rules = yara_rules_path().ok_or_else(|| "PALE_YARA_RULES not set".to_string())?;
+    if !rules.is_file() {
+        return Err(format!("YARA rules file missing: {}", rules.display()));
+    }
+    let tmp = std::env::temp_dir().join(format!("pale-yara-{}.bin", Uuid::new_v4()));
+    tokio::fs::write(&tmp, body)
+        .await
+        .map_err(|e| format!("YARA temp write failed: {e}"))?;
+    let output = tokio::process::Command::new("yara")
+        .arg("-w")
+        .arg(&rules)
+        .arg(&tmp)
+        .output()
+        .await
+        .map_err(|e| format!("YARA exec failed (is `yara` installed?): {e}"))?;
+    let _ = tokio::fs::remove_file(&tmp).await;
+    // yara exits 0 with matches printed; also 0 with no matches. Non-zero is error.
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("YARA failed: {stderr}"));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(!stdout.trim().is_empty())
+}
+
+/// Async malware scan: prefer ClamAV; optional YARA; local patterns unless ATP is required.
 async fn malware_scan_async(filename: &str, content_type: &str, body: &[u8]) -> MalwareScanOutcome {
     // Local EICAR / test patterns always run first (cheap and deterministic).
     if malware_signature_detected(filename, content_type, body) {
@@ -18755,21 +18897,36 @@ async fn malware_scan_async(filename: &str, content_type: &str, body: &[u8]) -> 
     if let Some(host) = clamav_host() {
         match clamav_scan(&host, body).await {
             Ok(true) => return MalwareScanOutcome::Infected,
-            Ok(false) => return MalwareScanOutcome::Clean,
+            Ok(false) => { /* continue to YARA */ }
             Err(e) => {
                 log::error!("ClamAV scan failed: {e}");
                 if atp_required() {
                     return MalwareScanOutcome::ScannerUnavailable(e);
                 }
-                // Soft mode: allow when ClamAV is down unless local patterns hit.
-                return MalwareScanOutcome::Clean;
             }
         }
     }
 
+    if yara_rules_path().is_some() {
+        match yara_scan(body).await {
+            Ok(true) => return MalwareScanOutcome::Infected,
+            Ok(false) => {}
+            Err(e) => {
+                log::error!("YARA scan failed: {e}");
+                if atp_required() {
+                    return MalwareScanOutcome::ScannerUnavailable(e);
+                }
+            }
+        }
+    }
+
+    if clamav_host().is_some() || yara_rules_path().is_some() {
+        return MalwareScanOutcome::Clean;
+    }
+
     if atp_required() {
         return MalwareScanOutcome::ScannerUnavailable(
-            "ATP required but PALE_CLAMAV_HOST is not set".to_string(),
+            "ATP required but PALE_CLAMAV_HOST / PALE_YARA_RULES not set".to_string(),
         );
     }
 

@@ -7,12 +7,30 @@ As an admin bearer:
 ```bash
 # Suggest new admin password, server token, storage key (does not apply them)
 curl -sS -X POST "$BASE/v1/admin/rotate-admin-password" \
-  -H "Authorization: Bearer $TOKEN" -H "User-Agent: Pale/admin"
+  -H "Authorization: Bearer $TOKEN" -H "User-Agent: Pale/admin" \
+  -H "Content-Type: application/json" \
+  -d '{}'
 
 # Suggest new server token only
 curl -sS -X POST "$BASE/v1/admin/rotate-server-token" \
-  -H "Authorization: Bearer $TOKEN" -H "User-Agent: Pale/admin"
+  -H "Authorization: Bearer $TOKEN" -H "User-Agent: Pale/admin" \
+  -H "Content-Type: application/json" \
+  -d '{}'
 ```
+
+### Dual-admin confirmation (production)
+
+Set `PALE_REQUIRE_DUAL_ADMIN=true`. Secret generation then requires a second
+admin’s session token:
+
+```bash
+curl -sS -X POST "$BASE/v1/admin/rotate-server-token" \
+  -H "Authorization: Bearer $ADMIN_A" -H "User-Agent: Pale/admin" \
+  -H "Content-Type: application/json" \
+  -d "{\"confirm_token\":\"$ADMIN_B_TOKEN\"}"
+```
+
+`confirm_token` must be a valid admin bearer for a **different** principal.
 
 Copy values into `/etc/pale-server/pale-server.env` or Docker `.env`, then
 **restart** pale-server. Secrets are not written to the database by these

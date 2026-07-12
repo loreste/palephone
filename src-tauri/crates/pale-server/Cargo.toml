@@ -38,7 +38,8 @@ chacha20poly1305 = "0.10"
 rusqlite = { version = "0.37", features = ["bundled", "chrono", "uuid"] }
 tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
 deadpool-postgres = "0.14"
-ldap3 = { version = "0.11", default-features = false, features = ["tls-rustls"] }
+# ldap3 0.12 uses rustls 0.23 (avoids rustls-webpki 0.101 GHSA).
+ldap3 = { version = "0.12", default-features = false, features = ["tls-rustls-aws-lc-rs"] }
 chrono-tz = "0.10"
 rand = "0.8"
 regex = "1"
@@ -49,7 +50,8 @@ jsonwebtoken = "9"
 url = "2"
 urlencoding = "2"
 clap = { version = "4", features = ["derive"] }
-aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-s3 = "1"
+# Prefer modern rustls HTTPS client features from the AWS SDK stack.
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "credentials-process", "sso", "default-https-client"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "rustls", "default-https-client"] }
 p256 = { version = "0.13", features = ["ecdsa", "jwk"] }
 jwt-simple = "0.12"

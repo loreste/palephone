@@ -78,10 +78,12 @@ wired via env. Still deeper adapters needed for:
 ### 2. End-to-End Enterprise Validation
 
 Validation now includes live workflow checks (DLP, MFA policy, registrar,
-LiveKit, ClamAV ping, storage, PSTN). Still useful:
+LiveKit, ClamAV ping, storage, PSTN) and CSV export at
+`/v1/admin/enterprise-integrations/validation.csv`. Pale Server CI runs a
+local binary smoke (`/health`, `/ready`, validation CSV). Still useful:
 
-- exportable certification PDF/CSV package for auditors
-- automated E2E job that runs `scripts/smoke-test.sh` in CI against compose
+- full `scripts/smoke-test.sh` against docker-compose in CI
+- PDF packaging for auditors
 
 ### 3. Real-Time Scale Proof
 
@@ -99,11 +101,11 @@ burst). Still needed for large-event claims:
 
 ### 5. Security Hardening
 
-CSP, `/ready`, Trivy workflow, secret rotation docs, restore drill script are
-in place. Still open:
+CSP, `/ready`, Trivy workflow, secret rotation docs, restore drill, dual-admin
+secret generation (`PALE_REQUIRE_DUAL_ADMIN`), and OIDC custom CA bundle
+(`PALE_OIDC_CA_BUNDLE`) are in place. Still open:
 
-- OIDC certificate pinning for provider calls
-- stricter multi-approver workflows for high-risk admin actions
+- full certificate pinning (SPKI) beyond custom CA trust
 - shared session store for multi-API-node HA
 
 ### 6. Documentation and Operator Guides

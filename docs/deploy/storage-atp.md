@@ -64,6 +64,22 @@ curl -sS "$BASE/v1/admin/atp/clamav/probe" \
   -H "Authorization: Bearer $TOKEN" -H "User-Agent: Pale/admin"
 ```
 
-Enterprise validation includes the same probe under `workflow.atp_scanner`.
+Optional YARA (host `yara` binary + rules file):
+
+```bash
+PALE_YARA_RULES=/etc/pale-server/rules.yar
+curl -sS "$BASE/v1/admin/atp/yara/probe" \
+  -H "Authorization: Bearer $TOKEN" -H "User-Agent: Pale/admin"
+```
+
+Enterprise validation includes ClamAV under `workflow.atp_scanner`.
+
+Export auditor CSV:
+
+```bash
+curl -sS "$BASE/v1/admin/enterprise-integrations/validation.csv" \
+  -H "Authorization: Bearer $TOKEN" -H "User-Agent: Pale/admin" \
+  -o pale-validation.csv
+```
 
 Admin cloud storage status reports S3 when `PALE_S3_*` is active.

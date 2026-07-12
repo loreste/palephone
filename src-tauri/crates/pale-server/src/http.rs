@@ -952,7 +952,12 @@ pub fn router(state: SharedState) -> Router {
             "/v1/admin/enterprise-integrations/validation",
             get(enterprise_validation_report),
         )
+        .route(
+            "/v1/admin/enterprise-integrations/validation.csv",
+            get(enterprise_validation_csv),
+        )
         .route("/v1/admin/atp/clamav/probe", get(probe_clamav))
+        .route("/v1/admin/atp/yara/probe", get(probe_yara))
         .route(
             "/v1/admin/enterprise-integrations/deployment-plan",
             get(enterprise_deployment_plan),
@@ -7921,14 +7926,49 @@ async fn rotate_encryption_key(
     Ok(Json(config))
 }
 
+#[derive(Default, serde::Deserialize)]
+struct DualAdminConfirm {
+    /// Bearer token of a second admin (different principal). Required when
+    /// `PALE_REQUIRE_DUAL_ADMIN=true`.
+    #[serde(default)]
+    confirm_token: Option<String>,
+}
+
+fn dual_admin_required() -> bool {
+    std::env::var("PALE_REQUIRE_DUAL_ADMIN")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        // Default off so single-admin labs still work; enable in production.
+        .unwrap_or(false)
+}
+
 /// Generate fresh secrets for rotation. The admin copies the new values
 /// into the environment file and restarts the server. This ensures
 /// secrets are never stored in the database or transmitted unnecessarily.
 async fn rotate_admin_password(
     State(state): State<SharedState>,
     headers: HeaderMap,
+    body: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
+    let confirm: DualAdminConfirm = if body.is_empty() {
+        DualAdminConfirm::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| ApiError::Conflict(e.to_string()))?
+    };
+    let second = if dual_admin_required() {
+        Some(
+            state
+                .require_second_admin(&principal, confirm.confirm_token.as_deref())
+                .map_err(ApiError::Conflict)?,
+        )
+    } else {
+        None
+    };
     use rand::Rng;
     let mut rng = rand::thread_rng();
     let new_password: String = (0..32)
@@ -7950,20 +7990,40 @@ async fn rotate_admin_password(
         })
         .collect();
 
-    state.record_audit_event(&principal, "secrets.generated", None);
+    state.record_audit_event(
+        &principal,
+        "secrets.generated",
+        second.map(|s| format!("second_admin={s}")),
+    );
     Ok(Json(json!({
         "PALE_ADMIN_PASSWORD": new_password,
         "PALE_SERVER_TOKEN": new_token,
         "PALE_STORAGE_KEY": new_storage_key,
-        "instructions": "Update your .env file with these values and restart the server. Do NOT store these in the database."
+        "instructions": "Update your .env file with these values and restart the server. Do NOT store these in the database.",
+        "dual_admin_required": dual_admin_required(),
     })))
 }
 
 async fn rotate_server_token(
     State(state): State<SharedState>,
     headers: HeaderMap,
+    body: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let principal = authenticated_admin(&headers, &state)?;
+    let confirm: DualAdminConfirm = if body.is_empty() {
+        DualAdminConfirm::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| ApiError::Conflict(e.to_string()))?
+    };
+    let second = if dual_admin_required() {
+        Some(
+            state
+                .require_second_admin(&principal, confirm.confirm_token.as_deref())
+                .map_err(ApiError::Conflict)?,
+        )
+    } else {
+        None
+    };
     use rand::Rng;
     let mut rng = rand::thread_rng();
     let new_token: String = (0..44)
@@ -7973,10 +8033,15 @@ async fn rotate_server_token(
         })
         .collect();
 
-    state.record_audit_event(&principal, "server.token_generated", None);
+    state.record_audit_event(
+        &principal,
+        "server.token_generated",
+        second.map(|s| format!("second_admin={s}")),
+    );
     Ok(Json(json!({
         "PALE_SERVER_TOKEN": new_token,
-        "instructions": "Update your .env file and restart the server. All existing sessions will be invalidated."
+        "instructions": "Update your .env file and restart the server. All existing sessions will be invalidated.",
+        "dual_admin_required": dual_admin_required(),
     })))
 }
 
@@ -10586,6 +10651,45 @@ async fn probe_clamav(
         )),
     );
     Ok(Json(result))
+}
+
+async fn probe_yara(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::YaraProbeResult>, ApiError> {
+    let principal = authenticated_admin(&headers, &state)?;
+    let result = state.probe_yara().await;
+    state.record_audit_event(
+        &principal,
+        "atp.yara_probed",
+        Some(result.detail.clone()),
+    );
+    Ok(Json(result))
+}
+
+async fn enterprise_validation_csv(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    authenticated_admin(&headers, &state)?;
+    let csv = state.enterprise_validation_csv().await;
+    Ok((
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/csv; charset=utf-8"),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                HeaderValue::from_static(
+                    "attachment; filename=\"pale-enterprise-validation.csv\"",
+                ),
+            ),
+        ],
+        csv,
+    )
+        .into_response())
 }
 
 async fn enterprise_deployment_plan(

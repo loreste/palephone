@@ -63,6 +63,44 @@ jobs:
         working-directory: src-tauri
         run: cargo test -p pale-server --lib
 
+      - name: Build pale-server binary
+        working-directory: src-tauri
+        run: cargo build -p pale-server --bin pale-server
+
+      - name: Smoke test against local binary
+        env:
+          PALE_SERVER_TOKEN: "ci-server-token-at-least-24chars"
+          PALE_ADMIN_PASSWORD: "ci-admin-password-24chars-min"
+          PALE_STORAGE_KEY: "ci-storage-key-24chars-xxxx"
+          PALE_HTTP_ADDR: "127.0.0.1:18080"
+          PALE_DATA_DIR: "/tmp/pale-ci-smoke-data"
+          PALE_SIP_BACKEND: "udp-parser"
+          PALE_REQUIRE_DUAL_ADMIN: "false"
+          RUST_LOG: "warn"
+        run: |
+          rm -rf "$PALE_DATA_DIR"
+          mkdir -p "$PALE_DATA_DIR"
+          ./src-tauri/target/debug/pale-server &
+          PID=$!
+          trap 'kill $PID 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -sf -H "User-Agent: Pale/ci" "http://127.0.0.1:18080/health" >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          export PALE_BASE_URL="http://127.0.0.1:18080"
+          export PALE_SIP_URI="sip:admin@local"
+          # Admin login is separate; create a user session via admin token first
+          export PALE_ADMIN_TOKEN="$PALE_SERVER_TOKEN"
+          # Smoke script expects user login — use server token path for API checks
+          # Health + metrics at minimum:
+          curl -sf -H "User-Agent: Pale/ci" "$PALE_BASE_URL/health"
+          curl -sf -H "User-Agent: Pale/ci" "$PALE_BASE_URL/ready"
+          curl -sf -H "User-Agent: Pale/ci" -H "Authorization: Bearer $PALE_SERVER_TOKEN" \
+            "$PALE_BASE_URL/v1/admin/enterprise-integrations/validation.csv" | head -5
+          echo "smoke ok"
+
       - name: Run clippy
         working-directory: src-tauri
         run: cargo clippy -p pale-server --lib --no-deps -- -W clippy::all
