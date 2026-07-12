@@ -8,6 +8,8 @@ pub mod types;
 
 #[cfg(target_os = "android")]
 pub mod android_jni;
+#[cfg(target_os = "android")]
+pub mod android_video;
 
 pub use call_history::{CallHistoryDb, CallRecord};
 pub use config::{

@@ -124,7 +124,6 @@ object PaleVideoOverlay {
         ensureAttached(activity)
         activity.runOnUiThread {
             remoteView?.visibility = if (visible) View.VISIBLE else View.GONE
-            // When remote is visible, let the surface receive layout
             root?.bringToFront()
         }
     }
@@ -135,6 +134,25 @@ object PaleVideoOverlay {
         activity.runOnUiThread {
             localView?.visibility = if (visible) View.VISIBLE else View.GONE
             root?.bringToFront()
+        }
+    }
+
+    /** Visibility toggles for native code (views already attached). */
+    @JvmStatic
+    fun setRemoteVisibleNoActivity(visible: Boolean) {
+        val v = if (visible) View.VISIBLE else View.GONE
+        remoteView?.post {
+            remoteView?.visibility = v
+            if (visible) root?.bringToFront()
+        }
+    }
+
+    @JvmStatic
+    fun setLocalVisibleNoActivity(visible: Boolean) {
+        val v = if (visible) View.VISIBLE else View.GONE
+        localView?.post {
+            localView?.visibility = v
+            if (visible) root?.bringToFront()
         }
     }
 

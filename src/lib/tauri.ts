@@ -78,7 +78,8 @@ export async function makeCall(uri: string): Promise<void> {
 }
 
 export async function answerCall(callId: number): Promise<void> {
-  await requestMediaForNativeCall(false);
+  // Request camera as well so video offers can be accepted (Android/desktop).
+  await requestMediaForNativeCall(true);
   return invoke("answer_call", { callId });
 }
 

@@ -13,6 +13,15 @@ CI (`.github/workflows/android.yml`) copies Java/Kotlin into `src-tauri/gen/andr
 
 Native side re-enables `PJMEDIA_VIDEO_DEV_HAS_ANDROID` + OpenGL renderer, disables PJSIP's own `JNI_OnLoad` (Pale owns it), and patches `android_dev.c` so `FindClass` uses the app ClassLoader from the PJSIP worker thread.
 
+### Live video call path
+
+1. `PaleJni.prepare` registers `CameraManager` and attaches overlays.
+2. Video call / answer uses `vid_cnt = 1`.
+3. On media active, `android_video::bind_call_video`:
+   - shows remote + local SurfaceViews
+   - `pjsua_vid_win_set_win` binds remote stream to remote Surface (`ANativeWindow`)
+   - `pjsua_vid_preview_start` draws local capture onto the PIP Surface
+
 ## Sideload signing certificate
 
 `pale-sideload.jks` is a **public sideload** signing key for CI and website

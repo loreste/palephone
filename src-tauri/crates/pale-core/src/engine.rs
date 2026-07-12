@@ -618,16 +618,31 @@ impl PjsipEngine {
 
     fn handle_answer_call(call_id: CallId, code: u16) {
         unsafe {
-            let status = pjsip_sys::pjsua_call_answer(
+            // Prefer answer2 with video so we accept offered video streams.
+            let mut opt: pjsip_sys::pjsua_call_setting = std::mem::zeroed();
+            pjsip_sys::pjsua_call_setting_default(&mut opt);
+            opt.aud_cnt = 1;
+            opt.vid_cnt = 1;
+            let status = pjsip_sys::pjsua_call_answer2(
                 call_id,
+                &opt,
                 code as u32,
                 std::ptr::null(),
                 std::ptr::null(),
             );
             if status != 0 {
-                emit_event(PaleEvent::Error {
-                    message: format!("Failed to answer call {}: status={}", call_id, status),
-                });
+                // Fallback without video if answer2 fails (e.g. older path).
+                let status = pjsip_sys::pjsua_call_answer(
+                    call_id,
+                    code as u32,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                );
+                if status != 0 {
+                    emit_event(PaleEvent::Error {
+                        message: format!("Failed to answer call {}: status={}", call_id, status),
+                    });
+                }
             }
         }
     }
@@ -776,6 +791,14 @@ impl PjsipEngine {
                 });
             } else {
                 log::info!("Video call initiated: call_id={}", call_id);
+                #[cfg(target_os = "android")]
+                {
+                    // Show local preview ASAP while the call is connecting.
+                    crate::android_video::set_overlays_visible(false, true);
+                    unsafe {
+                        crate::android_video::start_local_preview();
+                    }
+                }
             }
         }
     }
@@ -1321,12 +1344,25 @@ unsafe extern "C" fn on_call_media_state(call_id: pjsip_sys::pjsua_call_id) {
     }
 
     if has_incoming_video || has_outgoing_video {
+        #[cfg(target_os = "android")]
+        {
+            crate::android_video::bind_call_video(
+                call_id,
+                has_incoming_video,
+                has_outgoing_video,
+            );
+        }
         emit_event(PaleEvent::VideoStreamState {
             call_id,
             active: true,
             has_incoming: has_incoming_video,
             has_outgoing: has_outgoing_video,
         });
+    } else {
+        #[cfg(target_os = "android")]
+        {
+            crate::android_video::bind_call_video(call_id, false, false);
+        }
     }
 }
 

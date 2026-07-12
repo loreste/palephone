@@ -15,12 +15,12 @@ import { invoke } from "@tauri-apps/api/core";
 /**
  * Video call view — displays remote and self video with call controls.
  *
- * PJSIP renders video via platform-native windows (AVFoundation on macOS,
- * DirectShow on Windows). These native windows overlay the app and are
- * positioned/shown automatically by the engine when a video stream is active.
+ * PJSIP renders video via platform-native surfaces:
+ * - macOS: AVFoundation overlay windows
+ * - Windows: DirectShow / native windows
+ * - Android: PaleVideoOverlay SurfaceViews (remote full-bleed + local PIP)
  *
- * The React UI provides the call controls and status information beneath
- * the native video overlay area.
+ * The React UI provides controls and status; native layers draw video on top.
  */
 export function VideoCallView() {
   const { sessions, activeCallId, setMuted, setHeld, updateSessionState, removeSession } =
