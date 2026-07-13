@@ -154,8 +154,8 @@ are demos you can record; admin dual-control and retention are operator-proven.
 
 | # | Work item | Touch points |
 |---|-----------|--------------|
-| 2.1 | **Shared session store** — Redis or Postgres-backed sessions so API replicas share auth state (documented in `ha.md` as missing today) | `pale-server` session create/refresh/revoke; env `PALE_SESSION_STORE_*` |
-| 2.2 | **Session revocation propagation** — revoke-all and per-session delete visible on all API nodes within seconds | sessions API already present; store makes it real in HA |
+| 2.1 | **Shared session store** — Postgres-backed sessions so API replicas share auth state | `admin_sessions` + `put_auth_session` / PG miss path | **landed** (when `PALE_DATABASE_URL` set) |
+| 2.2 | **Session revocation propagation** — revoke-all and per-session delete visible on all API nodes | delete by token / token_hash / principal in PG | **landed** |
 | 2.3 | **OIDC production polish** — custom CA already (`PALE_OIDC_CA_BUNDLE`); add group/role claim mapping docs + one automated integration test with mock OIDC if feasible | SSO routes in `http.rs`, `docs/deploy/sso-oidc.md` |
 | 2.4 | **DLP enforcement matrix** — document and test: chat send, file upload, and any meeting chat path; export violations; ensure policy packages can attach DLP | DLP APIs + smoke extension |
 | 2.5 | **Retention enforcement proof** — enable interval worker in lab; document RPO for deleted content; smoke asserts job runs | `PALE_RETENTION_ENFORCEMENT_*` already in `main.rs` |
@@ -164,8 +164,7 @@ are demos you can record; admin dual-control and retention are operator-proven.
 
 ### Acceptance
 
-- `docs/deploy/ha.md` “What is not implemented” drops **shared session store**
-  (or marks it available with Redis/Postgres config).
+- `docs/deploy/ha.md` documents shared auth sessions via Postgres (landed).
 - Load balancer can run ≥2 API nodes with shared store; sticky sessions
   optional for SSE only.
 - Smoke (or new `scripts/compliance-smoke.sh`) proves: SSO login path (mock or
@@ -301,8 +300,8 @@ Update this file’s checkboxes as work lands. When a milestone completes, add a
 one-line entry under “What Has Landed” in [NEXT_STEPS.md](NEXT_STEPS.md) and
 bump the coverage snapshot row statuses only when proof exists.
 
-**Next action:** M1 landed (smoke/evidence/runbooks/env template + room membership
-fix). Android **3.0 video path** landed (sideload APK + emulator validation;
-release `android-video-full-0.1.6`). Optional M0 UI readiness tags remain.
-Proceed to **M2** (shared session store + compliance proof) when ready; keep
-issue #1 open until physical-device sideload is confirmed.
+**Next action:** M1 landed. M2.1–2.2 shared auth sessions landed (Postgres
+`admin_sessions`). Android **3.0 video path** landed. Continue M2.3–2.7
+(OIDC polish, compliance smoke, retention/ATP proof) and Phase 0.3 SSO client
+login — see [procurement/IMPLEMENTATION_BACKLOG.md](procurement/IMPLEMENTATION_BACKLOG.md).
+Keep issue #1 open until physical-device sideload is confirmed.

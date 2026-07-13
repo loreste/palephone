@@ -35,7 +35,8 @@ Constraints:
 | State | Shared? | Implication |
 |-------|---------|-------------|
 | Postgres | Yes | Users, rooms, messages, CDR, files metadata |
-| Admin/user sessions | Process-local | Sticky sessions or shared session store (not built-in) |
+| Admin/user **auth** sessions | **Yes (Postgres)** when `PALE_DATABASE_URL` is set | Bearer tokens in `admin_sessions`; any API replica can resolve or revoke them. Local memory is a cache. |
+| Device session inventory | Yes (Postgres `user_sessions`) | List/revoke devices in Settings |
 | SIP registrations | Process-local | **One** registrar; clients re-REGISTER on fail |
 | SSE connections | Process-local | Sticky LB recommended for `/v1/events` |
 | File blobs | Local disk or S3 | Use MinIO/S3 for multi-node |
@@ -66,11 +67,24 @@ instances at the same `PALE_DATABASE_URL`. Never expose Postgres publicly.
 4. Clients re-register SIP (expect brief calling outage)  
 5. Re-attach coturn `external-ip` and LiveKit if used  
 
+## Shared auth sessions (implemented)
+
+When PostgreSQL is configured:
+
+1. Login / SSO / MFA completion **writes** the bearer session to `admin_sessions` (token, principal, role, expires_at, token_hash).  
+2. Each request resolves the bearer from **local cache**, then **Postgres on miss**.  
+3. Revoke / refresh / role change / deactivate **deletes** the row so other API nodes reject the token.  
+4. On startup, active sessions are warmed into the local cache (capped).
+
+No sticky sessions are required for bearer auth. Sticky LB is still recommended for **SSE** (`/v1/events`) only.
+
+Without `PALE_DATABASE_URL`, sessions remain process-local (SQLite / memory lab mode).
+
 ## What is not implemented
 
 - Multi-active SIP registrar with shared registration table  
-- Shared session store for bearer tokens across API nodes  
 - Automatic leader election for PBX runtime  
+- Shared SSE fanout across API nodes  
 
 Track those as product work before claiming multi-region active-active.
 

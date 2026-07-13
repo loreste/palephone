@@ -26,8 +26,8 @@ Last updated: 2026-07-12.
 | MFA (TOTP) | enforced | Enrollment UI; secrets encrypted; CA can require MFA |
 | Conditional access `require_mfa` | enforced | Password and SSO login paths |
 | Conditional access (block) | enforced / partial | Login can be blocked when CA policy requires it; treat other CA dimensions carefully |
-| Session list / revoke | enforced (single node) | Process-local until shared session store (M2) |
-| Multi-API-node session HA | readiness-only | Documented gap in `docs/deploy/ha.md` |
+| Session list / revoke | enforced | Device inventory in PG; revoke clears shared auth sessions |
+| Multi-API-node session HA | enforced (with Postgres) | Bearer sessions in `admin_sessions`; see `docs/deploy/ha.md` |
 | LDAP/AD directory | configured-provider | LDAP auth path |
 | SCIM-style provisioning | readiness-only / partial | SCIM-style endpoints; validate against customer IdP |
 | Custom roles / policy packages | readiness-only | Models and admin APIs present |
@@ -110,7 +110,7 @@ Last updated: 2026-07-12.
 | Browser-only full client | readiness-only | Hardening incomplete vs desktop |
 | Multi-window lifecycle | readiness-only | Polish open |
 | Single-node production | configured-provider | PRODUCTION runbook |
-| HA (API scale-out + shared sessions) | readiness-only | Topology doc; session store is M2 |
+| HA (API scale-out + shared sessions) | partial | Shared auth sessions with Postgres; SIP still single registrar; SSE sticky |
 | Multi-active SIP registrar | out of scope | One registrar or external SIP edge |
 | Backup / restore | configured-provider | `scripts/backup.sh`, restore drill |
 | Metrics | available | Prometheus `/metrics` (keep private) |
@@ -145,7 +145,7 @@ Last updated: 2026-07-12.
 | Matrix gap | Milestone that closes it |
 |------------|--------------------------|
 | Compose CI + evidence pack + SSO/DLP labs | M1 (landed) |
-| Shared session store / multi-API auth | M2 |
+| Shared session store / multi-API auth | M2 (0.1/0.2 landed with Postgres) |
 | Android video sideload path | M3.0 (landed; physical E2E open) |
 | Client platform clarity / iOS gate / Android background | M3.1–3.3 |
 | Published RM-500 capacity numbers | M4 |

@@ -3087,8 +3087,7 @@ async fn mfa_validate(
     // The bearer token here is the temporary mfa_pending token
     let token = bearer_token(&headers);
     let session = state
-        .admin_sessions
-        .get(&token.to_string())
+        .get_auth_session(&token)
         .ok_or(ApiError::Unauthorized)?;
     if session.role != "mfa_pending" {
         return Err(ApiError::Conflict(
@@ -3107,8 +3106,8 @@ async fn mfa_validate(
         return Err(ApiError::Unauthorized);
     }
 
-    // Remove the MFA pending session
-    state.admin_sessions.remove(&token.to_string());
+    // Remove the MFA pending session (memory + shared store)
+    state.remove_auth_session(&token);
 
     // Create a real session
     let real_session = crate::AdminSession {
@@ -3117,9 +3116,7 @@ async fn mfa_validate(
         role: user.role.clone(),
         expires_at: Utc::now() + chrono::Duration::hours(12),
     };
-    state
-        .admin_sessions
-        .insert(real_session.token.clone(), real_session.clone());
+    state.put_auth_session(&real_session);
 
     // Track session
     let ip = request_source(&headers);

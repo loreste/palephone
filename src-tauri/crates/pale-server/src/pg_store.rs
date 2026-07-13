@@ -3,9 +3,14 @@ use std::str::FromStr;
 use deadpool_postgres::{Config, Pool, Runtime};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tokio_postgres::types::Json;
 use tokio_postgres::NoTls;
 use uuid::Uuid;
+
+fn hash_session_token(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
 
 use crate::{
     AdminAuditEvent, AdminSession, BusinessHours, CallDetailRecord, CallHistoryEntry,
@@ -277,6 +282,10 @@ pub const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
     (
         "065_push_subscriptions.sql",
         include_str!("../migrations/065_push_subscriptions.sql"),
+    ),
+    (
+        "066_shared_auth_sessions.sql",
+        include_str!("../migrations/066_shared_auth_sessions.sql"),
     ),
 ];
 
@@ -783,18 +792,48 @@ impl PgStore {
         Ok(())
     }
 
-    // ─── Admin Sessions ───
+    // ─── Admin Sessions (shared auth store for multi-API-node HA) ───
 
     pub async fn insert_session(&self, session: &AdminSession) -> Result<(), PgError> {
         let client = self.pool.get().await?;
+        let token_hash = hash_session_token(&session.token);
         client
             .execute(
-                "INSERT INTO admin_sessions (token, principal, expires_at) VALUES ($1, $2, $3)
-             ON CONFLICT (token) DO UPDATE SET expires_at = $3",
-                &[&session.token, &session.principal, &session.expires_at],
+                "INSERT INTO admin_sessions (token, principal, expires_at, role, token_hash)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (token) DO UPDATE SET
+                   principal = EXCLUDED.principal,
+                   expires_at = EXCLUDED.expires_at,
+                   role = EXCLUDED.role,
+                   token_hash = EXCLUDED.token_hash",
+                &[
+                    &session.token,
+                    &session.principal,
+                    &session.expires_at,
+                    &session.role,
+                    &token_hash,
+                ],
             )
             .await?;
         Ok(())
+    }
+
+    pub async fn get_session(&self, token: &str) -> Result<Option<AdminSession>, PgError> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_opt(
+                "SELECT token, principal, expires_at, COALESCE(role, '') AS role
+                 FROM admin_sessions
+                 WHERE token = $1 AND expires_at > now()",
+                &[&token],
+            )
+            .await?;
+        Ok(row.map(|r| AdminSession {
+            token: r.get("token"),
+            principal: r.get("principal"),
+            role: r.get("role"),
+            expires_at: r.get("expires_at"),
+        }))
     }
 
     pub async fn delete_session(&self, token: &str) -> Result<(), PgError> {
@@ -803,6 +842,51 @@ impl PgStore {
             .execute("DELETE FROM admin_sessions WHERE token = $1", &[&token])
             .await?;
         Ok(())
+    }
+
+    pub async fn delete_session_by_token_hash(&self, token_hash: &str) -> Result<bool, PgError> {
+        let client = self.pool.get().await?;
+        let count = client
+            .execute(
+                "DELETE FROM admin_sessions WHERE token_hash = $1",
+                &[&token_hash],
+            )
+            .await?;
+        Ok(count > 0)
+    }
+
+    pub async fn delete_sessions_for_principal(&self, principal: &str) -> Result<u64, PgError> {
+        let client = self.pool.get().await?;
+        let count = client
+            .execute(
+                "DELETE FROM admin_sessions WHERE principal = $1",
+                &[&principal],
+            )
+            .await?;
+        Ok(count)
+    }
+
+    pub async fn load_active_sessions(&self) -> Result<Vec<AdminSession>, PgError> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT token, principal, expires_at, COALESCE(role, '') AS role
+                 FROM admin_sessions
+                 WHERE expires_at > now()
+                 ORDER BY expires_at DESC
+                 LIMIT 10000",
+                &[],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|r| AdminSession {
+                token: r.get("token"),
+                principal: r.get("principal"),
+                role: r.get("role"),
+                expires_at: r.get("expires_at"),
+            })
+            .collect())
     }
 
     // ─── Cleanup ───

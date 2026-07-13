@@ -121,7 +121,8 @@ secret generation (`PALE_REQUIRE_DUAL_ADMIN`), and OIDC custom CA bundle
 (`PALE_OIDC_CA_BUNDLE`) are in place. Still open:
 
 - full certificate pinning (SPKI) beyond custom CA trust
-- shared session store for multi-API-node HA
+- ~~shared session store for multi-API-node HA~~ (Postgres `admin_sessions` when
+  `PALE_DATABASE_URL` is set; see `docs/deploy/ha.md`)
 
 ### 6. Documentation and Operator Guides
 

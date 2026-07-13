@@ -881,6 +881,22 @@ impl AppState {
             }
             Err(e) => log::warn!("Failed to load users from Postgres: {}", e),
         }
+        // Shared auth sessions: warm local cache so this replica can serve
+        // tokens issued by other API nodes before a cache miss hits Postgres.
+        match pg.load_active_sessions().await {
+            Ok(sessions) => {
+                let count = sessions.len();
+                for session in sessions {
+                    self.admin_sessions
+                        .insert(session.token.clone(), session);
+                }
+                self.admin_sessions.trim_to_len(MAX_ADMIN_SESSIONS);
+                if count > 0 {
+                    log::info!("Loaded {count} shared auth sessions from PostgreSQL");
+                }
+            }
+            Err(e) => log::warn!("Failed to load auth sessions from Postgres: {}", e),
+        }
         match pg.load_sip_accounts().await {
             Ok(accounts) => {
                 for account in accounts {
@@ -1478,9 +1494,7 @@ impl AppState {
             role: ROLE_ADMIN.to_string(),
             expires_at: Utc::now() + Duration::hours(12),
         };
-        self.admin_sessions
-            .insert(session.token.clone(), session.clone());
-        self.admin_sessions.trim_to_len(MAX_ADMIN_SESSIONS);
+        self.put_auth_session(&session);
         self.record_audit_event(
             &session.principal,
             "admin.login.succeeded",
@@ -1535,6 +1549,9 @@ impl AppState {
     /// Resolve a bearer token to `(principal, role)`. The static server token
     /// maps to the superuser admin; session tokens carry the role recorded at
     /// login time. Returns `None` for unknown or expired tokens.
+    ///
+    /// With PostgreSQL configured, sessions are shared across API nodes: local
+    /// memory is a cache; miss falls back to `admin_sessions` in Postgres.
     pub fn principal_role_for_bearer(&self, bearer: &str) -> Option<(String, String)> {
         if bearer == self.http_token {
             return Some((self.admin_username.clone(), ROLE_ADMIN.to_string()));
@@ -1542,39 +1559,98 @@ impl AppState {
 
         self.admin_sessions
             .retain(|_, session| session.expires_at > Utc::now());
-        let session = self.admin_sessions.get(&bearer.to_string())?;
+        let session = match self.admin_sessions.get(&bearer.to_string()) {
+            Some(s) => s,
+            None => self.load_auth_session_from_store(bearer)?,
+        };
         if self
             .user_by_sip_uri(&session.principal)
             .is_some_and(|user| !user.active)
         {
-            self.admin_sessions.remove(&bearer.to_string());
+            self.remove_auth_session(&bearer);
             return None;
         }
         Some((session.principal, session.role))
     }
 
+    /// Look up a session by bearer (memory, then shared Postgres store).
+    pub fn get_auth_session(&self, token: &str) -> Option<AdminSession> {
+        self.admin_sessions
+            .retain(|_, session| session.expires_at > Utc::now());
+        if let Some(s) = self.admin_sessions.get(&token.to_string()) {
+            return Some(s);
+        }
+        self.load_auth_session_from_store(token)
+    }
+
+    /// Insert/update an auth session in memory and the shared store (when PG is on).
+    pub fn put_auth_session(&self, session: &AdminSession) {
+        self.admin_sessions
+            .insert(session.token.clone(), session.clone());
+        self.admin_sessions.trim_to_len(MAX_ADMIN_SESSIONS);
+        self.persist_auth_session(session);
+    }
+
+    /// Remove an auth session from memory and the shared store.
+    pub fn remove_auth_session(&self, token: &str) {
+        self.admin_sessions.remove(&token.to_string());
+        self.delete_auth_session_from_store(token);
+    }
+
+    fn persist_auth_session(&self, session: &AdminSession) {
+        if self.pg.is_none() {
+            return;
+        }
+        let session = session.clone();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.insert_session(&session).await }));
+    }
+
+    fn delete_auth_session_from_store(&self, token: &str) {
+        if self.pg.is_none() {
+            return;
+        }
+        let token = token.to_string();
+        self.pg_spawn(move |pg| Box::pin(async move { pg.delete_session(&token).await }));
+    }
+
+    fn load_auth_session_from_store(&self, token: &str) -> Option<AdminSession> {
+        let pg = self.pg.as_ref()?;
+        let handle = tokio::runtime::Handle::try_current().ok()?;
+        let token = token.to_string();
+        let pg = pg.clone();
+        let session = std::thread::scope(|_| handle.block_on(pg.get_session(&token))).ok()??;
+        if session.expires_at <= Utc::now() {
+            self.delete_auth_session_from_store(&session.token);
+            return None;
+        }
+        // Populate local cache so subsequent requests on this node are hot.
+        self.admin_sessions
+            .insert(session.token.clone(), session.clone());
+        self.admin_sessions.trim_to_len(MAX_ADMIN_SESSIONS);
+        Some(session)
+    }
+
     pub fn refresh_admin_session(&self, old_token: &str) -> Result<AdminSession, AuthError> {
         let old_session = self
-            .admin_sessions
-            .remove(&old_token.to_string())
+            .get_auth_session(old_token)
             .ok_or(AuthError::Unauthorized)?;
         if old_session.expires_at <= Utc::now() {
+            self.remove_auth_session(old_token);
             return Err(AuthError::Unauthorized);
         }
+        self.remove_auth_session(old_token);
         let new_session = AdminSession {
             token: Uuid::new_v4().to_string(),
             principal: old_session.principal,
             role: old_session.role,
             expires_at: Utc::now() + Duration::hours(12),
         };
-        self.admin_sessions
-            .insert(new_session.token.clone(), new_session.clone());
-        self.admin_sessions.trim_to_len(MAX_ADMIN_SESSIONS);
+        self.put_auth_session(&new_session);
         Ok(new_session)
     }
 
     pub fn revoke_session(&self, token: &str) {
-        self.admin_sessions.remove(&token.to_string());
+        self.remove_auth_session(token);
     }
 
     pub fn is_admin_principal(&self, principal: &str) -> bool {
@@ -2087,9 +2163,7 @@ impl AppState {
                 role: "mfa_pending".to_string(),
                 expires_at: Utc::now() + Duration::minutes(10),
             };
-            self.admin_sessions
-                .insert(mfa_session.token.clone(), mfa_session.clone());
-            self.admin_sessions.trim_to_len(MAX_ADMIN_SESSIONS);
+            self.put_auth_session(&mfa_session);
             return Ok(UserLoginResponse {
                 token: mfa_session.token,
                 user,
@@ -2106,9 +2180,7 @@ impl AppState {
             role: user.role.clone(),
             expires_at: Utc::now() + Duration::hours(12),
         };
-        self.admin_sessions
-            .insert(session.token.clone(), session.clone());
-        self.admin_sessions.trim_to_len(MAX_ADMIN_SESSIONS);
+        self.put_auth_session(&session);
 
         // Set presence to online
         self.update_presence(&user.sip_uri, PresenceStatus::Online, None);
@@ -2389,13 +2461,19 @@ impl AppState {
             let pg = pg.clone();
             let rt = tokio::runtime::Handle::try_current();
             if let Ok(handle) = rt {
-                // Get the token_hash for this session so we can also remove it from admin_sessions
+                // Get the token_hash for this session so we can also remove it from auth store
                 if let Ok(Some(token_hash)) = std::thread::scope(|_| {
                     handle.block_on(pg.get_session_token_hash_for_id(session_id))
                 }) {
                     // Remove from in-memory session map
                     self.admin_sessions
                         .retain(|_, s| Self::hash_token(&s.token) != token_hash);
+                    // Remove from shared Postgres auth store (all API nodes)
+                    let pg_del = pg.clone();
+                    let hash = token_hash.clone();
+                    let _ = std::thread::scope(|_| {
+                        handle.block_on(pg_del.delete_session_by_token_hash(&hash))
+                    });
                 }
                 if let Ok(revoked) =
                     std::thread::scope(|_| handle.block_on(pg.revoke_user_session(session_id)))
@@ -2410,6 +2488,7 @@ impl AppState {
     /// Revoke all sessions for a user except the current one.
     pub fn revoke_all_sessions(&self, user_id: Uuid, current_token: &str) -> u64 {
         let current_hash = Self::hash_token(current_token);
+        let principal = self.user_sip_uri_for_id(user_id).unwrap_or_default();
         if let Some(pg) = &self.pg {
             let pg = pg.clone();
             let rt = tokio::runtime::Handle::try_current();
@@ -2417,17 +2496,37 @@ impl AppState {
                 if let Ok(count) = std::thread::scope(|_| {
                     handle.block_on(pg.revoke_all_user_sessions(user_id, &current_hash))
                 }) {
-                    // Also remove from in-memory map
+                    // Drop other auth sessions for this principal from local cache
                     self.admin_sessions.retain(|_, s| {
                         let h = Self::hash_token(&s.token);
-                        h == current_hash
-                            || s.principal != self.user_sip_uri_for_id(user_id).unwrap_or_default()
+                        h == current_hash || s.principal != principal
                     });
+                    // Shared store: delete all principal tokens then re-put current
+                    if !principal.is_empty() {
+                        let pg_del = pg.clone();
+                        let p = principal.clone();
+                        let _ = std::thread::scope(|_| {
+                            handle.block_on(pg_del.delete_sessions_for_principal(&p))
+                        });
+                        if let Some(current) = self.admin_sessions.get(&current_token.to_string()) {
+                            let pg_ins = pg.clone();
+                            let sess = current;
+                            let _ = std::thread::scope(|_| {
+                                handle.block_on(pg_ins.insert_session(&sess))
+                            });
+                        }
+                    }
                     return count;
                 }
             }
         }
-        0
+        // Memory-only path (no Postgres)
+        let before = self.admin_sessions.len();
+        self.admin_sessions.retain(|_, s| {
+            let h = Self::hash_token(&s.token);
+            h == current_hash || s.principal != principal
+        });
+        before.saturating_sub(self.admin_sessions.len()) as u64
     }
 
     fn user_sip_uri_for_id(&self, user_id: Uuid) -> Option<String> {
@@ -2511,6 +2610,15 @@ impl AppState {
         let principal = principal.to_string();
         self.admin_sessions
             .retain(|_, session| session.principal != principal);
+        if self.pg.is_some() {
+            let p = principal.clone();
+            self.pg_spawn(move |pg| {
+                Box::pin(async move {
+                    pg.delete_sessions_for_principal(&p).await?;
+                    Ok(())
+                })
+            });
+        }
     }
 
     /// Change a user's password. Verifies the old password, then updates to the
@@ -6331,9 +6439,7 @@ impl AppState {
                 role: "mfa_pending".to_string(),
                 expires_at: Utc::now() + Duration::minutes(10),
             };
-            self.admin_sessions
-                .insert(mfa_session.token.clone(), mfa_session.clone());
-            self.admin_sessions.trim_to_len(MAX_ADMIN_SESSIONS);
+            self.put_auth_session(&mfa_session);
             self.record_audit_event(
                 &user.sip_uri,
                 "user.sso_login_mfa_pending",
@@ -6355,9 +6461,7 @@ impl AppState {
             role: user.role.clone(),
             expires_at: Utc::now() + Duration::hours(12),
         };
-        self.admin_sessions
-            .insert(session.token.clone(), session.clone());
-        self.admin_sessions.trim_to_len(MAX_ADMIN_SESSIONS);
+        self.put_auth_session(&session);
 
         // Track session
         self.track_session(user.id, &session.token, "SSO", "desktop", client_ip);
@@ -22186,6 +22290,44 @@ mod tests {
             .audit_events()
             .iter()
             .any(|event| event.action == "admin.login.succeeded"));
+    }
+
+    #[test]
+    fn auth_session_put_get_refresh_and_revoke() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-auth-session-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+
+        let session = AdminSession {
+            token: "test-token-shared-store".to_string(),
+            principal: "sip:alice@example.com".to_string(),
+            role: "user".to_string(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        };
+        state.put_auth_session(&session);
+
+        assert_eq!(
+            state.principal_role_for_bearer(&session.token),
+            Some(("sip:alice@example.com".to_string(), "user".to_string()))
+        );
+        assert_eq!(
+            state.get_auth_session(&session.token).map(|s| s.role),
+            Some("user".to_string())
+        );
+
+        let refreshed = state.refresh_admin_session(&session.token).unwrap();
+        assert_ne!(refreshed.token, session.token);
+        assert!(state.principal_for_bearer(&session.token).is_none());
+        assert_eq!(
+            state.principal_for_bearer(&refreshed.token),
+            Some("sip:alice@example.com".to_string())
+        );
+
+        state.revoke_session(&refreshed.token);
+        assert!(state.principal_for_bearer(&refreshed.token).is_none());
+        assert!(state.get_auth_session(&refreshed.token).is_none());
     }
 
     #[test]
