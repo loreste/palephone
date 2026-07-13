@@ -106,7 +106,7 @@ Last updated: 2026-07-12.
 |------------|-------------|--------|
 | Desktop macOS / Windows / Linux | enforced | Shipping builds |
 | Android | lab / partial | Signed sideload APK + full SIP video path (camera, overlays, answer/outbound video); emulator API 34 validated. Background calling + physical two-party confirmation still open. Download: https://drcpbx.com/downloads/Pale.apk |
-| iOS | out of scope (until M3 gate A) | Packaging docs only; not certified fleet |
+| iOS | out of scope (Gate B) | Explicit: not certified until CallKit/APNs — `docs/deploy/ios-gate.md` |
 | Browser-only full client | readiness-only | Hardening incomplete vs desktop |
 | Multi-window lifecycle | readiness-only | Polish open |
 | Single-node production | configured-provider | PRODUCTION runbook |

@@ -6050,7 +6050,32 @@ impl AppState {
         self.sso_providers.values()
     }
 
+    /// Enabled providers without secrets — safe for the login wizard.
+    pub fn list_public_sso_providers(&self) -> Vec<PublicSsoProvider> {
+        self.sso_providers
+            .values()
+            .into_iter()
+            .filter(|p| p.enabled)
+            .map(|p| PublicSsoProvider {
+                id: p.id,
+                name: p.name,
+                provider_type: p.provider_type,
+                enabled: p.enabled,
+            })
+            .collect()
+    }
+
     pub fn create_sso_provider(&self, input: CreateSsoProviderRequest) -> SsoProvider {
+        let groups_claim = if input.groups_claim.trim().is_empty() {
+            default_groups_claim()
+        } else {
+            input.groups_claim
+        };
+        let default_role = if input.default_role.trim().is_empty() {
+            default_user_role()
+        } else {
+            input.default_role
+        };
         let provider = SsoProvider {
             id: Uuid::new_v4(),
             name: input.name,
@@ -6061,6 +6086,9 @@ impl AppState {
             redirect_uri: input.redirect_uri,
             enabled: input.enabled,
             created_at: Utc::now(),
+            groups_claim,
+            default_role,
+            role_mappings: input.role_mappings,
         };
         self.sso_providers.insert(provider.id, provider.clone());
         self.persist_pg_sso_provider(&provider);
@@ -6095,12 +6123,60 @@ impl AppState {
             if let Some(en) = input.enabled {
                 provider.enabled = en;
             }
+            if let Some(gc) = input.groups_claim {
+                provider.groups_claim = if gc.trim().is_empty() {
+                    default_groups_claim()
+                } else {
+                    gc
+                };
+            }
+            if let Some(dr) = input.default_role {
+                provider.default_role = if dr.trim().is_empty() {
+                    default_user_role()
+                } else {
+                    dr
+                };
+            }
+            if let Some(rm) = input.role_mappings {
+                provider.role_mappings = rm;
+            }
             Some(provider.clone())
         });
         if let Some(ref p) = updated {
             self.persist_pg_sso_provider(p);
         }
         updated
+    }
+
+    /// Resolve Pale role from IdP group/role claims using provider mappings.
+    pub fn resolve_sso_role(&self, provider: &SsoProvider, claims: &OidcIdTokenClaims) -> String {
+        let mut claim_values: Vec<String> = Vec::new();
+        if let Some(g) = &claims.groups {
+            claim_values.extend(g.as_vec());
+        }
+        if let Some(r) = &claims.roles {
+            claim_values.extend(r.as_vec());
+        }
+        // Custom claim name (e.g. groups_claim = "pale_groups")
+        if provider.groups_claim != "groups" && provider.groups_claim != "roles" {
+            if let Some(v) = claims.extra.get(&provider.groups_claim) {
+                claim_values.extend(oidc_value_to_strings(v));
+            }
+        } else if let Some(v) = claims.extra.get(&provider.groups_claim) {
+            claim_values.extend(oidc_value_to_strings(v));
+        }
+        for value in &claim_values {
+            if let Some(role) = provider.role_mappings.get(value) {
+                if !role.trim().is_empty() {
+                    return role.clone();
+                }
+            }
+        }
+        if provider.default_role.trim().is_empty() {
+            default_user_role()
+        } else {
+            provider.default_role.clone()
+        }
     }
 
     pub fn delete_sso_provider(&self, id: Uuid) -> bool {
@@ -6401,7 +6477,8 @@ impl AppState {
             .as_deref()
             .or(claims.preferred_username.as_deref())
             .ok_or("ID token missing email and preferred_username")?;
-        let display_name = claims.name.unwrap_or_else(|| email.to_string());
+        let display_name = claims.name.clone().unwrap_or_else(|| email.to_string());
+        let mapped_role = self.resolve_sso_role(&provider, &claims);
 
         // 8. Look up or auto-provision local user
         let sip_uri = format!("sip:{}@sso", email.split('@').next().unwrap_or(email));
@@ -6411,16 +6488,24 @@ impl AppState {
                 sip_uri: sip_uri.clone(),
                 matrix_user_id: None,
                 password: None,
-                role: Some("user".to_string()),
+                role: Some(mapped_role.clone()),
             });
-            log::info!("Auto-provisioned SSO user: {sip_uri} from {email}");
+            log::info!(
+                "Auto-provisioned SSO user: {sip_uri} from {email} role={mapped_role}"
+            );
         }
 
-        let user = self
+        let mut user = self
             .user_by_sip_uri(&sip_uri)
             .ok_or("Failed to find or provision SSO user")?;
         if !user.active {
             return Err("User account is deactivated".into());
+        }
+        // Keep local role in sync with IdP group mapping on each login.
+        if user.role != mapped_role && !mapped_role.is_empty() {
+            if let Some(updated) = self.update_user_role(user.id, &mapped_role) {
+                user = updated;
+            }
         }
 
         // 9. Evaluate conditional access (including require_mfa)
@@ -6454,7 +6539,7 @@ impl AppState {
             });
         }
 
-        // 10. Create full session
+        // 10. Create full session (role from mapped claims)
         let session = AdminSession {
             token: Uuid::new_v4().to_string(),
             principal: user.sip_uri.clone(),
@@ -15527,6 +15612,32 @@ pub struct SsoProvider {
     pub redirect_uri: String,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
+    /// OIDC claim name that carries group/role membership (default `groups`).
+    #[serde(default = "default_groups_claim")]
+    pub groups_claim: String,
+    /// Role assigned when no mapping matches.
+    #[serde(default = "default_user_role")]
+    pub default_role: String,
+    /// Map IdP group/role claim values → Pale roles (`admin`, `user`, …).
+    #[serde(default)]
+    pub role_mappings: std::collections::HashMap<String, String>,
+}
+
+fn default_groups_claim() -> String {
+    "groups".to_string()
+}
+
+fn default_user_role() -> String {
+    "user".to_string()
+}
+
+/// Public SSO provider listing (no client secret).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublicSsoProvider {
+    pub id: Uuid,
+    pub name: String,
+    pub provider_type: String,
+    pub enabled: bool,
 }
 
 /// Pending SSO login state stored server-side for CSRF and nonce verification.
@@ -15565,6 +15676,42 @@ pub struct OidcIdTokenClaims {
     pub preferred_username: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
+    /// Common group claim (Entra often uses `groups` or `roles`).
+    #[serde(default)]
+    pub groups: Option<OidcStringList>,
+    #[serde(default)]
+    pub roles: Option<OidcStringList>,
+    /// Catch-all for custom group claim names (e.g. `pale_groups`).
+    #[serde(flatten, default)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
+/// OIDC string-or-array claim (groups, roles).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum OidcStringList {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl OidcStringList {
+    pub fn as_vec(&self) -> Vec<String> {
+        match self {
+            Self::One(s) => vec![s.clone()],
+            Self::Many(v) => v.clone(),
+        }
+    }
+}
+
+fn oidc_value_to_strings(v: &serde_json::Value) -> Vec<String> {
+    match v {
+        serde_json::Value::String(s) => vec![s.clone()],
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|i| i.as_str().map(|s| s.to_string()))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// OIDC `aud` claim can be a single string or an array.
@@ -15630,6 +15777,12 @@ pub struct CreateSsoProviderRequest {
     pub redirect_uri: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default = "default_groups_claim")]
+    pub groups_claim: String,
+    #[serde(default = "default_user_role")]
+    pub default_role: String,
+    #[serde(default)]
+    pub role_mappings: std::collections::HashMap<String, String>,
 }
 
 fn default_oidc() -> String {
@@ -15645,6 +15798,9 @@ pub struct UpdateSsoProviderRequest {
     pub issuer_url: Option<String>,
     pub redirect_uri: Option<String>,
     pub enabled: Option<bool>,
+    pub groups_claim: Option<String>,
+    pub default_role: Option<String>,
+    pub role_mappings: Option<std::collections::HashMap<String, String>>,
 }
 
 // ─── Encryption Config (BYOK) ───
@@ -22328,6 +22484,65 @@ mod tests {
         state.revoke_session(&refreshed.token);
         assert!(state.principal_for_bearer(&refreshed.token).is_none());
         assert!(state.get_auth_session(&refreshed.token).is_none());
+    }
+
+    #[test]
+    fn sso_role_mapping_resolves_from_groups_claim() {
+        let state = AppState::new(
+            PathBuf::from("/tmp/pale-sso-role-test"),
+            "012345678901234567890123".to_string(),
+            sha256_hex("admin-password".as_bytes()),
+        );
+        let mut mappings = std::collections::HashMap::new();
+        mappings.insert("pale-admins".to_string(), "admin".to_string());
+        mappings.insert("staff".to_string(), "user".to_string());
+        let provider = SsoProvider {
+            id: Uuid::new_v4(),
+            name: "lab".into(),
+            provider_type: "oidc".into(),
+            client_id: "c".into(),
+            client_secret_enc: String::new(),
+            issuer_url: "https://idp.example".into(),
+            redirect_uri: "http://localhost/cb".into(),
+            enabled: true,
+            created_at: Utc::now(),
+            groups_claim: "groups".into(),
+            default_role: "user".into(),
+            role_mappings: mappings,
+        };
+        let claims = OidcIdTokenClaims {
+            iss: "https://idp.example".into(),
+            sub: "sub1".into(),
+            aud: OidcAudience::Single("c".into()),
+            exp: Utc::now().timestamp() + 3600,
+            iat: Utc::now().timestamp(),
+            nonce: None,
+            email: Some("a@example.com".into()),
+            preferred_username: None,
+            name: Some("A".into()),
+            groups: Some(OidcStringList::Many(vec![
+                "staff".into(),
+                "pale-admins".into(),
+            ])),
+            roles: None,
+            extra: Default::default(),
+        };
+        // First matching mapping wins in iteration order of claim values
+        let role = state.resolve_sso_role(&provider, &claims);
+        assert!(role == "admin" || role == "user");
+        // Prefer pale-admins if present alone
+        let claims_admin = OidcIdTokenClaims {
+            groups: Some(OidcStringList::One("pale-admins".into())),
+            ..claims.clone()
+        };
+        assert_eq!(state.resolve_sso_role(&provider, &claims_admin), "admin");
+        let claims_none = OidcIdTokenClaims {
+            groups: None,
+            roles: None,
+            extra: Default::default(),
+            ..claims
+        };
+        assert_eq!(state.resolve_sso_role(&provider, &claims_none), "user");
     }
 
     #[test]

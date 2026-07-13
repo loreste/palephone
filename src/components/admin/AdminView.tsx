@@ -5912,6 +5912,9 @@ function SsoProvidersPanel({ baseUrl, token }: { baseUrl: string; token: string 
   const [clientSecret, setClientSecret] = useState("");
   const [issuerUrl, setIssuerUrl] = useState("");
   const [redirectUri, setRedirectUri] = useState("");
+  const [groupsClaim, setGroupsClaim] = useState("groups");
+  const [defaultRole, setDefaultRole] = useState("user");
+  const [roleMappingsJson, setRoleMappingsJson] = useState('{"pale-admins":"admin"}');
 
   const load = useCallback(() => {
     api(baseUrl, token, "/v1/admin/sso-providers").then(setProviders).catch(() => {});
@@ -5921,6 +5924,13 @@ function SsoProvidersPanel({ baseUrl, token }: { baseUrl: string; token: string 
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
+    let role_mappings: Record<string, string> = {};
+    try {
+      role_mappings = roleMappingsJson.trim() ? JSON.parse(roleMappingsJson) : {};
+    } catch {
+      toast({ type: "error", title: "role_mappings must be valid JSON object" });
+      return;
+    }
     try {
       await api(baseUrl, token, "/v1/admin/sso-providers", {
         method: "POST",
@@ -5931,6 +5941,9 @@ function SsoProvidersPanel({ baseUrl, token }: { baseUrl: string; token: string 
           client_secret: clientSecret,
           issuer_url: issuerUrl,
           redirect_uri: redirectUri,
+          groups_claim: groupsClaim,
+          default_role: defaultRole,
+          role_mappings,
         },
       });
       setName(""); setClientId(""); setClientSecret(""); setIssuerUrl(""); setRedirectUri("");
@@ -5975,6 +5988,16 @@ function SsoProvidersPanel({ baseUrl, token }: { baseUrl: string; token: string 
           <Field label="Client Secret" value={clientSecret} onChange={setClientSecret} type="password" />
           <Field label="Issuer URL" value={issuerUrl} onChange={setIssuerUrl} />
           <Field label="Redirect URI" value={redirectUri} onChange={setRedirectUri} />
+          <Field label="Groups claim" value={groupsClaim} onChange={setGroupsClaim} />
+          <Field label="Default role" value={defaultRole} onChange={setDefaultRole} />
+          <Field
+            label="Role mappings JSON"
+            value={roleMappingsJson}
+            onChange={setRoleMappingsJson}
+          />
+          <p className="text-[10px] text-tertiary">
+            Map IdP group names to Pale roles, e.g. {"{"}&quot;pale-admins&quot;:&quot;admin&quot;{"}"}
+          </p>
           <button className="w-full py-1.5 bg-accent text-white rounded text-sm">Create Provider</button>
         </form>
       )}

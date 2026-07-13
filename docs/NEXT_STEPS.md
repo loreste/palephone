@@ -66,6 +66,9 @@ Recent client and security work completed:
 - **M1 certifiable deploy tooling** (2026-07-12): compose CI smoke
   (`.github/workflows/compose-smoke.yml`), regulated env template, SSO/DLP labs,
   `scripts/export-evidence-pack.sh`, smoke-test DLP/room fixes
+- **Phase 0 closeness** (2026-07-13): Postgres shared auth sessions; SetupWizard
+  SSO + OIDC role mappings; `scripts/compliance-smoke.sh`; desktop/Android/iOS
+  fleet docs; RM-500 template — see `docs/procurement/IMPLEMENTATION_BACKLOG.md`
 
 Those features make the gaps visible and manageable. They do not remove the
 need for real external systems where the feature depends on one.

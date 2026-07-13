@@ -621,6 +621,7 @@ pub fn router(state: SharedState) -> Router {
             "/v1/admin/sso-providers/{id}",
             put(update_sso_provider).delete(delete_sso_provider),
         )
+        .route("/v1/auth/sso/providers", get(list_public_sso_providers))
         .route("/v1/auth/sso/{provider_id}/login", get(sso_login))
         .route("/v1/auth/sso/callback", post(sso_callback))
         // Encryption (BYOK)
@@ -7798,6 +7799,13 @@ async fn user_call_analytics(
 
 // ─── SSO Providers ───
 
+/// Public list for the login wizard (enabled providers only, no secrets).
+async fn list_public_sso_providers(
+    State(state): State<SharedState>,
+) -> Result<Json<Vec<crate::PublicSsoProvider>>, ApiError> {
+    Ok(Json(state.list_public_sso_providers()))
+}
+
 async fn list_sso_providers(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -7895,6 +7903,7 @@ async fn sso_callback(
         "user": login_response.user,
         "expires_at": login_response.expires_at.to_rfc3339(),
         "mfa_required": login_response.mfa_required,
+        "sip_credentials": login_response.sip_credentials,
     })))
 }
 

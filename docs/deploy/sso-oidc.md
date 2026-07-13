@@ -44,7 +44,10 @@ curl -sS "${UA[@]}" -X POST "$PALE_BASE_URL/v1/admin/sso-providers" -d '{
   "client_secret": "replace-me",
   "issuer_url": "https://keycloak.example.com/realms/pale",
   "redirect_uri": "http://127.0.0.1:1420/auth/sso/callback",
-  "enabled": true
+  "enabled": true,
+  "groups_claim": "groups",
+  "default_role": "user",
+  "role_mappings": { "pale-admins": "admin", "staff": "user" }
 }'
 ```
 
@@ -53,7 +56,10 @@ Notes:
 - `issuer_url` must match the OIDC issuer in the discovery document
   (`{issuer}/.well-known/openid-configuration`).
 - Pale discovers authorization/token/JWKS endpoints from that document.
-- List providers: `GET /v1/admin/sso-providers` (secrets are not returned in full).
+- List providers (admin): `GET /v1/admin/sso-providers`
+- **Public list for login wizard** (no secrets): `GET /v1/auth/sso/providers`
+- `role_mappings` maps IdP group claim values → Pale roles on every SSO login
+  (auto-provision and existing users).
 
 ### Entra ID sketch
 
@@ -64,9 +70,12 @@ Notes:
 | client_secret | Client secret value |
 | redirect_uri | Same URI registered under Authentication → Redirect URIs |
 
-## 2. Start login
+## 2. Start login (client wizard or API)
 
-Browser or API:
+The Pale **Setup Wizard** loads `GET /v1/auth/sso/providers` and shows
+**Sign in with …** buttons. Prefer that path for end users.
+
+API equivalent:
 
 ```text
 GET /v1/auth/sso/{provider_id}/login
@@ -78,6 +87,9 @@ login at the IdP, then post the callback payload the client receives to:
 ```text
 POST /v1/auth/sso/callback
 ```
+
+The desktop/web client handles `/auth/sso/callback?code=&state=` automatically
+when the IdP redirect URI points at the app origin.
 
 Successful callback issues a user session token (or `mfa_required` / MFA-pending
 token when conditional access demands MFA).

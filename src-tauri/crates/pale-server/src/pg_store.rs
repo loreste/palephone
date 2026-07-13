@@ -287,6 +287,18 @@ pub const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
         "066_shared_auth_sessions.sql",
         include_str!("../migrations/066_shared_auth_sessions.sql"),
     ),
+    (
+        "067_sso_role_mappings.sql",
+        include_str!("../migrations/067_sso_role_mappings.sql"),
+    ),
+    (
+        "068_file_share_links.sql",
+        include_str!("../migrations/068_file_share_links.sql"),
+    ),
+    (
+        "069_scim_groups.sql",
+        include_str!("../migrations/069_scim_groups.sql"),
+    ),
 ];
 
 /// PostgreSQL-backed persistent store using deadpool connection pool.
@@ -2015,11 +2027,12 @@ impl PgStore {
 
     pub async fn upsert_sso_provider(&self, p: &crate::SsoProvider) -> Result<(), PgError> {
         let client = self.pool.get().await?;
+        let mappings = serde_json::to_string(&p.role_mappings).unwrap_or_else(|_| "{}".into());
         client.execute(
-            "INSERT INTO sso_providers (id, name, provider_type, client_id, client_secret_enc, issuer_url, redirect_uri, enabled, created_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-             ON CONFLICT (id) DO UPDATE SET name=$2, provider_type=$3, client_id=$4, client_secret_enc=$5, issuer_url=$6, redirect_uri=$7, enabled=$8",
-            &[&p.id, &p.name, &p.provider_type, &p.client_id, &p.client_secret_enc, &p.issuer_url, &p.redirect_uri, &p.enabled, &p.created_at],
+            "INSERT INTO sso_providers (id, name, provider_type, client_id, client_secret_enc, issuer_url, redirect_uri, enabled, created_at, groups_claim, default_role, role_mappings_json)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+             ON CONFLICT (id) DO UPDATE SET name=$2, provider_type=$3, client_id=$4, client_secret_enc=$5, issuer_url=$6, redirect_uri=$7, enabled=$8, groups_claim=$10, default_role=$11, role_mappings_json=$12",
+            &[&p.id, &p.name, &p.provider_type, &p.client_id, &p.client_secret_enc, &p.issuer_url, &p.redirect_uri, &p.enabled, &p.created_at, &p.groups_claim, &p.default_role, &mappings],
         ).await?;
         Ok(())
     }
@@ -2035,12 +2048,18 @@ impl PgStore {
     pub async fn load_sso_providers(&self) -> Result<Vec<crate::SsoProvider>, PgError> {
         let client = self.pool.get().await?;
         let rows = client.query(
-            "SELECT id, name, provider_type, client_id, client_secret_enc, issuer_url, redirect_uri, enabled, created_at FROM sso_providers ORDER BY created_at",
+            "SELECT id, name, provider_type, client_id, client_secret_enc, issuer_url, redirect_uri, enabled, created_at,
+                    COALESCE(groups_claim, 'groups') AS groups_claim,
+                    COALESCE(default_role, 'user') AS default_role,
+                    COALESCE(role_mappings_json, '{}') AS role_mappings_json
+             FROM sso_providers ORDER BY created_at",
             &[],
         ).await?;
         Ok(rows
             .iter()
             .filter_map(|r| {
+                let mappings_raw: String = r.try_get("role_mappings_json").unwrap_or_else(|_| "{}".into());
+                let role_mappings = serde_json::from_str(&mappings_raw).unwrap_or_default();
                 Some(crate::SsoProvider {
                     id: r.try_get("id").ok()?,
                     name: r.try_get("name").ok()?,
@@ -2053,6 +2072,9 @@ impl PgStore {
                     redirect_uri: r.try_get("redirect_uri").unwrap_or_default(),
                     enabled: r.try_get("enabled").unwrap_or(true),
                     created_at: r.try_get("created_at").ok()?,
+                    groups_claim: r.try_get("groups_claim").unwrap_or_else(|_| "groups".into()),
+                    default_role: r.try_get("default_role").unwrap_or_else(|_| "user".into()),
+                    role_mappings,
                 })
             })
             .collect())

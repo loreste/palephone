@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Phone, MessageSquare, Lock, ArrowRight, Check, Server, Shield } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { registerAccount, storeSipPassword, getConfig, saveSettings, type UserLoginResponse } from "@/lib/tauri";
@@ -14,6 +14,14 @@ import {
   type MfaLoginPhase,
 } from "@/lib/mfaLogin";
 import type { MfaSetupResponse } from "@/lib/adminApi";
+import {
+  completeSsoCallback,
+  listPublicSsoProviders,
+  openSsoAuthorizeUrl,
+  rememberSsoServerUrl,
+  startSsoLogin,
+  type PublicSsoProvider,
+} from "@/lib/ssoLogin";
 
 type WizardStep = "welcome" | "login" | "mfa" | "done";
 
@@ -175,6 +183,31 @@ function UnifiedLoginStep({
   const [sipUri, setSipUri] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [ssoProviders, setSsoProviders] = useState<PublicSsoProvider[]>([]);
+  const [ssoLoading, setSsoLoading] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const url = serverUrl.trim();
+    if (!url.startsWith("http")) {
+      setSsoProviders([]);
+      return;
+    }
+    setSsoLoading(true);
+    listPublicSsoProviders(url)
+      .then((list) => {
+        if (!cancelled) setSsoProviders(list.filter((p) => p.enabled));
+      })
+      .catch(() => {
+        if (!cancelled) setSsoProviders([]);
+      })
+      .finally(() => {
+        if (!cancelled) setSsoLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [serverUrl]);
 
   const handleLogin = async () => {
     if (!serverUrl || !sipUri || !password) return;
@@ -188,6 +221,25 @@ function UnifiedLoginStep({
       onComplete(phase.session, password, serverUrl);
     } catch (err) {
       toast({ type: "error", title: "Login failed", description: String(err) });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSso = async (provider: PublicSsoProvider) => {
+    if (!serverUrl.trim()) return;
+    setLoading(true);
+    try {
+      rememberSsoServerUrl(serverUrl);
+      const { redirect_url } = await startSsoLogin(serverUrl, provider.id);
+      toast({
+        type: "info",
+        title: `Continue with ${provider.name}`,
+        description: "Complete sign-in in the browser, then return here.",
+      });
+      await openSsoAuthorizeUrl(redirect_url);
+    } catch (err) {
+      toast({ type: "error", title: "SSO failed", description: String(err) });
     } finally {
       setLoading(false);
     }
@@ -218,16 +270,63 @@ function UnifiedLoginStep({
         {loading ? "Signing in..." : "Sign In"} {!loading && <ArrowRight size={14} />}
       </Button>
 
+      {(ssoProviders.length > 0 || ssoLoading) && (
+        <div className="mt-4 space-y-2">
+          <div className="flex items-center gap-2 text-[10px] text-tertiary uppercase tracking-wide">
+            <span className="flex-1 h-px bg-border-subtle" />
+            Single sign-on
+            <span className="flex-1 h-px bg-border-subtle" />
+          </div>
+          {ssoLoading && (
+            <p className="text-[10px] text-tertiary text-center">Loading SSO providers…</p>
+          )}
+          {ssoProviders.map((p) => (
+            <Button
+              key={p.id}
+              variant="secondary"
+              className="w-full gap-1"
+              onClick={() => void handleSso(p)}
+              disabled={loading}
+            >
+              <Shield size={14} /> Sign in with {p.name}
+            </Button>
+          ))}
+        </div>
+      )}
+
       {onSkip && (
         <Button variant="ghost" className="w-full mt-2" onClick={onSkip} disabled={loading}>
           Skip for now — use local SIP only
         </Button>
       )}
       <p className="text-[10px] text-tertiary text-center mt-2">
-        You can connect to a Pale server later in Settings &gt; Server.
+        You can connect to a Pale server later in Settings &gt; Server. For SSO, register redirect URI
+        to this app&apos;s <code className="text-[9px]">/auth/sso/callback</code>.
       </p>
     </div>
   );
+}
+
+/** Finish SSO after IdP redirects back with code/state (exported for App bootstrap). */
+export async function finishSsoFromCallback(
+  serverUrl: string,
+  code: string,
+  state: string,
+): Promise<{ session: UserLoginResponse; mfa?: Extract<MfaLoginPhase, { kind: "mfa_pending" }> }> {
+  const phase = await completeSsoCallback(serverUrl, code, state);
+  if (phase.kind === "mfa_pending") {
+    return {
+      session: {
+        token: phase.pendingToken,
+        user: phase.user,
+        expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+        mfa_required: true,
+        sip_credentials: null,
+      },
+      mfa: phase,
+    };
+  }
+  return { session: phase.session };
 }
 
 function MfaStep({
